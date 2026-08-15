@@ -42,6 +42,8 @@ object YoutubeDlDownloader {
             addOption("-o", "$stem.%(ext)s")
             addOption("--no-playlist")
             addOption("--no-mtime")
+            addOption("--no-warnings")
+            addOption("--no-check-certificate")
 
             if (referer.isNotBlank()) addOption("--referer", referer)
             if (ua.isNotBlank()) addOption("--user-agent", ua)
