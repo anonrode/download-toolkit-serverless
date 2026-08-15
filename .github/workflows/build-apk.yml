@@ -1,0 +1,54 @@
+name: Build & Release APK
+
+on:
+  push:
+    branches: [ master, main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build Release APKs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: gradle
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew || true
+
+      - name: Build Release APKs
+        run: ./gradlew assembleRelease --stacktrace
+
+      - name: Upload APK Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: anon-downloader-serverless-apks
+          path: app/build/outputs/apk/release/*.apk
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/heads/master') || startsWith(github.ref, 'refs/heads/main')
+        with:
+          tag_name: v3.0.0
+          name: "Anon Downloader v3.0.0 (Serverless 100% On-Device Edition)"
+          body: |
+            ## Anon Downloader — Serverless v3.0.0
+            
+            100% on-device drama scraping, episode search, stream resolution, and 16-socket parallel downloads directly on Android.
+            
+            - **No VPS, No API Keys**: Scrapes and resolves NKiri, DramaKey, Pluto, 9jaRocks, Anitaku, and DramaRain locally with Jsoup.
+            - **Fast Resumable Downloads**: Direct CDN downloads run on aria2c with 16 parallel sockets; file lockers use 1-socket protection.
+            - **Pure OLED Pitch-Black UI**: AMOLED seal aesthetic with zero electric blue.
+          files: app/build/outputs/apk/release/*.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
