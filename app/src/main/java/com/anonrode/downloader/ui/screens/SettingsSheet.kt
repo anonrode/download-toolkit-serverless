@@ -359,7 +359,7 @@ fun SettingsSheet(
                                 label = { Text(q, fontSize = 12.sp, fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal) },
                                 colors = FilterChipDefaults.filterChipColors(
                                     selectedContainerColor = AccentPrimary,
-                                    selectedLabelColor = BgBase,
+                                    selectedLabelColor = BackgroundDark,
                                     containerColor = SurfaceElevated
                                 ),
                                 modifier = Modifier.weight(1f)
@@ -409,7 +409,7 @@ fun SettingsSheet(
                 },
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(Radius.md),
-                colors = ButtonDefaults.buttonColors(containerColor = AccentPrimary, contentColor = BgBase)
+                colors = ButtonDefaults.buttonColors(containerColor = AccentPrimary, contentColor = BackgroundDark)
             ) {
                 Text("Save Preferences", fontWeight = FontWeight.Bold)
             }

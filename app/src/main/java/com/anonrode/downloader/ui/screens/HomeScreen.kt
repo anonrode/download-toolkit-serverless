@@ -269,7 +269,7 @@ fun HomeScreen(
                         Icon(
                             imageVector = Icons.Rounded.ArrowForward,
                             contentDescription = "Submit",
-                            tint = BgBase,
+                            tint = BackgroundDark,
                             modifier = Modifier.size(18.dp)
                         )
                     }
@@ -295,7 +295,7 @@ fun HomeScreen(
                                 text = label,
                                 fontSize = 12.sp,
                                 fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-                                color = if (isSelected) BgBase else TextSecondary
+                                color = if (isSelected) BackgroundDark else TextSecondary
                             )
                         },
                         colors = FilterChipDefaults.filterChipColors(
