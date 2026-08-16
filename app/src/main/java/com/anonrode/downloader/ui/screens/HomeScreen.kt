@@ -50,15 +50,15 @@ fun HomeScreen(
     val context = LocalContext.current
 
     val filters = listOf(
-        "all" to "All Providers",
+        "all" to "All Sites",
         "torrents" to "🧲 Torrents (TPB)",
-        "asianc" to "Asian Drama",
         "nkiri" to "NKiri",
-        "dramakey" to "DramaKey",
-        "anitaku" to "Anime",
-        "pluto" to "Movies (Pluto)",
-        "nepu" to "Nepu HD",
         "9jarocks" to "9jaRocks",
+        "asianc" to "AsianC",
+        "dramakey" to "DramaKey",
+        "anitaku" to "Anitaku Anime",
+        "pluto" to "Pluto Movies",
+        "nepu" to "Nepu HD",
         "naijavault" to "NaijaVault",
         "naijaprey" to "NaijaPrey",
         "dramarain" to "DramaRain"
@@ -98,7 +98,7 @@ fun HomeScreen(
                 Column {
                     Text(
                         text = "ANONRODE",
-                        fontSize = 20.sp,
+                        fontSize = 22.sp,
                         fontWeight = FontWeight.Black,
                         color = TextPrimary,
                         letterSpacing = 1.sp
@@ -106,25 +106,24 @@ fun HomeScreen(
                     Text(
                         text = "100% Serverless • Native Multi-Provider Engine",
                         fontSize = 11.sp,
-                        color = TextSecondary,
-                        fontWeight = FontWeight.Medium
+                        color = TextMuted
                     )
                 }
 
                 Row(horizontalArrangement = Arrangement.spacedBy(Spacing.sm)) {
+                    // Downloads screen shortcut with live badge
                     IconButton(
                         onClick = onOpenDownloads,
                         modifier = Modifier
                             .size(40.dp)
-                            .background(SurfaceElevated, CircleShape)
-                            .border(1.dp, BorderHairline, CircleShape)
+                            .background(SurfaceCard, CircleShape)
                     ) {
                         BadgedBox(
                             badge = {
                                 if (activeTasks.isNotEmpty()) {
                                     Badge(
-                                        containerColor = StatusSuccess,
-                                        contentColor = Color.Black
+                                        containerColor = AccentPrimary,
+                                        contentColor = BackgroundDark
                                     ) {
                                         Text("${activeTasks.size}", fontWeight = FontWeight.Bold)
                                     }
@@ -140,12 +139,12 @@ fun HomeScreen(
                         }
                     }
 
+                    // Settings modal shortcut
                     IconButton(
                         onClick = onOpenSettings,
                         modifier = Modifier
                             .size(40.dp)
-                            .background(SurfaceElevated, CircleShape)
-                            .border(1.dp, BorderHairline, CircleShape)
+                            .background(SurfaceCard, CircleShape)
                     ) {
                         Icon(
                             imageVector = Icons.Rounded.Settings,
@@ -157,126 +156,98 @@ fun HomeScreen(
                 }
             }
 
-            // Clipboard Quick Banner
-            if (clipboardSnippet != null) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(Radius.md))
-                        .background(SurfaceCard)
-                        .border(1.dp, BorderHairline, RoundedCornerShape(Radius.md))
-                        .clickable {
-                            val link = clipboardSnippet ?: ""
-                            clipboardSnippet = null
-                            viewModel.handlePastedInput(link, onOpenSocial)
-                        }
-                        .padding(horizontal = Spacing.md, vertical = Spacing.sm)
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Rounded.ContentPaste, contentDescription = null, tint = AccentPrimary, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(Spacing.xs))
-                            Text(
-                                text = "Paste: ${clipboardSnippet}",
-                                fontSize = 12.sp,
-                                color = TextPrimary,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                        IconButton(onClick = { clipboardSnippet = null }, modifier = Modifier.size(20.dp)) {
-                            Icon(Icons.Default.Clear, contentDescription = "Dismiss", tint = TextMuted, modifier = Modifier.size(14.dp))
-                        }
-                    }
-                }
-                Spacer(modifier = Modifier.height(Spacing.sm))
-            }
+            Spacer(modifier = Modifier.height(Spacing.sm))
 
             // Search Bar
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(Radius.full))
-                    .background(SurfaceCard)
-                    .border(1.dp, BorderHairline, RoundedCornerShape(Radius.full))
-                    .padding(horizontal = Spacing.md, vertical = 2.dp)
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
+            OutlinedTextField(
+                value = uiState.query,
+                onValueChange = { viewModel.onQueryChanged(it) },
+                placeholder = {
+                    Text(
+                        "Search series, anime, movies, torrents...",
+                        color = TextMuted,
+                        fontSize = 14.sp
+                    )
+                },
+                leadingIcon = {
                     Icon(
                         imageVector = Icons.Default.Search,
-                        contentDescription = "Search",
+                        contentDescription = null,
                         tint = TextSecondary,
                         modifier = Modifier.size(20.dp)
                     )
-
-                    Spacer(modifier = Modifier.width(Spacing.sm))
-
-                    TextField(
-                        value = uiState.query,
-                        onValueChange = { q ->
-                            viewModel.onQueryChanged(q)
-                            if (q.startsWith("http://") || q.startsWith("https://") || q.startsWith("magnet:?")) {
-                                viewModel.handlePastedInput(q, onOpenSocial)
+                },
+                trailingIcon = {
+                    if (uiState.query.isNotBlank()) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            IconButton(onClick = { viewModel.onQueryChanged("") }) {
+                                Icon(Icons.Default.Clear, contentDescription = "Clear", tint = TextSecondary, modifier = Modifier.size(18.dp))
                             }
-                        },
-                        placeholder = {
-                            Text(
-                                "Search series, anime, movies, or paste any URL...",
-                                color = TextMuted,
-                                fontSize = 13.sp,
-                                maxLines = 1
-                            )
-                        },
-                        singleLine = true,
-                        colors = TextFieldDefaults.colors(
-                            focusedContainerColor = Color.Transparent,
-                            unfocusedContainerColor = Color.Transparent,
-                            focusedIndicatorColor = Color.Transparent,
-                            unfocusedIndicatorColor = Color.Transparent,
-                            focusedTextColor = TextPrimary,
-                            unfocusedTextColor = TextPrimary
-                        ),
-                        modifier = Modifier.weight(1f)
-                    )
-
-                    if (uiState.query.isNotEmpty()) {
-                        IconButton(
-                            onClick = { viewModel.onQueryChanged("") },
-                            modifier = Modifier.size(28.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Clear,
-                                contentDescription = "Clear",
-                                tint = TextSecondary,
-                                modifier = Modifier.size(16.dp)
-                            )
+                            IconButton(
+                                onClick = { viewModel.search() },
+                                modifier = Modifier
+                                    .padding(end = 4.dp)
+                                    .size(32.dp)
+                                    .background(AccentPrimary, CircleShape)
+                            ) {
+                                Icon(Icons.Rounded.ArrowForward, contentDescription = "Search", tint = BackgroundDark, modifier = Modifier.size(16.dp))
+                            }
                         }
                     }
+                },
+                singleLine = true,
+                shape = RoundedCornerShape(Radius.full),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedContainerColor = SurfaceCard,
+                    unfocusedContainerColor = SurfaceCard,
+                    focusedBorderColor = AccentPrimary,
+                    unfocusedBorderColor = BorderHairline,
+                    focusedTextColor = TextPrimary,
+                    unfocusedTextColor = TextPrimary,
+                    cursorColor = AccentPrimary
+                ),
+                modifier = Modifier.fillMaxWidth()
+            )
 
-                    IconButton(
-                        onClick = { viewModel.search() },
-                        modifier = Modifier
-                            .size(36.dp)
-                            .background(AccentPrimary, CircleShape)
+            // Smart Clipboard Banner
+            if (!clipboardSnippet.isNullOrBlank() && uiState.query.isBlank()) {
+                Spacer(modifier = Modifier.height(Spacing.sm))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(Radius.md))
+                        .background(SurfaceElevated)
+                        .border(1.dp, BorderHairline, RoundedCornerShape(Radius.md))
+                        .clickable {
+                            val snippet = clipboardSnippet!!
+                            clipboardSnippet = null
+                            viewModel.handlePastedInput(snippet) { platform, url ->
+                                onOpenSocial(platform, url)
+                            }
+                        }
+                        .padding(horizontal = Spacing.md, vertical = Spacing.sm),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        modifier = Modifier.weight(1f),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(
-                            imageVector = Icons.Rounded.ArrowForward,
-                            contentDescription = "Submit",
-                            tint = BackgroundDark,
-                            modifier = Modifier.size(18.dp)
+                        Icon(Icons.Rounded.ContentPaste, contentDescription = null, tint = AccentPrimary, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(Spacing.sm))
+                        Text(
+                            text = "Paste link: ${clipboardSnippet!!.take(35)}...",
+                            color = TextPrimary,
+                            fontSize = 12.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
+                    Text("Download", color = AccentPrimary, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                 }
             }
 
-            Spacer(modifier = Modifier.height(Spacing.sm))
+            Spacer(modifier = Modifier.height(Spacing.md))
 
             // Filter Chips Carousel
             Row(
@@ -332,10 +303,9 @@ fun HomeScreen(
                     modifier = Modifier.fillMaxSize(),
                     contentAlignment = Alignment.Center
                 ) {
-                    Text("No results found for \"${uiState.query}\"", color = TextMuted, fontSize = 14.sp)
+                    Text("No results found for "${uiState.query}"", color = TextMuted, fontSize = 14.sp)
                 }
             } else if (uiState.searchResults.isEmpty()) {
-                // Empty state instructions
                 Box(
                     modifier = Modifier.fillMaxSize(),
                     contentAlignment = Alignment.Center
@@ -451,8 +421,6 @@ fun ShowCardItem(
     }
 }
 
-/** Poster art, or a deterministic colored tile with the show's initial when the
- *  source has no image (or the user turned posters off). Never a blank box. */
 @Composable
 private fun PosterTile(show: ShowCard, showPosters: Boolean) {
     val shape = RoundedCornerShape(Radius.md)
@@ -468,8 +436,6 @@ private fun PosterTile(show: ShowCard, showPosters: Boolean) {
                 contentDescription = show.title,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize(),
-                // While loading / on error, the tile color + initial already fill
-                // the box, so we just render nothing extra rather than a spinner.
                 loading = { InitialGlyph(show.title) },
                 error = { InitialGlyph(show.title) }
             )
@@ -509,45 +475,45 @@ private fun CardBadge(text: String, accent: Boolean) {
     }
 }
 
-// A hashed, deterministic tile color so the same title always gets the same tint.
 private val TILE_COLORS = listOf(
     Color(0xFF3A1C1C), Color(0xFF2A2A10), Color(0xFF20303A),
     Color(0xFF241A33), Color(0xFF14301F), Color(0xFF33231A)
 )
 private fun tileColor(title: String): Color {
-    // Guard the modulo: Int.MIN_VALUE.absoluteValue is still negative (overflow),
-    // which would give a negative index. The double-mod keeps it in range.
     val idx = ((title.hashCode() % TILE_COLORS.size) + TILE_COLORS.size) % TILE_COLORS.size
     return TILE_COLORS[idx]
 }
 
-// --- metric mapping: same card skeleton, meaning adapts per result type ------
+// Clean specLine that shows Category and Year without repeating the site name
 private fun specLine(show: ShowCard): String {
     val parts = buildList {
-        if (show.category.isNotBlank()) add(show.category)
+        if (show.category.isNotBlank() && !show.category.startsWith("⭐") && !show.category.startsWith("🛡️")) {
+            add(show.category)
+        }
         if (show.year.isNotBlank()) add(show.year)
     }
-    return if (parts.isEmpty()) show.site else parts.joinToString(" · ")
+    return if (parts.isEmpty()) "${show.site.uppercase()} Direct" else parts.joinToString(" · ")
 }
 
 private fun secondaryBadge(show: ShowCard): String? = when {
-    show.category.equals("Anime", ignoreCase = true) -> "SUB · DUB"
-    else -> "✓ 1080p"   // ✓ 1080p
+    show.category.contains("Anime", ignoreCase = true) -> "SUB · DUB"
+    show.site.equals("torrents", ignoreCase = true) -> null
+    else -> "✓ 1080p"
 }
 
 private fun leftMetric(show: ShowCard): String = when {
+    show.site.equals("torrents", ignoreCase = true) -> show.category
     show.totalEpisodes > 1 -> "${show.totalEpisodes} Episodes"
-    show.category.equals("Movie", ignoreCase = true) -> "Single film"
+    show.category.contains("Movie", ignoreCase = true) -> "Single film"
     show.totalEpisodes == 1 -> "1 Episode"
-    else -> show.category.ifBlank { "Stream" }
+    else -> "Available"
 }
 
-// Green right-metric: the source's speed rating (the drama analog of seeders).
 private fun rightMetric(show: ShowCard): String = when (show.site.lowercase()) {
     "nkiri", "9jarocks", "rocks" -> "Very Fast"
     "pluto", "nepu" -> "Fast"
     "anitaku" -> "Available"
     "dramakey", "dramarain", "asianc", "naijavault", "naijaprey" -> "Normal"
-    "torrents" -> "Torrent"
+    "torrents" -> "P2P Magnet"
     else -> "Available"
 }

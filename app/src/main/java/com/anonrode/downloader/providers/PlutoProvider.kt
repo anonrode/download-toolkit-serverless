@@ -1,24 +1,18 @@
 package com.anonrode.downloader.providers
 
 import com.anonrode.downloader.data.rules.DynamicRulesManager
-
 import com.anonrode.downloader.data.models.DownloadRecipe
 import com.anonrode.downloader.data.models.EpisodeItem
 import com.anonrode.downloader.data.models.ShowCard
 import com.anonrode.downloader.data.models.ShowDetails
 import com.anonrode.downloader.data.net.HttpClient
 import com.anonrode.downloader.resolvers.ResolverRegistry
+import org.jsoup.Jsoup
 import java.net.URLEncoder
-import java.util.regex.Pattern
 
 object PlutoProvider : SiteProvider {
     override val name: String = "pluto"
     override val mainUrl: String get() = DynamicRulesManager.getBaseUrl(name)
-
-    private val RESULT_RE = Pattern.compile(
-        """href="(https?://plutomovies\.com/(movies|series)/[^"]+)".*?alt="([^"]+)""",
-        Pattern.CASE_INSENSITIVE
-    )
 
     override suspend fun search(query: String): List<ShowCard> {
         val results = mutableListOf<ShowCard>()
@@ -26,28 +20,29 @@ object PlutoProvider : SiteProvider {
             val clean = query.replace("'", "").replace("’", "").trim()
             val encoded = URLEncoder.encode(clean, "UTF-8")
             val url = "$mainUrl/search/$encoded/page/1"
-            val html = HttpClient.getText(url) ?: return emptyList()
+            val html = HttpClient.getText(url, referer = "$mainUrl/") ?: return emptyList()
+            val doc = Jsoup.parse(html)
 
-            val matcher = RESULT_RE.matcher(html)
             val seen = mutableSetOf<String>()
+            for (a in doc.select("a[href*='/movie/'], a[href*='/series/']")) {
+                val href = a.attr("abs:href").ifEmpty { a.attr("href") }
+                val title = a.attr("title").ifEmpty { a.text() }.trim()
+                if (href.isBlank() || title.isBlank() || href in seen) continue
+                seen.add(href)
 
-            while (matcher.find()) {
-                val link = matcher.group(1) ?: continue
-                val kind = matcher.group(2) ?: "movie"
-                val title = matcher.group(3)?.trim() ?: ""
+                val isSeries = href.contains("/series/")
+                val img = a.selectFirst("img")
+                val poster = img?.attr("abs:src")?.ifEmpty { img.attr("abs:data-src") } ?: ""
 
-                if (link !in seen && title.isNotBlank()) {
-                    seen.add(link)
-                    results.add(
-                        ShowCard(
-                            title = title,
-                            url = link,
-                            posterUrl = "",
-                            site = name,
-                            category = if (kind == "series") "TV Series" else "Movie"
-                        )
+                results.add(
+                    ShowCard(
+                        title = title,
+                        url = href,
+                        posterUrl = poster,
+                        site = name,
+                        category = if (isSeries) "TV Series" else "Movie"
                     )
-                }
+                )
             }
         } catch (_: Exception) {}
         return results
@@ -56,39 +51,46 @@ object PlutoProvider : SiteProvider {
     override suspend fun loadEpisodes(showUrl: String): ShowDetails {
         val show = ShowCard(title = "Pluto Title", url = showUrl, site = name)
         try {
-            val html = HttpClient.getText(showUrl) ?: return ShowDetails(show = show)
+            val html = HttpClient.getText(showUrl, referer = "$mainUrl/") ?: return ShowDetails(show = show)
+            val doc = Jsoup.parse(html)
             val episodes = mutableListOf<EpisodeItem>()
 
+            val poster = doc.selectFirst("meta[property='og:image']")?.attr("content")
+                ?: doc.selectFirst(".poster img, .cover img")?.attr("abs:src") ?: ""
+            val title = doc.selectFirst("h1")?.text()?.trim() ?: "Pluto Video"
+
             if (showUrl.contains("/series/")) {
-                val epPat = Pattern.compile("""href="(https?://plutomovies\.com/episodes/[^"]+)"[^>]*>.*?Episode\s*(\d+)""", Pattern.CASE_INSENSITIVE)
-                val m = epPat.matcher(html)
+                val epLinks = doc.select("a[href*='/episodes/'], a[href*='/series/']")
                 var count = 1
-                while (m.find()) {
-                    val epUrl = m.group(1) ?: continue
-                    val epNum = m.group(2)?.toIntOrNull() ?: count
+                val seen = mutableSetOf<String>()
+                for (a in epLinks) {
+                    val href = a.attr("abs:href")
+                    if (href.isBlank() || href in seen) continue
+                    seen.add(href)
+                    val epName = a.text().trim().ifEmpty { "Episode $count" }
                     episodes.add(
                         EpisodeItem(
-                            title = "Episode $epNum",
-                            url = epUrl,
-                            episodeNum = epNum,
+                            title = epName,
+                            url = href,
+                            episodeNum = count++,
                             site = name
                         )
                     )
-                    count++
                 }
             } else {
-                // Single movie
+                // Movie download link from detail page
+                val dlLink = doc.selectFirst("a[href*='dl.plutomovies.com']")?.attr("abs:href") ?: showUrl
                 episodes.add(
                     EpisodeItem(
                         title = "Full Movie",
-                        url = showUrl,
+                        url = dlLink,
                         episodeNum = 1,
                         site = name
                     )
                 )
             }
 
-            return ShowDetails(show = show, episodes = episodes)
+            return ShowDetails(show = show.copy(title = title, posterUrl = poster), episodes = episodes)
         } catch (_: Exception) {
             return ShowDetails(show = show)
         }

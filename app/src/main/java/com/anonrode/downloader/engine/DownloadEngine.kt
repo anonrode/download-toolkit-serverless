@@ -1,13 +1,13 @@
 package com.anonrode.downloader.engine
 
 import android.content.Context
-import android.content.SharedPreferences
 import android.media.MediaScannerConnection
 import android.os.Environment
 import android.os.StatFs
 import com.anonrode.downloader.data.models.DownloadTask
 import com.anonrode.downloader.data.models.TaskStatus
 import com.anonrode.downloader.resolvers.ResolverRegistry
+import com.anonrode.downloader.security.TorrentSecurityShield
 import com.anonrode.downloader.service.DownloadService
 import com.anonrode.downloader.util.NetworkObserver
 import com.yausername.youtubedl_android.YoutubeDL
@@ -15,87 +15,53 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.StateFlow
 import java.io.File
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 
 class DownloadEngine(
     private val context: Context,
-    private val repository: DownloadRepository
+    private val repository: DownloadRepository,
+    private val networkObserver: NetworkObserver
 ) {
-    companion object {
-        // Marker set when a task is auto-paused by a network drop, so the
-        // reconnect handler knows which PAUSED tasks to auto-resume (vs the
-        // ones the user paused by hand, which must stay paused).
-        private const val NET_WAIT_MSG = "Waiting for network..."
-    }
+    private val engineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private val activeJobs = ConcurrentHashMap<String, Job>()
+
+    var maxConcurrentDownloads: Int = 3
+    var defaultQuality: String = "720p"
+    var autoOrganizeByShow: Boolean = true
+    var storageGuardGb: Double = 1.0
+    var wifiOnlyTorrents: Boolean = false
 
     val tasks: StateFlow<List<DownloadTask>> = repository.tasks
-    val networkObserver = NetworkObserver(context)
-
-    private val prefs: SharedPreferences = context.getSharedPreferences("anon_downloader_settings", Context.MODE_PRIVATE)
-    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-    private val activeJobs = mutableMapOf<String, Job>()
-
-    var maxConcurrentDownloads: Int = prefs.getInt("pref_max_concurrent", 3)
-    var parallelSocketsPerFile: Int = prefs.getInt("pref_sockets", 16)
-    var defaultQuality: String = prefs.getString("pref_quality", "720p") ?: "720p"
-    var autoOrganizeByShow: Boolean = prefs.getBoolean("pref_auto_organize", true)
-    var instantSocialDownload: Boolean = prefs.getBoolean("pref_instant_social", true)
-    var storageGuardGb: Double = prefs.getFloat("pref_storage_guard", 1.0f).toDouble()
-    var downloadTorrentsWifiOnly: Boolean = prefs.getBoolean("pref_torrents_wifi_only", false)
-    // Show poster art in search results. Off = the styled-initial tile only, so a
-    // user on metered data pays zero image bandwidth. Default on.
-    var showPostersInResults: Boolean = prefs.getBoolean("pref_show_posters", true)
-
-    fun setShowPosters(value: Boolean) {
-        showPostersInResults = value
-        prefs.edit().putBoolean("pref_show_posters", value).apply()
-    }
 
     init {
-        repository.initPersistence(context.filesDir)
-
-        scope.launch {
-            networkObserver.status.collect { net ->
-                if (!net.isConnected) {
-                    activeJobs.keys.toList().forEach { id ->
-                        pause(id)
-                        repository.update(id) { it.copy(errorMessage = NET_WAIT_MSG) }
-                    }
-                } else {
-                    // pause() above set these to PAUSED; processQueue only starts
-                    // QUEUED tasks, so without re-queueing them here a network blip
-                    // would strand every download as PAUSED forever.
-                    tasks.value
-                        .filter { it.status == TaskStatus.PAUSED && it.errorMessage == NET_WAIT_MSG }
-                        .forEach { t -> repository.update(t.id) { it.copy(status = TaskStatus.QUEUED, errorMessage = null) } }
-                    processQueue()
-                }
-            }
-        }
-
-        scope.launch {
-            processQueue()
-        }
+        loadPreferences()
     }
 
-    fun saveAllSettings(
-        maxConcurrent: Int,
-        parallelSockets: Int,
+    private fun loadPreferences() {
+        val prefs = context.getSharedPreferences("downloader_settings", Context.MODE_PRIVATE)
+        maxConcurrentDownloads = prefs.getInt("pref_max_downloads", 3)
+        defaultQuality = prefs.getString("pref_default_quality", "720p") ?: "720p"
+        autoOrganizeByShow = prefs.getBoolean("pref_auto_organize", true)
+        storageGuardGb = prefs.getFloat("pref_storage_guard", 1.0f).toDouble()
+        wifiOnlyTorrents = prefs.getBoolean("pref_torrents_wifi_only", false)
+    }
+
+    fun savePreferences(
+        maxDownloads: Int,
         quality: String,
         autoOrganize: Boolean,
         storageGuard: Double,
         wifiOnlyTorrents: Boolean
     ) {
-        maxConcurrentDownloads = maxConcurrent
-        parallelSocketsPerFile = parallelSockets
-        defaultQuality = quality
-        autoOrganizeByShow = autoOrganize
-        storageGuardGb = storageGuard
-        downloadTorrentsWifiOnly = wifiOnlyTorrents
+        this.maxConcurrentDownloads = maxDownloads
+        this.defaultQuality = quality
+        this.autoOrganizeByShow = autoOrganize
+        this.storageGuardGb = storageGuard
+        this.wifiOnlyTorrents = wifiOnlyTorrents
 
-        prefs.edit()
-            .putInt("pref_max_concurrent", maxConcurrent)
-            .putInt("pref_sockets", parallelSockets)
-            .putString("pref_quality", quality)
+        context.getSharedPreferences("downloader_settings", Context.MODE_PRIVATE).edit()
+            .putInt("pref_max_downloads", maxDownloads)
+            .putString("pref_default_quality", quality)
             .putBoolean("pref_auto_organize", autoOrganize)
             .putFloat("pref_storage_guard", storageGuard.toFloat())
             .putBoolean("pref_torrents_wifi_only", wifiOnlyTorrents)
@@ -116,7 +82,7 @@ class DownloadEngine(
         val downloadFolder = getDownloadDirectory(showTitle)
 
         val cleanTitle = episodeTitle.replace(Regex("""[^a-zA-Z0-9._ -]"""), "_").trim()
-        val ext = if (audioOnly) "mp3" else if (backend == "yt-dlp" || !isDirect) "mp4" else "mkv"
+        val ext = if (audioOnly) "mp3" else if (backend.contains("yt") || !isDirect) "mp4" else "mkv"
         val targetFile = File(downloadFolder, "$cleanTitle.$ext")
 
         val task = DownloadTask(
@@ -166,12 +132,6 @@ class DownloadEngine(
         processQueue()
     }
 
-    /**
-     * A last-resort guard against the "downloaded an HTML page" failure: if an
-     * unresolved embed page slips through, aria2c saves the HTML, which can be
-     * large enough to pass the size check. Sniff the first bytes for a markup
-     * signature and reject it as a failed download rather than a video.
-     */
     private fun looksLikeHtml(file: File): Boolean {
         return try {
             val head = file.inputStream().use { ins ->
@@ -185,7 +145,8 @@ class DownloadEngine(
         }
     }
 
-    private fun checkStorageAvailable(): Boolean {        try {
+    private fun checkStorageAvailable(): Boolean {
+        try {
             val path = Environment.getExternalStorageDirectory()
             val stat = StatFs(path.path)
             val freeGb = (stat.availableBlocksLong * stat.blockSizeLong).toDouble() / (1024.0 * 1024.0 * 1024.0)
@@ -214,6 +175,22 @@ class DownloadEngine(
         return dest
     }
 
+    private fun getRefererForUrl(url: String): String {
+        val low = url.lowercase()
+        return when {
+            low.contains("gogoanime") || low.contains("anitaku") || low.contains("workers.dev") -> "https://gogoanime.or.at/"
+            low.contains("asianc") || low.contains("vidbasic") || low.contains("vidb") -> "https://asianc.id/"
+            low.contains("pluto") || low.contains("kissorgrab") -> "https://plutomovies.com/"
+            low.contains("thenkiri") || low.contains("nkiri") -> "https://thenkiri.com/"
+            low.contains("9jarocks") || low.contains("loadedfiles") -> "https://my9jarocks.bz/"
+            low.contains("naijavault") || low.contains("vikingfile") || low.contains("lulacloud") -> "https://www.naijavault.com/"
+            low.contains("naijaprey") -> "https://www.naijaprey.tv/"
+            low.contains("dramakey") -> "https://dramakey.com/"
+            low.contains("dramarain") -> "https://dramarain.com/"
+            else -> ""
+        }
+    }
+
     private fun updateServiceState() {
         val current = tasks.value
         val active = current.filter { it.status == TaskStatus.DOWNLOADING || it.status == TaskStatus.RESOLVING }
@@ -240,43 +217,37 @@ class DownloadEngine(
 
         if (activeCount >= maxConcurrentDownloads) return
 
-        // Find the first QUEUED task we can actually start. Skipping (not
-        // returning) is deliberate: a Wi-Fi-only torrent at the head of the
-        // queue must not block unrelated downloads on mobile data.
-        for (queued in currentTasks.filter { it.status == TaskStatus.QUEUED }) {
-            if (queued.showTitle == "Torrents" && downloadTorrentsWifiOnly && !net.isWifi) {
-                repository.update(queued.id) { it.copy(errorMessage = "Paused: Waiting for Wi-Fi (Torrent)") }
-                continue
-            }
-            // Claim the task synchronously BEFORE launching. startTask flips the
-            // status inside a coroutine, so without claiming it here a second
-            // processQueue() (fired on every enqueue) could re-pick the same
-            // QUEUED task and launch a duplicate job for it.
-            repository.update(queued.id) { it.copy(status = TaskStatus.RESOLVING, errorMessage = null) }
-            startTask(queued.copy(status = TaskStatus.RESOLVING))
+        val nextTask = currentTasks.firstOrNull { it.status == TaskStatus.QUEUED } ?: return
+
+        if (!checkStorageAvailable()) {
+            repository.update(nextTask.id) { it.copy(status = TaskStatus.FAILED, errorMessage = "Storage limit reached (< ${storageGuardGb}GB free)") }
             return
         }
+
+        if (wifiOnlyTorrents && !net.isWifi && nextTask.directUrl.startsWith("magnet:")) {
+            repository.update(nextTask.id) { it.copy(status = TaskStatus.PAUSED, errorMessage = "Waiting for Wi-Fi (Torrents Wi-Fi Only enabled)") }
+            return
+        }
+
+        startTask(nextTask)
     }
 
     private fun startTask(task: DownloadTask) {
-        val job = scope.launch {
+        val job = engineScope.launch {
             try {
-                if (!checkStorageAvailable()) {
-                    repository.update(task.id) { it.copy(status = TaskStatus.PAUSED, errorMessage = "Paused: Storage below ${storageGuardGb}GB") }
-                    return@launch
-                }
-
                 var streamUrl = task.directUrl
-                val isMagnet = streamUrl.startsWith("magnet:?", ignoreCase = true)
+                val isMagnet = streamUrl.startsWith("magnet:")
+                val isHlsStream = streamUrl.contains(".m3u8") || streamUrl.contains("manifest")
+                val isExplicitYtdlp = task.backend.contains("yt-dlp") || task.backend.contains("ytdlp")
+                val isSocialOrYtdlp = isExplicitYtdlp || isHlsStream
 
-                if (task.backend != "yt-dlp" && !isMagnet) {
+                if (!isMagnet && !isSocialOrYtdlp && !streamUrl.startsWith("http")) {
                     repository.update(task.id) { it.copy(status = TaskStatus.RESOLVING) }
                     updateServiceState()
-                    val resolved = ResolverRegistry.resolve(task.directUrl, defaultQuality)
+
+                    val resolved = ResolverRegistry.resolve(streamUrl, defaultQuality)
                     if (resolved.isNullOrBlank()) {
                         repository.update(task.id) { it.copy(status = TaskStatus.FAILED, errorMessage = "Could not resolve stream link") }
-                        updateServiceState()
-                        processQueue()
                         return@launch
                     }
                     streamUrl = resolved
@@ -286,7 +257,9 @@ class DownloadEngine(
                 updateServiceState()
 
                 val targetFolder = getDownloadDirectory(task.showTitle)
-                val isExtractor = task.backend == "yt-dlp"
+                val finalBackend = if (isSocialOrYtdlp || streamUrl.contains(".m3u8")) "yt-dlp" else "aria2c"
+                val isExtractor = finalBackend == "yt-dlp"
+                val refererToPass = getRefererForUrl(streamUrl)
 
                 val producedFile = YoutubeDlDownloader.download(
                     context = context,
@@ -294,9 +267,9 @@ class DownloadEngine(
                     sourceUrl = streamUrl,
                     targetDir = targetFolder,
                     preferredFilename = File(task.filePath).name,
-                    backend = task.backend,
-                    referer = "",
-                    parallelSockets = if (task.backend == "yt-dlp") 1 else task.parallelSockets,
+                    backend = finalBackend,
+                    referer = refererToPass,
+                    parallelSockets = if (finalBackend == "yt-dlp") 1 else task.parallelSockets,
                     quality = defaultQuality,
                     isExtractorTask = isExtractor,
                     onProgress = { progressFloat ->
@@ -306,15 +279,18 @@ class DownloadEngine(
                     }
                 )
 
+                val validation = if (producedFile != null && producedFile.exists()) {
+                    TorrentSecurityShield.validateDownloadedFile(producedFile, targetFolder)
+                } else {
+                    Pair(false, "File missing")
+                }
+
                 if (producedFile != null && producedFile.exists() && producedFile.length() > 500 * 1024
-                    && !looksLikeHtml(producedFile)) {
+                    && !looksLikeHtml(producedFile) && validation.first) {
                     val finalTitle = producedFile.nameWithoutExtension
                     repository.update(task.id) {
                         it.copy(
                             filePath = producedFile.absolutePath,
-                            // Only extractor/social tasks get their title from the
-                            // produced filename (yt-dlp metadata). A drama episode
-                            // keeps "Episode 05" instead of becoming the file stem.
                             episodeTitle = if (isExtractor) finalTitle else it.episodeTitle,
                             downloadedBytes = 100L,
                             totalBytes = 100L,
@@ -333,7 +309,8 @@ class DownloadEngine(
 
                     DownloadService.notifyCompleted(context, finalTitle)
                 } else {
-                    repository.update(task.id) { it.copy(status = TaskStatus.FAILED, errorMessage = "Output file was too small or missing") }
+                    val errReason = if (!validation.first) validation.second else "Output file was too small or corrupted"
+                    repository.update(task.id) { it.copy(status = TaskStatus.FAILED, errorMessage = errReason) }
                 }
             } catch (e: CancellationException) {
                 // Cancelled

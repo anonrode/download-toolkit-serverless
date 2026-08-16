@@ -1,7 +1,6 @@
 package com.anonrode.downloader.providers
 
 import com.anonrode.downloader.data.rules.DynamicRulesManager
-
 import com.anonrode.downloader.data.models.DownloadRecipe
 import com.anonrode.downloader.data.models.EpisodeItem
 import com.anonrode.downloader.data.models.ShowCard
@@ -12,6 +11,8 @@ import okhttp3.FormBody
 import okhttp3.Request
 import org.json.JSONObject
 import org.jsoup.Jsoup
+import java.net.URI
+import java.util.regex.Pattern
 
 object AnitakuProvider : SiteProvider {
     override val name: String = "anitaku"
@@ -24,7 +25,7 @@ object AnitakuProvider : SiteProvider {
             "https://anitaku.com.ro/wp-admin/admin-ajax.php" to "https://anitaku.com.ro/"
         )
 
-        val cleanQuery = query.replace(Regex("""(?i)\b(season|series|part|s\d+)\s*\d*\b"""), "").trim()
+        val cleanQuery = query.replace(Regex("""(?i)(season|series|part|s\d+)\s*\d*"""), "").trim()
         val queryToUse = if (cleanQuery.length >= 2) cleanQuery else query
 
         for ((ajaxUrl, referer) in endpoints) {
@@ -119,12 +120,85 @@ object AnitakuProvider : SiteProvider {
     }
 
     override suspend fun resolveEpisode(episodeUrl: String, quality: String): DownloadRecipe {
-        val direct = ResolverRegistry.resolve(episodeUrl, quality) ?: episodeUrl
+        var direct: String? = null
+
+        try {
+            val html = HttpClient.getText(episodeUrl, referer = "https://gogoanime.or.at/") ?: ""
+            
+            // 0. Check Gogoanime direct download links API
+            val malMatch = Pattern.compile("""malId\s*=\s*['"](\d+)['"]""").matcher(html)
+            val epMatch = Pattern.compile("""ep\s*=\s*['"](\d+)['"]""").matcher(html)
+            if (malMatch.find() && epMatch.find()) {
+                val malId = malMatch.group(1) ?: ""
+                val ep = epMatch.group(1) ?: ""
+                val host = URI(episodeUrl).host ?: "gogoanime.or.at"
+                val ajaxUrl = "https://$host/wp-admin/admin-ajax.php"
+
+                val form = FormBody.Builder()
+                    .add("action", "fetch_download_links")
+                    .add("mal_id", malId)
+                    .add("ep", ep)
+                    .build()
+
+                val req = Request.Builder()
+                    .url(ajaxUrl)
+                    .header("User-Agent", HttpClient.DEFAULT_UA)
+                    .header("Referer", episodeUrl)
+                    .header("X-Requested-With", "XMLHttpRequest")
+                    .post(form)
+                    .build()
+
+                HttpClient.shared.newCall(req).execute().use { res ->
+                    if (res.isSuccessful) {
+                        val body = res.body?.string() ?: ""
+                        val dlHtml = JSONObject(body).optJSONObject("data")?.optString("result") ?: ""
+                        if (dlHtml.isNotBlank()) {
+                            val dlDoc = Jsoup.parse(dlHtml)
+                            for (a in dlDoc.select("a[href]")) {
+                                val dlLink = a.attr("href")
+                                val resolved = ResolverRegistry.resolve(dlLink, quality)
+                                if (!resolved.isNullOrBlank()) {
+                                    direct = resolved
+                                    break
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (direct.isNullOrBlank()) {
+                val doc = Jsoup.parse(html)
+                val candidates = mutableListOf<String>()
+                for (a in doc.select(".anime_muti_link a[data-video], .servers a[data-video], .anime_muti_link a[href]")) {
+                    val dataVideo = a.attr("data-video").ifEmpty { a.attr("href") }
+                    if (dataVideo.isNotBlank()) candidates.add(dataVideo)
+                }
+                for (iframe in doc.select("iframe[src]")) {
+                    candidates.add(iframe.attr("src"))
+                }
+
+                for (cand in candidates) {
+                    var src = cand
+                    if (src.startsWith("//")) src = "https:$src"
+                    else if (src.startsWith("/")) src = URI(episodeUrl).resolve(src).toString()
+
+                    val resolved = ResolverRegistry.resolve(src, quality)
+                    if (!resolved.isNullOrBlank()) {
+                        direct = resolved
+                        break
+                    }
+                }
+            }
+        } catch (_: Exception) {}
+
+        val target = direct ?: episodeUrl
+        val isHls = target.contains(".m3u8") || target.contains("manifest")
         return DownloadRecipe(
-            directUrl = direct,
-            filename = direct.substringAfterLast('/').substringBefore('?').ifEmpty { "anime.mp4" },
-            backend = "aria2c",
-            parallelSockets = 16
+            directUrl = target,
+            filename = target.substringAfterLast('/').substringBefore('?').ifEmpty { "anime.mp4" },
+            backend = if (isHls) "yt-dlp" else "aria2c",
+            parallelSockets = if (isHls) 1 else 16
         )
     }
 }

@@ -1,7 +1,6 @@
 package com.anonrode.downloader.providers
 
 import com.anonrode.downloader.data.rules.DynamicRulesManager
-
 import com.anonrode.downloader.data.models.DownloadRecipe
 import com.anonrode.downloader.data.models.EpisodeItem
 import com.anonrode.downloader.data.models.ShowCard
@@ -32,6 +31,8 @@ object NepuProvider : SiteProvider {
                 val title = item.optString("title").ifEmpty { item.optString("name") }
                 val releaseDate = item.optString("release_date").ifEmpty { item.optString("first_air_date") }
                 val year = if (releaseDate.contains("-")) releaseDate.substringBefore('-') else ""
+                val posterPath = item.optString("poster_path")
+                val poster = if (posterPath.isNotBlank() && posterPath != "null") "https://image.tmdb.org/t/p/w342$posterPath" else ""
 
                 if (tmdbId.isNotBlank() && title.isNotBlank()) {
                     val fullUrl = "$mainUrl/watch/$mediaType/$tmdbId"
@@ -39,7 +40,7 @@ object NepuProvider : SiteProvider {
                         ShowCard(
                             title = if (year.isNotBlank()) "$title ($year)" else title,
                             url = fullUrl,
-                            posterUrl = "",
+                            posterUrl = poster,
                             site = name,
                             category = if (mediaType == "tv") "TV Show" else "Movie",
                             year = year
@@ -66,11 +67,12 @@ object NepuProvider : SiteProvider {
 
     override suspend fun resolveEpisode(episodeUrl: String, quality: String): DownloadRecipe {
         val direct = ResolverRegistry.resolve(episodeUrl, quality) ?: episodeUrl
+        val isHls = direct.contains(".m3u8") || direct.contains("manifest")
         return DownloadRecipe(
             directUrl = direct,
             filename = direct.substringAfterLast('/').substringBefore('?').ifEmpty { "movie.mp4" },
-            backend = "aria2c",
-            parallelSockets = 16
+            backend = if (isHls) "ytdlp" else "aria2c",
+            parallelSockets = if (isHls) 1 else 16
         )
     }
 }

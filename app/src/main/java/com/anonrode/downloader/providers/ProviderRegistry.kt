@@ -47,7 +47,15 @@ object ProviderRegistry {
                 async(Dispatchers.IO) {
                     try {
                         val items = provider.search(query)
-                        Pair(provider.name, items)
+                        val enriched = items.map { card ->
+                            if (card.posterUrl.isBlank()) {
+                                val tmdbPoster = TmdbPosterResolver.resolvePoster(card.title)
+                                if (!tmdbPoster.isNullOrBlank()) card.copy(posterUrl = tmdbPoster) else card
+                            } else {
+                                card
+                            }
+                        }
+                        Pair(provider.name, enriched)
                     } catch (_: Exception) {
                         Pair(provider.name, emptyList<ShowCard>())
                     }

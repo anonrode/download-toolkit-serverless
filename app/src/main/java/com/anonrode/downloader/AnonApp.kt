@@ -20,6 +20,7 @@ class AnonApp : Application(), ImageLoaderFactory {
 
     override fun onCreate() {
         super.onCreate()
+        com.anonrode.downloader.util.CrashHandler.install(this)
         appScope.launch {
             try {
                 initMutex.withLock {

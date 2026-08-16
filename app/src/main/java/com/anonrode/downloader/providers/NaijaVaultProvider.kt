@@ -1,7 +1,6 @@
 package com.anonrode.downloader.providers
 
 import com.anonrode.downloader.data.rules.DynamicRulesManager
-
 import com.anonrode.downloader.data.models.DownloadRecipe
 import com.anonrode.downloader.data.models.EpisodeItem
 import com.anonrode.downloader.data.models.ShowCard
@@ -20,7 +19,7 @@ object NaijaVaultProvider : SiteProvider {
         val results = mutableListOf<ShowCard>()
         try {
             val encoded = URLEncoder.encode(query, "UTF-8")
-            val url = "$mainUrl/wp-json/wp/v2/posts?search=$encoded"
+            val url = "$mainUrl/wp-json/wp/v2/posts?search=$encoded&_embed=1"
             val jsonStr = HttpClient.getText(url) ?: return emptyList()
 
             val array = JSONArray(jsonStr)
@@ -30,14 +29,24 @@ object NaijaVaultProvider : SiteProvider {
                 val title = titleObj?.optString("rendered")?.replace(Regex("<[^>]+>"), "")?.trim() ?: ""
                 val link = item.optString("link")
 
+                // Extract poster from featured media embedded JSON
+                var poster = item.optString("jetpack_featured_media_url")
+                if (poster.isBlank()) {
+                    val embedded = item.optJSONObject("_embedded")
+                    val featured = embedded?.optJSONArray("wp:featuredmedia")
+                    if (featured != null && featured.length() > 0) {
+                        poster = featured.getJSONObject(0).optString("source_url")
+                    }
+                }
+
                 if (link.isNotBlank() && title.isNotBlank()) {
                     results.add(
                         ShowCard(
                             title = title,
                             url = link,
-                            posterUrl = "",
+                            posterUrl = poster,
                             site = name,
-                            category = "Nollywood & Movies"
+                            category = "Nollywood & Series"
                         )
                     )
                 }
@@ -53,7 +62,9 @@ object NaijaVaultProvider : SiteProvider {
             val doc = Jsoup.parse(html)
 
             val title = doc.selectFirst("h1.entry-title, h1")?.text()?.trim() ?: "Movie"
-            val poster = doc.selectFirst(".entry-content img, .post-thumbnail img")?.attr("abs:src") ?: ""
+            val poster = doc.selectFirst("meta[property='og:image']")?.attr("content")
+                ?: doc.selectFirst(".entry-content img, .post-thumbnail img")?.attr("abs:src")
+                ?: ""
             val synopsis = doc.selectFirst(".entry-content p")?.text()?.trim() ?: ""
 
             val episodes = mutableListOf<EpisodeItem>()
