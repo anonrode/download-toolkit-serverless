@@ -112,7 +112,7 @@ fun SocialModal(
                     },
                     colors = FilterChipDefaults.filterChipColors(
                         selectedContainerColor = AccentPrimary,
-                        selectedLabelColor = BgBase
+                        selectedLabelColor = BackgroundDark
                     ),
                     modifier = Modifier.weight(1f)
                 )
@@ -129,7 +129,7 @@ fun SocialModal(
                     },
                     colors = FilterChipDefaults.filterChipColors(
                         selectedContainerColor = AccentPrimary,
-                        selectedLabelColor = BgBase
+                        selectedLabelColor = BackgroundDark
                     ),
                     modifier = Modifier.weight(1f)
                 )
@@ -153,7 +153,7 @@ fun SocialModal(
                 },
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(Radius.md),
-                colors = ButtonDefaults.buttonColors(containerColor = AccentPrimary, contentColor = BgBase)
+                colors = ButtonDefaults.buttonColors(containerColor = AccentPrimary, contentColor = BackgroundDark)
             ) {
                 Icon(Icons.Rounded.Download, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(modifier = Modifier.width(Spacing.xs))
