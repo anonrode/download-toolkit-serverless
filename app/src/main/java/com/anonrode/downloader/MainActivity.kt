@@ -10,7 +10,8 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.compose.runtime.*
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
-import com.anonrode.downloader.service.DownloadService
+import com.anonrode.downloader.data.router.ParsedUrl
+import com.anonrode.downloader.data.router.UrlRouter
 import com.anonrode.downloader.ui.screens.*
 import com.anonrode.downloader.ui.theme.AnonDownloaderTheme
 import com.anonrode.downloader.viewmodel.MainViewModel
@@ -18,7 +19,7 @@ import com.anonrode.downloader.viewmodel.MainViewModel
 class MainActivity : ComponentActivity() {
 
     private val viewModel: MainViewModel by viewModels()
-    private var activeSharedUrl = mutableStateOf<String?>(null)
+    private var activeSocialTarget = mutableStateOf<Pair<String, String>?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         try {
@@ -35,7 +36,7 @@ class MainActivity : ComponentActivity() {
                 val uiState by viewModel.uiState.collectAsState()
                 var currentScreen by remember { mutableStateOf("home") }
                 var showSettings by remember { mutableStateOf(false) }
-                val socialUrl by activeSharedUrl
+                val socialTarget by activeSocialTarget
 
                 BackHandler(enabled = currentScreen != "home") {
                     currentScreen = "home"
@@ -47,7 +48,9 @@ class MainActivity : ComponentActivity() {
                             viewModel = viewModel,
                             onOpenDownloads = { currentScreen = "downloads" },
                             onOpenSettings = { showSettings = true },
-                            onOpenSocialModal = { url -> activeSharedUrl.value = url }
+                            onOpenSocialModal = { platform, url ->
+                                activeSocialTarget.value = Pair(platform, url)
+                            }
                         )
 
                         uiState.activeShowForDrawer?.let { show ->
@@ -65,11 +68,12 @@ class MainActivity : ComponentActivity() {
                             )
                         }
 
-                        socialUrl?.let { url ->
+                        socialTarget?.let { (platform, url) ->
                             SocialModal(
+                                platformName = platform,
                                 url = url,
                                 viewModel = viewModel,
-                                onDismiss = { activeSharedUrl.value = null }
+                                onDismiss = { activeSocialTarget.value = null }
                             )
                         }
                     }
@@ -95,38 +99,50 @@ class MainActivity : ComponentActivity() {
             val cleanUrl = extractCleanUrl(rawText)
 
             if (!cleanUrl.isNullOrBlank()) {
-                if (viewModel.engine.instantSocialDownload) {
-                    val platform = getPlatformLabel(cleanUrl)
-                    viewModel.engine.enqueue(
-                        showTitle = "Social",
-                        episodeNum = 1,
-                        episodeTitle = "$platform Video",
-                        sourceUrl = cleanUrl,
-                        isDirect = false,
-                        backend = "yt-dlp",
-                        parallelSockets = 1
-                    )
-                    Toast.makeText(this, "Downloading from $platform...", Toast.LENGTH_SHORT).show()
-                } else {
-                    activeSharedUrl.value = cleanUrl
+                when (val parsed = UrlRouter.parse(cleanUrl)) {
+                    is ParsedUrl.DramaUrl -> {
+                        viewModel.openEpisodeDrawer(parsed.showCard)
+                    }
+                    is ParsedUrl.SocialUrl -> {
+                        if (viewModel.engine.instantSocialDownload) {
+                            viewModel.engine.enqueue(
+                                showTitle = "Social",
+                                episodeNum = 1,
+                                episodeTitle = "${parsed.platform} Video",
+                                sourceUrl = parsed.cleanUrl,
+                                isDirect = false,
+                                backend = "yt-dlp",
+                                parallelSockets = 1
+                            )
+                            Toast.makeText(this, "Downloading from ${parsed.platform}...", Toast.LENGTH_SHORT).show()
+                        } else {
+                            activeSocialTarget.value = Pair(parsed.platform, parsed.cleanUrl)
+                        }
+                    }
+                    is ParsedUrl.DirectMediaUrl -> {
+                        viewModel.engine.enqueue(
+                            showTitle = "Direct Downloads",
+                            episodeNum = 1,
+                            episodeTitle = parsed.filename,
+                            sourceUrl = parsed.url,
+                            isDirect = true,
+                            backend = "aria2c",
+                            parallelSockets = 16
+                        )
+                        Toast.makeText(this, "Downloading ${parsed.filename}...", Toast.LENGTH_SHORT).show()
+                    }
+                    is ParsedUrl.SearchQuery -> {
+                        viewModel.onQueryChanged(parsed.query)
+                        viewModel.search(parsed.query)
+                    }
                 }
             }
         }
     }
 
     private fun extractCleanUrl(text: String): String? {
-        val urlRegex = Regex("https?://[^\\s<>\"{}|\\^`]+")
+        val urlRegex = Regex("""https?://[^\s<>"{}|\^`]+""")
         val match = urlRegex.find(text)
         return match?.value?.trim()
-    }
-
-    private fun getPlatformLabel(url: String): String {
-        return when {
-            url.contains("instagram.com") -> "Instagram"
-            url.contains("youtube.com") || url.contains("youtu.be") -> "YouTube"
-            url.contains("tiktok.com") -> "TikTok"
-            url.contains("twitter.com") || url.contains("x.com") -> "Twitter"
-            else -> "Media"
-        }
     }
 }

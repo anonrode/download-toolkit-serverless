@@ -1,42 +1,45 @@
 package com.anonrode.downloader.engine
 
-import com.anonrode.downloader.AnonApp
-import com.yausername.youtubedl_android.YoutubeDL
-import com.yausername.youtubedl_android.YoutubeDLRequest
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import android.content.Context
+import com.yaedd.youtubedl_android.YoutubeDL
+import com.yaedd.youtubedl_android.YoutubeDLRequest
 import java.io.File
 
 object YoutubeDlDownloader {
 
-    private const val PROGRESS_SCALE = 100L
-    private const val DEFAULT_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    private val LOCKER_HOSTS = listOf(
+        "downloadwella.com",
+        "wetafiles.com",
+        "kissorgrab.com",
+        "streamwish.",
+        "sfastwish.",
+        "vidhide."
+    )
+
+    fun isConnectionSensitive(url: String): Boolean {
+        val lower = url.lowercase()
+        return LOCKER_HOSTS.any { lower.contains(it) }
+    }
 
     suspend fun download(
+        context: Context,
         taskId: String,
         sourceUrl: String,
-        targetFilePath: String,
-        headers: Map<String, String>,
-        backend: String = "aria2c",
+        targetFile: File,
+        backend: String,
+        referer: String = "",
+        origin: String = "",
+        ua: String = "",
+        customHeaders: Map<String, String> = emptyMap(),
         parallelSockets: Int = 16,
-        onProgress: (percent: Float) -> Unit
-    ): Unit = withContext(Dispatchers.IO) {
-        if (!AnonApp.ensureReady()) {
-            throw IllegalStateException("Video engine still starting up. Try again in a moment.")
-        }
+        isExtractorTask: Boolean = false,
+        onProgress: (Float) -> Unit
+    ) {
+        val outDir = targetFile.parentFile ?: File(context.filesDir, "downloads")
+        if (!outDir.exists()) outDir.mkdirs()
 
-        val target = File(targetFilePath)
-        target.parentFile?.mkdirs()
-
-        val stem = target.absolutePath.removeSuffix(".mp4").removeSuffix(".part")
-
-        val referer = headers["Referer"] ?: headers["referer"] ?: ""
-        val ua = headers["User-Agent"] ?: headers["user-agent"] ?: DEFAULT_UA
-        val origin = headers["Origin"] ?: headers["origin"] ?: ""
-
-        val isSocialUrl = isSocial(sourceUrl)
-        val isHlsUrl = isHls(sourceUrl)
-        val isExtractorTask = backend == "yt-dlp" || isSocialUrl || isHlsUrl
+        val stem = File(outDir, targetFile.nameWithoutExtension).absolutePath
+        val target = targetFile
 
         val request = YoutubeDLRequest(sourceUrl).apply {
             addOption("-o", "$stem.%(ext)s")
@@ -44,11 +47,14 @@ object YoutubeDlDownloader {
             addOption("--no-mtime")
             addOption("--no-warnings")
             addOption("--no-check-certificate")
+            addOption("--newline")
+            addOption("--progress")
 
             if (referer.isNotBlank()) addOption("--referer", referer)
             if (ua.isNotBlank()) addOption("--user-agent", ua)
-            headers.forEach { (k, v) ->
-                if (!k.equals("Referer", ignoreCase = true) && !k.equals("User-Agent", ignoreCase = true)) {
+
+            for ((k, v) in customHeaders) {
+                if (k.isNotBlank() && v.isNotBlank()) {
                     addOption("--add-header", "$k:$v")
                 }
             }
@@ -73,14 +79,16 @@ object YoutubeDlDownloader {
         }
 
         YoutubeDL.getInstance().execute(request, taskId) { progress, _, _ ->
-            if (progress >= 0f) onProgress(progress)
+            if (progress >= 0f) {
+                onProgress(progress)
+            }
         }
 
         // Ensure output file exists and is normalized
         if (!target.exists()) {
             val produced = target.parentFile
                 ?.listFiles { f ->
-                    f.name.startsWith(File(stem).name + ".") &&
+                    f.name.startsWith(File(stem).name) &&
                     !f.name.endsWith(".aria2") &&
                     !f.name.endsWith(".part") &&
                     !f.name.endsWith(".ytdl")
@@ -90,41 +98,5 @@ object YoutubeDlDownloader {
                 produced.renameTo(target)
             }
         }
-        if (!target.exists() || target.length() <= 0L) {
-            throw IllegalStateException("yt-dlp produced no output file")
-        }
-    }
-
-    fun cancel(taskId: String) {
-        try {
-            YoutubeDL.getInstance().destroyProcessById(taskId)
-        } catch (_: Exception) {}
-    }
-
-    fun scaleTotal(): Long = PROGRESS_SCALE
-
-    fun scaleDownloaded(percent: Float): Long =
-        (percent.coerceIn(0f, 100f) / 100f * PROGRESS_SCALE).toLong()
-
-    fun isSocial(url: String): Boolean {
-        val u = url.lowercase()
-        return u.contains("instagram.com") || u.contains("youtube.com") ||
-                u.contains("youtu.be") || u.contains("tiktok.com") ||
-                u.contains("twitter.com") || u.contains("x.com") ||
-                u.contains("facebook.com") || u.contains("fb.watch") ||
-                u.contains("threads.net") || u.contains("reddit.com")
-    }
-
-    fun isHls(url: String): Boolean {
-        val u = url.lowercase()
-        return u.contains(".m3u8") || u.contains("/hls/") || u.contains("manifest")
-    }
-
-    fun isConnectionSensitive(url: String): Boolean {
-        val u = url.lowercase()
-        return u.contains("kissorgrab") || u.contains("downloadwella") ||
-                u.contains("wetafiles") || u.contains("wella") ||
-                u.contains("streamwish") || u.contains("filelions") ||
-                u.contains("vidhide")
     }
 }

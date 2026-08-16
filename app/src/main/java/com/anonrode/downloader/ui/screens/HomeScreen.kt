@@ -44,7 +44,7 @@ fun HomeScreen(
     viewModel: MainViewModel,
     onOpenDownloads: () -> Unit,
     onOpenSettings: () -> Unit,
-    onOpenSocialModal: (String) -> Unit
+    onOpenSocialModal: (String, String) -> Unit
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val tasks by viewModel.engine.tasks.collectAsState()
@@ -57,7 +57,11 @@ fun HomeScreen(
         "all" to "All Providers",
         "nkiri" to "NKiri",
         "dramakey" to "DramaKey",
-        "pluto" to "Pluto Movies"
+        "asianc" to "MyAsianTV / AsianC",
+        "anitaku" to "Anime (Anitaku)",
+        "pluto" to "Movies (Pluto)",
+        "9jarocks" to "9jaRocks",
+        "dramarain" to "DramaRain"
     )
 
     Box(
@@ -88,7 +92,7 @@ fun HomeScreen(
                         letterSpacing = 1.sp
                     )
                     Text(
-                        text = "100% Serverless • Native Fast Engine",
+                        text = "100% Serverless • Native Multi-Provider Engine",
                         fontSize = 11.sp,
                         color = TextSecondary,
                         fontWeight = FontWeight.Medium
@@ -172,9 +176,9 @@ fun HomeScreen(
                         onValueChange = { viewModel.onQueryChanged(it) },
                         placeholder = {
                             Text(
-                                "Search Asian dramas, movies, anime...",
+                                "Search or paste any Drama / Social link...",
                                 color = TextMuted,
-                                fontSize = 14.sp
+                                fontSize = 13.sp
                             )
                         },
                         colors = TextFieldDefaults.colors(
@@ -188,7 +192,14 @@ fun HomeScreen(
                         ),
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                        keyboardActions = KeyboardActions(onSearch = { viewModel.search() }),
+                        keyboardActions = KeyboardActions(onSearch = {
+                            val input = uiState.query
+                            if (input.startsWith("http")) {
+                                viewModel.handlePastedInput(input, onOpenSocialModal)
+                            } else {
+                                viewModel.search()
+                            }
+                        }),
                         modifier = Modifier.weight(1f)
                     )
 
@@ -211,12 +222,7 @@ fun HomeScreen(
                                 val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                                 val clip = clipboard.primaryClip?.getItemAt(0)?.text?.toString() ?: ""
                                 if (clip.isNotBlank()) {
-                                    if (clip.startsWith("http")) {
-                                        onOpenSocialModal(clip)
-                                    } else {
-                                        viewModel.onQueryChanged(clip)
-                                        viewModel.search(clip)
-                                    }
+                                    viewModel.handlePastedInput(clip, onOpenSocialModal)
                                 }
                             },
                             modifier = Modifier.size(28.dp)
@@ -261,8 +267,8 @@ fun HomeScreen(
 
             Spacer(modifier = Modifier.height(Spacing.md))
 
-            // Results Section
-            if (uiState.isSearching) {
+            // Search Results or Interactive Empty State
+            if (uiState.isSearching && uiState.searchResults.isEmpty()) {
                 Box(
                     modifier = Modifier.fillMaxSize(),
                     contentAlignment = Alignment.Center
@@ -275,19 +281,19 @@ fun HomeScreen(
                         )
                         Spacer(modifier = Modifier.height(Spacing.md))
                         Text(
-                            text = "Scraping direct links across providers...",
+                            text = "Streaming live results across all providers...",
                             color = TextSecondary,
                             fontSize = 13.sp
                         )
                     }
                 }
-            } else if (uiState.searchError != null) {
+            } else if (uiState.searchError != null && uiState.searchResults.isEmpty()) {
                 Box(
                     modifier = Modifier.fillMaxSize(),
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
-                        text = uiState.searchError ?: "No results",
+                        text = uiState.searchError ?: "No results found",
                         color = TextSecondary,
                         fontSize = 14.sp
                     )
@@ -306,7 +312,7 @@ fun HomeScreen(
                         )
                         Spacer(modifier = Modifier.height(Spacing.md))
                         Text(
-                            text = "Search for a title to start downloading",
+                            text = "Search drama title or paste any video URL",
                             color = TextSecondary,
                             fontSize = 14.sp
                         )
@@ -334,7 +340,6 @@ fun HomeScreen(
         if (activeTasks.isNotEmpty()) {
             val task = activeTasks.first()
             val progress = if (task.totalBytes > 0) task.downloadedBytes.toFloat() / task.totalBytes.toFloat() else 0f
-            val speedMb = task.speedBytesPerSec / (1024 * 1024)
 
             Box(
                 modifier = Modifier
@@ -380,7 +385,7 @@ fun HomeScreen(
                     }
                     Spacer(modifier = Modifier.width(Spacing.md))
                     Text(
-                        text = if (speedMb > 0.05) String.format("%.1f MB/s", speedMb) else "${(progress * 100).toInt()}%",
+                        text = "${(progress * 100).toInt()}%",
                         color = StatusSuccess,
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Bold

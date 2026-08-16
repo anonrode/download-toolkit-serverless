@@ -1,29 +1,36 @@
 package com.anonrode.downloader.engine
 
+import android.content.Context
+import android.media.MediaScannerConnection
 import android.os.Environment
 import com.anonrode.downloader.data.models.DownloadTask
 import com.anonrode.downloader.data.models.TaskStatus
+import com.anonrode.downloader.resolvers.ResolverRegistry
+import com.yaedd.youtubedl_android.YoutubeDL
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.StateFlow
 import java.io.File
 import java.util.UUID
 
-class DownloadEngine private constructor() {
-
-    val repository = DownloadRepository()
+class DownloadEngine(
+    private val context: Context,
+    private val repository: DownloadRepository
+) {
     val tasks: StateFlow<List<DownloadTask>> = repository.tasks
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val activeJobs = mutableMapOf<String, Job>()
 
-    var maxConcurrentDownloads: Int = 2
-    var parallelSocketsPerFile: Int = 16
-    var defaultQuality: String = "720p"
-    var autoOrganizeByShow: Boolean = true
-    var instantSocialDownload: Boolean = false
+    var maxConcurrentDownloads = 3
+    var parallelSocketsPerFile = 16
+    var defaultQuality = "720p"
+    var autoOrganizeByShow = true
+    var instantSocialDownload = true
 
-    fun initPersistence(dir: File) {
-        repository.initPersistence(dir)
+    init {
+        scope.launch {
+            processQueue()
+        }
     }
 
     fun enqueue(
@@ -31,159 +38,163 @@ class DownloadEngine private constructor() {
         episodeNum: Int,
         episodeTitle: String,
         sourceUrl: String,
-        isDirect: Boolean = true,
-        headers: Map<String, String> = emptyMap(),
+        isDirect: Boolean,
         backend: String = "aria2c",
         parallelSockets: Int = 16
     ): String {
         val taskId = UUID.randomUUID().toString()
-        val baseDir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "Anon")
-        val folder = if (autoOrganizeByShow && showTitle.isNotBlank() && showTitle != "Social") {
-            File(baseDir, sanitizeFilename(showTitle))
-        } else baseDir
-        folder.mkdirs()
+        val downloadFolder = getDownloadDirectory(showTitle)
 
-        val filename = if (showTitle == "Social") {
-            "Social_${System.currentTimeMillis()}.mp4"
+        val cleanTitle = episodeTitle.replace(Regex("""[^a-zA-Z0-9._ -]"""), "_").trim()
+        val filename = if (backend == "yt-dlp" || !isDirect) {
+            "${cleanTitle}.mp4"
         } else {
-            "${sanitizeFilename(showTitle)}_E${String.format("%02d", episodeNum)}.mp4"
+            "${cleanTitle}.mkv"
         }
-        val targetFile = File(folder, filename)
+        val targetFile = File(downloadFolder, filename)
 
         val task = DownloadTask(
             id = taskId,
             showTitle = showTitle,
             episodeNum = episodeNum,
             episodeTitle = episodeTitle,
-            directUrl = sourceUrl,
-            status = TaskStatus.QUEUED,
+            sourceUrl = sourceUrl,
             filePath = targetFile.absolutePath,
+            status = TaskStatus.QUEUED,
+            downloadedBytes = 0L,
+            totalBytes = 100L,
+            speedBytesPerSec = 0L,
+            isDirect = isDirect,
             backend = backend,
-            parallelSockets = parallelSockets,
-            headers = headers
+            parallelSockets = parallelSockets
         )
 
-        repository.addFirst(task)
-        pumpQueue()
+        repository.upsertTask(task)
+        processQueue()
         return taskId
-    }
-
-    fun retry(taskId: String) {
-        val task = repository.find(taskId) ?: return
-        if (task.status == TaskStatus.DOWNLOADING) return
-
-        repository.update(taskId) {
-            it.copy(
-                status = TaskStatus.QUEUED,
-                downloadedBytes = 0L,
-                speedBytesPerSec = 0.0,
-                errorMessage = null
-            )
-        }
-        pumpQueue()
     }
 
     fun pause(taskId: String) {
         activeJobs[taskId]?.cancel()
         activeJobs.remove(taskId)
-        YoutubeDlDownloader.cancel(taskId)
-
-        repository.update(taskId) {
-            it.copy(status = TaskStatus.PAUSED, speedBytesPerSec = 0.0)
-        }
-        repository.persist()
-        pumpQueue()
+        try {
+            YoutubeDL.getInstance().destroyProcessById(taskId)
+        } catch (_: Exception) {}
+        repository.updateStatus(taskId, TaskStatus.PAUSED)
+        processQueue()
     }
 
     fun cancel(taskId: String) {
-        pause(taskId)
-        repository.remove(taskId)
+        activeJobs[taskId]?.cancel()
+        activeJobs.remove(taskId)
+        try {
+            YoutubeDL.getInstance().destroyProcessById(taskId)
+        } catch (_: Exception) {}
+        repository.removeTask(taskId)
+        processQueue()
     }
 
-    private fun pumpQueue() {
-        val currentDownloading = repository.snapshot().count { it.status == TaskStatus.DOWNLOADING }
-        val availableSlots = maxConcurrentDownloads - currentDownloading
-        if (availableSlots <= 0) return
-
-        val queued = repository.snapshot().filter { it.status == TaskStatus.QUEUED }.take(availableSlots)
-        queued.forEach { startDownload(it) }
+    fun retry(taskId: String) {
+        repository.updateStatus(taskId, TaskStatus.QUEUED)
+        processQueue()
     }
 
-    private fun startDownload(task: DownloadTask) {
-        if (activeJobs.containsKey(task.id)) return
+    private fun getDownloadDirectory(showTitle: String): File {
+        val root = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+        val base = File(root, "Anon")
+        val dest = if (autoOrganizeByShow && showTitle.isNotBlank() && showTitle != "Social") {
+            val safe = showTitle.replace(Regex("""[^a-zA-Z0-9.-]"""), "_")
+            File(base, safe)
+        } else {
+            base
+        }
+        if (!dest.exists()) dest.mkdirs()
+        return dest
+    }
 
+    @Synchronized
+    private fun processQueue() {
+        val currentTasks = tasks.value
+        val activeCount = currentTasks.count { it.status == TaskStatus.DOWNLOADING || it.status == TaskStatus.RESOLVING }
+
+        if (activeCount >= maxConcurrentDownloads) return
+
+        val queued = currentTasks.firstOrNull { it.status == TaskStatus.QUEUED } ?: return
+        startTask(queued)
+    }
+
+    private fun startTask(task: DownloadTask) {
         val job = scope.launch {
-            repository.update(task.id) {
-                it.copy(status = TaskStatus.DOWNLOADING, speedBytesPerSec = 0.0, errorMessage = null)
-            }
-
-            var lastBytes = 0L
-            var lastTime = System.currentTimeMillis()
-
             try {
+                var directUrl = task.sourceUrl
+
+                if (!task.isDirect && task.backend != "yt-dlp") {
+                    repository.updateStatus(task.id, TaskStatus.RESOLVING)
+                    val resolved = ResolverRegistry.resolve(task.sourceUrl, defaultQuality)
+                    if (resolved.isNullOrBlank()) {
+                        repository.updateStatus(task.id, TaskStatus.FAILED, errorMessage = "Could not resolve stream link")
+                        processQueue()
+                        return@launch
+                    }
+                    directUrl = resolved
+                }
+
+                repository.updateStatus(task.id, TaskStatus.DOWNLOADING)
+
+                val file = File(task.filePath)
+                val isExtractor = task.backend == "yt-dlp" || !task.isDirect
+
                 YoutubeDlDownloader.download(
+                    context = context,
                     taskId = task.id,
-                    sourceUrl = task.directUrl,
-                    targetFilePath = task.filePath,
-                    headers = task.headers,
+                    sourceUrl = directUrl,
+                    targetFile = file,
                     backend = task.backend,
-                    parallelSockets = task.parallelSockets,
-                    onProgress = { percent ->
-                        val now = System.currentTimeMillis()
-                        val total = YoutubeDlDownloader.scaleTotal()
-                        val downloaded = YoutubeDlDownloader.scaleDownloaded(percent)
-
-                        val dt = (now - lastTime).coerceAtLeast(1L)
-                        val dBytes = (downloaded - lastBytes).coerceAtLeast(0L)
-                        val speed = (dBytes.toDouble() / dt) * 1000.0
-
-                        lastBytes = downloaded
-                        lastTime = now
-
-                        repository.update(task.id) {
-                            it.copy(
-                                downloadedBytes = downloaded,
-                                totalBytes = total,
-                                speedBytesPerSec = speed
-                            )
-                        }
+                    referer = "",
+                    parallelSockets = if (task.backend == "yt-dlp") 1 else task.parallelSockets,
+                    isExtractorTask = isExtractor,
+                    onProgress = { progressFloat ->
+                        val pct = progressFloat.toLong().coerceIn(0L, 100L)
+                        repository.updateProgress(task.id, pct, 100L, 0L)
                     }
                 )
 
-                repository.update(task.id) {
-                    it.copy(
-                        status = TaskStatus.COMPLETED,
-                        downloadedBytes = YoutubeDlDownloader.scaleTotal(),
-                        totalBytes = YoutubeDlDownloader.scaleTotal(),
-                        speedBytesPerSec = 0.0
-                    )
+                // Locate the downloaded file on disk
+                val actualFile = if (file.exists()) file else {
+                    file.parentFile?.listFiles { f ->
+                        f.name.startsWith(file.nameWithoutExtension) &&
+                        !f.name.endsWith(".aria2") &&
+                        !f.name.endsWith(".part") &&
+                        !f.name.endsWith(".ytdl")
+                    }?.maxByOrNull { it.length() } ?: file
                 }
-                repository.persist()
-            } catch (e: Exception) {
-                if (isActive) {
-                    repository.update(task.id) {
-                        it.copy(
-                            status = TaskStatus.FAILED,
-                            speedBytesPerSec = 0.0,
-                            errorMessage = e.message ?: "Download failed"
+
+                if (actualFile.exists() && actualFile.length() > 1024) {
+                    repository.updateProgress(task.id, 100L, 100L, 0L)
+                    repository.updateStatus(task.id, TaskStatus.COMPLETED)
+
+                    // Notify Android MediaStore so video shows immediately in Gallery
+                    try {
+                        MediaScannerConnection.scanFile(
+                            context,
+                            arrayOf(actualFile.absolutePath),
+                            arrayOf("video/*"),
+                            null
                         )
-                    }
-                    repository.persist()
+                    } catch (_: Exception) {}
+                } else {
+                    repository.updateStatus(task.id, TaskStatus.FAILED, errorMessage = "Output file was empty")
                 }
+            } catch (e: CancellationException) {
+                // Task was paused or cancelled
+            } catch (e: Exception) {
+                repository.updateStatus(task.id, TaskStatus.FAILED, errorMessage = e.message ?: "Download error")
             } finally {
                 activeJobs.remove(task.id)
-                pumpQueue()
+                processQueue()
             }
         }
 
         activeJobs[task.id] = job
-    }
-
-    private fun sanitizeFilename(name: String): String {
-        return name.replace(Regex("[\\/:*?\"<>|]"), "_").trim()
-    }
-
-    companion object {
-        val instance: DownloadEngine by lazy { DownloadEngine() }
     }
 }

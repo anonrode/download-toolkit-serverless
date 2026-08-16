@@ -26,20 +26,13 @@ import com.anonrode.downloader.viewmodel.MainViewModel
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SocialModal(
+    platformName: String,
     url: String,
     viewModel: MainViewModel,
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
-    val platform = remember(url) {
-        when {
-            url.contains("instagram.com") -> "Instagram Reel"
-            url.contains("tiktok.com") -> "TikTok Video"
-            url.contains("youtube.com") || url.contains("youtu.be") -> "YouTube Video"
-            url.contains("twitter.com") || url.contains("x.com") -> "Twitter Video"
-            else -> "Media Link"
-        }
-    }
+    val cleanPlatform = platformName.removeSuffix(" Video").removeSuffix(" Reel")
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -78,7 +71,7 @@ fun SocialModal(
                     )
                     Spacer(modifier = Modifier.width(Spacing.sm))
                     Text(
-                        text = "Download $platform",
+                        text = "Download $cleanPlatform Video",
                         fontSize = 17.sp,
                         fontWeight = FontWeight.Bold,
                         color = TextPrimary
@@ -117,7 +110,7 @@ fun SocialModal(
                     viewModel.engine.enqueue(
                         showTitle = "Social",
                         episodeNum = 1,
-                        episodeTitle = "$platform Video",
+                        episodeTitle = "$cleanPlatform Video",
                         sourceUrl = url,
                         isDirect = false,
                         backend = "yt-dlp",
