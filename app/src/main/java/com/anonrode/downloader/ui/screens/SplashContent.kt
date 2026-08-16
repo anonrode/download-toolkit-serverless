@@ -44,14 +44,16 @@ import com.anonrode.downloader.ui.theme.TextSecondary
  */
 @Composable
 fun SplashContent() {
-    val visible = remember { mutableStateOf(false) }
+    var visible by remember { mutableStateOf(false) }
     val fade by animateFloatAsState(
-        targetValue = if (visible.value) 1f else 0f,
-        animationSpec = tween(500),
+        targetValue = if (visible) 1f else 0.4f,
+        animationSpec = tween(400),
         label = "splashFade"
     )
-    // Flip once on first composition to drive the fade-in.
-    visible.value = true
+
+    LaunchedEffect(Unit) {
+        visible = true
+    }
 
     Box(
         modifier = Modifier

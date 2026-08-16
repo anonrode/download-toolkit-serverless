@@ -10,6 +10,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.DownloadForOffline
 import androidx.compose.material3.*
@@ -37,6 +38,35 @@ fun EpisodeDrawer(
     val episodes = uiState.drawerEpisodes
     val isLoading = uiState.isEpisodesLoading
 
+    var selectedEpisodes by remember(episodes) { mutableStateOf(setOf<EpisodeItem>()) }
+    var rangeText by remember { mutableStateOf("") }
+
+    // Parse range string (e.g. "1-5, 8, 10-12")
+    fun applyRange(input: String) {
+        val clean = input.trim()
+        if (clean.isBlank()) {
+            selectedEpisodes = emptySet()
+            return
+        }
+        val targetNums = mutableSetOf<Int>()
+        val parts = clean.split(',', ';', ' ')
+        for (part in parts) {
+            val p = part.trim()
+            if (p.contains('-')) {
+                val start = p.substringBefore('-').toIntOrNull()
+                val end = p.substringAfter('-').toIntOrNull()
+                if (start != null && end != null) {
+                    val rMin = minOf(start, end)
+                    val rMax = maxOf(start, end)
+                    targetNums.addAll(rMin..rMax)
+                }
+            } else {
+                p.toIntOrNull()?.let { targetNums.add(it) }
+            }
+        }
+        selectedEpisodes = episodes.filter { it.episodeNum in targetNums }.toSet()
+    }
+
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         containerColor = SurfaceElevated,
@@ -58,6 +88,7 @@ fun EpisodeDrawer(
                 .padding(horizontal = Spacing.lg)
                 .padding(bottom = Spacing.xxl)
         ) {
+            // Header Title & Close
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -97,33 +128,110 @@ fun EpisodeDrawer(
             }
 
             if (episodes.isNotEmpty()) {
+                // Range Selector Bar
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(vertical = Spacing.sm),
+                        .padding(vertical = Spacing.xs),
+                    horizontalArrangement = Arrangement.spacedBy(Spacing.sm),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedTextField(
+                        value = rangeText,
+                        onValueChange = {
+                            rangeText = it
+                            applyRange(it)
+                        },
+                        placeholder = { Text("Range (e.g. 1-5, 8, 10)", color = TextMuted, fontSize = 11.sp) },
+                        singleLine = true,
+                        shape = RoundedCornerShape(Radius.md),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedContainerColor = SurfaceCard,
+                            unfocusedContainerColor = SurfaceCard,
+                            focusedBorderColor = AccentPrimary,
+                            unfocusedBorderColor = BorderHairline,
+                            focusedTextColor = TextPrimary,
+                            unfocusedTextColor = TextPrimary
+                        ),
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(44.dp)
+                    )
+
+                    Button(
+                        onClick = {
+                            if (selectedEpisodes.size == episodes.size) {
+                                selectedEpisodes = emptySet()
+                                rangeText = ""
+                            } else {
+                                selectedEpisodes = episodes.toSet()
+                                rangeText = "1-${episodes.size}"
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (selectedEpisodes.size == episodes.size) AccentPrimary else SurfaceCard,
+                            contentColor = if (selectedEpisodes.size == episodes.size) BackgroundDark else TextPrimary
+                        ),
+                        shape = RoundedCornerShape(Radius.md),
+                        modifier = Modifier.height(44.dp)
+                    ) {
+                        Text(
+                            text = if (selectedEpisodes.size == episodes.size) "Deselect" else "All",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+
+                // Batch Download Actions
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = Spacing.xs),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = "${episodes.size} Episodes available",
+                        text = if (selectedEpisodes.isEmpty()) "${episodes.size} Episodes" else "${selectedEpisodes.size}/${episodes.size} Selected",
                         fontSize = 12.sp,
-                        color = TextMuted
+                        color = if (selectedEpisodes.isEmpty()) TextMuted else AccentPrimary,
+                        fontWeight = if (selectedEpisodes.isEmpty()) FontWeight.Normal else FontWeight.Bold
                     )
 
-                    TextButton(
-                        onClick = {
-                            viewModel.downloadAllEpisodes(episodes)
-                            onDismiss()
-                        },
-                        colors = ButtonDefaults.textButtonColors(contentColor = AccentPrimary)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.DownloadForOffline,
-                            contentDescription = null,
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Spacer(modifier = Modifier.width(Spacing.xs))
-                        Text("Download All", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    if (selectedEpisodes.isNotEmpty()) {
+                        Button(
+                            onClick = {
+                                viewModel.downloadAllEpisodes(selectedEpisodes.toList().sortedBy { it.episodeNum })
+                                onDismiss()
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = AccentPrimary, contentColor = BackgroundDark),
+                            shape = RoundedCornerShape(Radius.full),
+                            modifier = Modifier.height(34.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.DownloadForOffline,
+                                contentDescription = null,
+                                modifier = Modifier.size(15.dp)
+                            )
+                            Spacer(modifier = Modifier.width(Spacing.xs))
+                            Text("Download Selected (${selectedEpisodes.size})", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        }
+                    } else {
+                        TextButton(
+                            onClick = {
+                                viewModel.downloadAllEpisodes(episodes)
+                                onDismiss()
+                            },
+                            colors = ButtonDefaults.textButtonColors(contentColor = AccentPrimary)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.DownloadForOffline,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(Spacing.xs))
+                            Text("Download All (${episodes.size})", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
                     }
                 }
             }
@@ -157,11 +265,16 @@ fun EpisodeDrawer(
                     verticalArrangement = Arrangement.spacedBy(Spacing.sm),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .heightIn(max = 420.dp)
+                        .heightIn(max = 380.dp)
                 ) {
                     items(episodes) { ep ->
+                        val isChecked = ep in selectedEpisodes
                         EpisodeRowItem(
                             episode = ep,
+                            isChecked = isChecked,
+                            onToggleSelect = {
+                                selectedEpisodes = if (isChecked) selectedEpisodes - ep else selectedEpisodes + ep
+                            },
                             onDownload = {
                                 viewModel.downloadEpisode(ep)
                                 onDismiss()
@@ -177,15 +290,17 @@ fun EpisodeDrawer(
 @Composable
 fun EpisodeRowItem(
     episode: EpisodeItem,
+    isChecked: Boolean,
+    onToggleSelect: () -> Unit,
     onDownload: () -> Unit
 ) {
     Box(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(Radius.md))
-            .background(SurfaceCard)
-            .border(1.dp, BorderHairline, RoundedCornerShape(Radius.md))
-            .clickable { onDownload() }
+            .background(if (isChecked) SurfaceElevated else SurfaceCard)
+            .border(1.dp, if (isChecked) AccentPrimary else BorderHairline, RoundedCornerShape(Radius.md))
+            .clickable { onToggleSelect() }
             .padding(horizontal = Spacing.md, vertical = Spacing.sm)
     ) {
         Row(
@@ -193,18 +308,34 @@ fun EpisodeRowItem(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = episode.title,
-                    color = TextPrimary,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Medium
+            Row(
+                modifier = Modifier.weight(1f),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Checkbox(
+                    checked = isChecked,
+                    onCheckedChange = { onToggleSelect() },
+                    colors = CheckboxDefaults.colors(
+                        checkedColor = AccentPrimary,
+                        uncheckedColor = BorderHairline,
+                        checkmarkColor = BackgroundDark
+                    ),
+                    modifier = Modifier.size(24.dp)
                 )
-                Text(
-                    text = "Direct Fast CDN",
-                    color = TextMuted,
-                    fontSize = 10.sp
-                )
+                Spacer(modifier = Modifier.width(Spacing.sm))
+                Column {
+                    Text(
+                        text = episode.title,
+                        color = if (isChecked) AccentPrimary else TextPrimary,
+                        fontSize = 13.sp,
+                        fontWeight = if (isChecked) FontWeight.Bold else FontWeight.Medium
+                    )
+                    Text(
+                        text = "Direct Fast Stream",
+                        color = TextMuted,
+                        fontSize = 10.sp
+                    )
+                }
             }
 
             IconButton(
@@ -216,7 +347,7 @@ fun EpisodeRowItem(
             ) {
                 Icon(
                     imageVector = Icons.Rounded.Download,
-                    contentDescription = "Download",
+                    contentDescription = "Download Single",
                     tint = TextPrimary,
                     modifier = Modifier.size(18.dp)
                 )
