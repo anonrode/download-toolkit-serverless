@@ -1,6 +1,7 @@
 package com.anonrode.downloader.providers
 
 import com.anonrode.downloader.data.models.ShowCard
+import com.anonrode.downloader.data.rules.DynamicRulesManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
@@ -10,25 +11,33 @@ import kotlinx.coroutines.flow.flowOn
 
 object ProviderRegistry {
 
-    val allProviders: List<SiteProvider> = listOf(
+    private val staticProviders: List<SiteProvider> = listOf(
         NkiriProvider,
         DramaKeyProvider,
         AsianCProvider,
         AnitakuProvider,
         PlutoProvider,
         DramaRainProvider,
-        RocksProvider
+        RocksProvider,
+        NaijaVaultProvider,
+        NaijaPreyProvider,
+        NepuProvider,
+        TorrentProvider
     )
+
+    val allProviders: List<SiteProvider>
+        get() = staticProviders + DynamicRulesManager.getDynamicProviders()
 
     fun getProvider(site: String): SiteProvider? {
         return allProviders.find { it.name.equals(site, ignoreCase = true) }
     }
 
     fun searchStreaming(query: String, siteFilter: String? = null): Flow<List<ShowCard>> = flow {
+        val currentProviders = allProviders
         val targets = if (!siteFilter.isNullOrBlank() && siteFilter != "all") {
-            allProviders.filter { it.name.equals(siteFilter, ignoreCase = true) }
+            currentProviders.filter { it.name.equals(siteFilter, ignoreCase = true) }
         } else {
-            allProviders
+            currentProviders
         }
 
         val accumulated = mutableListOf<ShowCard>()

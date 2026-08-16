@@ -1,5 +1,7 @@
 package com.anonrode.downloader.providers
 
+import com.anonrode.downloader.data.rules.DynamicRulesManager
+
 import com.anonrode.downloader.data.models.DownloadRecipe
 import com.anonrode.downloader.data.models.EpisodeItem
 import com.anonrode.downloader.data.models.ShowCard
@@ -11,7 +13,7 @@ import java.net.URLEncoder
 
 object RocksProvider : SiteProvider {
     override val name: String = "9jarocks"
-    override val mainUrl: String = "https://9jarocks.com"
+    override val mainUrl: String get() = DynamicRulesManager.getBaseUrl(name)
 
     override suspend fun search(query: String): List<ShowCard> {
         val results = mutableListOf<ShowCard>()
@@ -25,12 +27,20 @@ object RocksProvider : SiteProvider {
                 val title = item.selectFirst("title")?.text()?.replace("<![CDATA[", "")?.replace("]]>", "")?.trim() ?: ""
                 val link = item.selectFirst("link")?.text()?.trim() ?: ""
 
+                // The RSS description/content carries an <img> thumbnail inline;
+                // pull it so the result card shows a real poster instead of the
+                // lettered fallback. No extra network call.
+                val desc = (item.selectFirst("content|encoded")?.text()
+                    ?: item.selectFirst("description")?.text() ?: "")
+                val poster = Regex("""<img[^>]+src=["']([^"']+\.(?:jpg|jpeg|png|webp)[^"']*)["']""", RegexOption.IGNORE_CASE)
+                    .find(desc)?.groupValues?.get(1) ?: ""
+
                 if (title.isNotBlank() && link.isNotBlank()) {
                     results.add(
                         ShowCard(
                             title = title,
                             url = link,
-                            posterUrl = "",
+                            posterUrl = poster,
                             site = name,
                             category = "Nollywood & Movies"
                         )

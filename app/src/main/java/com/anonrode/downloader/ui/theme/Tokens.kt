@@ -17,4 +17,5 @@ object Radius {
     val lg = 16.dp
     val xl = 20.dp
     val pill = 999.dp
+    val full = 999.dp   // alias: fully-rounded (chips, circular controls)
 }

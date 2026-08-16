@@ -5,7 +5,6 @@ import android.os.Environment
 import android.os.StatFs
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.anonrode.downloader.AnonApp
 import com.anonrode.downloader.data.models.EpisodeItem
 import com.anonrode.downloader.data.models.ShowCard
 import com.anonrode.downloader.data.router.ParsedUrl
@@ -63,7 +62,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 openEpisodeDrawer(parsed.showCard)
             }
             is ParsedUrl.SocialUrl -> {
-                onOpenSocial(parsed.platform, parsed.cleanUrl)
+                if (engine.instantSocialDownload) {
+                    engine.enqueue(
+                        showTitle = "Social/${parsed.platform}",
+                        episodeNum = 1,
+                        episodeTitle = "${parsed.platform} Video",
+                        sourceUrl = parsed.cleanUrl,
+                        isDirect = false,
+                        backend = "yt-dlp",
+                        parallelSockets = 1
+                    )
+                } else {
+                    onOpenSocial(parsed.platform, parsed.cleanUrl)
+                }
+            }
+            is ParsedUrl.MagnetUrl -> {
+                engine.enqueue(
+                    showTitle = "Torrents",
+                    episodeNum = 1,
+                    episodeTitle = parsed.title,
+                    sourceUrl = parsed.magnet,
+                    isDirect = true,
+                    backend = "aria2c",
+                    parallelSockets = 16
+                )
             }
             is ParsedUrl.DirectMediaUrl -> {
                 engine.enqueue(
@@ -73,7 +95,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     sourceUrl = parsed.url,
                     isDirect = true,
                     backend = "aria2c",
-                    parallelSockets = 16
+                    parallelSockets = engine.parallelSocketsPerFile
                 )
             }
             is ParsedUrl.SearchQuery -> {
@@ -113,6 +135,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun openEpisodeDrawer(show: ShowCard) {
+        if (show.url.startsWith("magnet:?")) {
+            engine.enqueue(
+                showTitle = "Torrents",
+                episodeNum = 1,
+                episodeTitle = show.title,
+                sourceUrl = show.url,
+                isDirect = true,
+                backend = "aria2c",
+                parallelSockets = 16
+            )
+            return
+        }
+
         _uiState.update {
             it.copy(
                 activeShowForDrawer = show,
@@ -174,7 +209,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             sourceUrl = episode.url,
             isDirect = false,
             backend = "aria2c",
-            parallelSockets = 16
+            parallelSockets = engine.parallelSocketsPerFile
         )
     }
 
@@ -188,7 +223,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 sourceUrl = ep.url,
                 isDirect = false,
                 backend = "aria2c",
-                parallelSockets = 16
+                parallelSockets = engine.parallelSocketsPerFile
             )
         }
     }
@@ -197,12 +232,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         maxConcurrent: Int,
         parallelSockets: Int,
         quality: String,
-        autoOrganize: Boolean
+        autoOrganize: Boolean,
+        storageGuard: Double,
+        wifiOnlyTorrents: Boolean
     ) {
-        engine.maxConcurrentDownloads = maxConcurrent
-        engine.parallelSocketsPerFile = parallelSockets
-        engine.defaultQuality = quality
-        engine.autoOrganizeByShow = autoOrganize
+        engine.saveAllSettings(
+            maxConcurrent = maxConcurrent,
+            parallelSockets = parallelSockets,
+            quality = quality,
+            autoOrganize = autoOrganize,
+            storageGuard = storageGuard,
+            wifiOnlyTorrents = wifiOnlyTorrents
+        )
     }
 
     private fun refreshStorageInfo() {

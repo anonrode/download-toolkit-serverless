@@ -1,17 +1,21 @@
 package com.anonrode.downloader
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.runtime.*
+import androidx.core.content.ContextCompat
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
-import com.anonrode.downloader.data.router.ParsedUrl
-import com.anonrode.downloader.data.router.UrlRouter
 import com.anonrode.downloader.ui.screens.*
 import com.anonrode.downloader.ui.theme.AnonDownloaderTheme
 import com.anonrode.downloader.viewmodel.MainViewModel
@@ -38,8 +42,40 @@ class MainActivity : ComponentActivity() {
                 var showSettings by remember { mutableStateOf(false) }
                 val socialTarget by activeSocialTarget
 
+                // Request Notification Permission on Android 13+ (API 33+)
+                val permissionLauncher = rememberLauncherForActivityResult(
+                    contract = ActivityResultContracts.RequestPermission(),
+                    onResult = { _ -> }
+                )
+
+                LaunchedEffect(Unit) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        val hasPermission = ContextCompat.checkSelfPermission(
+                            this@MainActivity,
+                            Manifest.permission.POST_NOTIFICATIONS
+                        ) == PackageManager.PERMISSION_GRANTED
+
+                        if (!hasPermission) {
+                            permissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                        }
+                    }
+                }
+
                 BackHandler(enabled = currentScreen != "home") {
                     currentScreen = "home"
+                }
+
+                // Guaranteed-visible splash: the system SplashScreen API dismisses
+                // on first frame (never seen on fast devices), so hold a designed
+                // Compose splash for a short beat before revealing the app.
+                var showSplash by remember { mutableStateOf(true) }
+                LaunchedEffect(Unit) {
+                    kotlinx.coroutines.delay(1100)
+                    showSplash = false
+                }
+                if (showSplash) {
+                    SplashContent()
+                    return@AnonDownloaderTheme
                 }
 
                 when (currentScreen) {
@@ -48,34 +84,10 @@ class MainActivity : ComponentActivity() {
                             viewModel = viewModel,
                             onOpenDownloads = { currentScreen = "downloads" },
                             onOpenSettings = { showSettings = true },
-                            onOpenSocialModal = { platform, url ->
+                            onOpenSocial = { platform, url ->
                                 activeSocialTarget.value = Pair(platform, url)
                             }
                         )
-
-                        uiState.activeShowForDrawer?.let { show ->
-                            EpisodeDrawer(
-                                show = show,
-                                viewModel = viewModel,
-                                onDismiss = { viewModel.closeEpisodeDrawer() }
-                            )
-                        }
-
-                        if (showSettings) {
-                            SettingsSheet(
-                                viewModel = viewModel,
-                                onDismiss = { showSettings = false }
-                            )
-                        }
-
-                        socialTarget?.let { (platform, url) ->
-                            SocialModal(
-                                platformName = platform,
-                                url = url,
-                                viewModel = viewModel,
-                                onDismiss = { activeSocialTarget.value = null }
-                            )
-                        }
                     }
                     "downloads" -> {
                         DownloadsScreen(
@@ -84,65 +96,40 @@ class MainActivity : ComponentActivity() {
                         )
                     }
                 }
+
+                if (showSettings) {
+                    SettingsSheet(
+                        viewModel = viewModel,
+                        onDismiss = { showSettings = false }
+                    )
+                }
+
+                if (socialTarget != null) {
+                    val (platform, url) = socialTarget!!
+                    SocialModal(
+                        platform = platform,
+                        url = url,
+                        viewModel = viewModel,
+                        onDismiss = { activeSocialTarget.value = null }
+                    )
+                }
             }
         }
     }
 
-    override fun onNewIntent(intent: Intent) {
+    override fun onNewIntent(intent: Intent?) {
         super.onNewIntent(intent)
         handleShareIntent(intent)
     }
 
     private fun handleShareIntent(intent: Intent?) {
         if (intent?.action == Intent.ACTION_SEND && intent.type == "text/plain") {
-            val rawText = intent.getStringExtra(Intent.EXTRA_TEXT) ?: ""
-            val cleanUrl = extractCleanUrl(rawText)
-
-            if (!cleanUrl.isNullOrBlank()) {
-                when (val parsed = UrlRouter.parse(cleanUrl)) {
-                    is ParsedUrl.DramaUrl -> {
-                        viewModel.openEpisodeDrawer(parsed.showCard)
-                    }
-                    is ParsedUrl.SocialUrl -> {
-                        if (viewModel.engine.instantSocialDownload) {
-                            viewModel.engine.enqueue(
-                                showTitle = "Social",
-                                episodeNum = 1,
-                                episodeTitle = "${parsed.platform} Video",
-                                sourceUrl = parsed.cleanUrl,
-                                isDirect = false,
-                                backend = "yt-dlp",
-                                parallelSockets = 1
-                            )
-                            Toast.makeText(this, "Downloading from ${parsed.platform}...", Toast.LENGTH_SHORT).show()
-                        } else {
-                            activeSocialTarget.value = Pair(parsed.platform, parsed.cleanUrl)
-                        }
-                    }
-                    is ParsedUrl.DirectMediaUrl -> {
-                        viewModel.engine.enqueue(
-                            showTitle = "Direct Downloads",
-                            episodeNum = 1,
-                            episodeTitle = parsed.filename,
-                            sourceUrl = parsed.url,
-                            isDirect = true,
-                            backend = "aria2c",
-                            parallelSockets = 16
-                        )
-                        Toast.makeText(this, "Downloading ${parsed.filename}...", Toast.LENGTH_SHORT).show()
-                    }
-                    is ParsedUrl.SearchQuery -> {
-                        viewModel.onQueryChanged(parsed.query)
-                        viewModel.search(parsed.query)
-                    }
+            val sharedText = intent.getStringExtra(Intent.EXTRA_TEXT)
+            if (!sharedText.isNullOrBlank()) {
+                viewModel.handlePastedInput(sharedText) { platform, url ->
+                    activeSocialTarget.value = Pair(platform, url)
                 }
             }
         }
-    }
-
-    private fun extractCleanUrl(text: String): String? {
-        val urlRegex = Regex("""https?://[^\s<>"{}|\^`]+""")
-        val match = urlRegex.find(text)
-        return match?.value?.trim()
     }
 }

@@ -1,5 +1,7 @@
 package com.anonrode.downloader.providers
 
+import com.anonrode.downloader.data.rules.DynamicRulesManager
+
 import com.anonrode.downloader.data.models.DownloadRecipe
 import com.anonrode.downloader.data.models.EpisodeItem
 import com.anonrode.downloader.data.models.ShowCard
@@ -10,7 +12,7 @@ import org.jsoup.Jsoup
 
 object DramaRainProvider : SiteProvider {
     override val name: String = "dramarain"
-    override val mainUrl: String = "https://dramarain.com"
+    override val mainUrl: String get() = DynamicRulesManager.getBaseUrl(name)
 
     override suspend fun search(query: String): List<ShowCard> {
         val results = mutableListOf<ShowCard>()
