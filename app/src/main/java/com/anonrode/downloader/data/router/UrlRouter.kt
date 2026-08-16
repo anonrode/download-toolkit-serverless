@@ -1,11 +1,13 @@
 package com.anonrode.downloader.data.router
 
 import com.anonrode.downloader.data.models.ShowCard
+import java.net.URLDecoder
 
 sealed class ParsedUrl {
     data class DramaUrl(val site: String, val showCard: ShowCard) : ParsedUrl()
     data class SocialUrl(val platform: String, val cleanUrl: String) : ParsedUrl()
     data class DirectMediaUrl(val url: String, val filename: String) : ParsedUrl()
+    data class MagnetUrl(val magnet: String, val title: String) : ParsedUrl()
     data class SearchQuery(val query: String) : ParsedUrl()
 }
 
@@ -13,116 +15,97 @@ object UrlRouter {
 
     fun parse(input: String): ParsedUrl {
         val trimmed = input.trim()
+        val lower = trimmed.lowercase()
+
+        // 0. Magnet links
+        if (lower.startsWith("magnet:?")) {
+            val titleMatch = Regex("""dn=([^&]+)""").find(trimmed)
+            val title = titleMatch?.groupValues?.get(1)?.let {
+                try { URLDecoder.decode(it, "UTF-8") } catch (_: Exception) { "Torrent Download" }
+            } ?: "Torrent Download"
+            return ParsedUrl.MagnetUrl(trimmed, title)
+        }
+
         if (!trimmed.startsWith("http://", ignoreCase = true) && !trimmed.startsWith("https://", ignoreCase = true)) {
             return ParsedUrl.SearchQuery(trimmed)
         }
 
-        val lower = trimmed.lowercase()
-
         // 1. Direct Media files
         val cleanUrl = trimmed.substringBefore('?')
         val ext = cleanUrl.substringAfterLast('.', "")
-        if (ext in listOf("mp4", "mkv", "avi", "mov", "webm", "m3u8", "ts")) {
+        if (ext in listOf("mp4", "mkv", "avi", "mov", "webm", "m3u8", "ts", "torrent")) {
             val filename = cleanUrl.substringAfterLast('/').ifEmpty { "download.$ext" }
             return ParsedUrl.DirectMediaUrl(trimmed, filename)
         }
 
-        // 2. Asian Drama / Movie providers
+        // 2. Providers
         if (lower.contains("thenkiri.com") || lower.contains("nkiri")) {
-            val slug = extractSlug(trimmed)
             return ParsedUrl.DramaUrl(
                 site = "nkiri",
-                showCard = ShowCard(
-                    title = slugToTitle(slug),
-                    url = trimmed,
-                    posterUrl = "",
-                    site = "nkiri",
-                    category = "Asian Drama"
-                )
+                showCard = ShowCard(title = slugToTitle(extractSlug(trimmed)), url = trimmed, site = "nkiri", category = "Asian Drama")
             )
         }
 
         if (lower.contains("myasiantv") || lower.contains("asianc.") || lower.contains("dramacool")) {
-            val slug = extractSlug(trimmed)
             return ParsedUrl.DramaUrl(
                 site = "asianc",
-                showCard = ShowCard(
-                    title = slugToTitle(slug),
-                    url = trimmed,
-                    posterUrl = "",
-                    site = "asianc",
-                    category = "Asian Drama"
-                )
+                showCard = ShowCard(title = slugToTitle(extractSlug(trimmed)), url = trimmed, site = "asianc", category = "Asian Drama")
             )
         }
 
         if (lower.contains("dramakey")) {
-            val slug = extractSlug(trimmed)
             return ParsedUrl.DramaUrl(
                 site = "dramakey",
-                showCard = ShowCard(
-                    title = slugToTitle(slug),
-                    url = trimmed,
-                    posterUrl = "",
-                    site = "dramakey",
-                    category = "Asian Drama"
-                )
+                showCard = ShowCard(title = slugToTitle(extractSlug(trimmed)), url = trimmed, site = "dramakey", category = "Asian Drama")
             )
         }
 
         if (lower.contains("dramarain.com")) {
-            val slug = extractSlug(trimmed)
             return ParsedUrl.DramaUrl(
                 site = "dramarain",
-                showCard = ShowCard(
-                    title = slugToTitle(slug),
-                    url = trimmed,
-                    posterUrl = "",
-                    site = "dramarain",
-                    category = "Asian Drama"
-                )
+                showCard = ShowCard(title = slugToTitle(extractSlug(trimmed)), url = trimmed, site = "dramarain", category = "Asian Drama")
             )
         }
 
         if (lower.contains("plutomovies.com")) {
-            val slug = extractSlug(trimmed)
             return ParsedUrl.DramaUrl(
                 site = "pluto",
-                showCard = ShowCard(
-                    title = slugToTitle(slug),
-                    url = trimmed,
-                    posterUrl = "",
-                    site = "pluto",
-                    category = "Movies & Series"
-                )
+                showCard = ShowCard(title = slugToTitle(extractSlug(trimmed)), url = trimmed, site = "pluto", category = "Movies & Series")
             )
         }
 
         if (lower.contains("anitaku.") || lower.contains("gogoanime.")) {
-            val slug = extractSlug(trimmed)
             return ParsedUrl.DramaUrl(
                 site = "anitaku",
-                showCard = ShowCard(
-                    title = slugToTitle(slug),
-                    url = trimmed,
-                    posterUrl = "",
-                    site = "anitaku",
-                    category = "Anime"
-                )
+                showCard = ShowCard(title = slugToTitle(extractSlug(trimmed)), url = trimmed, site = "anitaku", category = "Anime")
             )
         }
 
         if (lower.contains("9jarocks.") || lower.contains("my9jarocks.")) {
-            val slug = extractSlug(trimmed)
             return ParsedUrl.DramaUrl(
                 site = "9jarocks",
-                showCard = ShowCard(
-                    title = slugToTitle(slug),
-                    url = trimmed,
-                    posterUrl = "",
-                    site = "9jarocks",
-                    category = "Nollywood & Movies"
-                )
+                showCard = ShowCard(title = slugToTitle(extractSlug(trimmed)), url = trimmed, site = "9jarocks", category = "Nollywood & Movies")
+            )
+        }
+
+        if (lower.contains("naijavault.com")) {
+            return ParsedUrl.DramaUrl(
+                site = "naijavault",
+                showCard = ShowCard(title = slugToTitle(extractSlug(trimmed)), url = trimmed, site = "naijavault", category = "Nollywood & Movies")
+            )
+        }
+
+        if (lower.contains("naijaprey.tv")) {
+            return ParsedUrl.DramaUrl(
+                site = "naijaprey",
+                showCard = ShowCard(title = slugToTitle(extractSlug(trimmed)), url = trimmed, site = "naijavault", category = "Nollywood & Series")
+            )
+        }
+
+        if (lower.contains("nepu.gd") || lower.contains("nepu.to")) {
+            return ParsedUrl.DramaUrl(
+                site = "nepu",
+                showCard = ShowCard(title = slugToTitle(extractSlug(trimmed)), url = trimmed, site = "nepu", category = "Movies")
             )
         }
 

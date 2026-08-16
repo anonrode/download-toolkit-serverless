@@ -1,8 +1,7 @@
 package com.anonrode.downloader.ui.screens
 
+import android.content.Context
 import android.content.Intent
-import android.net.Uri
-import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -12,15 +11,13 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.rounded.ArrowBack
-import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.rounded.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -39,193 +36,86 @@ fun DownloadsScreen(
     onBack: () -> Unit
 ) {
     val tasks by viewModel.engine.tasks.collectAsState()
-    val uiState by viewModel.uiState.collectAsState()
-    var selectedTab by remember { mutableStateOf(0) } // 0: Active, 1: Completed
-
-    val activeTasks = remember(tasks) {
-        tasks.filter { it.status != TaskStatus.COMPLETED }
-    }
-    val completedTasks = remember(tasks) {
-        tasks.filter { it.status == TaskStatus.COMPLETED }
-    }
-
     val context = LocalContext.current
 
-    Box(
+    Column(
         modifier = Modifier
             .fillMaxSize()
             .background(BackgroundDark)
             .statusBarsPadding()
+            .padding(horizontal = Spacing.lg)
     ) {
-        Column(
+        // Header
+        Row(
             modifier = Modifier
-                .fillMaxSize()
-                .padding(horizontal = Spacing.lg)
+                .fillMaxWidth()
+                .padding(vertical = Spacing.md),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            // Header
-            Row(
+            IconButton(
+                onClick = onBack,
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = Spacing.md),
-                verticalAlignment = Alignment.CenterVertically
+                    .size(40.dp)
+                    .background(SurfaceElevated, CircleShape)
+                    .border(1.dp, BorderHairline, CircleShape)
             ) {
-                IconButton(
-                    onClick = onBack,
-                    modifier = Modifier
-                        .size(36.dp)
-                        .background(SurfaceCard, CircleShape)
-                        .border(1.dp, BorderHairline, CircleShape)
-                ) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
-                        contentDescription = "Back",
-                        tint = TextPrimary,
-                        modifier = Modifier.size(18.dp)
-                    )
-                }
-
-                Spacer(modifier = Modifier.width(Spacing.md))
-
-                Text(
-                    text = "Downloads Hub",
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = TextPrimary
+                Icon(
+                    imageVector = Icons.Default.ArrowBack,
+                    contentDescription = "Back",
+                    tint = TextPrimary,
+                    modifier = Modifier.size(20.dp)
                 )
             }
 
-            // Storage Status Bar
+            Spacer(modifier = Modifier.width(Spacing.md))
+
+            Column {
+                Text(
+                    text = "DOWNLOADS & MEDIA",
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Black,
+                    color = TextPrimary,
+                    letterSpacing = 1.sp
+                )
+                Text(
+                    text = "${tasks.size} Total Items",
+                    fontSize = 11.sp,
+                    color = TextSecondary
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(Spacing.sm))
+
+        if (tasks.isEmpty()) {
             Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(Radius.md))
-                    .background(SurfaceCard)
-                    .border(1.dp, BorderHairline, RoundedCornerShape(Radius.md))
-                    .padding(Spacing.md)
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.Center
             ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            imageVector = Icons.Rounded.SdCard,
-                            contentDescription = null,
-                            tint = TextSecondary,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(modifier = Modifier.width(Spacing.sm))
-                        Text(
-                            text = "Device Storage",
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = TextPrimary
-                        )
-                    }
-                    Text(
-                        text = "${uiState.freeStorageGb} GB Free / ${uiState.totalStorageGb} GB",
-                        fontSize = 11.sp,
-                        color = TextSecondary
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(
+                        imageVector = Icons.Rounded.DownloadDone,
+                        contentDescription = null,
+                        tint = TextMuted,
+                        modifier = Modifier.size(48.dp)
                     )
+                    Spacer(modifier = Modifier.height(Spacing.sm))
+                    Text("No active or completed downloads", color = TextSecondary, fontSize = 14.sp)
                 }
             }
-
-            Spacer(modifier = Modifier.height(Spacing.md))
-
-            // Tabs (Active / Completed)
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(Radius.md))
-                    .background(SurfaceCard)
-                    .padding(Spacing.xs)
+        } else {
+            LazyColumn(
+                verticalArrangement = Arrangement.spacedBy(Spacing.md),
+                modifier = Modifier.fillMaxSize()
             ) {
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .clip(RoundedCornerShape(Radius.sm))
-                        .background(if (selectedTab == 0) SurfaceElevated else Color.Transparent)
-                        .clickable { selectedTab = 0 }
-                        .padding(vertical = Spacing.sm),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = "Active (${activeTasks.size})",
-                        color = if (selectedTab == 0) TextPrimary else TextSecondary,
-                        fontSize = 12.sp,
-                        fontWeight = if (selectedTab == 0) FontWeight.Bold else FontWeight.Medium
+                items(tasks, key = { it.id }) { task ->
+                    DownloadCard(
+                        task = task,
+                        context = context,
+                        onPause = { viewModel.engine.pause(task.id) },
+                        onRetry = { viewModel.engine.retry(task.id) },
+                        onCancel = { viewModel.engine.cancel(task.id) }
                     )
-                }
-
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .clip(RoundedCornerShape(Radius.sm))
-                        .background(if (selectedTab == 1) SurfaceElevated else Color.Transparent)
-                        .clickable { selectedTab = 1 }
-                        .padding(vertical = Spacing.sm),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = "Completed (${completedTasks.size})",
-                        color = if (selectedTab == 1) TextPrimary else TextSecondary,
-                        fontSize = 12.sp,
-                        fontWeight = if (selectedTab == 1) FontWeight.Bold else FontWeight.Medium
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.height(Spacing.md))
-
-            val currentList = if (selectedTab == 0) activeTasks else completedTasks
-
-            if (currentList.isEmpty()) {
-                Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = if (selectedTab == 0) "No active downloads" else "No completed downloads yet",
-                        color = TextSecondary,
-                        fontSize = 13.sp
-                    )
-                }
-            } else {
-                LazyColumn(
-                    verticalArrangement = Arrangement.spacedBy(Spacing.sm),
-                    contentPadding = PaddingValues(bottom = Spacing.xxl),
-                    modifier = Modifier.fillMaxSize()
-                ) {
-                    items(currentList, key = { it.id }) { task ->
-                        DownloadTaskCard(
-                            task = task,
-                            onPause = { viewModel.engine.pause(task.id) },
-                            onCancel = { viewModel.engine.cancel(task.id) },
-                            onRetry = { viewModel.engine.retry(task.id) },
-                            onPlay = {
-                                val file = File(task.filePath)
-                                if (file.exists()) {
-                                    try {
-                                        val uri: Uri = FileProvider.getUriForFile(
-                                            context,
-                                            "${context.packageName}.fileprovider",
-                                            file
-                                        )
-                                        val intent = Intent(Intent.ACTION_VIEW).apply {
-                                            setDataAndType(uri, "video/*")
-                                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                                        }
-                                        context.startActivity(intent)
-                                    } catch (_: Exception) {
-                                        Toast.makeText(context, "No video player installed", Toast.LENGTH_SHORT).show()
-                                    }
-                                } else {
-                                    Toast.makeText(context, "File does not exist on disk", Toast.LENGTH_SHORT).show()
-                                }
-                            }
-                        )
-                    }
                 }
             }
         }
@@ -233,147 +123,65 @@ fun DownloadsScreen(
 }
 
 @Composable
-fun DownloadTaskCard(
+fun DownloadCard(
     task: DownloadTask,
+    context: Context,
     onPause: () -> Unit,
-    onCancel: () -> Unit,
     onRetry: () -> Unit,
-    onPlay: () -> Unit
+    onCancel: () -> Unit
 ) {
-    val progress = if (task.totalBytes > 0) task.downloadedBytes.toFloat() / task.totalBytes.toFloat() else 0f
-    val speedMb = task.speedBytesPerSec / (1024 * 1024)
+    val isCompleted = task.status == TaskStatus.COMPLETED
+    val isDownloading = task.status == TaskStatus.DOWNLOADING || task.status == TaskStatus.RESOLVING
+    val isPaused = task.status == TaskStatus.PAUSED
+    val isFailed = task.status == TaskStatus.FAILED
 
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(Radius.md))
+            .clip(RoundedCornerShape(Radius.lg))
             .background(SurfaceCard)
-            .border(1.dp, BorderHairline, RoundedCornerShape(Radius.md))
+            .border(1.dp, BorderHairline, RoundedCornerShape(Radius.lg))
+            .clickable(enabled = isCompleted) {
+                playMedia(context, task.filePath)
+            }
             .padding(Spacing.md)
     ) {
-        Column(modifier = Modifier.fillMaxWidth()) {
+        Column {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text = task.episodeTitle,
-                    color = TextPrimary,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Bold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f)
-                )
-
-                Spacer(modifier = Modifier.width(Spacing.sm))
-
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    when (task.status) {
-                        TaskStatus.COMPLETED -> {
-                            IconButton(
-                                onClick = onPlay,
-                                modifier = Modifier
-                                    .size(32.dp)
-                                    .background(StatusSuccess.copy(alpha = 0.2f), CircleShape)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Rounded.PlayArrow,
-                                    contentDescription = "Play",
-                                    tint = StatusSuccess,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                            }
-                        }
-                        TaskStatus.FAILED -> {
-                            IconButton(
-                                onClick = onRetry,
-                                modifier = Modifier
-                                    .size(32.dp)
-                                    .background(SurfaceElevated, CircleShape)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Rounded.Refresh,
-                                    contentDescription = "Retry",
-                                    tint = TextPrimary,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                            }
-                        }
-                        TaskStatus.DOWNLOADING -> {
-                            IconButton(
-                                onClick = onPause,
-                                modifier = Modifier
-                                    .size(32.dp)
-                                    .background(SurfaceElevated, CircleShape)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Rounded.Pause,
-                                    contentDescription = "Pause",
-                                    tint = TextSecondary,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                            }
-                        }
-                        TaskStatus.PAUSED -> {
-                            IconButton(
-                                onClick = onRetry,
-                                modifier = Modifier
-                                    .size(32.dp)
-                                    .background(SurfaceElevated, CircleShape)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Rounded.PlayArrow,
-                                    contentDescription = "Resume",
-                                    tint = TextPrimary,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                            }
-                        }
-                        TaskStatus.QUEUED -> {
-                            Text("Queued", color = TextMuted, fontSize = 11.sp)
-                        }
-                        TaskStatus.RESOLVING -> {
-                            Text("Resolving...", color = TextSecondary, fontSize = 11.sp)
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.width(Spacing.xs))
-
-                    IconButton(
-                        onClick = onCancel,
-                        modifier = Modifier.size(28.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Close,
-                            contentDescription = "Cancel",
-                            tint = TextMuted,
-                            modifier = Modifier.size(16.dp)
-                        )
-                    }
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = task.episodeTitle,
+                        color = TextPrimary,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = if (task.showTitle != "Direct Downloads") task.showTitle else "Direct Media",
+                        color = TextSecondary,
+                        fontSize = 11.sp
+                    )
                 }
+
+                StatusBadge(status = task.status)
             }
 
             Spacer(modifier = Modifier.height(Spacing.sm))
 
-            if (task.status == TaskStatus.FAILED) {
-                Text(
-                    text = "Failed: ${task.errorMessage ?: "Download failed"}",
-                    color = StatusError,
-                    fontSize = 11.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            } else {
+            if (!isCompleted) {
                 LinearProgressIndicator(
-                    progress = { progress },
-                    color = if (task.status == TaskStatus.COMPLETED) StatusSuccess else AccentPrimary,
-                    trackColor = Color(0xFF1E2330),
+                    progress = { task.downloadedBytes.toFloat() / 100f },
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(4.dp)
-                        .clip(RoundedCornerShape(2.dp))
+                        .clip(RoundedCornerShape(2.dp)),
+                    color = if (isFailed) StatusError else AccentPrimary,
+                    trackColor = SurfaceElevated
                 )
 
                 Spacer(modifier = Modifier.height(Spacing.xs))
@@ -383,21 +191,116 @@ fun DownloadTaskCard(
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Text(
-                        text = if (task.status == TaskStatus.COMPLETED) "Completed" else "${(progress * 100).toInt()}%",
-                        color = TextSecondary,
+                        text = if (task.errorMessage != null) task.errorMessage else "${task.downloadedBytes}%",
+                        color = if (isFailed) StatusError else TextMuted,
                         fontSize = 11.sp
                     )
 
-                    if (task.status == TaskStatus.DOWNLOADING && speedMb > 0.05) {
-                        Text(
-                            text = String.format("%.1f MB/s", speedMb),
-                            color = StatusSuccess,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold
-                        )
+                    Row(horizontalArrangement = Arrangement.spacedBy(Spacing.xs)) {
+                        if (isDownloading) {
+                            IconButton(onClick = onPause, modifier = Modifier.size(24.dp)) {
+                                Icon(Icons.Rounded.Pause, contentDescription = "Pause", tint = TextSecondary, modifier = Modifier.size(16.dp))
+                            }
+                        } else if (isPaused || isFailed) {
+                            IconButton(onClick = onRetry, modifier = Modifier.size(24.dp)) {
+                                Icon(Icons.Rounded.PlayArrow, contentDescription = "Resume", tint = AccentPrimary, modifier = Modifier.size(16.dp))
+                            }
+                        }
+                        IconButton(onClick = onCancel, modifier = Modifier.size(24.dp)) {
+                            Icon(Icons.Rounded.Close, contentDescription = "Cancel", tint = TextMuted, modifier = Modifier.size(16.dp))
+                        }
+                    }
+                }
+            } else {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Tap to play • ${File(task.filePath).name.substringAfterLast('.') .uppercase()}",
+                        color = TextMuted,
+                        fontSize = 11.sp
+                    )
+
+                    Row(horizontalArrangement = Arrangement.spacedBy(Spacing.sm)) {
+                        IconButton(
+                            onClick = { playMedia(context, task.filePath) },
+                            modifier = Modifier
+                                .size(32.dp)
+                                .background(SurfaceElevated, CircleShape)
+                        ) {
+                            Icon(Icons.Rounded.PlayArrow, contentDescription = "Play", tint = AccentPrimary, modifier = Modifier.size(18.dp))
+                        }
+
+                        IconButton(
+                            onClick = { shareMedia(context, task.filePath) },
+                            modifier = Modifier
+                                .size(32.dp)
+                                .background(SurfaceElevated, CircleShape)
+                        ) {
+                            Icon(Icons.Rounded.Share, contentDescription = "Share", tint = TextSecondary, modifier = Modifier.size(16.dp))
+                        }
+
+                        IconButton(
+                            onClick = onCancel,
+                            modifier = Modifier
+                                .size(32.dp)
+                                .background(SurfaceElevated, CircleShape)
+                        ) {
+                            Icon(Icons.Rounded.DeleteOutline, contentDescription = "Delete", tint = TextMuted, modifier = Modifier.size(16.dp))
+                        }
                     }
                 }
             }
         }
     }
+}
+
+@Composable
+fun StatusBadge(status: TaskStatus) {
+    val (text, bg, fg) = when (status) {
+        TaskStatus.QUEUED -> Triple("QUEUED", SurfaceElevated, TextMuted)
+        TaskStatus.RESOLVING -> Triple("RESOLVING", SurfaceElevated, AccentPrimary)
+        TaskStatus.DOWNLOADING -> Triple("DOWNLOADING", StatusSuccess.copy(alpha = 0.15f), StatusSuccess)
+        TaskStatus.PAUSED -> Triple("PAUSED", SurfaceElevated, TextSecondary)
+        TaskStatus.COMPLETED -> Triple("DONE", StatusSuccess.copy(alpha = 0.15f), StatusSuccess)
+        TaskStatus.FAILED -> Triple("FAILED", StatusError.copy(alpha = 0.15f), StatusError)
+    }
+
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(Radius.full))
+            .background(bg)
+            .padding(horizontal = Spacing.sm, vertical = 2.dp)
+    ) {
+        Text(text = text, color = fg, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+    }
+}
+
+fun playMedia(context: Context, filePath: String) {
+    try {
+        val file = File(filePath)
+        if (!file.exists()) return
+        val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, "video/*")
+            flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK
+        }
+        context.startActivity(intent)
+    } catch (_: Exception) {}
+}
+
+fun shareMedia(context: Context, filePath: String) {
+    try {
+        val file = File(filePath)
+        if (!file.exists()) return
+        val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = "video/*"
+            putExtra(Intent.EXTRA_STREAM, uri)
+            flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK
+        }
+        context.startActivity(Intent.createChooser(intent, "Share Video"))
+    } catch (_: Exception) {}
 }

@@ -1,6 +1,5 @@
 package com.anonrode.downloader.ui.screens
 
-import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
@@ -8,14 +7,14 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.rounded.VideoLibrary
+import androidx.compose.material.icons.rounded.Audiotrack
+import androidx.compose.material.icons.rounded.Download
+import androidx.compose.material.icons.rounded.Videocam
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -26,13 +25,14 @@ import com.anonrode.downloader.viewmodel.MainViewModel
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SocialModal(
-    platformName: String,
+    platform: String,
     url: String,
     viewModel: MainViewModel,
     onDismiss: () -> Unit
 ) {
-    val context = LocalContext.current
-    val cleanPlatform = platformName.removeSuffix(" Video").removeSuffix(" Reel")
+    var audioOnly by remember { mutableStateOf(false) }
+
+    val cleanPlatform = platform.replace(Regex("(?i)video"), "").trim().ifEmpty { "Social" }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -62,19 +62,19 @@ fun SocialModal(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        imageVector = Icons.Rounded.VideoLibrary,
-                        contentDescription = null,
-                        tint = AccentPrimary,
-                        modifier = Modifier.size(22.dp)
-                    )
-                    Spacer(modifier = Modifier.width(Spacing.sm))
+                Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "Download $cleanPlatform Video",
-                        fontSize = 17.sp,
+                        text = "$cleanPlatform Video",
+                        fontSize = 18.sp,
                         fontWeight = FontWeight.Bold,
                         color = TextPrimary
+                    )
+                    Text(
+                        text = url,
+                        fontSize = 11.sp,
+                        color = TextSecondary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
 
@@ -93,38 +93,70 @@ fun SocialModal(
                 }
             }
 
-            Spacer(modifier = Modifier.height(Spacing.sm))
+            Spacer(modifier = Modifier.height(Spacing.md))
 
-            Text(
-                text = url,
-                color = TextSecondary,
-                fontSize = 12.sp,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis
-            )
+            // Format Selection
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(Spacing.sm)
+            ) {
+                FilterChip(
+                    selected = !audioOnly,
+                    onClick = { audioOnly = false },
+                    label = {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Rounded.Videocam, contentDescription = null, modifier = Modifier.size(14.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Video (MP4)")
+                        }
+                    },
+                    colors = FilterChipDefaults.filterChipColors(
+                        selectedContainerColor = AccentPrimary,
+                        selectedLabelColor = BgBase
+                    ),
+                    modifier = Modifier.weight(1f)
+                )
+
+                FilterChip(
+                    selected = audioOnly,
+                    onClick = { audioOnly = true },
+                    label = {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Rounded.Audiotrack, contentDescription = null, modifier = Modifier.size(14.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Audio Only (MP3)")
+                        }
+                    },
+                    colors = FilterChipDefaults.filterChipColors(
+                        selectedContainerColor = AccentPrimary,
+                        selectedLabelColor = BgBase
+                    ),
+                    modifier = Modifier.weight(1f)
+                )
+            }
 
             Spacer(modifier = Modifier.height(Spacing.lg))
 
             Button(
                 onClick = {
                     viewModel.engine.enqueue(
-                        showTitle = "Social",
+                        showTitle = "Social/$cleanPlatform",
                         episodeNum = 1,
                         episodeTitle = "$cleanPlatform Video",
                         sourceUrl = url,
                         isDirect = false,
                         backend = "yt-dlp",
-                        parallelSockets = 1
+                        parallelSockets = 1,
+                        audioOnly = audioOnly
                     )
-                    Toast.makeText(context, "Added to Downloads Hub", Toast.LENGTH_SHORT).show()
                     onDismiss()
                 },
-                colors = ButtonDefaults.buttonColors(containerColor = AccentPrimary, contentColor = Color.Black),
+                modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(Radius.md),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(48.dp)
+                colors = ButtonDefaults.buttonColors(containerColor = AccentPrimary, contentColor = BgBase)
             ) {
+                Icon(Icons.Rounded.Download, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(modifier = Modifier.width(Spacing.xs))
                 Text("Download Now", fontWeight = FontWeight.Bold)
             }
         }

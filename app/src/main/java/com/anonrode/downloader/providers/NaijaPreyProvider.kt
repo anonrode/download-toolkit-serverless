@@ -11,8 +11,8 @@ import com.anonrode.downloader.resolvers.ResolverRegistry
 import org.jsoup.Jsoup
 import java.net.URLEncoder
 
-object RocksProvider : SiteProvider {
-    override val name: String = "9jarocks"
+object NaijaPreyProvider : SiteProvider {
+    override val name: String = "naijaprey"
     override val mainUrl: String get() = DynamicRulesManager.getBaseUrl(name)
 
     override suspend fun search(query: String): List<ShowCard> {
@@ -27,22 +27,14 @@ object RocksProvider : SiteProvider {
                 val title = item.selectFirst("title")?.text()?.replace("<![CDATA[", "")?.replace("]]>", "")?.trim() ?: ""
                 val link = item.selectFirst("link")?.text()?.trim() ?: ""
 
-                // The RSS description/content carries an <img> thumbnail inline;
-                // pull it so the result card shows a real poster instead of the
-                // lettered fallback. No extra network call.
-                val desc = (item.selectFirst("content|encoded")?.text()
-                    ?: item.selectFirst("description")?.text() ?: "")
-                val poster = Regex("""<img[^>]+src=["']([^"']+\.(?:jpg|jpeg|png|webp)[^"']*)["']""", RegexOption.IGNORE_CASE)
-                    .find(desc)?.groupValues?.get(1) ?: ""
-
                 if (title.isNotBlank() && link.isNotBlank()) {
                     results.add(
                         ShowCard(
                             title = title,
                             url = link,
-                            posterUrl = poster,
+                            posterUrl = "",
                             site = name,
-                            category = "Nollywood & Movies"
+                            category = "Nollywood & Series"
                         )
                     )
                 }
@@ -52,26 +44,26 @@ object RocksProvider : SiteProvider {
     }
 
     override suspend fun loadEpisodes(showUrl: String): ShowDetails {
-        val show = ShowCard(title = "Movie", url = showUrl, site = name)
+        val show = ShowCard(title = "NaijaPrey Media", url = showUrl, site = name)
         try {
             val html = HttpClient.getText(showUrl) ?: return ShowDetails(show = show)
             val doc = Jsoup.parse(html)
 
-            val title = doc.selectFirst("h1.entry-title, h1")?.text()?.trim() ?: "Movie"
-            val poster = doc.selectFirst(".entry-content img, .post-thumb img")?.attr("abs:src") ?: ""
+            val title = doc.selectFirst("h1.entry-title, h1")?.text()?.trim() ?: "NaijaPrey Video"
+            val poster = doc.selectFirst(".entry-content img, .post-thumbnail img")?.attr("abs:src") ?: ""
             val synopsis = doc.selectFirst(".entry-content p")?.text()?.trim() ?: ""
 
             val episodes = mutableListOf<EpisodeItem>()
-            val dls = doc.select(".entry-content a[href*='download'], .download-links a")
+            val links = doc.select(".entry-content a[href*='download'], .entry-content a.elementor-button")
 
             var count = 1
-            for (a in dls) {
+            for (a in links) {
                 val href = a.attr("abs:href")
                 val text = a.text().trim()
                 if (href.isNotBlank()) {
                     episodes.add(
                         EpisodeItem(
-                            title = if (text.isNotBlank()) text else "Download Link $count",
+                            title = if (text.isNotBlank()) text else "Download $count",
                             url = href,
                             episodeNum = count++,
                             site = name
@@ -91,7 +83,7 @@ object RocksProvider : SiteProvider {
         val direct = ResolverRegistry.resolve(episodeUrl, quality) ?: episodeUrl
         return DownloadRecipe(
             directUrl = direct,
-            filename = direct.substringAfterLast('/').substringBefore('?').ifEmpty { "movie.mp4" },
+            filename = direct.substringAfterLast('/').substringBefore('?').ifEmpty { "media.mp4" },
             backend = "aria2c",
             parallelSockets = 16
         )

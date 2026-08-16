@@ -1,150 +1,192 @@
 package com.anonrode.downloader.service
 
-import android.app.*
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.app.Service
 import android.content.Context
 import android.content.Intent
-import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import com.anonrode.downloader.MainActivity
-import com.anonrode.downloader.data.models.TaskStatus
-import com.anonrode.downloader.engine.DownloadEngine
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
-import kotlinx.coroutines.launch
 
 class DownloadService : Service() {
 
-    private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private var wakeLock: PowerManager.WakeLock? = null
+    private var lastUpdateTime = 0L
 
     override fun onCreate() {
         super.onCreate()
-        createNotificationChannel()
+        createNotificationChannels()
         acquireWakeLock()
-        observeDownloads()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val notification = buildNotification("Anon Downloader", "Download service active", 0, false)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
-        } else {
-            startForeground(NOTIFICATION_ID, notification)
+        val action = intent?.action
+        if (action == ACTION_STOP) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+            return START_NOT_STICKY
         }
+
+        val activeTitle = intent?.getStringExtra(EXTRA_TITLE) ?: "Downloading..."
+        val progress = intent?.getIntExtra(EXTRA_PROGRESS, 0) ?: 0
+        val activeCount = intent?.getIntExtra(EXTRA_COUNT, 1) ?: 1
+
+        val now = System.currentTimeMillis()
+        if (now - lastUpdateTime >= 500L || progress >= 100 || progress == 0) {
+            lastUpdateTime = now
+            val notification = buildOngoingNotification(activeTitle, progress, activeCount)
+            startForeground(ONGOING_NOTIFICATION_ID, notification)
+        }
+
         return START_STICKY
     }
 
-    override fun onBind(intent: Intent?): IBinder? = null
-
-    override fun onDestroy() {
-        super.onDestroy()
-        serviceScope.cancel()
-        releaseWakeLock()
-    }
-
-    private fun observeDownloads() {
-        serviceScope.launch {
-            DownloadEngine.instance.tasks.collect { tasks ->
-                val active = tasks.filter { it.status == TaskStatus.DOWNLOADING || it.status == TaskStatus.RESOLVING }
-                val completed = tasks.filter { it.status == TaskStatus.COMPLETED }
-                val failed = tasks.filter { it.status == TaskStatus.FAILED }
-
-                val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-
-                when {
-                    active.isNotEmpty() -> {
-                        val first = active.first()
-                        val count = active.size
-                        val title = if (count == 1) first.episodeTitle else "Downloading $count files"
-                        val progress = if (first.totalBytes > 0) ((first.downloadedBytes * 100) / first.totalBytes).toInt() else 0
-                        val speedMb = first.speedBytesPerSec / (1024 * 1024)
-                        val text = if (speedMb > 0.05) String.format("%.1f MB/s • %d%%", speedMb, progress) else "$progress%"
-
-                        manager.notify(NOTIFICATION_ID, buildNotification(title, text, progress, true))
-                    }
-                    failed.isNotEmpty() && completed.isEmpty() -> {
-                        manager.notify(NOTIFICATION_ID, buildNotification("Download Failed", "Tap to retry in Downloads", 0, false))
-                    }
-                    completed.isNotEmpty() -> {
-                        val count = completed.size
-                        val text = if (count == 1) "${completed.first().episodeTitle} saved" else "$count downloads finished"
-                        manager.notify(NOTIFICATION_ID, buildNotification("Downloads Complete", text, 100, false))
-                    }
-                    tasks.isEmpty() -> {
-                        manager.cancel(NOTIFICATION_ID)
-                        stopSelf()
-                    }
-                }
-            }
-        }
-    }
-
-    private fun buildNotification(title: String, text: String, progress: Int, isIndeterminate: Boolean): Notification {
-        val intent = Intent(this, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-        }
-        val pendingIntent = PendingIntent.getActivity(
-            this, 0, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-
-        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle(title)
-            .setContentText(text)
-            .setSmallIcon(android.R.drawable.stat_sys_download)
-            .setOngoing(isIndeterminate)
-            .setOnlyAlertOnce(true)
-            .setContentIntent(pendingIntent)
-
-        if (isIndeterminate) {
-            builder.setProgress(100, progress, progress == 0)
-        }
-
-        return builder.build()
-    }
-
-    private fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                CHANNEL_ID,
-                "Anon Active Downloads",
-                NotificationManager.IMPORTANCE_LOW
-            ).apply {
-                description = "Foreground notifications for active downloads"
-            }
-            val manager = getSystemService(NotificationManager::class.java)
-            manager.createNotificationChannel(channel)
-        }
-    }
-
     private fun acquireWakeLock() {
-        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "AnonDownloader::ServiceWakeLock").apply {
-            acquire(12 * 60 * 60 * 1000L) // 12 hours max
-        }
+        try {
+            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "AnonDownloader::DownloadWakeLock").apply {
+                acquire(24 * 60 * 60 * 1000L) // 24 hours max
+            }
+        } catch (_: Exception) {}
     }
 
     private fun releaseWakeLock() {
         try {
-            if (wakeLock?.isHeld == true) wakeLock?.release()
+            if (wakeLock?.isHeld == true) {
+                wakeLock?.release()
+            }
         } catch (_: Exception) {}
     }
 
-    companion object {
-        private const val CHANNEL_ID = "anon_download_channel"
-        private const val NOTIFICATION_ID = 2001
+    private fun createNotificationChannels() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val manager = getSystemService(NotificationManager::class.java) ?: return
 
-        fun start(context: Context) {
-            val intent = Intent(context, DownloadService::class.java)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
+            // Channel 1: Silent live progress updates
+            val ongoingChannel = NotificationChannel(
+                CHANNEL_ONGOING_ID,
+                "Active Download Progress",
+                NotificationManager.IMPORTANCE_LOW
+            ).apply {
+                description = "Silent progress updates during active downloads"
+                setShowBadge(false)
+                enableVibration(false)
+                setSound(null, null)
             }
+
+            // Channel 2: Download Complete chime & vibration
+            val completeChannel = NotificationChannel(
+                CHANNEL_COMPLETE_ID,
+                "Download Completed",
+                NotificationManager.IMPORTANCE_DEFAULT
+            ).apply {
+                description = "Notification when a download reaches 100%"
+                setShowBadge(true)
+                enableVibration(true)
+            }
+
+            manager.createNotificationChannel(ongoingChannel)
+            manager.createNotificationChannel(completeChannel)
+        }
+    }
+
+    private fun buildOngoingNotification(title: String, progress: Int, activeCount: Int): Notification {
+        val appIntent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
+        }
+        val pendingIntent = PendingIntent.getActivity(
+            this,
+            0,
+            appIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val countText = if (activeCount > 1) " ($activeCount active)" else ""
+
+        return NotificationCompat.Builder(this, CHANNEL_ONGOING_ID)
+            .setContentTitle("Anonrode$countText")
+            .setContentText(title)
+            .setSmallIcon(android.R.drawable.stat_sys_download)
+            .setProgress(100, progress, progress == 0)
+            .setContentIntent(pendingIntent)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .build()
+    }
+
+    override fun onDestroy() {
+        releaseWakeLock()
+        super.onDestroy()
+    }
+
+    override fun onBind(intent: Intent?): IBinder? = null
+
+    companion object {
+        const val CHANNEL_ONGOING_ID = "anon_downloads_channel"
+        const val CHANNEL_COMPLETE_ID = "anon_completed_channel"
+        const val ONGOING_NOTIFICATION_ID = 8801
+
+        const val ACTION_START_OR_UPDATE = "com.anonrode.downloader.START_OR_UPDATE"
+        const val ACTION_STOP = "com.anonrode.downloader.STOP"
+
+        const val EXTRA_TITLE = "extra_title"
+        const val EXTRA_PROGRESS = "extra_progress"
+        const val EXTRA_COUNT = "extra_count"
+
+        fun updateProgress(context: Context, title: String, progress: Int, activeCount: Int) {
+            try {
+                val intent = Intent(context, DownloadService::class.java).apply {
+                    action = ACTION_START_OR_UPDATE
+                    putExtra(EXTRA_TITLE, title)
+                    putExtra(EXTRA_PROGRESS, progress)
+                    putExtra(EXTRA_COUNT, activeCount)
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(intent)
+                } else {
+                    context.startService(intent)
+                }
+            } catch (_: Exception) {}
+        }
+
+        fun notifyCompleted(context: Context, filename: String) {
+            try {
+                val appIntent = Intent(context, MainActivity::class.java).apply {
+                    flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
+                }
+                val pendingIntent = PendingIntent.getActivity(
+                    context,
+                    0,
+                    appIntent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                )
+
+                val notification = NotificationCompat.Builder(context, CHANNEL_COMPLETE_ID)
+                    .setContentTitle("Download Complete")
+                    .setContentText(filename)
+                    .setSmallIcon(android.R.drawable.stat_sys_download_done)
+                    .setContentIntent(pendingIntent)
+                    .setAutoCancel(true)
+                    .build()
+
+                val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                val notifId = (System.currentTimeMillis() % 100000).toInt() + 9000
+                manager.notify(notifId, notification)
+            } catch (_: Exception) {}
+        }
+
+        fun stop(context: Context) {
+            try {
+                val intent = Intent(context, DownloadService::class.java).apply {
+                    action = ACTION_STOP
+                }
+                context.startService(intent)
+            } catch (_: Exception) {}
         }
     }
 }

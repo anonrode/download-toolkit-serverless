@@ -8,39 +8,34 @@ import com.anonrode.downloader.data.models.ShowCard
 import com.anonrode.downloader.data.models.ShowDetails
 import com.anonrode.downloader.data.net.HttpClient
 import com.anonrode.downloader.resolvers.ResolverRegistry
+import org.json.JSONArray
 import org.jsoup.Jsoup
 import java.net.URLEncoder
 
-object RocksProvider : SiteProvider {
-    override val name: String = "9jarocks"
+object NaijaVaultProvider : SiteProvider {
+    override val name: String = "naijavault"
     override val mainUrl: String get() = DynamicRulesManager.getBaseUrl(name)
 
     override suspend fun search(query: String): List<ShowCard> {
         val results = mutableListOf<ShowCard>()
         try {
             val encoded = URLEncoder.encode(query, "UTF-8")
-            val rssUrl = "$mainUrl/search/$encoded/feed/rss2/"
-            val xml = HttpClient.getText(rssUrl) ?: return emptyList()
+            val url = "$mainUrl/wp-json/wp/v2/posts?search=$encoded"
+            val jsonStr = HttpClient.getText(url) ?: return emptyList()
 
-            val doc = Jsoup.parse(xml, "", org.jsoup.parser.Parser.xmlParser())
-            for (item in doc.select("item")) {
-                val title = item.selectFirst("title")?.text()?.replace("<![CDATA[", "")?.replace("]]>", "")?.trim() ?: ""
-                val link = item.selectFirst("link")?.text()?.trim() ?: ""
+            val array = JSONArray(jsonStr)
+            for (i in 0 until array.length()) {
+                val item = array.getJSONObject(i)
+                val titleObj = item.optJSONObject("title")
+                val title = titleObj?.optString("rendered")?.replace(Regex("<[^>]+>"), "")?.trim() ?: ""
+                val link = item.optString("link")
 
-                // The RSS description/content carries an <img> thumbnail inline;
-                // pull it so the result card shows a real poster instead of the
-                // lettered fallback. No extra network call.
-                val desc = (item.selectFirst("content|encoded")?.text()
-                    ?: item.selectFirst("description")?.text() ?: "")
-                val poster = Regex("""<img[^>]+src=["']([^"']+\.(?:jpg|jpeg|png|webp)[^"']*)["']""", RegexOption.IGNORE_CASE)
-                    .find(desc)?.groupValues?.get(1) ?: ""
-
-                if (title.isNotBlank() && link.isNotBlank()) {
+                if (link.isNotBlank() && title.isNotBlank()) {
                     results.add(
                         ShowCard(
                             title = title,
                             url = link,
-                            posterUrl = poster,
+                            posterUrl = "",
                             site = name,
                             category = "Nollywood & Movies"
                         )
@@ -52,26 +47,26 @@ object RocksProvider : SiteProvider {
     }
 
     override suspend fun loadEpisodes(showUrl: String): ShowDetails {
-        val show = ShowCard(title = "Movie", url = showUrl, site = name)
+        val show = ShowCard(title = "NaijaVault Media", url = showUrl, site = name)
         try {
             val html = HttpClient.getText(showUrl) ?: return ShowDetails(show = show)
             val doc = Jsoup.parse(html)
 
             val title = doc.selectFirst("h1.entry-title, h1")?.text()?.trim() ?: "Movie"
-            val poster = doc.selectFirst(".entry-content img, .post-thumb img")?.attr("abs:src") ?: ""
+            val poster = doc.selectFirst(".entry-content img, .post-thumbnail img")?.attr("abs:src") ?: ""
             val synopsis = doc.selectFirst(".entry-content p")?.text()?.trim() ?: ""
 
             val episodes = mutableListOf<EpisodeItem>()
-            val dls = doc.select(".entry-content a[href*='download'], .download-links a")
+            val links = doc.select(".entry-content a[href*='download'], .entry-content a[href*='loadedfiles'], .entry-content a[href*='waffi']")
 
             var count = 1
-            for (a in dls) {
+            for (a in links) {
                 val href = a.attr("abs:href")
                 val text = a.text().trim()
                 if (href.isNotBlank()) {
                     episodes.add(
                         EpisodeItem(
-                            title = if (text.isNotBlank()) text else "Download Link $count",
+                            title = if (text.isNotBlank()) text else "Download $count",
                             url = href,
                             episodeNum = count++,
                             site = name
