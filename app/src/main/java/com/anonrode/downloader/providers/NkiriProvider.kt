@@ -38,6 +38,13 @@ object NkiriProvider : SiteProvider {
                         ?: Regex("""<img[^>]+src=["']([^"']+\.(?:jpg|jpeg|png|webp)[^"']*)["']""", RegexOption.IGNORE_CASE)
                             .find(content)?.groupValues?.get(1) ?: ""
 
+                    val lowerTitle = title.lowercase()
+                    val cat = when {
+                        lowerTitle.contains("korean") || lowerTitle.contains("kdrama") || lowerTitle.contains("c-drama") || lowerTitle.contains("drama") || lowerTitle.contains("series") || lowerTitle.contains("season") -> "Asian Drama"
+                        lowerTitle.contains("nollywood") || lowerTitle.contains("yoruba") -> "Nollywood"
+                        else -> "Asian Drama & Movies"
+                    }
+
                     if (link.isNotBlank() && title.isNotBlank()) {
                         results.add(
                             ShowCard(
@@ -45,7 +52,7 @@ object NkiriProvider : SiteProvider {
                                 url = link,
                                 posterUrl = poster,
                                 site = name,
-                                category = "Nollywood & Movies"
+                                category = cat
                             )
                         )
                     }
