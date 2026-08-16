@@ -8,6 +8,7 @@ import com.anonrode.downloader.data.net.HttpClient
 import com.anonrode.downloader.resolvers.ResolverRegistry
 import org.json.JSONArray
 import org.jsoup.Jsoup
+import java.net.URI
 import java.net.URLEncoder
 
 object AsianCProvider : SiteProvider {
@@ -56,18 +57,24 @@ object AsianCProvider : SiteProvider {
             val synopsis = doc.selectFirst(".info p, .details p")?.text()?.trim() ?: ""
 
             val episodes = mutableListOf<EpisodeItem>()
-            val epLinks = doc.select("ul.list-episode-item-2 li a, .all-episodes li a, .list-episode a")
+            val epLinks = doc.select("ul.list-episode-item-2 li a, .all-episodes li a, .list-episode a, .list-episode-item a, a[href*='-episode-']")
 
             for (link in epLinks) {
                 val href = link.attr("abs:href")
-                val epText = link.selectFirst(".title, h3")?.text()?.trim() ?: link.text().trim()
+                val epRaw = link.selectFirst(".title, h3")?.text()?.trim() ?: link.text().trim()
                 val epNum = Regex("""(?:Episode|Ep|E)\s*(\d+)""", RegexOption.IGNORE_CASE)
-                    .find(epText)?.groupValues?.get(1)?.toIntOrNull() ?: (episodes.size + 1)
+                    .find(epRaw)?.groupValues?.get(1)?.toIntOrNull() ?: (episodes.size + 1)
+
+                val cleanTitle = if (epRaw.contains("Episode", ignoreCase = true)) {
+                    "Episode $epNum" + if (epRaw.contains("RAW", ignoreCase = true)) " (RAW)" else ""
+                } else {
+                    "Episode $epNum"
+                }
 
                 if (href.isNotBlank()) {
                     episodes.add(
                         EpisodeItem(
-                            title = epText.ifEmpty { "Episode $epNum" },
+                            title = cleanTitle,
                             url = href,
                             episodeNum = epNum,
                             site = name
@@ -90,7 +97,10 @@ object AsianCProvider : SiteProvider {
                 val html = HttpClient.getText(episodeUrl, referer = "$mainUrl/") ?: ""
                 val doc = Jsoup.parse(html)
                 for (iframe in doc.select("iframe[src]")) {
-                    val src = iframe.attr("abs:src")
+                    var src = iframe.attr("src")
+                    if (src.startsWith("//")) src = "https:$src"
+                    else if (src.startsWith("/")) src = URI(episodeUrl).resolve(src).toString()
+
                     val resolved = ResolverRegistry.resolve(src, quality)
                     if (!resolved.isNullOrBlank()) {
                         direct = resolved
@@ -101,11 +111,12 @@ object AsianCProvider : SiteProvider {
         }
 
         val target = direct ?: episodeUrl
+        val isHls = target.contains(".m3u8") || target.contains("manifest")
         return DownloadRecipe(
             directUrl = target,
             filename = target.substringAfterLast('/').substringBefore('?').ifEmpty { "episode.mp4" },
-            backend = "aria2c",
-            parallelSockets = 16
+            backend = if (isHls) "yt-dlp" else "aria2c",
+            parallelSockets = if (isHls) 1 else 16
         )
     }
 }

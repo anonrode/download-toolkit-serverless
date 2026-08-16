@@ -1,7 +1,6 @@
 package com.anonrode.downloader.providers
 
 import com.anonrode.downloader.data.rules.DynamicRulesManager
-
 import com.anonrode.downloader.data.models.DownloadRecipe
 import com.anonrode.downloader.data.models.EpisodeItem
 import com.anonrode.downloader.data.models.ShowCard
@@ -27,12 +26,16 @@ object NaijaPreyProvider : SiteProvider {
                 val title = item.selectFirst("title")?.text()?.replace("<![CDATA[", "")?.replace("]]>", "")?.trim() ?: ""
                 val link = item.selectFirst("link")?.text()?.trim() ?: ""
 
+                val desc = item.selectFirst("content|encoded")?.text() ?: item.selectFirst("description")?.text() ?: ""
+                val poster = Regex("""<img[^>]+src=["']([^"']+\.(?:jpg|jpeg|png|webp)[^"']*)["']""", RegexOption.IGNORE_CASE)
+                    .find(desc)?.groupValues?.get(1) ?: ""
+
                 if (title.isNotBlank() && link.isNotBlank()) {
                     results.add(
                         ShowCard(
                             title = title,
                             url = link,
-                            posterUrl = "",
+                            posterUrl = poster,
                             site = name,
                             category = "Nollywood & Series"
                         )
@@ -50,7 +53,9 @@ object NaijaPreyProvider : SiteProvider {
             val doc = Jsoup.parse(html)
 
             val title = doc.selectFirst("h1.entry-title, h1")?.text()?.trim() ?: "NaijaPrey Video"
-            val poster = doc.selectFirst(".entry-content img, .post-thumbnail img")?.attr("abs:src") ?: ""
+            val poster = doc.selectFirst("meta[property='og:image']")?.attr("content")
+                ?: doc.selectFirst(".entry-content img, .post-thumbnail img")?.attr("abs:src")
+                ?: ""
             val synopsis = doc.selectFirst(".entry-content p")?.text()?.trim() ?: ""
 
             val episodes = mutableListOf<EpisodeItem>()

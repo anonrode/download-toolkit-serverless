@@ -48,7 +48,11 @@ object RelevanceScorer {
     }
 
     fun filterAndSort(query: String, items: List<ShowCard>): List<ShowCard> {
-        val scored = items.mapNotNull { item ->
+        val validItems = items.filter { item ->
+            com.anonrode.downloader.security.TorrentSecurityShield.checkNegativeFilters(item.title, query).first
+        }
+
+        val scored = validItems.mapNotNull { item ->
             if (item.site.equals("pluto", ignoreCase = true) ||
                 item.site.equals("dramakey", ignoreCase = true) ||
                 item.site.equals("dramarain", ignoreCase = true)) {

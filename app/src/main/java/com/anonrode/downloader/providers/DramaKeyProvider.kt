@@ -1,7 +1,6 @@
 package com.anonrode.downloader.providers
 
 import com.anonrode.downloader.data.rules.DynamicRulesManager
-
 import com.anonrode.downloader.data.models.DownloadRecipe
 import com.anonrode.downloader.data.models.EpisodeItem
 import com.anonrode.downloader.data.models.ShowCard
@@ -18,23 +17,47 @@ object DramaKeyProvider : SiteProvider {
     override suspend fun search(query: String): List<ShowCard> {
         val results = mutableListOf<ShowCard>()
         try {
-            val slug = query.trim().lowercase().replace(Regex("[^a-z0-9]+"), "-")
+            val clean = query.trim().lowercase()
+            val slug = clean.replace(Regex("[^a-z0-9]+"), "-").trim('-')
+            if (slug.isBlank()) return emptyList()
+
             val candidateUrls = listOf(
                 "https://dramakey.com/$slug/",
                 "https://dramakey.com/drama/$slug/",
                 "https://dramakey.cc/$slug/",
-                "https://dramakey.cc/drama/$slug/"
+                "https://dramakey.cc/drama/$slug/",
+                "https://dramakey.cc/chinese/$slug/",
+                "https://dramakey.cc/korean/$slug/",
+                "https://dramakey.cc/thai/$slug/"
             )
+
+            val queryTokens = clean.split(Regex("[\s-]+")).filter { it.length > 1 }.toSet()
 
             for (url in candidateUrls) {
                 val html = HttpClient.getText(url) ?: continue
                 val doc = Jsoup.parse(html)
-                val title = doc.selectFirst("h1.entry-title, h1")?.text()?.trim() ?: continue
-                val poster = doc.selectFirst(".entry-content img, .post-thumbnail img")?.attr("abs:src") ?: ""
+                val rawTitle = doc.selectFirst("h1.entry-title, h1")?.text()?.trim() ?: continue
+
+                // Soft-404 Guard: Reject the generic homepage/catalog title
+                val lowerTitle = rawTitle.lowercase()
+                if (lowerTitle.contains("download korean, chinese, thai") || lowerTitle.contains("latest dramas")) {
+                    continue
+                }
+
+                // Verify title token overlap (guards against soft-404 fallback pages)
+                val titleTokens = lowerTitle.split(Regex("[^a-z0-9]+")).filter { it.length > 1 }.toSet()
+                val overlap = if (queryTokens.isNotEmpty()) (queryTokens.intersect(titleTokens).size.toDouble() / queryTokens.size) else 0.0
+                if (overlap < 0.5 && !lowerTitle.contains(clean)) {
+                    continue
+                }
+
+                val poster = doc.selectFirst("meta[property='og:image']")?.attr("content")
+                    ?: doc.selectFirst(".entry-content img, .post-thumbnail img, img.cover")?.attr("abs:src")
+                    ?: ""
 
                 results.add(
                     ShowCard(
-                        title = title,
+                        title = rawTitle,
                         url = url,
                         posterUrl = poster,
                         site = name,
@@ -54,11 +77,13 @@ object DramaKeyProvider : SiteProvider {
             val doc = Jsoup.parse(html)
 
             val pageTitle = doc.selectFirst("h1.entry-title, h1")?.text()?.trim() ?: "DramaKey Drama"
-            val poster = doc.selectFirst(".entry-content img, .post-thumbnail img")?.attr("abs:src") ?: ""
+            val poster = doc.selectFirst("meta[property='og:image']")?.attr("content")
+                ?: doc.selectFirst(".entry-content img, .post-thumbnail img")?.attr("abs:src")
+                ?: ""
             val synopsis = doc.selectFirst(".entry-content p")?.text()?.trim() ?: ""
 
             val episodes = mutableListOf<EpisodeItem>()
-            val dlLinks = doc.select(".entry-content a[href*='downloadwella.com'], .entry-content a[href*='kissorgrab.com']")
+            val dlLinks = doc.select(".entry-content a[href*='downloadwella.com'], .entry-content a[href*='kissorgrab.com'], .entry-content a[href*='wetafiles.com']")
 
             var count = 1
             for (a in dlLinks) {
