@@ -49,7 +49,6 @@ object RelevanceScorer {
 
     fun filterAndSort(query: String, items: List<ShowCard>): List<ShowCard> {
         val scored = items.mapNotNull { item ->
-            // Pluto, direct slug hits, or exact matches get high relevance
             if (item.site.equals("pluto", ignoreCase = true) ||
                 item.site.equals("dramakey", ignoreCase = true) ||
                 item.site.equals("dramarain", ignoreCase = true)) {
@@ -64,11 +63,11 @@ object RelevanceScorer {
                 .thenBy { orderKey(it.first) }
         )
 
-        return sorted.map { it.first }.distinctBy { it.detailUrl }
+        return sorted.map { it.first }.distinctBy { it.url }
     }
 
     private fun orderKey(item: ShowCard): Int {
-        val combined = "${item.title} ${item.detailUrl}".lowercase()
+        val combined = "${item.title} ${item.url}".lowercase()
         val isCollection = COLLECTION_RE.matcher(combined).find() || YEAR_RANGE_RE.matcher(combined).find()
         if (isCollection) return 0
 

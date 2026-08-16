@@ -1,5 +1,6 @@
 package com.anonrode.downloader.providers
 
+import com.anonrode.downloader.data.models.DownloadRecipe
 import com.anonrode.downloader.data.models.EpisodeItem
 import com.anonrode.downloader.data.models.ShowCard
 import com.anonrode.downloader.data.models.ShowDetails
@@ -9,11 +10,10 @@ import okhttp3.FormBody
 import okhttp3.Request
 import org.json.JSONObject
 import org.jsoup.Jsoup
-import java.net.URLEncoder
 
 object AnitakuProvider : SiteProvider {
-    override val siteName: String = "anitaku"
-    override val baseUrl: String = "https://gogoanime.or.at"
+    override val name: String = "anitaku"
+    override val mainUrl: String = "https://gogoanime.or.at"
 
     override suspend fun search(query: String): List<ShowCard> {
         val results = mutableListOf<ShowCard>()
@@ -63,9 +63,9 @@ object AnitakuProvider : SiteProvider {
                                     results.add(
                                         ShowCard(
                                             title = title,
+                                            url = link,
                                             posterUrl = image,
-                                            detailUrl = link,
-                                            site = siteName,
+                                            site = name,
                                             category = "Anime ${if (sub.isNotBlank()) "($sub)" else ""}"
                                         )
                                     )
@@ -80,9 +80,10 @@ object AnitakuProvider : SiteProvider {
         return results
     }
 
-    override suspend fun loadEpisodes(detailUrl: String): ShowDetails? {
+    override suspend fun loadEpisodes(showUrl: String): ShowDetails {
+        val show = ShowCard(title = "Anime", url = showUrl, site = name)
         try {
-            val html = HttpClient.getText(detailUrl) ?: return null
+            val html = HttpClient.getText(showUrl) ?: return ShowDetails(show = show)
             val doc = Jsoup.parse(html)
 
             val title = doc.selectFirst(".anime_info_body_bg h1, h1.entry-title")?.text()?.trim() ?: "Anime"
@@ -94,45 +95,34 @@ object AnitakuProvider : SiteProvider {
 
             for (a in epLinks) {
                 val href = a.attr("abs:href")
-                val name = a.text().trim()
-                val num = Regex("""\d+""").find(name)?.value?.toIntOrNull() ?: (episodes.size + 1)
+                val nameText = a.text().trim()
+                val num = Regex("""\d+""").find(nameText)?.value?.toIntOrNull() ?: (episodes.size + 1)
                 if (href.isNotBlank()) {
                     episodes.add(
                         EpisodeItem(
                             title = "Episode $num",
+                            url = href,
                             episodeNum = num,
-                            downloadPageUrl = href,
-                            isDirect = false
+                            site = name
                         )
                     )
                 }
             }
 
-            return ShowDetails(
-                title = title,
-                posterUrl = poster,
-                synopsis = synopsis,
-                episodes = episodes.sortedBy { it.episodeNum },
-                site = siteName
-            )
+            val card = ShowCard(title = title, url = showUrl, posterUrl = poster, site = name)
+            return ShowDetails(show = card, synopsis = synopsis, episodes = episodes.sortedBy { it.episodeNum })
         } catch (_: Exception) {
-            return null
+            return ShowDetails(show = show)
         }
     }
 
-    override suspend fun resolveEpisode(episode: EpisodeItem): String? {
-        try {
-            val html = HttpClient.getText(episode.downloadPageUrl) ?: return null
-            val doc = Jsoup.parse(html)
-            val iframes = doc.select("iframe[src]")
-            for (iframe in iframes) {
-                val src = iframe.attr("abs:src")
-                val direct = ResolverRegistry.resolve(src)
-                if (!direct.isNullOrBlank()) return direct
-            }
-            return null
-        } catch (_: Exception) {
-            return null
-        }
+    override suspend fun resolveEpisode(episodeUrl: String, quality: String): DownloadRecipe {
+        val direct = ResolverRegistry.resolve(episodeUrl, quality) ?: episodeUrl
+        return DownloadRecipe(
+            directUrl = direct,
+            filename = direct.substringAfterLast('/').substringBefore('?').ifEmpty { "anime.mp4" },
+            backend = "aria2c",
+            parallelSockets = 16
+        )
     }
 }

@@ -1,26 +1,26 @@
 package com.anonrode.downloader.providers
 
+import com.anonrode.downloader.data.models.DownloadRecipe
 import com.anonrode.downloader.data.models.EpisodeItem
 import com.anonrode.downloader.data.models.ShowCard
 import com.anonrode.downloader.data.models.ShowDetails
 import com.anonrode.downloader.data.net.HttpClient
 import com.anonrode.downloader.resolvers.ResolverRegistry
 import org.jsoup.Jsoup
-import java.net.URLEncoder
 
 object DramaRainProvider : SiteProvider {
-    override val siteName: String = "dramarain"
-    override val baseUrl: String = "https://dramarain.com"
+    override val name: String = "dramarain"
+    override val mainUrl: String = "https://dramarain.com"
 
     override suspend fun search(query: String): List<ShowCard> {
         val results = mutableListOf<ShowCard>()
         try {
             val slug = query.trim().lowercase().replace(Regex("[^a-z0-9]+"), "-")
             val candidateUrls = listOf(
-                "$baseUrl/$slug/",
-                "$baseUrl/drama/$slug/",
-                "$baseUrl/$slug-korean-drama/",
-                "$baseUrl/$slug-season-1/"
+                "$mainUrl/$slug/",
+                "$mainUrl/drama/$slug/",
+                "$mainUrl/$slug-korean-drama/",
+                "$mainUrl/$slug-season-1/"
             )
 
             for (url in candidateUrls) {
@@ -32,9 +32,9 @@ object DramaRainProvider : SiteProvider {
                 results.add(
                     ShowCard(
                         title = title,
+                        url = url,
                         posterUrl = poster,
-                        detailUrl = url,
-                        site = siteName,
+                        site = name,
                         category = "Asian Drama"
                     )
                 )
@@ -44,9 +44,10 @@ object DramaRainProvider : SiteProvider {
         return results
     }
 
-    override suspend fun loadEpisodes(detailUrl: String): ShowDetails? {
+    override suspend fun loadEpisodes(showUrl: String): ShowDetails {
+        val show = ShowCard(title = "Drama", url = showUrl, site = name)
         try {
-            val html = HttpClient.getText(detailUrl) ?: return null
+            val html = HttpClient.getText(showUrl) ?: return ShowDetails(show = show)
             val doc = Jsoup.parse(html)
 
             val title = doc.selectFirst("h1.entry-title, h1")?.text()?.trim() ?: "Drama"
@@ -64,27 +65,28 @@ object DramaRainProvider : SiteProvider {
                     episodes.add(
                         EpisodeItem(
                             title = if (text.isNotBlank()) text else "Episode $count",
+                            url = href,
                             episodeNum = count++,
-                            downloadPageUrl = href,
-                            isDirect = false
+                            site = name
                         )
                     )
                 }
             }
 
-            return ShowDetails(
-                title = title,
-                posterUrl = poster,
-                synopsis = synopsis,
-                episodes = episodes,
-                site = siteName
-            )
+            val card = ShowCard(title = title, url = showUrl, posterUrl = poster, site = name)
+            return ShowDetails(show = card, synopsis = synopsis, episodes = episodes)
         } catch (_: Exception) {
-            return null
+            return ShowDetails(show = show)
         }
     }
 
-    override suspend fun resolveEpisode(episode: EpisodeItem): String? {
-        return ResolverRegistry.resolve(episode.downloadPageUrl)
+    override suspend fun resolveEpisode(episodeUrl: String, quality: String): DownloadRecipe {
+        val direct = ResolverRegistry.resolve(episodeUrl, quality) ?: episodeUrl
+        return DownloadRecipe(
+            directUrl = direct,
+            filename = direct.substringAfterLast('/').substringBefore('?').ifEmpty { "episode.mkv" },
+            backend = "aria2c",
+            parallelSockets = 16
+        )
     }
 }

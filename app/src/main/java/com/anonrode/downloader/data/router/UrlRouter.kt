@@ -34,8 +34,8 @@ object UrlRouter {
                 site = "nkiri",
                 showCard = ShowCard(
                     title = slugToTitle(slug),
+                    url = trimmed,
                     posterUrl = "",
-                    detailUrl = trimmed,
                     site = "nkiri",
                     category = "Asian Drama"
                 )
@@ -48,8 +48,8 @@ object UrlRouter {
                 site = "asianc",
                 showCard = ShowCard(
                     title = slugToTitle(slug),
+                    url = trimmed,
                     posterUrl = "",
-                    detailUrl = trimmed,
                     site = "asianc",
                     category = "Asian Drama"
                 )
@@ -62,8 +62,8 @@ object UrlRouter {
                 site = "dramakey",
                 showCard = ShowCard(
                     title = slugToTitle(slug),
+                    url = trimmed,
                     posterUrl = "",
-                    detailUrl = trimmed,
                     site = "dramakey",
                     category = "Asian Drama"
                 )
@@ -76,8 +76,8 @@ object UrlRouter {
                 site = "dramarain",
                 showCard = ShowCard(
                     title = slugToTitle(slug),
+                    url = trimmed,
                     posterUrl = "",
-                    detailUrl = trimmed,
                     site = "dramarain",
                     category = "Asian Drama"
                 )
@@ -90,8 +90,8 @@ object UrlRouter {
                 site = "pluto",
                 showCard = ShowCard(
                     title = slugToTitle(slug),
+                    url = trimmed,
                     posterUrl = "",
-                    detailUrl = trimmed,
                     site = "pluto",
                     category = "Movies & Series"
                 )
@@ -104,8 +104,8 @@ object UrlRouter {
                 site = "anitaku",
                 showCard = ShowCard(
                     title = slugToTitle(slug),
+                    url = trimmed,
                     posterUrl = "",
-                    detailUrl = trimmed,
                     site = "anitaku",
                     category = "Anime"
                 )
@@ -118,8 +118,8 @@ object UrlRouter {
                 site = "9jarocks",
                 showCard = ShowCard(
                     title = slugToTitle(slug),
+                    url = trimmed,
                     posterUrl = "",
-                    detailUrl = trimmed,
                     site = "9jarocks",
                     category = "Nollywood & Movies"
                 )

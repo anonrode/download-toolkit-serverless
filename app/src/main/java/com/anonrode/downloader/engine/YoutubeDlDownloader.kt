@@ -1,8 +1,8 @@
 package com.anonrode.downloader.engine
 
 import android.content.Context
-import com.yaedd.youtubedl_android.YoutubeDL
-import com.yaedd.youtubedl_android.YoutubeDLRequest
+import com.yausername.youtubedl_android.YoutubeDL
+import com.yausername.youtubedl_android.YoutubeDLRequest
 import java.io.File
 
 object YoutubeDlDownloader {
@@ -60,11 +60,9 @@ object YoutubeDlDownloader {
             }
 
             if (isExtractorTask) {
-                // Social / HLS / Extractor mode: native yt-dlp extraction + ffmpeg muxing
                 addOption("-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best")
                 addOption("--merge-output-format", "mp4")
             } else {
-                // Direct CDN file mode: use aria2c
                 addOption("--downloader", "libaria2c.so")
                 val conns = if (isConnectionSensitive(sourceUrl)) 1 else parallelSockets.coerceIn(1, 16)
                 val aria2Args = buildString {
@@ -84,7 +82,6 @@ object YoutubeDlDownloader {
             }
         }
 
-        // Ensure output file exists and is normalized
         if (!target.exists()) {
             val produced = target.parentFile
                 ?.listFiles { f ->

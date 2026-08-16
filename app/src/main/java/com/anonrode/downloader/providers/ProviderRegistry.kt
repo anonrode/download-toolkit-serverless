@@ -21,16 +21,12 @@ object ProviderRegistry {
     )
 
     fun getProvider(site: String): SiteProvider? {
-        return allProviders.find { it.siteName.equals(site, ignoreCase = true) }
+        return allProviders.find { it.name.equals(site, ignoreCase = true) }
     }
 
-    /**
-     * Incremental Flow search: emits accumulated, relevance-scored results
-     * in real-time as each provider finishes, giving instantaneous UI responsiveness.
-     */
     fun searchStreaming(query: String, siteFilter: String? = null): Flow<List<ShowCard>> = flow {
         val targets = if (!siteFilter.isNullOrBlank() && siteFilter != "all") {
-            allProviders.filter { it.siteName.equals(siteFilter, ignoreCase = true) }
+            allProviders.filter { it.name.equals(siteFilter, ignoreCase = true) }
         } else {
             allProviders
         }
@@ -42,9 +38,9 @@ object ProviderRegistry {
                 async(Dispatchers.IO) {
                     try {
                         val items = provider.search(query)
-                        Pair(provider.siteName, items)
+                        Pair(provider.name, items)
                     } catch (_: Exception) {
-                        Pair(provider.siteName, emptyList<ShowCard>())
+                        Pair(provider.name, emptyList<ShowCard>())
                     }
                 }
             }
@@ -63,25 +59,4 @@ object ProviderRegistry {
             emit(emptyList())
         }
     }.flowOn(Dispatchers.IO)
-
-    suspend fun searchAll(query: String, siteFilter: String? = null): List<ShowCard> = coroutineScope {
-        val targets = if (!siteFilter.isNullOrBlank() && siteFilter != "all") {
-            allProviders.filter { it.siteName.equals(siteFilter, ignoreCase = true) }
-        } else {
-            allProviders
-        }
-
-        val deferreds = targets.map { provider ->
-            async(Dispatchers.IO) {
-                try {
-                    provider.search(query)
-                } catch (_: Exception) {
-                    emptyList()
-                }
-            }
-        }
-
-        val raw = deferreds.flatMap { it.await() }
-        RelevanceScorer.filterAndSort(query, raw)
-    }
 }

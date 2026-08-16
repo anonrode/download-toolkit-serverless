@@ -1,41 +1,41 @@
 package com.anonrode.downloader.providers
 
+import com.anonrode.downloader.data.models.DownloadRecipe
 import com.anonrode.downloader.data.models.EpisodeItem
 import com.anonrode.downloader.data.models.ShowCard
 import com.anonrode.downloader.data.models.ShowDetails
 import com.anonrode.downloader.data.net.HttpClient
 import com.anonrode.downloader.resolvers.ResolverRegistry
 import org.json.JSONArray
-import org.json.JSONObject
 import org.jsoup.Jsoup
 import java.net.URLEncoder
 
 object AsianCProvider : SiteProvider {
-    override val siteName: String = "asianc"
-    override val baseUrl: String = "https://asianc.id"
+    override val name: String = "asianc"
+    override val mainUrl: String = "https://asianc.id"
 
     override suspend fun search(query: String): List<ShowCard> {
         val results = mutableListOf<ShowCard>()
         try {
             val encoded = URLEncoder.encode(query, "UTF-8")
-            val url = "$baseUrl/api?a=search&keyword=$encoded"
-            val jsonStr = HttpClient.getText(url, referer = "$baseUrl/") ?: return emptyList()
+            val url = "$mainUrl/api?a=search&keyword=$encoded"
+            val jsonStr = HttpClient.getText(url, referer = "$mainUrl/") ?: return emptyList()
 
             val array = JSONArray(jsonStr)
             for (i in 0 until array.length()) {
                 val item = array.getJSONObject(i)
                 val rawUrl = item.optString("url")
-                val name = item.optString("name").ifEmpty { item.optString("value") }
+                val title = item.optString("name").ifEmpty { item.optString("value") }
                 val cover = item.optString("cover")
 
-                if (rawUrl.isNotBlank() && name.isNotBlank()) {
-                    val fullUrl = if (rawUrl.startsWith("/")) "$baseUrl$rawUrl" else rawUrl
+                if (rawUrl.isNotBlank() && title.isNotBlank()) {
+                    val fullUrl = if (rawUrl.startsWith("/")) "$mainUrl$rawUrl" else rawUrl
                     results.add(
                         ShowCard(
-                            title = name,
+                            title = title,
+                            url = fullUrl,
                             posterUrl = cover,
-                            detailUrl = fullUrl,
-                            site = siteName,
+                            site = name,
                             category = "Asian Drama"
                         )
                     )
@@ -45,9 +45,10 @@ object AsianCProvider : SiteProvider {
         return results
     }
 
-    override suspend fun loadEpisodes(detailUrl: String): ShowDetails? {
+    override suspend fun loadEpisodes(showUrl: String): ShowDetails {
+        val show = ShowCard(title = "Asian Drama", url = showUrl, site = name)
         try {
-            val html = HttpClient.getText(detailUrl, referer = "$baseUrl/") ?: return null
+            val html = HttpClient.getText(showUrl, referer = "$mainUrl/") ?: return ShowDetails(show = show)
             val doc = Jsoup.parse(html)
 
             val title = doc.selectFirst("h1, .info h1")?.text()?.trim() ?: "Asian Drama"
@@ -67,52 +68,44 @@ object AsianCProvider : SiteProvider {
                     episodes.add(
                         EpisodeItem(
                             title = epText.ifEmpty { "Episode $epNum" },
+                            url = href,
                             episodeNum = epNum,
-                            downloadPageUrl = href,
-                            isDirect = false
+                            site = name
                         )
                     )
                 }
             }
 
-            // Normalise episode ordering
-            val sorted = episodes.sortedBy { it.episodeNum }
-            return ShowDetails(
-                title = title,
-                posterUrl = poster,
-                synopsis = synopsis,
-                episodes = sorted,
-                site = siteName
-            )
+            val card = ShowCard(title = title, url = showUrl, posterUrl = poster, site = name)
+            return ShowDetails(show = card, synopsis = synopsis, episodes = episodes.sortedBy { it.episodeNum })
         } catch (_: Exception) {
-            return null
+            return ShowDetails(show = show)
         }
     }
 
-    override suspend fun resolveEpisode(episode: EpisodeItem): String? {
-        try {
-            val html = HttpClient.getText(episode.downloadPageUrl, referer = "$baseUrl/") ?: return null
-            val doc = Jsoup.parse(html)
-
-            // Extract embed players (Streamwish, Vidhide, Standard)
-            val iframes = doc.select("iframe[src]")
-            for (iframe in iframes) {
-                val src = iframe.attr("abs:src")
-                val direct = ResolverRegistry.resolve(src)
-                if (!direct.isNullOrBlank()) return direct
-            }
-
-            // Download buttons
-            val dls = doc.select(".download a, a[download]")
-            for (a in dls) {
-                val href = a.attr("abs:href")
-                val direct = ResolverRegistry.resolve(href)
-                if (!direct.isNullOrBlank()) return direct
-            }
-
-            return null
-        } catch (_: Exception) {
-            return null
+    override suspend fun resolveEpisode(episodeUrl: String, quality: String): DownloadRecipe {
+        var direct = ResolverRegistry.resolve(episodeUrl, quality)
+        if (direct.isNullOrBlank()) {
+            try {
+                val html = HttpClient.getText(episodeUrl, referer = "$mainUrl/") ?: ""
+                val doc = Jsoup.parse(html)
+                for (iframe in doc.select("iframe[src]")) {
+                    val src = iframe.attr("abs:src")
+                    val resolved = ResolverRegistry.resolve(src, quality)
+                    if (!resolved.isNullOrBlank()) {
+                        direct = resolved
+                        break
+                    }
+                }
+            } catch (_: Exception) {}
         }
+
+        val target = direct ?: episodeUrl
+        return DownloadRecipe(
+            directUrl = target,
+            filename = target.substringAfterLast('/').substringBefore('?').ifEmpty { "episode.mp4" },
+            backend = "aria2c",
+            parallelSockets = 16
+        )
     }
 }

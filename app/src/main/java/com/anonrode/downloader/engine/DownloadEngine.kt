@@ -6,7 +6,7 @@ import android.os.Environment
 import com.anonrode.downloader.data.models.DownloadTask
 import com.anonrode.downloader.data.models.TaskStatus
 import com.anonrode.downloader.resolvers.ResolverRegistry
-import com.yaedd.youtubedl_android.YoutubeDL
+import com.yausername.youtubedl_android.YoutubeDL
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.StateFlow
 import java.io.File
@@ -28,6 +28,7 @@ class DownloadEngine(
     var instantSocialDownload = true
 
     init {
+        repository.initPersistence(context.filesDir)
         scope.launch {
             processQueue()
         }
@@ -58,18 +59,17 @@ class DownloadEngine(
             showTitle = showTitle,
             episodeNum = episodeNum,
             episodeTitle = episodeTitle,
-            sourceUrl = sourceUrl,
+            directUrl = sourceUrl,
             filePath = targetFile.absolutePath,
             status = TaskStatus.QUEUED,
             downloadedBytes = 0L,
             totalBytes = 100L,
-            speedBytesPerSec = 0L,
-            isDirect = isDirect,
+            speedBytesPerSec = 0.0,
             backend = backend,
             parallelSockets = parallelSockets
         )
 
-        repository.upsertTask(task)
+        repository.addFirst(task)
         processQueue()
         return taskId
     }
@@ -80,7 +80,7 @@ class DownloadEngine(
         try {
             YoutubeDL.getInstance().destroyProcessById(taskId)
         } catch (_: Exception) {}
-        repository.updateStatus(taskId, TaskStatus.PAUSED)
+        repository.update(taskId) { it.copy(status = TaskStatus.PAUSED, speedBytesPerSec = 0.0) }
         processQueue()
     }
 
@@ -90,12 +90,12 @@ class DownloadEngine(
         try {
             YoutubeDL.getInstance().destroyProcessById(taskId)
         } catch (_: Exception) {}
-        repository.removeTask(taskId)
+        repository.remove(taskId)
         processQueue()
     }
 
     fun retry(taskId: String) {
-        repository.updateStatus(taskId, TaskStatus.QUEUED)
+        repository.update(taskId) { it.copy(status = TaskStatus.QUEUED, errorMessage = null) }
         processQueue()
     }
 
@@ -126,28 +126,28 @@ class DownloadEngine(
     private fun startTask(task: DownloadTask) {
         val job = scope.launch {
             try {
-                var directUrl = task.sourceUrl
+                var streamUrl = task.directUrl
 
-                if (!task.isDirect && task.backend != "yt-dlp") {
-                    repository.updateStatus(task.id, TaskStatus.RESOLVING)
-                    val resolved = ResolverRegistry.resolve(task.sourceUrl, defaultQuality)
+                if (task.backend != "yt-dlp") {
+                    repository.update(task.id) { it.copy(status = TaskStatus.RESOLVING) }
+                    val resolved = ResolverRegistry.resolve(task.directUrl, defaultQuality)
                     if (resolved.isNullOrBlank()) {
-                        repository.updateStatus(task.id, TaskStatus.FAILED, errorMessage = "Could not resolve stream link")
+                        repository.update(task.id) { it.copy(status = TaskStatus.FAILED, errorMessage = "Could not resolve stream link") }
                         processQueue()
                         return@launch
                     }
-                    directUrl = resolved
+                    streamUrl = resolved
                 }
 
-                repository.updateStatus(task.id, TaskStatus.DOWNLOADING)
+                repository.update(task.id) { it.copy(status = TaskStatus.DOWNLOADING) }
 
                 val file = File(task.filePath)
-                val isExtractor = task.backend == "yt-dlp" || !task.isDirect
+                val isExtractor = task.backend == "yt-dlp"
 
                 YoutubeDlDownloader.download(
                     context = context,
                     taskId = task.id,
-                    sourceUrl = directUrl,
+                    sourceUrl = streamUrl,
                     targetFile = file,
                     backend = task.backend,
                     referer = "",
@@ -155,11 +155,10 @@ class DownloadEngine(
                     isExtractorTask = isExtractor,
                     onProgress = { progressFloat ->
                         val pct = progressFloat.toLong().coerceIn(0L, 100L)
-                        repository.updateProgress(task.id, pct, 100L, 0L)
+                        repository.update(task.id) { it.copy(downloadedBytes = pct, totalBytes = 100L) }
                     }
                 )
 
-                // Locate the downloaded file on disk
                 val actualFile = if (file.exists()) file else {
                     file.parentFile?.listFiles { f ->
                         f.name.startsWith(file.nameWithoutExtension) &&
@@ -170,10 +169,8 @@ class DownloadEngine(
                 }
 
                 if (actualFile.exists() && actualFile.length() > 1024) {
-                    repository.updateProgress(task.id, 100L, 100L, 0L)
-                    repository.updateStatus(task.id, TaskStatus.COMPLETED)
+                    repository.update(task.id) { it.copy(downloadedBytes = 100L, totalBytes = 100L, status = TaskStatus.COMPLETED) }
 
-                    // Notify Android MediaStore so video shows immediately in Gallery
                     try {
                         MediaScannerConnection.scanFile(
                             context,
@@ -183,12 +180,12 @@ class DownloadEngine(
                         )
                     } catch (_: Exception) {}
                 } else {
-                    repository.updateStatus(task.id, TaskStatus.FAILED, errorMessage = "Output file was empty")
+                    repository.update(task.id) { it.copy(status = TaskStatus.FAILED, errorMessage = "Output file was empty") }
                 }
             } catch (e: CancellationException) {
-                // Task was paused or cancelled
+                // Cancelled
             } catch (e: Exception) {
-                repository.updateStatus(task.id, TaskStatus.FAILED, errorMessage = e.message ?: "Download error")
+                repository.update(task.id) { it.copy(status = TaskStatus.FAILED, errorMessage = e.message ?: "Download error") }
             } finally {
                 activeJobs.remove(task.id)
                 processQueue()

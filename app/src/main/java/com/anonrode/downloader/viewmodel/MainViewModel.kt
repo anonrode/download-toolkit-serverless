@@ -11,11 +11,11 @@ import com.anonrode.downloader.data.models.ShowCard
 import com.anonrode.downloader.data.router.ParsedUrl
 import com.anonrode.downloader.data.router.UrlRouter
 import com.anonrode.downloader.engine.DownloadEngine
+import com.anonrode.downloader.engine.DownloadRepository
 import com.anonrode.downloader.providers.ProviderRegistry
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
-import java.io.File
 
 data class HomeUiState(
     val query: String = "",
@@ -33,7 +33,8 @@ data class HomeUiState(
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
-    val engine: DownloadEngine = (application as AnonApp).engine
+    private val repository = DownloadRepository()
+    val engine: DownloadEngine = DownloadEngine(application, repository)
 
     private val _uiState = MutableStateFlow(HomeUiState())
     val uiState: StateFlow<HomeUiState> = _uiState.asStateFlow()
@@ -59,7 +60,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun handlePastedInput(input: String, onOpenSocial: (String, String) -> Unit) {
         when (val parsed = UrlRouter.parse(input)) {
             is ParsedUrl.DramaUrl -> {
-                // Instantly open the show / episode drawer
                 openEpisodeDrawer(parsed.showCard)
             }
             is ParsedUrl.SocialUrl -> {
@@ -126,8 +126,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 val provider = ProviderRegistry.getProvider(show.site)
                 if (provider != null) {
-                    val details = provider.loadEpisodes(show.detailUrl)
-                    if (details != null && details.episodes.isNotEmpty()) {
+                    val details = provider.loadEpisodes(show.url)
+                    if (details.episodes.isNotEmpty()) {
                         _uiState.update {
                             it.copy(
                                 drawerEpisodes = details.episodes,
@@ -171,9 +171,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             showTitle = show.title,
             episodeNum = episode.episodeNum,
             episodeTitle = "${show.title} - ${episode.title}",
-            sourceUrl = episode.downloadPageUrl,
-            isDirect = episode.isDirect,
-            backend = if (episode.isDirect) "aria2c" else "aria2c",
+            sourceUrl = episode.url,
+            isDirect = false,
+            backend = "aria2c",
             parallelSockets = 16
         )
     }
@@ -185,9 +185,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 showTitle = show.title,
                 episodeNum = ep.episodeNum,
                 episodeTitle = "${show.title} - ${ep.title}",
-                sourceUrl = ep.downloadPageUrl,
-                isDirect = ep.isDirect,
-                backend = if (ep.isDirect) "aria2c" else "aria2c",
+                sourceUrl = ep.url,
+                isDirect = false,
+                backend = "aria2c",
                 parallelSockets = 16
             )
         }
