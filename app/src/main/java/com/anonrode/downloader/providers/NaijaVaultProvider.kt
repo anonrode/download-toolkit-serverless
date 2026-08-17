@@ -116,10 +116,28 @@ object NaijaVaultProvider : SiteProvider {
     }
 
     override suspend fun resolveEpisode(episodeUrl: String, quality: String): DownloadRecipe {
-        val direct = ResolverRegistry.resolve(episodeUrl, quality) ?: episodeUrl
+        var direct = ResolverRegistry.resolve(episodeUrl, quality)
+        if (direct == null && episodeUrl.contains("/dl-")) {
+            try {
+                val html = HttpClient.getText(episodeUrl) ?: ""
+                val duMatch = Regex("var\\s+downloadURL\\s*=\\s*\"([^\"]+)\"").find(html)
+                if (duMatch != null) {
+                    val cdnUrl = duMatch.groupValues[1]
+                    direct = ResolverRegistry.resolve(cdnUrl, quality) ?: cdnUrl
+                } else {
+                    // Fallback to scanning HTML for locker hosts (vikingfile, lulacloud, etc.)
+                    val lockerMatch = Regex("""https?://(?:www\.)?(?:vikingfile|lulacloud|waffi)\.[a-z0-9-]+/[^\s"'<>]+""", RegexOption.IGNORE_CASE).find(html)
+                    if (lockerMatch != null) {
+                        val lockerUrl = lockerMatch.groupValues[0]
+                        direct = ResolverRegistry.resolve(lockerUrl, quality) ?: lockerUrl
+                    }
+                }
+            } catch (_: Exception) {}
+        }
+        val finalUrl = direct ?: episodeUrl
         return DownloadRecipe(
-            directUrl = direct,
-            filename = direct.substringAfterLast('/').substringBefore('?').ifEmpty { "movie.mp4" },
+            directUrl = finalUrl,
+            filename = finalUrl.substringAfterLast('/').substringBefore('?').ifEmpty { "movie.mp4" },
             backend = "aria2c",
             parallelSockets = 16
         )

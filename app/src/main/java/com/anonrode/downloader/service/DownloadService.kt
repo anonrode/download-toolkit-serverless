@@ -10,6 +10,8 @@ import android.content.Intent
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.content.pm.ServiceInfo
+import androidx.core.app.ServiceCompat
 import androidx.core.app.NotificationCompat
 import com.anonrode.downloader.MainActivity
 
@@ -40,7 +42,16 @@ class DownloadService : Service() {
         if (now - lastUpdateTime >= 500L || progress >= 100 || progress == 0) {
             lastUpdateTime = now
             val notification = buildOngoingNotification(activeTitle, progress, activeCount)
-            startForeground(ONGOING_NOTIFICATION_ID, notification)
+            try {
+                ServiceCompat.startForeground(
+                    this,
+                    ONGOING_NOTIFICATION_ID,
+                    notification,
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC else 0
+                )
+            } catch (_: Exception) {
+                // Prevent ForegroundServiceStartNotAllowedException crash if system restarts service while app is backgrounded
+            }
         }
 
         return START_STICKY

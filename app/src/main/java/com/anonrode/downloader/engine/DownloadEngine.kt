@@ -41,6 +41,20 @@ class DownloadEngine(
 
     init {
         loadPreferences()
+        engineScope.launch {
+            // Auto-rescue tasks interrupted by app kill/crash
+            val currentTasks = repository.tasks.value
+            currentTasks.forEach { t ->
+                if (t.status == TaskStatus.DOWNLOADING || t.status == TaskStatus.RESOLVING) {
+                    repository.update(t.id) { it.copy(status = TaskStatus.QUEUED) }
+                }
+            }
+            networkObserver.status.collect { net ->
+                if (net.isConnected) {
+                    processQueue()
+                }
+            }
+        }
     }
 
     private fun loadPreferences() {
@@ -98,7 +112,7 @@ class DownloadEngine(
         audioOnly: Boolean = false
     ): String {
         val taskId = UUID.randomUUID().toString()
-        val downloadFolder = getDownloadDirectory(showTitle)
+        val downloadFolder = getDownloadDirectory(showTitle, createDirs = false)
 
         val cleanTitle = episodeTitle.replace(Regex("""[^a-zA-Z0-9._ -]"""), "_").trim()
         val ext = if (audioOnly) "mp3" else if (backend.contains("yt") || !isDirect) "mp4" else "mkv"
@@ -162,7 +176,7 @@ class DownloadEngine(
 
     private fun checkStorageAvailable(): Boolean {
         try {
-            val path = Environment.getExternalStorageDirectory()
+            val path = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
             val stat = StatFs(path.path)
             val freeGb = (stat.availableBlocksLong * stat.blockSizeLong).toDouble() / (1024.0 * 1024.0 * 1024.0)
             return freeGb >= storageGuardGb
@@ -171,13 +185,14 @@ class DownloadEngine(
         }
     }
 
-    private fun getDownloadDirectory(showTitle: String): File {
+    private fun getDownloadDirectory(showTitle: String, createDirs: Boolean = false): File {
         val root = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
         val base = File(root, "Anon")
         val dest = when {
             showTitle.startsWith("Social", ignoreCase = true) -> {
                 val platform = showTitle.substringAfter("Social/", "Generic").trim()
-                File(base, "Social/$platform")
+                val safePlatform = platform.replace(Regex("""[^a-zA-Z0-9.-]"""), "_")
+                File(base, "Social/$safePlatform")
             }
             showTitle.equals("Torrents", ignoreCase = true) -> File(base, "Torrents")
             autoOrganizeByShow && showTitle.isNotBlank() && showTitle != "Direct Downloads" -> {
@@ -186,7 +201,7 @@ class DownloadEngine(
             }
             else -> base
         }
-        if (!dest.exists()) dest.mkdirs()
+        if (createDirs && !dest.exists()) dest.mkdirs()
         return dest
     }
 
@@ -247,6 +262,23 @@ class DownloadEngine(
         startTask(nextTask)
     }
 
+    private fun isKnownLockerHost(url: String): Boolean {
+        val lower = url.lowercase()
+        return listOf(
+            "downloadwella.com",
+            "loadedfiles.",
+            "wetafiles.com",
+            "vikingfile.com",
+            "lulacloud.com",
+            "waffi",
+            "dood.",
+            "streamwish.",
+            "vidhide.",
+            "kissorgrab.com",
+            "nkiserv.com"
+        ).any { lower.contains(it) }
+    }
+
     private fun startTask(task: DownloadTask) {
         val job = engineScope.launch {
             try {
@@ -260,13 +292,16 @@ class DownloadEngine(
                     updateServiceState()
 
                     val resolved = ResolverRegistry.resolve(streamUrl, defaultQuality)
-                    if (!resolved.isNullOrBlank()) {
+                    if (activeJobs[task.id] == null) return@launch
+
+                    if (!resolved.isNullOrBlank() && !isKnownLockerHost(resolved)) {
                         streamUrl = resolved
                     } else {
-                        // Check if it's already a direct media URL (ends in .mp4/.mkv/.m3u8)
-                        val isDirectMedia = listOf(".mp4", ".mkv", ".m3u8", ".webm", ".avi").any { streamUrl.substringBefore('?').lowercase().endsWith(it) }
-                        if (!isDirectMedia) {
-                            repository.update(task.id) { it.copy(status = TaskStatus.FAILED, errorMessage = "Could not resolve stream link") }
+                        // Check if it's already a direct media URL (ends in .mp4/.mkv/.m3u8) AND not a raw locker page
+                        val isLocker = isKnownLockerHost(streamUrl)
+                        val isDirectMedia = listOf(".mp4", ".mkv", ".m3u8", ".webm", ".avi", ".ts").any { streamUrl.substringBefore('?').substringBefore('#').lowercase().endsWith(it) }
+                        if (isLocker || !isDirectMedia) {
+                            repository.update(task.id) { it.copy(status = TaskStatus.FAILED, errorMessage = "Could not crack stream link ($streamUrl)") }
                             return@launch
                         }
                     }
@@ -279,7 +314,7 @@ class DownloadEngine(
                 repository.update(task.id) { it.copy(status = TaskStatus.DOWNLOADING, directUrl = streamUrl) }
                 updateServiceState()
 
-                val targetFolder = getDownloadDirectory(task.showTitle)
+                val targetFolder = getDownloadDirectory(task.showTitle, createDirs = true)
                 val refererToPass = getRefererForUrl(streamUrl)
 
                 val producedFile = YoutubeDlDownloader.download(
@@ -290,6 +325,7 @@ class DownloadEngine(
                     preferredFilename = File(task.filePath).name,
                     backend = finalBackend,
                     referer = refererToPass,
+                    ua = HttpClient.DEFAULT_UA,
                     parallelSockets = if (finalBackend == "yt-dlp") 1 else task.parallelSockets,
                     quality = defaultQuality,
                     isExtractorTask = isExtractor,
@@ -323,10 +359,10 @@ class DownloadEngine(
                         MediaScannerConnection.scanFile(
                             context,
                             arrayOf(producedFile.absolutePath),
-                            arrayOf("video/*", "audio/*"),
+                            null,
                             null
                         )
-                    } catch (_: Exception) {}
+                    } catch (_: Throwable) {}
 
                     DownloadService.notifyCompleted(context, finalTitle)
                 } else {

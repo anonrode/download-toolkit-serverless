@@ -18,7 +18,7 @@ object UrlRouter {
         val lower = trimmed.lowercase()
 
         // 0. Magnet links
-        if (lower.startsWith("magnet:?")) {
+        if (lower.startsWith("magnet:")) {
             val titleMatch = Regex("""dn=([^&]+)""").find(trimmed)
             val title = titleMatch?.groupValues?.get(1)?.let {
                 try { URLDecoder.decode(it, "UTF-8") } catch (_: Exception) { "Torrent Download" }

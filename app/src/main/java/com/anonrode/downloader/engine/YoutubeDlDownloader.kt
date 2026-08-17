@@ -53,7 +53,7 @@ object YoutubeDlDownloader {
     ): File? {
         if (!targetDir.exists()) targetDir.mkdirs()
 
-        val isMagnet = sourceUrl.startsWith("magnet:?", ignoreCase = true)
+        val isMagnet = sourceUrl.startsWith("magnet:", ignoreCase = true)
         val isM3u8 = sourceUrl.lowercase().contains(".m3u8")
 
         val height = when (quality.lowercase()) {
@@ -96,6 +96,8 @@ object YoutubeDlDownloader {
                 val aria2Args = buildString {
                     append("aria2c:-x $conns -s $conns --min-split-size=1M --continue=true --disk-cache=32M")
                     if (origin.isNotBlank()) append(" --header=\"Origin: $origin\"")
+                    if (referer.isNotBlank()) append(" --header=\"Referer: $referer\"")
+                    if (ua.isNotBlank()) append(" --header=\"User-Agent: $ua\"")
                     append(" --header=\"Accept: video/mp4,video/x-matroska,video/*,*/*\"")
                     append(" --check-certificate=false")
                     append(" --summary-interval=1")
@@ -198,6 +200,12 @@ object YoutubeDlDownloader {
         val pb = ProcessBuilder(cmd)
         pb.redirectErrorStream(true)
         val process = pb.start()
+
+        if (Thread.currentThread().isInterrupted) {
+            process.destroy()
+            throw InterruptedException("Task was cancelled before process started")
+        }
+
         activeNativeProcesses[taskId] = process
 
         val progressRegex = Regex("""\((\d+)%\).*?DL:\s*([\d.]+[KMGT]?i?B)""", RegexOption.IGNORE_CASE)
@@ -213,7 +221,10 @@ object YoutubeDlDownloader {
                 }
                 line = reader.readLine()
             }
-            process.waitFor()
+            val exitCode = process.waitFor()
+            if (exitCode != 0) {
+                throw Exception("aria2c exited with code $exitCode")
+            }
         } catch (e: Exception) {
             process.destroy()
             throw e

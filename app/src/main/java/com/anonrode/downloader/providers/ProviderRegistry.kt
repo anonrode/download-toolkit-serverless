@@ -99,4 +99,13 @@ object ProviderRegistry {
         // source makes that whole failure class impossible regardless of caller.
         return withContext(Dispatchers.IO) { provider.loadEpisodes(show.url) }
     }
+
+    suspend fun resolveEpisode(site: String, episodeUrl: String, quality: String): DownloadRecipe {
+        val provider = getProvider(site) ?: return DownloadRecipe(
+            directUrl = episodeUrl,
+            filename = episodeUrl.substringAfterLast('/').substringBefore('?').ifEmpty { "media.mp4" },
+            backend = "aria2c"
+        )
+        return withContext(Dispatchers.IO) { provider.resolveEpisode(episodeUrl, quality) }
+    }
 }

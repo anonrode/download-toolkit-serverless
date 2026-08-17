@@ -113,8 +113,7 @@ class MainActivity : ComponentActivity() {
                     )
                 }
 
-                if (socialTarget != null) {
-                    val (platform, url) = socialTarget!!
+                socialTarget?.let { (platform, url) ->
                     SocialModal(
                         platform = platform,
                         url = url,
@@ -134,9 +133,11 @@ class MainActivity : ComponentActivity() {
     private fun handleShareIntent(intent: Intent?) {
         if (intent?.action == Intent.ACTION_SEND && intent.type == "text/plain") {
             val sharedText = intent.getStringExtra(Intent.EXTRA_TEXT)
-            if (!sharedText.isNullOrBlank()) {
-                viewModel.handlePastedInput(sharedText) { platform, url ->
-                    activeSocialTarget.value = Pair(platform, url)
+            val matcher = sharedText?.let { java.util.regex.Pattern.compile("""https?://[^\s"'<>]+""").matcher(it) }
+            val url = if (matcher?.find() == true) matcher.group(0) else sharedText?.trim()
+            if (!url.isNullOrBlank()) {
+                viewModel.handlePastedInput(url) { platform, u ->
+                    activeSocialTarget.value = Pair(platform, u)
                 }
             }
         }

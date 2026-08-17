@@ -65,51 +65,91 @@ object RocksProvider : SiteProvider {
 
             val episodes = mutableListOf<EpisodeItem>()
             val seen = mutableSetOf<String>()
-            val allLinks = doc.select("a[href]")
+            val entry = doc.selectFirst(".entry-content") ?: doc.body()
+
+            var currentSeason = 1
+            val slugMatch = Regex("""season-(\d{1,2})""", RegexOption.IGNORE_CASE).find(showUrl)
+                ?: Regex("""season\s*(\d{1,2})""", RegexOption.IGNORE_CASE).find(title)
+            if (slugMatch != null) {
+                currentSeason = slugMatch.groupValues[1].toIntOrNull() ?: 1
+            }
 
             var count = 1
-            for (a in allLinks) {
-                val rawHref = a.attr("href")
-                val href = a.attr("abs:href").ifBlank {
-                    if (rawHref.startsWith("http")) rawHref else java.net.URI(showUrl).resolve(rawHref).toString()
-                }
-                val lowerHref = href.lowercase()
+            val allElements = entry.allElements
+            for (elem in allElements) {
+                val tagName = elem.tagName().lowercase()
 
-                if (href.isBlank() || href in seen) continue
-                val isLocker = lowerHref.contains("loadedfiles") ||
-                        lowerHref.contains("downloadwella") ||
-                        lowerHref.contains("wetafiles") ||
-                        lowerHref.contains("waffi") ||
-                        lowerHref.contains("vikingfile") ||
-                        lowerHref.contains("lulacloud")
-
-                if (isLocker) {
-                    seen.add(href)
-                    val text = a.text().trim()
-                    val parent = a.parent()
-                    val parentText = parent?.text()?.trim() ?: ""
-
-                    val epMatch = Regex("""(?:EPISODE|EP|E)\s*(\d{1,3})""", RegexOption.IGNORE_CASE).find(text)
-                        ?: Regex("""(?:EPISODE|EP|E)\s*(\d{1,3})""", RegexOption.IGNORE_CASE).find(parentText)
-                        ?: Regex("""S\d{1,2}E(\d{1,3})""", RegexOption.IGNORE_CASE).find(href)
-
-                    val epNum = epMatch?.groupValues?.get(1)?.toIntOrNull() ?: count
-                    val baseName = "Episode $epNum"
-                    val label = if (text.isNotBlank() && text != baseName && text.length < 35 && !text.equals("Download", ignoreCase = true)) {
-                        "$baseName ($text)"
-                    } else {
-                        baseName
+                // Track active Season headings in page content
+                if (tagName in listOf("h1", "h2", "h3", "h4", "strong", "b", "p", "div")) {
+                    val t = elem.text().trim()
+                    val isExclusion = Regex("""\b(synopsis|storyline|about|comment|download|how to|click|added)\b""", RegexOption.IGNORE_CASE).containsMatchIn(t)
+                    if (t.length < 60 && !isExclusion) {
+                        val sm = Regex("""\b(?:SEASON|S)\s*(\d{1,2})\b(?!\s*-\s*\d+)""", RegexOption.IGNORE_CASE).find(t)
+                        if (sm != null) {
+                            currentSeason = sm.groupValues[1].toIntOrNull() ?: currentSeason
+                        }
                     }
+                }
 
-                    episodes.add(
-                        EpisodeItem(
-                            title = label,
-                            url = href,
-                            episodeNum = epNum,
-                            site = name
+                if (tagName == "a" && elem.hasAttr("href")) {
+                    val rawHref = elem.attr("href")
+                    val href = elem.attr("abs:href").ifBlank {
+                        if (rawHref.startsWith("http")) rawHref else java.net.URI(showUrl).resolve(rawHref).toString()
+                    }
+                    val lowerHref = href.lowercase()
+
+                    if (href.isBlank() || href in seen || href.contains("error?e=", ignoreCase = true) || href.contains("errore=", ignoreCase = true)) continue
+                    val isLocker = lowerHref.contains("loadedfiles") ||
+                            lowerHref.contains("downloadwella") ||
+                            lowerHref.contains("wetafiles") ||
+                            lowerHref.contains("waffi") ||
+                            lowerHref.contains("vikingfile") ||
+                            lowerHref.contains("lulacloud")
+
+                    if (isLocker) {
+                        seen.add(href)
+                        val text = elem.text().trim()
+                        val parentText = elem.parent()?.text()?.trim() ?: ""
+
+                        // Season ZIP detection
+                        val zipMatch = Regex("""\b(?:SEASON|S)\s*(\d{1,2})\b.*\bZIP\b""", RegexOption.IGNORE_CASE).find(parentText)
+                        val isZip = zipMatch != null || parentText.contains("ZIP", ignoreCase = true) || href.contains("ZIP", ignoreCase = true)
+                        if (isZip) {
+                            val zipSeason = zipMatch?.groupValues?.get(1)?.toIntOrNull() ?: currentSeason
+                            val zipLabel = "S%02d Complete Season ZIP".format(zipSeason)
+                            episodes.add(
+                                EpisodeItem(
+                                    title = zipLabel,
+                                    url = href,
+                                    episodeNum = count++,
+                                    site = name
+                                )
+                            )
+                            continue
+                        }
+
+                        val epMatch = Regex("""\b(?:EPISODE|EP|E)\s*(\d{1,3})\b""", RegexOption.IGNORE_CASE).find(text)
+                            ?: Regex("""\b(?:EPISODE|EP|E)\s*(\d{1,3})\b""", RegexOption.IGNORE_CASE).find(parentText)
+                            ?: Regex("""\bS\d{1,2}E(\d{1,3})\b""", RegexOption.IGNORE_CASE).find(href)
+
+                        val epNum = epMatch?.groupValues?.get(1)?.toIntOrNull() ?: count
+                        val epCode = "S%02dE%02d".format(currentSeason, epNum)
+                        val qMatch = Regex("""\b(\d{3,4}p)\b""", RegexOption.IGNORE_CASE).find(text)
+                            ?: Regex("""\b(\d{3,4}p)\b""", RegexOption.IGNORE_CASE).find(parentText)
+                        val qualitySuffix = qMatch?.let { " [${it.groupValues[1]}]" } ?: ""
+
+                        val label = "$epCode$qualitySuffix"
+
+                        episodes.add(
+                            EpisodeItem(
+                                title = label,
+                                url = href,
+                                episodeNum = currentSeason * 100 + epNum,
+                                site = name
+                            )
                         )
-                    )
-                    count++
+                        count++
+                    }
                 }
             }
 
