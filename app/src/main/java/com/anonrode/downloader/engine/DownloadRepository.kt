@@ -45,12 +45,19 @@ class DownloadRepository {
         }
     }
 
+    private val persistMutex = kotlinx.coroutines.sync.Mutex()
+
     fun persist() {
         val f = stateFile ?: return
         scope.launch {
-            try {
-                f.writeText(json.encodeToString(_tasks.value))
-            } catch (_: Throwable) {}
+            persistMutex.withLock {
+                try {
+                    val encoded = json.encodeToString(_tasks.value)
+                    val tmp = File(f.parentFile, "${f.name}.tmp")
+                    tmp.writeText(encoded)
+                    tmp.renameTo(f)
+                } catch (_: Throwable) {}
+            }
         }
     }
 
@@ -72,5 +79,6 @@ class DownloadRepository {
         _tasks.update { list ->
             list.map { if (it.id == taskId) transform(it) else it }
         }
+        persist()
     }
 }

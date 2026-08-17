@@ -52,7 +52,7 @@ object PlutoProvider : SiteProvider {
         val show = ShowCard(title = "Pluto Title", url = showUrl, site = name)
         try {
             val html = HttpClient.getText(showUrl, referer = "$mainUrl/") ?: return ShowDetails(show = show)
-            val doc = Jsoup.parse(html)
+            val doc = Jsoup.parse(html, showUrl)
             val episodes = mutableListOf<EpisodeItem>()
 
             val poster = doc.selectFirst("meta[property='og:image']")?.attr("content")
@@ -64,7 +64,10 @@ object PlutoProvider : SiteProvider {
                 var count = 1
                 val seen = mutableSetOf<String>()
                 for (a in epLinks) {
-                    val href = a.attr("abs:href")
+                    val rawHref = a.attr("href")
+                    val href = a.attr("abs:href").ifBlank {
+                        if (rawHref.startsWith("http")) rawHref else URI(showUrl).resolve(rawHref).toString()
+                    }
                     if (href.isBlank() || href in seen) continue
                     seen.add(href)
                     val epName = a.text().trim().ifEmpty { "Episode $count" }
@@ -79,7 +82,9 @@ object PlutoProvider : SiteProvider {
                 }
             } else {
                 // Movie download link from detail page
-                val dlLink = doc.selectFirst("a[href*='dl.plutomovies.com']")?.attr("abs:href") ?: showUrl
+                val dlLink = doc.selectFirst("a[href*='dl.plutomovies.com']")?.let {
+                    it.attr("abs:href").ifBlank { it.attr("href") }
+                } ?: showUrl
                 episodes.add(
                     EpisodeItem(
                         title = "Full Movie",

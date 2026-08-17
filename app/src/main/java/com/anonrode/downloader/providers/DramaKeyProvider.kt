@@ -81,23 +81,30 @@ object DramaKeyProvider : SiteProvider {
         val show = ShowCard(title = "Asian Drama", url = showUrl, site = name)
         try {
             val html = HttpClient.getText(showUrl) ?: return ShowDetails(show = show)
-            val doc = Jsoup.parse(html)
+            val doc = Jsoup.parse(html, showUrl)
 
             val title = doc.selectFirst("h1.entry-title, h1")?.text()?.trim() ?: "Asian Drama"
-            val poster = doc.selectFirst(".entry-content img, .post-thumbnail img")?.attr("abs:src") ?: ""
+            val poster = doc.selectFirst(".entry-content img, .post-thumbnail img, meta[property='og:image']")?.let {
+                if (it.tagName() == "meta") it.attr("content") else it.attr("abs:src").ifBlank { it.attr("src") }
+            } ?: ""
             val synopsis = doc.selectFirst(".entry-content p")?.text()?.trim() ?: ""
 
             val episodes = mutableListOf<EpisodeItem>()
-            val links = doc.select(".entry-content a[href*='download'], .entry-content a[href*='episode'], .entry-content a[href*='downloadwella']")
+            val seen = mutableSetOf<String>()
+            val links = doc.select("a[href*='download'], a[href*='episode'], a[href*='downloadwella'], .entry-content a")
 
             var count = 1
             for (a in links) {
-                val href = a.attr("abs:href")
+                val rawHref = a.attr("href")
+                val href = a.attr("abs:href").ifBlank {
+                    if (rawHref.startsWith("http")) rawHref else URI(showUrl).resolve(rawHref).toString()
+                }
                 val text = a.text().trim()
-                if (href.isNotBlank()) {
+                if (href.isNotBlank() && href !in seen && !href.contains("/category/") && !href.contains("/tag/")) {
+                    seen.add(href)
                     episodes.add(
                         EpisodeItem(
-                            title = if (text.isNotBlank()) text else "Episode $count",
+                            title = if (text.isNotBlank() && !text.equals("Download", ignoreCase = true)) text else "Episode $count",
                             url = href,
                             episodeNum = count++,
                             site = name

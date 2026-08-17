@@ -50,20 +50,31 @@ object AsianCProvider : SiteProvider {
         val show = ShowCard(title = "Asian Drama", url = showUrl, site = name)
         try {
             val html = HttpClient.getText(showUrl, referer = "$mainUrl/") ?: return ShowDetails(show = show)
-            val doc = Jsoup.parse(html)
+            val doc = Jsoup.parse(html, showUrl)
 
             val title = doc.selectFirst("h1, .info h1")?.text()?.trim() ?: "Asian Drama"
-            val poster = doc.selectFirst(".img img, .details img")?.attr("abs:src") ?: ""
+            val poster = doc.selectFirst(".img img, .details img, meta[property='og:image']")?.let {
+                if (it.tagName() == "meta") it.attr("content") else it.attr("abs:src").ifBlank { it.attr("src") }
+            } ?: ""
             val synopsis = doc.selectFirst(".info p, .details p")?.text()?.trim() ?: ""
 
             val episodes = mutableListOf<EpisodeItem>()
+            val seen = mutableSetOf<String>()
             val epLinks = doc.select("ul.list-episode-item-2 li a, .all-episodes li a, .list-episode a, .list-episode-item a, a[href*='-episode-']")
 
             for (link in epLinks) {
-                val href = link.attr("abs:href")
+                val rawHref = link.attr("href")
+                val href = link.attr("abs:href").ifBlank {
+                    if (rawHref.startsWith("http")) rawHref else URI(showUrl).resolve(rawHref).toString()
+                }
+                if (href.isBlank() || href in seen) continue
+                seen.add(href)
+
                 val epRaw = link.selectFirst(".title, h3")?.text()?.trim() ?: link.text().trim()
                 val epNum = Regex("""(?:Episode|Ep|E)\s*(\d+)""", RegexOption.IGNORE_CASE)
-                    .find(epRaw)?.groupValues?.get(1)?.toIntOrNull() ?: (episodes.size + 1)
+                    .find(epRaw)?.groupValues?.get(1)?.toIntOrNull()
+                    ?: Regex("""episode-(\d+)""", RegexOption.IGNORE_CASE).find(href)?.groupValues?.get(1)?.toIntOrNull()
+                    ?: (episodes.size + 1)
 
                 val cleanTitle = if (epRaw.contains("Episode", ignoreCase = true)) {
                     "Episode $epNum" + if (epRaw.contains("RAW", ignoreCase = true)) " (RAW)" else ""
@@ -71,16 +82,14 @@ object AsianCProvider : SiteProvider {
                     "Episode $epNum"
                 }
 
-                if (href.isNotBlank()) {
-                    episodes.add(
-                        EpisodeItem(
-                            title = cleanTitle,
-                            url = href,
-                            episodeNum = epNum,
-                            site = name
-                        )
+                episodes.add(
+                    EpisodeItem(
+                        title = cleanTitle,
+                        url = href,
+                        episodeNum = epNum,
+                        site = name
                     )
-                }
+                )
             }
 
             val card = ShowCard(title = title, url = showUrl, posterUrl = poster, site = name)
@@ -95,9 +104,9 @@ object AsianCProvider : SiteProvider {
         if (direct.isNullOrBlank()) {
             try {
                 val html = HttpClient.getText(episodeUrl, referer = "$mainUrl/") ?: ""
-                val doc = Jsoup.parse(html)
+                val doc = Jsoup.parse(html, episodeUrl)
                 for (iframe in doc.select("iframe[src]")) {
-                    var src = iframe.attr("src")
+                    var src = iframe.attr("abs:src").ifBlank { iframe.attr("src") }
                     if (src.startsWith("//")) src = "https:$src"
                     else if (src.startsWith("/")) src = URI(episodeUrl).resolve(src).toString()
 

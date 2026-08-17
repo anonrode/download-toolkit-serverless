@@ -22,12 +22,12 @@ object DynamicRulesManager {
         "nkiri" to "https://thenkiri.com",
         "dramakey" to "https://dramakey.com",
         "asianc" to "https://asianc.id",
-        "anitaku" to "https://gogoanime.or.at",
+        "anitaku" to "https://anitaku.com.ro",
         "pluto" to "https://plutomovies.com",
         "dramarain" to "https://dramarain.com",
-        "9jarocks" to "https://9jarocks.com",
+        "9jarocks" to "https://www.my9jarocks.bz",
         "naijavault" to "https://naijavault.com",
-        "naijaprey" to "https://www.naijaprey.tv",
+        "naijaprey" to "https://naijaprey.com",
         "nepu" to "https://nepu.gd",
         "torrents" to "https://apibay.org"
     )

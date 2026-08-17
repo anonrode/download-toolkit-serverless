@@ -35,12 +35,15 @@ import kotlinx.coroutines.withContext
 @Composable
 fun SettingsSheet(
     viewModel: MainViewModel,
+    themeMode: String = "dark",
+    onThemeChanged: (String) -> Unit = {},
     onDismiss: () -> Unit
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
+    var currentThemeMode by remember(themeMode) { mutableStateOf(themeMode) }
     var maxConcurrent by remember { mutableStateOf(viewModel.engine.maxConcurrentDownloads) }
     var sockets by remember { mutableStateOf(viewModel.engine.parallelSocketsPerFile) }
     var quality by remember { mutableStateOf(viewModel.engine.defaultQuality) }
@@ -187,6 +190,85 @@ fun SettingsSheet(
                         }
                     }
                 )
+            }
+
+            Spacer(modifier = Modifier.height(Spacing.lg))
+
+            // SECTION: Appearance & Theme
+            SettingsCategoryHeader(title = "Appearance & Theme")
+            SettingsCard {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = Spacing.md, vertical = Spacing.md),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        modifier = Modifier.weight(1f),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(Spacing.md)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(36.dp)
+                                .background(SurfaceElevated, RoundedCornerShape(Radius.sm)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = when (currentThemeMode) {
+                                    "light" -> Icons.Rounded.LightMode
+                                    "dark" -> Icons.Rounded.DarkMode
+                                    else -> Icons.Rounded.BrightnessAuto
+                                },
+                                contentDescription = null,
+                                tint = AccentPrimary,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                        Column {
+                            Text(
+                                text = "App Theme",
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = TextPrimary
+                            )
+                            Text(
+                                text = when (currentThemeMode) {
+                                    "light" -> "Light Mode"
+                                    "dark" -> "Dark Mode (OLED)"
+                                    else -> "System Default"
+                                },
+                                fontSize = 11.sp,
+                                color = TextSecondary
+                            )
+                        }
+                    }
+
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        listOf("Dark" to "dark", "Light" to "light", "Auto" to "system").forEach { (label, mode) ->
+                            val isSel = currentThemeMode.equals(mode, ignoreCase = true)
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(if (isSel) AccentPrimary else SurfaceElevated)
+                                    .clickable {
+                                        currentThemeMode = mode
+                                        onThemeChanged(mode)
+                                    }
+                                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = label,
+                                    fontSize = 11.sp,
+                                    fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal,
+                                    color = if (isSel) (if (AnonTheme.colors.isDark) Color.Black else Color.White) else TextSecondary
+                                )
+                            }
+                        }
+                    }
+                }
             }
 
             Spacer(modifier = Modifier.height(Spacing.lg))

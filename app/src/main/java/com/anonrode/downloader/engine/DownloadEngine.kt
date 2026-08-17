@@ -127,9 +127,7 @@ class DownloadEngine(
     fun pause(taskId: String) {
         activeJobs[taskId]?.cancel()
         activeJobs.remove(taskId)
-        try {
-            YoutubeDL.getInstance().destroyProcessById(taskId)
-        } catch (_: Exception) {}
+        YoutubeDlDownloader.killProcess(taskId)
         repository.update(taskId) { it.copy(status = TaskStatus.PAUSED, speedBytesPerSec = 0.0) }
         updateServiceState()
         processQueue()
@@ -138,9 +136,7 @@ class DownloadEngine(
     fun cancel(taskId: String) {
         activeJobs[taskId]?.cancel()
         activeJobs.remove(taskId)
-        try {
-            YoutubeDL.getInstance().destroyProcessById(taskId)
-        } catch (_: Exception) {}
+        YoutubeDlDownloader.killProcess(taskId)
         repository.remove(taskId)
         updateServiceState()
         processQueue()
@@ -255,29 +251,35 @@ class DownloadEngine(
         val job = engineScope.launch {
             try {
                 var streamUrl = task.directUrl
-                val isMagnet = streamUrl.startsWith("magnet:")
-                val isHlsStream = streamUrl.contains(".m3u8") || streamUrl.contains("manifest")
-                val isExplicitYtdlp = task.backend.contains("yt-dlp") || task.backend.contains("ytdlp")
-                val isSocialOrYtdlp = isExplicitYtdlp || isHlsStream
+                val isMagnet = streamUrl.startsWith("magnet:", ignoreCase = true)
+                val isSocial = task.showTitle.startsWith("Social/", ignoreCase = true) || task.backend.contains("yt-dlp")
 
-                if (!isMagnet && !isSocialOrYtdlp && !streamUrl.startsWith("http")) {
+                // If not a magnet and not a social media URL, resolve locker/embed URLs to direct stream/manifest URLs
+                if (!isMagnet && !isSocial) {
                     repository.update(task.id) { it.copy(status = TaskStatus.RESOLVING) }
                     updateServiceState()
 
                     val resolved = ResolverRegistry.resolve(streamUrl, defaultQuality)
-                    if (resolved.isNullOrBlank()) {
-                        repository.update(task.id) { it.copy(status = TaskStatus.FAILED, errorMessage = "Could not resolve stream link") }
-                        return@launch
+                    if (!resolved.isNullOrBlank()) {
+                        streamUrl = resolved
+                    } else {
+                        // Check if it's already a direct media URL (ends in .mp4/.mkv/.m3u8)
+                        val isDirectMedia = listOf(".mp4", ".mkv", ".m3u8", ".webm", ".avi").any { streamUrl.substringBefore('?').lowercase().endsWith(it) }
+                        if (!isDirectMedia) {
+                            repository.update(task.id) { it.copy(status = TaskStatus.FAILED, errorMessage = "Could not resolve stream link") }
+                            return@launch
+                        }
                     }
-                    streamUrl = resolved
                 }
 
-                repository.update(task.id) { it.copy(status = TaskStatus.DOWNLOADING) }
+                val isHlsStream = streamUrl.lowercase().contains(".m3u8") || streamUrl.lowercase().contains("manifest")
+                val finalBackend = if (isSocial || isHlsStream) "yt-dlp" else "aria2c"
+                val isExtractor = isSocial
+
+                repository.update(task.id) { it.copy(status = TaskStatus.DOWNLOADING, directUrl = streamUrl) }
                 updateServiceState()
 
                 val targetFolder = getDownloadDirectory(task.showTitle)
-                val finalBackend = if (isSocialOrYtdlp || streamUrl.contains(".m3u8")) "yt-dlp" else "aria2c"
-                val isExtractor = finalBackend == "yt-dlp"
                 val refererToPass = getRefererForUrl(streamUrl)
 
                 val producedFile = YoutubeDlDownloader.download(

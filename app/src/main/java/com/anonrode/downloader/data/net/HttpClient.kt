@@ -8,12 +8,21 @@ import java.util.concurrent.TimeUnit
 object HttpClient {
     const val DEFAULT_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
+    private val pool = okhttp3.ConnectionPool(64, 5, TimeUnit.MINUTES)
+    private val dispatcher = okhttp3.Dispatcher().apply {
+        maxRequests = 128
+        maxRequestsPerHost = 32
+    }
+
     val shared: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(20, TimeUnit.SECONDS)
-        .readTimeout(25, TimeUnit.SECONDS)
-        .writeTimeout(20, TimeUnit.SECONDS)
+        .connectionPool(pool)
+        .dispatcher(dispatcher)
+        .connectTimeout(4, TimeUnit.SECONDS)
+        .readTimeout(6, TimeUnit.SECONDS)
+        .writeTimeout(6, TimeUnit.SECONDS)
         .followRedirects(true)
         .followSslRedirects(true)
+        .retryOnConnectionFailure(true)
         .build()
 
     fun get(url: String, referer: String? = null, headers: Map<String, String> = emptyMap()): Response {

@@ -63,6 +63,10 @@ object YoutubeDlDownloader {
             else -> 720
         }
 
+        if (isMagnet) {
+            return downloadMagnetAria2c(context, taskId, sourceUrl, targetDir, preferredFilename, onProgress)
+        }
+
         val request = YoutubeDLRequest(sourceUrl).apply {
             if (isExtractorTask) {
                 // True Monolith Metadata Naming Template with user-configured quality
@@ -77,16 +81,6 @@ object YoutubeDlDownloader {
                     addOption("--merge-output-format", "mp4")
                 }
                 addOption("--no-playlist")
-            } else if (isMagnet) {
-                // High-Speed Android BitTorrent aria2c Engine
-                addOption("-o", File(targetDir, "%(title)s.%(ext)s").absolutePath)
-                addOption("--downloader", "libaria2c.so")
-                val bittorrentArgs = buildString {
-                    append("aria2c:--enable-dht=true --enable-dht6=true --enable-peer-exchange=true --bt-enable-lpd=true")
-                    append(" --bt-max-peers=120 --seed-time=0 --disk-cache=32M --summary-interval=1")
-                    append(" --bt-tracker=$TIER1_TRACKERS")
-                }
-                addOption("--downloader-args", bittorrentArgs)
             } else if (isM3u8) {
                 // HLS m3u8 stream variant selection based on user quality setting
                 val stem = File(targetDir, preferredFilename.substringBeforeLast('.')).absolutePath
@@ -152,5 +146,102 @@ object YoutubeDlDownloader {
         return fresh.firstOrNull { it.nameWithoutExtension == stem || it.name.startsWith("$stem.") }
             ?: fresh.maxByOrNull { it.lastModified() }
             ?: candidates.firstOrNull { it.nameWithoutExtension == stem || it.name.startsWith("$stem.") }
+    }
+
+    private val activeNativeProcesses = java.util.concurrent.ConcurrentHashMap<String, Process>()
+
+    fun killProcess(taskId: String) {
+        try {
+            YoutubeDL.getInstance().destroyProcessById(taskId)
+        } catch (_: Exception) {}
+        activeNativeProcesses.remove(taskId)?.let { p ->
+            try {
+                p.destroy()
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                    p.destroyForcibly()
+                }
+            } catch (_: Exception) {}
+        }
+    }
+
+    private fun downloadMagnetAria2c(
+        context: Context,
+        taskId: String,
+        magnetUrl: String,
+        targetDir: File,
+        preferredFilename: String,
+        onProgress: (Float) -> Unit
+    ): File? {
+        val before = targetDir.listFiles()?.map { it.absolutePath }?.toSet() ?: emptySet()
+
+        val aria2Exec = findAria2Executable(context)
+        val cmd = mutableListOf(
+            aria2Exec.absolutePath,
+            "--enable-dht=true",
+            "--bt-enable-lpd=true",
+            "--enable-peer-exchange=true",
+            "--dht-entry-point=router.bittorrent.com:6881",
+            "--dht-entry-point6=router.bittorrent.com:6881",
+            "--seed-time=0",
+            "--seed-ratio=0.0",
+            "--summary-interval=1",
+            "--bt-max-peers=120",
+            "--file-allocation=none",
+            "--check-certificate=false",
+            "--bt-metadata-only=false",
+            "--continue=true",
+            "--bt-tracker=$TIER1_TRACKERS",
+            "-d", targetDir.absolutePath,
+            magnetUrl
+        )
+
+        val pb = ProcessBuilder(cmd)
+        pb.redirectErrorStream(true)
+        val process = pb.start()
+        activeNativeProcesses[taskId] = process
+
+        val progressRegex = Regex("""\((\d+)%\).*?DL:\s*([\d.]+[KMGT]?i?B)""", RegexOption.IGNORE_CASE)
+        val reader = process.inputStream.bufferedReader()
+
+        try {
+            var line: String? = reader.readLine()
+            while (line != null) {
+                val match = progressRegex.find(line)
+                if (match != null) {
+                    val pct = match.groupValues[1].toFloatOrNull() ?: 0f
+                    onProgress(pct)
+                }
+                line = reader.readLine()
+            }
+            process.waitFor()
+        } catch (e: Exception) {
+            process.destroy()
+            throw e
+        } finally {
+            activeNativeProcesses.remove(taskId)
+        }
+
+        fun isFinal(f: File) = f.length() > 0 &&
+                !f.name.endsWith(".aria2") && !f.name.endsWith(".part") && !f.name.endsWith(".ytdl")
+
+        val candidates = targetDir.listFiles { f -> isFinal(f) }?.toList() ?: emptyList()
+        val fresh = candidates.filter { it.absolutePath !in before }
+        val stem = preferredFilename.substringBeforeLast('.')
+        return fresh.firstOrNull { it.nameWithoutExtension == stem || it.name.startsWith("$stem.") }
+            ?: fresh.maxByOrNull { it.lastModified() }
+            ?: candidates.maxByOrNull { it.lastModified() }
+    }
+
+    private fun findAria2Executable(context: Context): File {
+        val libDir = File(context.applicationInfo.nativeLibraryDir, "libaria2c.so")
+        if (libDir.exists()) return libDir
+
+        val binDir = File(context.filesDir, "bin/aria2c")
+        if (binDir.exists()) return binDir
+
+        val packagesDir = File(context.filesDir, "packages/aria2c/usr/bin/aria2c")
+        if (packagesDir.exists()) return packagesDir
+
+        return libDir
     }
 }
