@@ -189,12 +189,12 @@ object KisskhMegaplayResolver : BaseResolver {
 
             // animesama layout
             val smMatcher = Pattern.compile("""const\s+STREAM\s*=\s*["']([^"']+)["']""").matcher(html)
-            if (smMatcher.find()) return smMatcher.group(1)?.replace("\/", "/")
+            if (smMatcher.find()) return smMatcher.group(1)?.replace("\\/", "/")
 
             // megaplays / takuembed layout
             val defMatcher = Pattern.compile("""var\s+defaultUrl\s*=\s*["']([^"']+)["']""").matcher(html)
             if (defMatcher.find()) {
-                val targetUrl = defMatcher.group(1)?.replace("\/", "/") ?: ""
+                val targetUrl = defMatcher.group(1)?.replace("\\/", "/") ?: ""
                 val pbMatcher = Pattern.compile("""var\s+proxyBase\s*=\s*["']([^"']+)["']""").matcher(html)
                 if (pbMatcher.find()) {
                     val proxyBase = pbMatcher.group(1) ?: ""

@@ -46,8 +46,8 @@ object TorrentSecurityShield {
     private val INFOHASH_B32 = Pattern.compile("^[A-Z2-7]{32}$")
 
     // --- Layer 4: Shell & URI Dangerous Characters ---
-    private val SHELL_DANGER = Pattern.compile("[;&|`$\r\n\x00-\x1f]")
-    private val MAGNET_DANGER = Pattern.compile("[;|`$\r\n\x00-\x1f]")
+    private val SHELL_DANGER = Pattern.compile("[;&|`$\\r\\n\\u0000-\\u001f]")
+    private val MAGNET_DANGER = Pattern.compile("[;|`$\\r\\n\\u0000-\\u001f]")
 
     // High-uptime public trackers
     val TRACKERS = listOf(

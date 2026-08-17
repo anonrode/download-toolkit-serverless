@@ -32,7 +32,7 @@ object NkiriProvider : SiteProvider {
                     val link = rawLink.substringBefore("?") // Strip tracking UTM params
 
                     val desc = item.selectFirst("description")?.text() ?: ""
-                    val content = item.selectFirst("content\:encoded")?.text() ?: ""
+                    val content = item.selectFirst("content\\:encoded")?.text() ?: item.selectFirst("content:encoded")?.text() ?: ""
                     var poster = Regex("""<img[^>]+src=["']([^"']+\.(?:jpg|jpeg|png|webp)[^"']*)["']""", RegexOption.IGNORE_CASE)
                         .find(desc)?.groupValues?.get(1)
                         ?: Regex("""<img[^>]+src=["']([^"']+\.(?:jpg|jpeg|png|webp)[^"']*)["']""", RegexOption.IGNORE_CASE)

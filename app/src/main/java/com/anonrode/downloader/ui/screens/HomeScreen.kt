@@ -111,7 +111,6 @@ fun HomeScreen(
                 }
 
                 Row(horizontalArrangement = Arrangement.spacedBy(Spacing.sm)) {
-                    // Downloads screen shortcut with live badge
                     IconButton(
                         onClick = onOpenDownloads,
                         modifier = Modifier
@@ -139,7 +138,6 @@ fun HomeScreen(
                         }
                     }
 
-                    // Settings modal shortcut
                     IconButton(
                         onClick = onOpenSettings,
                         modifier = Modifier
@@ -303,7 +301,7 @@ fun HomeScreen(
                     modifier = Modifier.fillMaxSize(),
                     contentAlignment = Alignment.Center
                 ) {
-                    Text("No results found for "${uiState.query}"", color = TextMuted, fontSize = 14.sp)
+                    Text("No results found for \"${uiState.query}\"", color = TextMuted, fontSize = 14.sp)
                 }
             } else if (uiState.searchResults.isEmpty()) {
                 Box(
@@ -484,7 +482,6 @@ private fun tileColor(title: String): Color {
     return TILE_COLORS[idx]
 }
 
-// Clean specLine that shows Category and Year without repeating the site name
 private fun specLine(show: ShowCard): String {
     val parts = buildList {
         if (show.category.isNotBlank() && !show.category.startsWith("⭐") && !show.category.startsWith("🛡️")) {

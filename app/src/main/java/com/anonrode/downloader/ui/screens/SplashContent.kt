@@ -11,19 +11,21 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.ui.draw.clip
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.ArrowDownward
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -33,15 +35,6 @@ import com.anonrode.downloader.ui.theme.SurfaceElevated
 import com.anonrode.downloader.ui.theme.TextPrimary
 import com.anonrode.downloader.ui.theme.TextSecondary
 
-/**
- * A designed Compose splash rendered as the FIRST screen.
- *
- * The system SplashScreen API dismisses the moment the first frame is drawn, so
- * on a fast device it's never perceived -- which is why "the splash doesn't show
- * at startup." This composable is held for a short fixed beat by MainActivity
- * (a plain delay), guaranteeing the brand is actually seen. Pure black to match
- * the AMOLED theme; the wordmark fades in so it doesn't pop.
- */
 @Composable
 fun SplashContent() {
     var visible by remember { mutableStateOf(false) }
