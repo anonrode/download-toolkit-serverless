@@ -14,12 +14,14 @@ import com.anonrode.downloader.engine.DownloadRepository
 import com.anonrode.downloader.providers.ProviderRegistry
 import com.anonrode.downloader.providers.RelevanceScorer
 import com.anonrode.downloader.util.NetworkObserver
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 data class HomeUiState(
     val query: String = "",
@@ -157,7 +159,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         viewModelScope.launch {
             try {
-                val details = ProviderRegistry.loadEpisodes(show)
+                val details = withContext(Dispatchers.IO) {
+                    ProviderRegistry.loadEpisodes(show)
+                }
                 _uiState.update {
                     it.copy(
                         drawerEpisodes = details.episodes,

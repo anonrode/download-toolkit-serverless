@@ -70,17 +70,33 @@ object NaijaVaultProvider : SiteProvider {
 
             val episodes = mutableListOf<EpisodeItem>()
             val seen = mutableSetOf<String>()
-            val links = doc.select(".entry-content a[href*='download'], .entry-content a[href*='loadedfiles'], .entry-content a[href*='waffi'], .entry-content a[href*='downloadwella']")
+            val allLinks = doc.select(".entry-content a[href]")
 
             var count = 1
-            for (a in links) {
+            for (a in allLinks) {
                 val rawHref = a.attr("href")
                 val href = a.attr("abs:href").ifBlank {
                     if (rawHref.startsWith("http")) rawHref else URI(showUrl).resolve(rawHref).toString()
                 }
-                val text = a.text().trim()
-                if (href.isNotBlank() && href !in seen) {
+                val lowerHref = href.lowercase()
+
+                if (href.isBlank() || href in seen) continue
+                // Skip social/navigation links
+                if (lowerHref.contains("telegram") || lowerHref.contains("facebook") || lowerHref.contains("twitter") || lowerHref.contains("whatsapp")) continue
+
+                val isDownloadLink = lowerHref.contains("/dl-") ||
+                        lowerHref.contains("lulacloud.com") ||
+                        lowerHref.contains("pixeldrain.com") ||
+                        lowerHref.contains("loadedfiles") ||
+                        lowerHref.contains("downloadwella") ||
+                        lowerHref.contains("wetafiles") ||
+                        lowerHref.contains("waffi") ||
+                        lowerHref.contains("vikingfile") ||
+                        lowerHref.contains("nkiserv")
+
+                if (isDownloadLink) {
                     seen.add(href)
+                    val text = a.text().trim()
                     episodes.add(
                         EpisodeItem(
                             title = if (text.isNotBlank() && !text.equals("Download", ignoreCase = true)) text else "Download $count",
