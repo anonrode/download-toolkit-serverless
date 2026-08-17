@@ -1,6 +1,7 @@
 package com.anonrode.downloader.providers
 
 import com.anonrode.downloader.data.models.ShowCard
+import com.anonrode.downloader.data.models.ShowDetails
 import com.anonrode.downloader.data.rules.DynamicRulesManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
