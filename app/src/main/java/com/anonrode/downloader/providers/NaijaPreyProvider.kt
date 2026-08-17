@@ -8,6 +8,7 @@ import com.anonrode.downloader.data.models.ShowDetails
 import com.anonrode.downloader.data.net.HttpClient
 import com.anonrode.downloader.resolvers.ResolverRegistry
 import org.jsoup.Jsoup
+import java.net.URI
 import java.net.URLEncoder
 
 object NaijaPreyProvider : SiteProvider {

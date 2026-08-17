@@ -6,6 +6,8 @@ import android.util.Log
 import coil.ImageLoader
 import coil.ImageLoaderFactory
 import com.anonrode.downloader.data.net.HttpClient
+import com.anonrode.downloader.engine.DownloadEngine
+import com.anonrode.downloader.engine.DownloadRepository
 import com.yausername.ffmpeg.FFmpeg
 import com.yausername.aria2c.Aria2c
 import com.yausername.youtubedl_android.YoutubeDL
@@ -18,8 +20,14 @@ import kotlinx.coroutines.sync.withLock
 
 class AnonApp : Application(), ImageLoaderFactory {
 
+    lateinit var engine: DownloadEngine
+        private set
+
     override fun onCreate() {
         super.onCreate()
+        instance = this
+        repository.initPersistence(filesDir)
+        engine = DownloadEngine(this, repository, com.anonrode.downloader.util.NetworkObserver(this))
         com.anonrode.downloader.util.CrashHandler.install(this)
         appScope.launch {
             try {
@@ -73,6 +81,14 @@ class AnonApp : Application(), ImageLoaderFactory {
     }
 
     companion object {
+        lateinit var instance: AnonApp
+            private set
+
+        val repository: DownloadRepository by lazy { DownloadRepository() }
+
+        val downloadEngine: DownloadEngine
+            get() = instance.engine
+
         private val appScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
         private val initMutex = Mutex()
 
