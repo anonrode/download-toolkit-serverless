@@ -12,8 +12,13 @@ import com.anonrode.downloader.data.router.UrlRouter
 import com.anonrode.downloader.engine.DownloadEngine
 import com.anonrode.downloader.engine.DownloadRepository
 import com.anonrode.downloader.providers.ProviderRegistry
+import com.anonrode.downloader.providers.RelevanceScorer
+import com.anonrode.downloader.util.NetworkObserver
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 data class HomeUiState(
@@ -33,7 +38,7 @@ data class HomeUiState(
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val repository = DownloadRepository()
-    val engine: DownloadEngine = DownloadEngine(application, repository)
+    val engine: DownloadEngine = DownloadEngine(application, repository, NetworkObserver(application))
 
     private val _uiState = MutableStateFlow(HomeUiState())
     val uiState: StateFlow<HomeUiState> = _uiState.asStateFlow()
@@ -110,44 +115,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (q.isBlank()) return
 
         searchJob?.cancel()
-        _uiState.update { it.copy(isSearching = true, searchError = null, searchResults = emptyList()) }
-
         searchJob = viewModelScope.launch {
+            _uiState.update { it.copy(isSearching = true, searchResults = emptyList(), searchError = null) }
+
+            val filter = _uiState.value.selectedFilter
+            val collected = mutableListOf<ShowCard>()
+
             try {
-                val filter = _uiState.value.selectedFilter
-                ProviderRegistry.searchStreaming(q, filter).collect { partialResults ->
-                    _uiState.update {
-                        it.copy(
-                            searchResults = partialResults,
-                            isSearching = false
-                        )
-                    }
+                ProviderRegistry.searchFlow(q, filter).collect { incomingBatch ->
+                    collected.addAll(incomingBatch)
+                    val deduplicatedAndRanked = RelevanceScorer.filterAndSort(q, collected)
+                    _uiState.update { it.copy(searchResults = deduplicatedAndRanked) }
                 }
             } catch (e: Exception) {
-                _uiState.update {
-                    it.copy(
-                        isSearching = false,
-                        searchError = e.message ?: "Search encountered an error"
-                    )
-                }
+                _uiState.update { it.copy(searchError = e.message) }
+            } finally {
+                _uiState.update { it.copy(isSearching = false) }
             }
         }
     }
 
     fun openEpisodeDrawer(show: ShowCard) {
-        if (show.url.startsWith("magnet:?")) {
-            engine.enqueue(
-                showTitle = "Torrents",
-                episodeNum = 1,
-                episodeTitle = show.title,
-                sourceUrl = show.url,
-                isDirect = true,
-                backend = "aria2c",
-                parallelSockets = 16
-            )
-            return
-        }
-
         _uiState.update {
             it.copy(
                 activeShowForDrawer = show,
@@ -159,37 +147,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         viewModelScope.launch {
             try {
-                val provider = ProviderRegistry.getProvider(show.site)
-                if (provider != null) {
-                    val details = provider.loadEpisodes(show.url)
-                    if (details.episodes.isNotEmpty()) {
-                        _uiState.update {
-                            it.copy(
-                                drawerEpisodes = details.episodes,
-                                isEpisodesLoading = false
-                            )
-                        }
-                    } else {
-                        _uiState.update {
-                            it.copy(
-                                isEpisodesLoading = false,
-                                episodesError = "No episodes found for this show"
-                            )
-                        }
-                    }
-                } else {
-                    _uiState.update {
-                        it.copy(
-                            isEpisodesLoading = false,
-                            episodesError = "Unknown provider: ${show.site}"
-                        )
-                    }
+                val details = ProviderRegistry.loadEpisodes(show)
+                _uiState.update {
+                    it.copy(
+                        drawerEpisodes = details.episodes,
+                        isEpisodesLoading = false,
+                        episodesError = if (details.episodes.isEmpty()) "No episodes found on this page" else null
+                    )
                 }
             } catch (e: Exception) {
                 _uiState.update {
                     it.copy(
                         isEpisodesLoading = false,
-                        episodesError = e.message ?: "Failed to load episodes"
+                        episodesError = "Failed to load episodes: ${e.message}"
                     )
                 }
             }

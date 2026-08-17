@@ -1,6 +1,5 @@
 package com.anonrode.downloader.providers
 
-import com.anonrode.downloader.data.rules.DynamicRulesManager
 import com.anonrode.downloader.data.models.DownloadRecipe
 import com.anonrode.downloader.data.models.EpisodeItem
 import com.anonrode.downloader.data.models.ShowCard
@@ -8,30 +7,37 @@ import com.anonrode.downloader.data.models.ShowDetails
 import com.anonrode.downloader.data.net.HttpClient
 import com.anonrode.downloader.resolvers.ResolverRegistry
 import org.jsoup.Jsoup
+import java.net.URI
 
 object DramaKeyProvider : SiteProvider {
     override val name: String = "dramakey"
-    override val mainUrl: String get() = DynamicRulesManager.getBaseUrl(name)
-    override val requiresSingleSocket: Boolean = true
+    override val mainUrl: String = "https://dramakey.com"
 
     override suspend fun search(query: String): List<ShowCard> {
         val results = mutableListOf<ShowCard>()
         try {
-            val clean = query.trim().lowercase()
-            val slug = clean.replace(Regex("[^a-z0-9]+"), "-").trim('-')
-            if (slug.isBlank()) return emptyList()
-
-            val candidateUrls = listOf(
-                "https://dramakey.com/$slug/",
-                "https://dramakey.com/drama/$slug/",
-                "https://dramakey.cc/$slug/",
-                "https://dramakey.cc/drama/$slug/",
-                "https://dramakey.cc/chinese/$slug/",
-                "https://dramakey.cc/korean/$slug/",
-                "https://dramakey.cc/thai/$slug/"
+            val clean = query.trim().lowercase().replace(Regex("""[^a-z0-9]+"""), "-")
+            val candidateSlugs = listOf(
+                clean,
+                "$clean-korean-drama",
+                "$clean-chinese-drama",
+                "$clean-thai-drama",
+                "$clean-season-1"
             )
 
-            val queryTokens = clean.split(Regex("[\s-]+")).filter { it.length > 1 }.toSet()
+            val candidateUrls = candidateSlugs.flatMap { slug ->
+                listOf(
+                    "https://dramakey.com/$slug/",
+                    "https://dramakey.com/drama/$slug/",
+                    "https://dramakey.cc/$slug/",
+                    "https://dramakey.cc/drama/$slug/",
+                    "https://dramakey.cc/chinese/$slug/",
+                    "https://dramakey.cc/korean/$slug/",
+                    "https://dramakey.cc/thai/$slug/"
+                )
+            }
+
+            val queryTokens = clean.split(Regex("""[\s-]+""")).filter { it.length > 1 }.toSet()
 
             for (url in candidateUrls) {
                 val html = HttpClient.getText(url) ?: continue
@@ -44,16 +50,17 @@ object DramaKeyProvider : SiteProvider {
                     continue
                 }
 
-                // Verify title token overlap (guards against soft-404 fallback pages)
-                val titleTokens = lowerTitle.split(Regex("[^a-z0-9]+")).filter { it.length > 1 }.toSet()
-                val overlap = if (queryTokens.isNotEmpty()) (queryTokens.intersect(titleTokens).size.toDouble() / queryTokens.size) else 0.0
-                if (overlap < 0.5 && !lowerTitle.contains(clean)) {
+                // Verify token overlap between searched query and matched title
+                val titleTokens = lowerTitle.split(Regex("""[^a-z0-9]+""")).filter { it.length > 1 }.toSet()
+                val overlap = queryTokens.intersect(titleTokens).size.toDouble() / maxOf(queryTokens.size, 1).toDouble()
+
+                if (overlap < 0.5 && !lowerTitle.contains(clean.replace("-", " "))) {
                     continue
                 }
 
-                val poster = doc.selectFirst("meta[property='og:image']")?.attr("content")
-                    ?: doc.selectFirst(".entry-content img, .post-thumbnail img, img.cover")?.attr("abs:src")
-                    ?: ""
+                val poster = doc.selectFirst(".entry-content img, .post-thumbnail img, meta[property=og:image]")?.let {
+                    if (it.tagName() == "meta") it.attr("content") else it.attr("abs:src")
+                } ?: ""
 
                 results.add(
                     ShowCard(
@@ -71,22 +78,20 @@ object DramaKeyProvider : SiteProvider {
     }
 
     override suspend fun loadEpisodes(showUrl: String): ShowDetails {
-        val show = ShowCard(title = "DramaKey Show", url = showUrl, site = name)
+        val show = ShowCard(title = "Asian Drama", url = showUrl, site = name)
         try {
             val html = HttpClient.getText(showUrl) ?: return ShowDetails(show = show)
             val doc = Jsoup.parse(html)
 
-            val pageTitle = doc.selectFirst("h1.entry-title, h1")?.text()?.trim() ?: "DramaKey Drama"
-            val poster = doc.selectFirst("meta[property='og:image']")?.attr("content")
-                ?: doc.selectFirst(".entry-content img, .post-thumbnail img")?.attr("abs:src")
-                ?: ""
+            val title = doc.selectFirst("h1.entry-title, h1")?.text()?.trim() ?: "Asian Drama"
+            val poster = doc.selectFirst(".entry-content img, .post-thumbnail img")?.attr("abs:src") ?: ""
             val synopsis = doc.selectFirst(".entry-content p")?.text()?.trim() ?: ""
 
             val episodes = mutableListOf<EpisodeItem>()
-            val dlLinks = doc.select(".entry-content a[href*='downloadwella.com'], .entry-content a[href*='kissorgrab.com'], .entry-content a[href*='wetafiles.com']")
+            val links = doc.select(".entry-content a[href*='download'], .entry-content a[href*='episode'], .entry-content a[href*='downloadwella']")
 
             var count = 1
-            for (a in dlLinks) {
+            for (a in links) {
                 val href = a.attr("abs:href")
                 val text = a.text().trim()
                 if (href.isNotBlank()) {
@@ -101,7 +106,7 @@ object DramaKeyProvider : SiteProvider {
                 }
             }
 
-            val card = ShowCard(title = pageTitle, url = showUrl, posterUrl = poster, site = name)
+            val card = ShowCard(title = title, url = showUrl, posterUrl = poster, site = name)
             return ShowDetails(show = card, synopsis = synopsis, episodes = episodes)
         } catch (_: Exception) {
             return ShowDetails(show = show)
@@ -112,10 +117,9 @@ object DramaKeyProvider : SiteProvider {
         val direct = ResolverRegistry.resolve(episodeUrl, quality) ?: episodeUrl
         return DownloadRecipe(
             directUrl = direct,
-            filename = direct.substringAfterLast('/').substringBefore('?').ifEmpty { "episode.mkv" },
-            headers = mapOf("Referer" to mainUrl),
+            filename = direct.substringAfterLast('/').substringBefore('?').ifEmpty { "episode.mp4" },
             backend = "aria2c",
-            parallelSockets = 1
+            parallelSockets = 16
         )
     }
 }

@@ -20,16 +20,22 @@ import java.util.concurrent.ConcurrentHashMap
 class DownloadEngine(
     private val context: Context,
     private val repository: DownloadRepository,
-    private val networkObserver: NetworkObserver
+    private val networkObserver: NetworkObserver = NetworkObserver(context)
 ) {
     private val engineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val activeJobs = ConcurrentHashMap<String, Job>()
 
     var maxConcurrentDownloads: Int = 3
+    var parallelSocketsPerFile: Int = 16
     var defaultQuality: String = "720p"
     var autoOrganizeByShow: Boolean = true
-    var storageGuardGb: Double = 1.0
+    var instantSocialDownload: Boolean = false
     var wifiOnlyTorrents: Boolean = false
+    var downloadTorrentsWifiOnly: Boolean
+        get() = wifiOnlyTorrents
+        set(value) { wifiOnlyTorrents = value }
+    var showPostersInResults: Boolean = true
+    var storageGuardGb: Double = 1.0
 
     val tasks: StateFlow<List<DownloadTask>> = repository.tasks
 
@@ -40,27 +46,40 @@ class DownloadEngine(
     private fun loadPreferences() {
         val prefs = context.getSharedPreferences("downloader_settings", Context.MODE_PRIVATE)
         maxConcurrentDownloads = prefs.getInt("pref_max_downloads", 3)
+        parallelSocketsPerFile = prefs.getInt("pref_parallel_sockets", 16)
         defaultQuality = prefs.getString("pref_default_quality", "720p") ?: "720p"
         autoOrganizeByShow = prefs.getBoolean("pref_auto_organize", true)
-        storageGuardGb = prefs.getFloat("pref_storage_guard", 1.0f).toDouble()
+        instantSocialDownload = prefs.getBoolean("pref_instant_social", false)
         wifiOnlyTorrents = prefs.getBoolean("pref_torrents_wifi_only", false)
+        showPostersInResults = prefs.getBoolean("pref_show_posters", true)
+        storageGuardGb = prefs.getFloat("pref_storage_guard", 1.0f).toDouble()
     }
 
-    fun savePreferences(
-        maxDownloads: Int,
+    fun setShowPosters(show: Boolean) {
+        this.showPostersInResults = show
+        context.getSharedPreferences("downloader_settings", Context.MODE_PRIVATE).edit()
+            .putBoolean("pref_show_posters", show)
+            .apply()
+    }
+
+    fun saveAllSettings(
+        maxConcurrent: Int,
+        parallelSockets: Int,
         quality: String,
         autoOrganize: Boolean,
         storageGuard: Double,
         wifiOnlyTorrents: Boolean
     ) {
-        this.maxConcurrentDownloads = maxDownloads
+        this.maxConcurrentDownloads = maxConcurrent
+        this.parallelSocketsPerFile = parallelSockets
         this.defaultQuality = quality
         this.autoOrganizeByShow = autoOrganize
         this.storageGuardGb = storageGuard
         this.wifiOnlyTorrents = wifiOnlyTorrents
 
         context.getSharedPreferences("downloader_settings", Context.MODE_PRIVATE).edit()
-            .putInt("pref_max_downloads", maxDownloads)
+            .putInt("pref_max_downloads", maxConcurrent)
+            .putInt("pref_parallel_sockets", parallelSockets)
             .putString("pref_default_quality", quality)
             .putBoolean("pref_auto_organize", autoOrganize)
             .putFloat("pref_storage_guard", storageGuard.toFloat())
