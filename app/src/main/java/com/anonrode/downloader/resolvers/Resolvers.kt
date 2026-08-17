@@ -258,7 +258,7 @@ object BloggerResolver : BaseResolver {
             val token = tokenMatcher.group(1) ?: return null
 
             val rpcUrl = "https://www.blogger.com/_/BloggerVideoPlayerUi/data/batchexecute?rpcids=WcwnYd&source-path=%2Fvideo.g&f.sid=${URLEncoder.encode(fSid, "UTF-8")}&bl=${URLEncoder.encode(bl, "UTF-8")}&hl=en-US&rt=c"
-            val fReq = """[[["WcwnYd","["$token"]",null,"generic"]]]"""
+            val fReq = """[[["WcwnYd","[\"$token\"]",null,"generic"]]]"""
 
             val form = FormBody.Builder()
                 .add("f.req", fReq)
@@ -502,21 +502,23 @@ object PlutoMoviesResolver : BaseResolver {
             val html = HttpClient.getText(url, referer = "https://plutomovies.com/") ?: return null
             val m = Pattern.compile("""location\.href\s*=\s*['"](https?://[^'"]+)['"]""").matcher(html)
             if (m.find()) {
-                return m.group(1)
+                val dest = m.group(1) ?: ""
+                if (dest.isNotBlank() && !dest.equals(url, ignoreCase = true) && !isRootLockerDomain(dest)) return dest
             }
 
             val soup = Jsoup.parse(html)
-            val btn = soup.selectFirst("a[href*='kissorgrab.com'], a[href*='download']")
+            val btn = soup.selectFirst("a[href*='kissorgrab.com']")
             if (btn != null) {
-                return btn.attr("abs:href")
+                val href = btn.attr("abs:href")
+                if (href.isNotBlank() && !href.equals(url, ignoreCase = true) && !isRootLockerDomain(href)) return href
             }
+
+            return findDirectMediaUrl(html)
         } catch (_: Exception) {}
         return null
     }
 }
 
-// -------------------------------------------------------------
-// 14. DownloadwellaResolver
 // -------------------------------------------------------------
 // 14. DownloadwellaResolver
 // -------------------------------------------------------------
@@ -531,6 +533,8 @@ object DownloadwellaResolver : BaseResolver {
             val html = HttpClient.getText(url, referer = url) ?: return null
             val doc = Jsoup.parse(html, url)
             val formEl = doc.selectFirst("form") ?: return null
+
+            val formAction = formEl.attr("abs:action").ifBlank { url }
 
             val formBuilder = FormBody.Builder()
             var hasInputs = false
@@ -547,7 +551,7 @@ object DownloadwellaResolver : BaseResolver {
 
             val form = formBuilder.build()
             val req = Request.Builder()
-                .url(url)
+                .url(formAction)
                 .header("User-Agent", HttpClient.DEFAULT_UA)
                 .header("Referer", url)
                 .post(form)
@@ -556,13 +560,40 @@ object DownloadwellaResolver : BaseResolver {
             HttpClient.shared.newCall(req).execute().use { res ->
                 if (!res.isSuccessful) return null
                 val body = res.body?.string() ?: return null
-                val postDoc = Jsoup.parse(body, url)
-                val direct = postDoc.selectFirst("a.btn-download, a[href*='download'], a[href*='.mkv'], a[href*='.mp4']")?.attr("abs:href")
-                if (!direct.isNullOrBlank()) return direct
 
-                val linkMatch = Pattern.compile("""https?://[^\s"'<>]+\.(?:mkv|mp4)[^\s"'<>]*""").matcher(body)
-                if (linkMatch.find()) {
-                    return linkMatch.group(0)
+                val directMedia = findDirectMediaUrl(body)
+                if (!directMedia.isNullOrBlank() && !directMedia.equals(url, ignoreCase = true) && !isRootLockerDomain(directMedia)) {
+                    return directMedia
+                }
+
+                val postDoc = Jsoup.parse(body, url)
+                val directAnchor = postDoc.select("a[href]").mapNotNull { a ->
+                    val href = a.attr("abs:href")
+                    if (isDirectMediaUrl(href) || (href.contains("/d/") && !href.endsWith(".html"))) href else null
+                }.firstOrNull { !it.equals(url, ignoreCase = true) && !isRootLockerDomain(it) }
+
+                if (!directAnchor.isNullOrBlank()) return directAnchor
+
+                // Step 2 form if present
+                val step2Form = postDoc.selectFirst("form[name='F1'], form")
+                if (step2Form != null && step2Form.select("input[name='op']").isNotEmpty()) {
+                    val step2Builder = FormBody.Builder()
+                    for (inp in step2Form.select("input[name]")) {
+                        step2Builder.add(inp.attr("name"), inp.attr("value"))
+                    }
+                    val step2Req = Request.Builder()
+                        .url(step2Form.attr("abs:action").ifBlank { formAction })
+                        .header("User-Agent", HttpClient.DEFAULT_UA)
+                        .header("Referer", url)
+                        .post(step2Builder.build())
+                        .build()
+                    HttpClient.shared.newCall(step2Req).execute().use { res2 ->
+                        if (res2.isSuccessful) {
+                            val body2 = res2.body?.string() ?: ""
+                            val direct2 = findDirectMediaUrl(body2)
+                            if (!direct2.isNullOrBlank() && !isRootLockerDomain(direct2)) return direct2
+                        }
+                    }
                 }
             }
         } catch (_: Exception) {}
@@ -638,7 +669,7 @@ object LoadedfilesResolver : BaseResolver {
                 val loc = res.header("Location")
                 if (!loc.isNullOrBlank()) return loc
             }
-            return step2
+            return null
         } catch (_: Exception) {}
         return null
     }
@@ -932,3 +963,40 @@ private fun extractMp4FromHtml(html: String): String? {
     }
     return null
 }
+
+fun isDirectMediaUrl(url: String): Boolean {
+    if (url.isBlank()) return false
+    val clean = url.substringBefore('?').substringBefore('#').lowercase()
+    return listOf(".mp4", ".mkv", ".m3u8", ".webm", ".avi", ".ts").any { clean.endsWith(it) }
+}
+
+fun isRootLockerDomain(url: String): Boolean {
+    val clean = url.trimEnd('/')
+    return listOf(
+        "https://downloadwella.com",
+        "http://downloadwella.com",
+        "https://wetafiles.com",
+        "http://wetafiles.com",
+        "https://loadedfiles.net",
+        "https://loadedfiles.st",
+        "https://loadedfiles.to",
+        "https://loadedfiles.org",
+        "https://loadedfiles.com",
+        "https://kissorgrab.com"
+    ).any { clean.equals(it, ignoreCase = true) }
+}
+
+fun findDirectMediaUrl(text: String): String? {
+    for (ext in listOf("m3u8", "mp4", "mkv", "webm", "avi")) {
+        val matcher = Pattern.compile("""https?://[^\s"'<>,\\)]+\.$ext(?:[^\s"'<>,\\)]*)?""", Pattern.CASE_INSENSITIVE).matcher(text)
+        while (matcher.find()) {
+            val cand = matcher.group(0)?.trimEnd('.', ',', ';', ')') ?: continue
+            val clean = cand.substringBefore('?').substringBefore('#').lowercase()
+            if (listOf(".mp4", ".mkv", ".m3u8", ".webm", ".avi", ".ts").any { clean.endsWith(it) }) {
+                return cand
+            }
+        }
+    }
+    return null
+}
+

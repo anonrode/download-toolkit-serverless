@@ -175,7 +175,7 @@ fun DownloadCard(
 
             if (!isCompleted) {
                 LinearProgressIndicator(
-                    progress = { task.downloadedBytes.toFloat() / 100f },
+                    progress = { (task.downloadedBytes.toFloat().coerceIn(0f, 100f)) / 100f },
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(4.dp)
@@ -186,28 +186,42 @@ fun DownloadCard(
 
                 Spacer(modifier = Modifier.height(Spacing.xs))
 
+                val progressText = when {
+                    task.errorMessage != null -> task.errorMessage
+                    task.status == TaskStatus.RESOLVING -> "Resolving stream link..."
+                    task.speedBytesPerSec > 0.0 -> {
+                        val speedMb = task.speedBytesPerSec / (1024.0 * 1024.0)
+                        "${task.downloadedBytes}% • %.1f MB/s".format(speedMb)
+                    }
+                    else -> "${task.downloadedBytes}%"
+                }
+
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = if (task.errorMessage != null) task.errorMessage else "${task.downloadedBytes}%",
-                        color = if (isFailed) StatusError else TextMuted,
-                        fontSize = 11.sp
+                        text = progressText,
+                        color = if (isFailed) StatusError else if (task.status == TaskStatus.RESOLVING) AccentPrimary else TextMuted,
+                        fontSize = 11.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
                     )
 
                     Row(horizontalArrangement = Arrangement.spacedBy(Spacing.xs)) {
                         if (isDownloading) {
-                            IconButton(onClick = onPause, modifier = Modifier.size(24.dp)) {
-                                Icon(Icons.Rounded.Pause, contentDescription = "Pause", tint = TextSecondary, modifier = Modifier.size(16.dp))
+                            IconButton(onClick = onPause) {
+                                Icon(Icons.Rounded.Pause, contentDescription = "Pause", tint = TextSecondary, modifier = Modifier.size(20.dp))
                             }
                         } else if (isPaused || isFailed) {
-                            IconButton(onClick = onRetry, modifier = Modifier.size(24.dp)) {
-                                Icon(Icons.Rounded.PlayArrow, contentDescription = "Resume", tint = AccentPrimary, modifier = Modifier.size(16.dp))
+                            IconButton(onClick = onRetry) {
+                                Icon(Icons.Rounded.PlayArrow, contentDescription = "Resume", tint = AccentPrimary, modifier = Modifier.size(20.dp))
                             }
                         }
-                        IconButton(onClick = onCancel, modifier = Modifier.size(24.dp)) {
-                            Icon(Icons.Rounded.Close, contentDescription = "Cancel", tint = TextMuted, modifier = Modifier.size(16.dp))
+                        IconButton(onClick = onCancel) {
+                            Icon(Icons.Rounded.Close, contentDescription = "Cancel", tint = TextMuted, modifier = Modifier.size(20.dp))
                         }
                     }
                 }

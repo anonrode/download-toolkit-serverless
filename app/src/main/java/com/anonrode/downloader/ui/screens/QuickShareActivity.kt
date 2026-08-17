@@ -91,7 +91,7 @@ class QuickShareActivity : ComponentActivity() {
     private fun extractSharedUrl(intent: Intent?): String {
         if (intent == null) return ""
         val text = intent.getStringExtra(Intent.EXTRA_TEXT)
-            ?: intent.clipData?.getItemAt(0)?.text?.toString()
+            ?: intent.clipData?.let { if (it.itemCount > 0) it.getItemAt(0).text else null }?.toString()
             ?: intent.dataString
             ?: ""
 

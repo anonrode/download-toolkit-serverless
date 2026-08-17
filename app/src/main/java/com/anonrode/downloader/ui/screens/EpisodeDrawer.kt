@@ -219,7 +219,7 @@ fun EpisodeDrawer(
                     } else {
                         TextButton(
                             onClick = {
-                                viewModel.downloadAllEpisodes(episodes)
+                                viewModel.downloadAllEpisodes(episodes.sortedBy { it.episodeNum })
                                 onDismiss()
                             },
                             colors = ButtonDefaults.textButtonColors(contentColor = AccentPrimary)
@@ -263,9 +263,10 @@ fun EpisodeDrawer(
             } else {
                 LazyColumn(
                     verticalArrangement = Arrangement.spacedBy(Spacing.sm),
+                    contentPadding = androidx.compose.foundation.layout.WindowInsets.navigationBars.asPaddingValues(),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .heightIn(max = 380.dp)
+                        .heightIn(max = 420.dp)
                 ) {
                     items(episodes) { ep ->
                         val isChecked = ep in selectedEpisodes

@@ -36,7 +36,7 @@ class DownloadRepository {
                     _tasks.value = json.decodeFromString<List<DownloadTask>>(raw)
                         .map {
                             if (it.status == TaskStatus.DOWNLOADING || it.status == TaskStatus.RESOLVING) {
-                                it.copy(status = TaskStatus.PAUSED, speedBytesPerSec = 0.0)
+                                it.copy(status = TaskStatus.QUEUED, speedBytesPerSec = 0.0)
                             } else it
                         }
                 }

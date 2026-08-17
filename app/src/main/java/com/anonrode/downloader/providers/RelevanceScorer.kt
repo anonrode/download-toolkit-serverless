@@ -6,7 +6,7 @@ import java.util.regex.Pattern
 object RelevanceScorer {
 
     private val STOP_WORDS = setOf(
-        "the", "a", "an", "of", "and", "s01", "s02", "complete", "season", "episode", "ep", "korean", "drama", "series"
+        "the", "a", "an", "of", "and", "s01", "s02", "complete", "season"
     )
 
     private val COLLECTION_RE = Pattern.compile(
@@ -31,14 +31,16 @@ object RelevanceScorer {
     }
 
     fun score(query: String, title: String): Double {
+        val qClean = query.trim().lowercase()
+        val tClean = title.trim().lowercase()
         val q = tokenize(query)
-        if (q.isEmpty()) return 1.0
+        if (q.isEmpty()) {
+            return if (qClean.isNotEmpty() && tClean.contains(qClean)) 1.0 else 0.0
+        }
         val t = tokenize(title)
         if (t.isEmpty()) return 0.0
 
         val overlap = (q.intersect(t).size).toDouble() / q.size.toDouble()
-        val qClean = query.trim().lowercase()
-        val tClean = title.trim().lowercase()
 
         var finalScore = overlap
         if (tClean.contains(qClean)) {
@@ -53,11 +55,6 @@ object RelevanceScorer {
         }
 
         val scored = validItems.mapNotNull { item ->
-            if (item.site.equals("pluto", ignoreCase = true) ||
-                item.site.equals("dramakey", ignoreCase = true) ||
-                item.site.equals("dramarain", ignoreCase = true)) {
-                return@mapNotNull Pair(item, 1.0)
-            }
             val sc = score(query, item.title)
             if (sc >= RELEVANCE_MIN) Pair(item, sc) else null
         }

@@ -48,6 +48,7 @@ fun HomeScreen(
         tasks.filter { it.status == TaskStatus.DOWNLOADING || it.status == TaskStatus.RESOLVING }
     }
     val context = LocalContext.current
+    val keyboardController = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
 
     val filters = listOf(
         "all" to "All Sites",
@@ -182,7 +183,10 @@ fun HomeScreen(
                                 Icon(Icons.Default.Clear, contentDescription = "Clear", tint = TextSecondary, modifier = Modifier.size(18.dp))
                             }
                             IconButton(
-                                onClick = { viewModel.search() },
+                                onClick = {
+                                    keyboardController?.hide()
+                                    viewModel.search()
+                                },
                                 modifier = Modifier
                                     .padding(end = 4.dp)
                                     .size(32.dp)
@@ -195,7 +199,10 @@ fun HomeScreen(
                 },
                 singleLine = true,
                 keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(imeAction = androidx.compose.ui.text.input.ImeAction.Search),
-                keyboardActions = androidx.compose.foundation.text.KeyboardActions(onSearch = { viewModel.search() }),
+                keyboardActions = androidx.compose.foundation.text.KeyboardActions(onSearch = {
+                    keyboardController?.hide()
+                    viewModel.search()
+                }),
                 shape = RoundedCornerShape(Radius.full),
                 colors = OutlinedTextFieldDefaults.colors(
                     focusedContainerColor = SurfaceCard,
@@ -210,7 +217,8 @@ fun HomeScreen(
             )
 
             // Smart Clipboard Banner
-            if (!clipboardSnippet.isNullOrBlank() && uiState.query.isBlank()) {
+            val snippetText = clipboardSnippet
+            if (!snippetText.isNullOrBlank() && uiState.query.isBlank()) {
                 Spacer(modifier = Modifier.height(Spacing.sm))
                 Row(
                     modifier = Modifier
@@ -219,9 +227,8 @@ fun HomeScreen(
                         .background(SurfaceElevated)
                         .border(1.dp, BorderHairline, RoundedCornerShape(Radius.md))
                         .clickable {
-                            val snippet = clipboardSnippet!!
                             clipboardSnippet = null
-                            viewModel.handlePastedInput(snippet) { platform, url ->
+                            viewModel.handlePastedInput(snippetText) { platform, url ->
                                 onOpenSocial(platform, url)
                             }
                         }
@@ -236,7 +243,7 @@ fun HomeScreen(
                         Icon(Icons.Rounded.ContentPaste, contentDescription = null, tint = AccentPrimary, modifier = Modifier.size(16.dp))
                         Spacer(modifier = Modifier.width(Spacing.sm))
                         Text(
-                            text = "Paste link: ${clipboardSnippet!!.take(35)}...",
+                            text = "Paste link: ${snippetText.take(35)}...",
                             color = TextPrimary,
                             fontSize = 12.sp,
                             maxLines = 1,
@@ -333,9 +340,9 @@ fun HomeScreen(
         }
 
         // Episode Drawer Modal
-        if (uiState.activeShowForDrawer != null) {
+        uiState.activeShowForDrawer?.let { currentShow ->
             EpisodeDrawer(
-                show = uiState.activeShowForDrawer!!,
+                show = currentShow,
                 viewModel = viewModel,
                 onDismiss = { viewModel.closeEpisodeDrawer() }
             )
