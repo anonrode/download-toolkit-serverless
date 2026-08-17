@@ -606,8 +606,8 @@ object DownloadwellaResolver : BaseResolver {
 // -------------------------------------------------------------
 object LoadedfilesResolver : BaseResolver {
     private val HOST_RE = Pattern.compile("""loadedfiles\.[a-z0-9-]+""", Pattern.CASE_INSENSITIVE)
-    private val FALLBACK_TLDS = listOf("st", "net", "org", "to", "com")
-    private var lastWorkingHost: String? = null
+    private val PREFERRED_HOSTS = listOf("loadedfiles.st", "loadedfiles.org", "loadedfiles.net", "loadedfiles.to", "loadedfiles.com")
+    private var lastWorkingHost: String = "loadedfiles.st"
 
     override fun canResolve(url: String): Boolean {
         return HOST_RE.matcher(url.lowercase()).find()
@@ -615,14 +615,13 @@ object LoadedfilesResolver : BaseResolver {
 
     private fun getCandidateHosts(url: String): List<String> {
         val hosts = mutableListOf<String>()
-        lastWorkingHost?.let { hosts.add(it) }
+        hosts.add(lastWorkingHost)
+        for (h in PREFERRED_HOSTS) {
+            if (h !in hosts) hosts.add(h)
+        }
         val m = HOST_RE.matcher(url)
         if (m.find()) {
             val h = m.group(0).lowercase()
-            if (h !in hosts) hosts.add(h)
-        }
-        for (tld in FALLBACK_TLDS) {
-            val h = "loadedfiles.$tld"
             if (h !in hosts) hosts.add(h)
         }
         return hosts
@@ -631,45 +630,38 @@ object LoadedfilesResolver : BaseResolver {
     override suspend fun resolve(url: String, quality: String): String? {
         try {
             val candidateHosts = getCandidateHosts(url)
-            var liveHost = ""
-            var html1: String? = null
-
             for (host in candidateHosts) {
-                val candidateUrl = url.replace(HOST_RE.toRegex(), host)
-                val testHtml = HttpClient.getText(candidateUrl, referer = "https://my9jarocks.bz/")
-                if (!testHtml.isNullOrBlank()) {
-                    liveHost = host
-                    lastWorkingHost = host
-                    html1 = testHtml
-                    break
-                }
+                try {
+                    val candidateUrl = url.replace(HOST_RE.toRegex(), host)
+                    val html1 = HttpClient.getText(candidateUrl, referer = "https://my9jarocks.bz/") ?: continue
+                    val m1 = Pattern.compile("""var downloadUrl = '(https://loadedfiles\.[a-z0-9-]+/[^']+)'""", Pattern.CASE_INSENSITIVE).matcher(html1)
+                    if (!m1.find()) continue
+                    val rawStep1 = m1.group(1) ?: continue
+                    val step1 = rawStep1.replace(HOST_RE.toRegex(), host)
+
+                    val html2 = HttpClient.getText(step1, referer = "https://$host/") ?: continue
+                    val m2 = Pattern.compile("""var downloadUrl = '(https://loadedfiles\.[a-z0-9-]+/[^']+)'""", Pattern.CASE_INSENSITIVE).matcher(html2)
+                    if (!m2.find()) continue
+                    val rawStep2 = m2.group(1) ?: continue
+                    val step2 = rawStep2.replace(HOST_RE.toRegex(), host)
+
+                    // Step 3: Capture 302 location header
+                    val req = Request.Builder()
+                        .url(step2)
+                        .header("User-Agent", HttpClient.DEFAULT_UA)
+                        .header("Referer", "https://$host/")
+                        .build()
+
+                    val noRedirectClient = HttpClient.shared.newBuilder().followRedirects(false).build()
+                    noRedirectClient.newCall(req).execute().use { res ->
+                        val loc = res.header("Location")
+                        if (!loc.isNullOrBlank() && !isRootLockerDomain(loc)) {
+                            lastWorkingHost = host
+                            return loc
+                        }
+                    }
+                } catch (_: Exception) {}
             }
-            if (html1.isNullOrBlank()) return null
-
-            val m1 = Pattern.compile("""var downloadUrl = '(https://loadedfiles\.[a-z0-9-]+/[^']+)'""", Pattern.CASE_INSENSITIVE).matcher(html1)
-            if (!m1.find()) return null
-            val rawStep1 = m1.group(1) ?: return null
-            val step1 = rawStep1.replace(HOST_RE.toRegex(), liveHost)
-
-            val html2 = HttpClient.getText(step1, referer = "https://$liveHost/") ?: return null
-            val m2 = Pattern.compile("""var downloadUrl = '(https://loadedfiles\.[a-z0-9-]+/[^']+)'""", Pattern.CASE_INSENSITIVE).matcher(html2)
-            if (!m2.find()) return null
-            val rawStep2 = m2.group(1) ?: return null
-            val step2 = rawStep2.replace(HOST_RE.toRegex(), liveHost)
-
-            // Step 3: Capture 302 location header
-            val req = Request.Builder()
-                .url(step2)
-                .header("User-Agent", HttpClient.DEFAULT_UA)
-                .header("Referer", "https://$liveHost/")
-                .build()
-
-            val noRedirectClient = HttpClient.shared.newBuilder().followRedirects(false).build()
-            noRedirectClient.newCall(req).execute().use { res ->
-                val loc = res.header("Location")
-                if (!loc.isNullOrBlank()) return loc
-            }
-            return null
         } catch (_: Exception) {}
         return null
     }

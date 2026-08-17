@@ -193,7 +193,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             sourceUrl = episode.url,
             isDirect = false,
             backend = "aria2c",
-            parallelSockets = engine.parallelSocketsPerFile
+            parallelSockets = engine.parallelSocketsPerFile,
+            site = episode.site.ifBlank { show.site }
         )
     }
 
@@ -207,7 +208,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 sourceUrl = ep.url,
                 isDirect = false,
                 backend = "aria2c",
-                parallelSockets = engine.parallelSocketsPerFile
+                parallelSockets = engine.parallelSocketsPerFile,
+                site = ep.site.ifBlank { show.site }
             )
         }
     }

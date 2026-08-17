@@ -183,21 +183,29 @@ object YoutubeDlDownloader {
             "--bt-enable-lpd=true",
             "--enable-peer-exchange=true",
             "--dht-entry-point=router.bittorrent.com:6881",
-            "--dht-entry-point6=router.bittorrent.com:6881",
             "--seed-time=0",
             "--seed-ratio=0.0",
             "--summary-interval=1",
-            "--bt-max-peers=120",
+            "--bt-max-peers=80",
             "--file-allocation=none",
             "--check-certificate=false",
-            "--bt-metadata-only=false",
             "--continue=true",
+            "--follow-torrent=mem",
+            "--bt-save-metadata=false",
             "--bt-tracker=$TIER1_TRACKERS",
             "-d", targetDir.absolutePath,
             magnetUrl
         )
 
         val pb = ProcessBuilder(cmd)
+        try {
+            val nativeLibDir = context.applicationInfo.nativeLibraryDir
+            pb.environment()["LD_LIBRARY_PATH"] = nativeLibDir
+            pb.environment()["TMPDIR"] = context.cacheDir.absolutePath
+            val currentPath = System.getenv("PATH") ?: ""
+            pb.environment()["PATH"] = "$nativeLibDir:$currentPath"
+        } catch (_: Exception) {}
+        pb.directory(targetDir)
         pb.redirectErrorStream(true)
         val process = pb.start()
 
@@ -210,10 +218,17 @@ object YoutubeDlDownloader {
 
         val progressRegex = Regex("""\((\d+)%\).*?DL:\s*([\d.]+[KMGT]?i?B)""", RegexOption.IGNORE_CASE)
         val reader = process.inputStream.bufferedReader()
+        val logBuffer = mutableListOf<String>()
 
         try {
             var line: String? = reader.readLine()
             while (line != null) {
+                if (logBuffer.size < 50) {
+                    logBuffer.add(line)
+                } else {
+                    logBuffer.removeAt(0)
+                    logBuffer.add(line)
+                }
                 val match = progressRegex.find(line)
                 if (match != null) {
                     val pct = match.groupValues[1].toFloatOrNull() ?: 0f
@@ -223,7 +238,8 @@ object YoutubeDlDownloader {
             }
             val exitCode = process.waitFor()
             if (exitCode != 0) {
-                throw Exception("aria2c exited with code $exitCode")
+                val errSummary = logBuffer.takeLast(3).joinToString(" | ")
+                throw Exception("aria2c failed (code $exitCode): $errSummary")
             }
         } catch (e: Exception) {
             process.destroy()
