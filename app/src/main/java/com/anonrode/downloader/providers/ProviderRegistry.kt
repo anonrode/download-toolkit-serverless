@@ -4,6 +4,7 @@ import com.anonrode.downloader.data.models.ShowCard
 import com.anonrode.downloader.data.models.ShowDetails
 import com.anonrode.downloader.data.rules.DynamicRulesManager
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
@@ -91,6 +92,11 @@ object ProviderRegistry {
 
     suspend fun loadEpisodes(show: ShowCard): ShowDetails {
         val provider = getProvider(show.site) ?: return ShowDetails(show = show)
-        return provider.loadEpisodes(show.url)
+        // Force IO here, not just at the call site: loadEpisodes does blocking
+        // OkHttp, and a caller that forgets to switch off Main gets a
+        // NetworkOnMainThreadException that HttpClient's blanket catch swallows
+        // into an empty list ("No episodes found"). Guaranteeing it at the
+        // source makes that whole failure class impossible regardless of caller.
+        return withContext(Dispatchers.IO) { provider.loadEpisodes(show.url) }
     }
 }
