@@ -6,6 +6,7 @@ import android.os.Environment
 import android.os.StatFs
 import com.anonrode.downloader.data.models.DownloadTask
 import com.anonrode.downloader.data.models.TaskStatus
+import com.anonrode.downloader.data.net.HttpClient
 import com.anonrode.downloader.resolvers.ResolverRegistry
 import com.anonrode.downloader.security.TorrentSecurityShield
 import com.anonrode.downloader.service.DownloadService

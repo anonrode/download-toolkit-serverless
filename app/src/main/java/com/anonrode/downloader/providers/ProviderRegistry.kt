@@ -1,5 +1,6 @@
 package com.anonrode.downloader.providers
 
+import com.anonrode.downloader.data.models.DownloadRecipe
 import com.anonrode.downloader.data.models.ShowCard
 import com.anonrode.downloader.data.models.ShowDetails
 import com.anonrode.downloader.data.rules.DynamicRulesManager
