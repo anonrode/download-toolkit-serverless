@@ -76,4 +76,11 @@ object ProviderRegistry {
             emit(emptyList())
         }
     }.flowOn(Dispatchers.IO)
+
+    fun searchFlow(query: String, siteFilter: String? = null): Flow<List<ShowCard>> = searchStreaming(query, siteFilter)
+
+    suspend fun loadEpisodes(show: ShowCard): ShowDetails {
+        val provider = getProvider(show.site) ?: return ShowDetails(show = show)
+        return provider.loadEpisodes(show.url)
+    }
 }
