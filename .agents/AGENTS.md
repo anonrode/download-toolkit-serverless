@@ -29,5 +29,11 @@
 6. **Canonical Domain Migrations & Fallbacks**:
    - Always keep canonical domains synchronized with the monolith: `9jarocks` -> `my9jarocks.bz`, `anitaku` -> `anitaku.com.ro`, `naijaprey` -> `naijaprey.com`.
 
-7. **Never add AI attribution to commits** (no `Co-Authored-By`, no "Generated with"). Commit messages describe the change only.
-8. **Ask before pushing** and before large refactors.
+7. **Coroutine Threading & OkHttp Execution Invariants**:
+   - `viewModelScope.launch { }` runs on `Dispatchers.Main` by default.
+   - Synchronous network calls (such as `HttpClient.getText()` / OkHttp `.execute()`) MUST ALWAYS be executed on `Dispatchers.IO` (using `withContext(Dispatchers.IO)` at both caller and registry levels).
+   - Never execute blocking HTTP calls on `Dispatchers.Main` where Android throws `NetworkOnMainThreadException` which blanket catch blocks silently swallow into empty episode lists.
+
+8. **Never add AI attribution to commits** (no `Co-Authored-By`, no "Generated with"). Commit messages describe the change only.
+9. **Ask before pushing** and before large refactors.
+
