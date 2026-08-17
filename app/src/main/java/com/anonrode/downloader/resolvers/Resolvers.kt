@@ -613,13 +613,13 @@ object LoadedfilesResolver : BaseResolver {
 
     override suspend fun resolve(url: String, quality: String): String? {
         try {
-            var currUrl = url
+            var currUrl = HttpClient.safeUrl(url)
             val noRedirectClient = HttpClient.shared.newBuilder().followRedirects(false).build()
 
             for (step in 1..8) {
                 val referer = if (step == 1) "https://my9jarocks.bz/" else currUrl
                 val req = Request.Builder()
-                    .url(currUrl)
+                    .url(HttpClient.safeUrl(currUrl))
                     .header("User-Agent", HttpClient.DEFAULT_UA)
                     .header("Referer", referer)
                     .build()
@@ -627,12 +627,14 @@ object LoadedfilesResolver : BaseResolver {
                 noRedirectClient.newCall(req).execute().use { res ->
                     val loc = res.header("Location")
                     if (!loc.isNullOrBlank()) {
-                        if (isDirectMediaUrl(loc) || loc.contains("/token/download/") || loc.contains("/d/")) {
-                            if (!loc.contains("?pt=")) {
-                                return loc
+                        val safeLoc = HttpClient.safeUrl(loc)
+                        if (isDirectMediaUrl(safeLoc) || safeLoc.contains("/token/download/") || safeLoc.contains("/d/")) {
+                            if (!safeLoc.contains("?pt=")) {
+                                android.util.Log.d("AnonDownload", "Loadedfiles cracked direct URL: $safeLoc")
+                                return safeLoc
                             }
                         }
-                        currUrl = loc
+                        currUrl = safeLoc
                         return@use
                     }
 
@@ -640,17 +642,21 @@ object LoadedfilesResolver : BaseResolver {
                         val body = res.body?.string() ?: return@use
                         val direct = findDirectMediaUrl(body)
                         if (!direct.isNullOrBlank() && !isRootLockerDomain(direct)) {
-                            return direct
+                            val safeDirect = HttpClient.safeUrl(direct)
+                            android.util.Log.d("AnonDownload", "Loadedfiles found direct media in body: $safeDirect")
+                            return safeDirect
                         }
 
                         val m = Pattern.compile("""var downloadUrl = '([^']+)'""", Pattern.CASE_INSENSITIVE).matcher(body)
                         if (m.find()) {
-                            currUrl = m.group(1) ?: return@use
+                            currUrl = HttpClient.safeUrl(m.group(1) ?: return@use)
                         }
                     }
                 }
             }
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+            android.util.Log.e("AnonDownload", "LoadedfilesResolver error: ${e.message}", e)
+        }
         return null
     }
 }

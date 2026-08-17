@@ -294,6 +294,7 @@ class DownloadEngine(
                 var streamUrl = task.directUrl
                 val isMagnet = streamUrl.startsWith("magnet:", ignoreCase = true)
                 val isSocial = task.showTitle.startsWith("Social/", ignoreCase = true) || task.backend.contains("yt-dlp")
+                android.util.Log.d("AnonDownload", "startTask: id=${task.id}, title=${task.episodeTitle}, rawUrl=$streamUrl, site=${task.site}")
 
                 // If not a magnet and not a social media URL, resolve locker/embed URLs to direct stream/manifest URLs
                 if (!isMagnet && !isSocial) {
@@ -304,6 +305,7 @@ class DownloadEngine(
 
                     // 1. Try direct resolution via ResolverRegistry (for lockers)
                     resolved = ResolverRegistry.resolve(streamUrl, defaultQuality)
+                    android.util.Log.d("AnonDownload", "Tier 1 ResolverRegistry resolved: $resolved")
 
                     // 2. If unresolved or returned a locker, resolve via ProviderRegistry (for provider episode pages like AsianC, Anitaku, DramaKey, Pluto, etc.)
                     if (resolved.isNullOrBlank() || isKnownLockerHost(resolved)) {
@@ -312,8 +314,11 @@ class DownloadEngine(
                                 val recipe = ProviderRegistry.resolveEpisode(task.site, streamUrl, defaultQuality)
                                 if (recipe.directUrl.isNotBlank() && recipe.directUrl != streamUrl) {
                                     resolved = recipe.directUrl
+                                    android.util.Log.d("AnonDownload", "Tier 2 ProviderRegistry (${task.site}) resolved: $resolved")
                                 }
-                            } catch (_: Exception) {}
+                            } catch (e: Exception) {
+                                android.util.Log.w("AnonDownload", "Tier 2 ProviderRegistry error: ${e.message}")
+                            }
                         }
 
                         if (resolved.isNullOrBlank() || isKnownLockerHost(resolved)) {
@@ -323,9 +328,12 @@ class DownloadEngine(
                                         val recipe = provider.resolveEpisode(streamUrl, defaultQuality)
                                         if (recipe.directUrl.isNotBlank() && recipe.directUrl != streamUrl) {
                                             resolved = recipe.directUrl
+                                            android.util.Log.d("AnonDownload", "Tier 2 Fallback Provider (${provider.name}) resolved: $resolved")
                                             break
                                         }
-                                    } catch (_: Exception) {}
+                                    } catch (e: Exception) {
+                                        android.util.Log.w("AnonDownload", "Tier 2 Fallback Provider error: ${e.message}")
+                                    }
                                 }
                             }
                         }
@@ -337,8 +345,11 @@ class DownloadEngine(
                             val innerResolved = ResolverRegistry.resolve(resolved, defaultQuality)
                             if (!innerResolved.isNullOrBlank() && !isKnownLockerHost(innerResolved)) {
                                 resolved = innerResolved
+                                android.util.Log.d("AnonDownload", "Tier 3 Secondary Resolver resolved: $resolved")
                             }
-                        } catch (_: Exception) {}
+                        } catch (e: Exception) {
+                            android.util.Log.w("AnonDownload", "Tier 3 Secondary Resolver error: ${e.message}")
+                        }
                     }
 
                     if (activeJobs[task.id] == null) return@launch
@@ -350,6 +361,7 @@ class DownloadEngine(
                         val isLocker = isKnownLockerHost(streamUrl)
                         val isDirectMedia = isDirectMediaUrl(streamUrl)
                         if (isLocker || !isDirectMedia) {
+                            android.util.Log.e("AnonDownload", "Resolution FAILED: streamUrl=$streamUrl, resolved=$resolved, isLocker=$isLocker, isDirectMedia=$isDirectMedia")
                             repository.update(task.id) { it.copy(status = TaskStatus.FAILED, errorMessage = "Could not crack stream link ($streamUrl)") }
                             return@launch
                         }
@@ -359,6 +371,7 @@ class DownloadEngine(
                 val isHlsStream = streamUrl.lowercase().contains(".m3u8") || streamUrl.lowercase().contains("manifest")
                 val finalBackend = if (isSocial || isHlsStream) "yt-dlp" else "aria2c"
                 val isExtractor = isSocial
+                android.util.Log.d("AnonDownload", "Final stream URL: $streamUrl, backend: $finalBackend")
 
                 repository.update(task.id) { it.copy(status = TaskStatus.DOWNLOADING, directUrl = streamUrl) }
                 updateServiceState()
