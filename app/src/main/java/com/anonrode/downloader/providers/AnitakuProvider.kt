@@ -85,7 +85,7 @@ object AnitakuProvider : SiteProvider {
 
         val allResults = deferreds.flatMap { it.await() }
         val seen = mutableSetOf<String>()
-        allResults.filter { seen.add(it.url) }
+        allResults.filter { card -> seen.add(card.url) }
     }
 
     override suspend fun loadEpisodes(showUrl: String): ShowDetails {

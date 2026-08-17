@@ -9,6 +9,7 @@ import com.anonrode.downloader.data.net.HttpClient
 import com.anonrode.downloader.resolvers.ResolverRegistry
 import org.json.JSONArray
 import org.jsoup.Jsoup
+import java.net.URI
 import java.net.URLEncoder
 
 object NaijaVaultProvider : SiteProvider {

@@ -112,7 +112,7 @@ class QuickShareActivity : ComponentActivity() {
 
     private fun dispatchDownload(parsed: ParsedUrl, rawUrl: String, quality: String, audioOnly: Boolean) {
         val app = application as? AnonApp ?: return
-        val engine = app.downloadEngine
+        val engine = app.engine
 
         when (parsed) {
             is ParsedUrl.SocialUrl -> {
@@ -263,7 +263,7 @@ fun QuickShareCard(
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(SurfaceBase, RoundedCornerShape(12.dp))
+                    .background(SurfaceElevated, RoundedCornerShape(12.dp))
                     .padding(12.dp)
             ) {
                 Text(
