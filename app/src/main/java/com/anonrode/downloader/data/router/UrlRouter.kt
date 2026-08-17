@@ -95,10 +95,10 @@ object UrlRouter {
             )
         }
 
-        if (lower.contains("naijaprey.tv")) {
+        if (lower.contains("naijaprey.")) {
             return ParsedUrl.DramaUrl(
                 site = "naijaprey",
-                showCard = ShowCard(title = slugToTitle(extractSlug(trimmed)), url = trimmed, site = "naijavault", category = "Nollywood & Series")
+                showCard = ShowCard(title = slugToTitle(extractSlug(trimmed)), url = trimmed, site = "naijaprey", category = "Nollywood & Series")
             )
         }
 

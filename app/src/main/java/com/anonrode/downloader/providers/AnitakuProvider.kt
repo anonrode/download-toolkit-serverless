@@ -18,98 +18,113 @@ object AnitakuProvider : SiteProvider {
     override val name: String = "anitaku"
     override val mainUrl: String get() = DynamicRulesManager.getBaseUrl(name)
 
-    override suspend fun search(query: String): List<ShowCard> {
-        val results = mutableListOf<ShowCard>()
+    override suspend fun search(query: String): List<ShowCard> = coroutineScope {
         val endpoints = listOf(
             "https://gogoanime.or.at/wp-admin/admin-ajax.php" to "https://gogoanime.or.at/",
             "https://anitaku.com.ro/wp-admin/admin-ajax.php" to "https://anitaku.com.ro/"
         )
 
-        val cleanQuery = query.replace(Regex("""(?i)(season|series|part|s\d+)\s*\d*"""), "").trim()
+        val cleanQuery = query.replace(Regex("""(?i) (season|series|part|s\d+)\s*\d* """), "").trim()
         val queryToUse = if (cleanQuery.length >= 2) cleanQuery else query
 
-        for ((ajaxUrl, referer) in endpoints) {
-            try {
-                val form = FormBody.Builder()
-                    .add("action", "ts_ac_do_search")
-                    .add("ts_ac_query", queryToUse)
-                    .build()
+        val deferreds = endpoints.map { (ajaxUrl, referer) ->
+            async(Dispatchers.IO) {
+                val batch = mutableListOf<ShowCard>()
+                try {
+                    val form = FormBody.Builder()
+                        .add("action", "ts_ac_do_search")
+                        .add("ts_ac_query", queryToUse)
+                        .build()
 
-                val req = Request.Builder()
-                    .url(ajaxUrl)
-                    .header("User-Agent", HttpClient.DEFAULT_UA)
-                    .header("Referer", referer)
-                    .header("X-Requested-With", "XMLHttpRequest")
-                    .post(form)
-                    .build()
+                    val req = Request.Builder()
+                        .url(ajaxUrl)
+                        .header("User-Agent", HttpClient.DEFAULT_UA)
+                        .header("Referer", referer)
+                        .header("X-Requested-With", "XMLHttpRequest")
+                        .post(form)
+                        .build()
 
-                HttpClient.shared.newCall(req).execute().use { res ->
-                    if (!res.isSuccessful) return@use
-                    val body = res.body?.string() ?: return@use
-                    val json = JSONObject(body)
+                    HttpClient.shared.newCall(req).execute().use { res ->
+                        if (!res.isSuccessful) return@use
+                        val body = res.body?.string() ?: return@use
+                        val json = JSONObject(body)
 
-                    val keys = json.keys()
-                    while (keys.hasNext()) {
-                        val key = keys.next()
-                        val group = json.optJSONArray(key) ?: continue
-                        for (i in 0 until group.length()) {
-                            val block = group.optJSONObject(i) ?: continue
-                            val all = block.optJSONArray("all") ?: continue
-                            for (j in 0 until all.length()) {
-                                val item = all.getJSONObject(j)
-                                val link = item.optString("post_link")
-                                val title = item.optString("post_title")
-                                val image = item.optString("post_image")
-                                val sub = item.optString("post_sub")
+                        val keys = json.keys()
+                        while (keys.hasNext()) {
+                            val key = keys.next()
+                            val group = json.optJSONArray(key) ?: continue
+                            for (i in 0 until group.length()) {
+                                val block = group.optJSONObject(i) ?: continue
+                                val all = block.optJSONArray("all") ?: continue
+                                for (j in 0 until all.length()) {
+                                    val item = all.getJSONObject(j)
+                                    val link = item.optString("post_link")
+                                    val title = item.optString("post_title")
+                                    val image = item.optString("post_image")
+                                    val sub = item.optString("post_sub")
 
-                                if (link.isNotBlank() && title.isNotBlank()) {
-                                    results.add(
-                                        ShowCard(
-                                            title = title,
-                                            url = link,
-                                            posterUrl = image,
-                                            site = name,
-                                            category = "Anime ${if (sub.isNotBlank()) "($sub)" else ""}"
+                                    if (link.isNotBlank() && title.isNotBlank()) {
+                                        batch.add(
+                                            ShowCard(
+                                                title = title,
+                                                url = link,
+                                                posterUrl = image,
+                                                site = name,
+                                                category = "Anime ${if (sub.isNotBlank()) "($sub)" else ""}"
+                                            )
                                         )
-                                    )
+                                    }
                                 }
                             }
                         }
                     }
-                }
-                if (results.isNotEmpty()) break
-            } catch (_: Exception) {}
+                } catch (_: Exception) {}
+                batch
+            }
         }
-        return results
+
+        val allResults = deferreds.flatMap { it.await() }
+        val seen = mutableSetOf<String>()
+        allResults.filter { seen.add(it.url) }
     }
 
     override suspend fun loadEpisodes(showUrl: String): ShowDetails {
         val show = ShowCard(title = "Anime", url = showUrl, site = name)
         try {
             val html = HttpClient.getText(showUrl) ?: return ShowDetails(show = show)
-            val doc = Jsoup.parse(html)
+            val doc = Jsoup.parse(html, showUrl)
 
-            val title = doc.selectFirst(".anime_info_body_bg h1, h1.entry-title")?.text()?.trim() ?: "Anime"
-            val poster = doc.selectFirst(".anime_info_body_bg img, .thumb img")?.attr("abs:src") ?: ""
+            val title = doc.selectFirst(".anime_info_body_bg h1, h1.entry-title, h1")?.text()?.trim() ?: "Anime"
+            val poster = doc.selectFirst(".anime_info_body_bg img, .thumb img, meta[property='og:image']")?.let {
+                if (it.tagName() == "meta") it.attr("content") else it.attr("abs:src").ifBlank { it.attr("src") }
+            } ?: ""
             val synopsis = doc.selectFirst(".description, .entry-content p")?.text()?.trim() ?: ""
 
             val episodes = mutableListOf<EpisodeItem>()
-            val epLinks = doc.select("#episode_related a, .episodes a, ul.episodes-lists li a")
+            val seen = mutableSetOf<String>()
+            val epLinks = doc.select(".bixbox.bxcl.epcheck a, .eplister ul li a, #episode_related a, .episodes a, ul.episodes-lists li a, a[href*='episode']")
 
             for (a in epLinks) {
-                val href = a.attr("abs:href")
-                val nameText = a.text().trim()
-                val num = Regex("""\d+""").find(nameText)?.value?.toIntOrNull() ?: (episodes.size + 1)
-                if (href.isNotBlank()) {
-                    episodes.add(
-                        EpisodeItem(
-                            title = "Episode $num",
-                            url = href,
-                            episodeNum = num,
-                            site = name
-                        )
-                    )
+                val rawHref = a.attr("href")
+                val href = a.attr("abs:href").ifBlank {
+                    if (rawHref.startsWith("http")) rawHref else URI(showUrl).resolve(rawHref).toString()
                 }
+                if (href.isBlank() || href in seen || href.contains("/category/") || href.contains("/genre/")) continue
+                seen.add(href)
+
+                val nameText = a.text().trim()
+                val num = Regex("""\d+""").find(nameText)?.value?.toIntOrNull()
+                    ?: Regex("""episode-(\d+)""", RegexOption.IGNORE_CASE).find(href)?.groupValues?.get(1)?.toIntOrNull()
+                    ?: (episodes.size + 1)
+
+                episodes.add(
+                    EpisodeItem(
+                        title = "Episode $num",
+                        url = href,
+                        episodeNum = num,
+                        site = name
+                    )
+                )
             }
 
             val card = ShowCard(title = title, url = showUrl, posterUrl = poster, site = name)

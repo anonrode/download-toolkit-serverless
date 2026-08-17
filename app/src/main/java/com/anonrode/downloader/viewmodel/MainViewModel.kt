@@ -44,6 +44,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val uiState: StateFlow<HomeUiState> = _uiState.asStateFlow()
 
     private var searchJob: Job? = null
+    private var debounceJob: Job? = null
 
     init {
         refreshStorageInfo()
@@ -51,6 +52,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun onQueryChanged(newQuery: String) {
         _uiState.update { it.copy(query = newQuery) }
+        debounceJob?.cancel()
+        val q = newQuery.trim()
+        if (q.length >= 2) {
+            debounceJob = viewModelScope.launch {
+                kotlinx.coroutines.delay(350)
+                search(q)
+            }
+        } else if (q.isBlank()) {
+            searchJob?.cancel()
+            _uiState.update { it.copy(isSearching = false, searchResults = emptyList(), searchError = null) }
+        }
     }
 
     fun onFilterSelected(filter: String) {
@@ -114,18 +126,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val q = query.trim()
         if (q.isBlank()) return
 
+        debounceJob?.cancel()
         searchJob?.cancel()
         searchJob = viewModelScope.launch {
-            _uiState.update { it.copy(isSearching = true, searchResults = emptyList(), searchError = null) }
+            _uiState.update { it.copy(isSearching = true, searchError = null) }
 
             val filter = _uiState.value.selectedFilter
-            val collected = mutableListOf<ShowCard>()
 
             try {
-                ProviderRegistry.searchFlow(q, filter).collect { incomingBatch ->
-                    collected.addAll(incomingBatch)
-                    val deduplicatedAndRanked = RelevanceScorer.filterAndSort(q, collected)
-                    _uiState.update { it.copy(searchResults = deduplicatedAndRanked) }
+                ProviderRegistry.searchFlow(q, filter).collect { incomingRanked ->
+                    _uiState.update { it.copy(searchResults = incomingRanked) }
                 }
             } catch (e: Exception) {
                 _uiState.update { it.copy(searchError = e.message) }

@@ -18,25 +18,26 @@ object NkiriProvider : SiteProvider {
     override suspend fun search(query: String): List<ShowCard> {
         val results = mutableListOf<ShowCard>()
         try {
-            val cleanSlug = query.trim().lowercase().replace(Regex("[^a-z0-9]+"), "-")
-            val rssUrl = "$mainUrl/search/$cleanSlug/feed/rss2/"
+            val encoded = URLEncoder.encode(query, "UTF-8")
+            val searchUrl = "$mainUrl/?s=$encoded"
+            val html = HttpClient.getText(searchUrl, referer = "$mainUrl/")
+            if (!html.isNullOrBlank()) {
+                val doc = Jsoup.parse(html, searchUrl)
+                val articles = doc.select("article, .post-item, .elementor-post, h2.entry-title a")
 
-            val rssXml = HttpClient.getText(rssUrl, referer = "$mainUrl/")
-            if (!rssXml.isNullOrBlank()) {
-                val doc = Jsoup.parse(rssXml, "", org.jsoup.parser.Parser.xmlParser())
-                val items = doc.select("item")
+                for (art in articles) {
+                    val linkElem = if (art.tagName() == "a") art else art.selectFirst("h2 a, .entry-title a, a")
+                    if (linkElem == null) continue
+                    val title = linkElem.text().trim()
+                    val rawLink = linkElem.attr("abs:href").ifBlank { linkElem.attr("href") }
+                    val link = rawLink.substringBefore("?")
 
-                for (item in items) {
-                    val title = item.selectFirst("title")?.text()?.trim() ?: ""
-                    val rawLink = item.selectFirst("link")?.text()?.trim() ?: ""
-                    val link = rawLink.substringBefore("?") // Strip tracking UTM params
+                    if (link.isBlank() || title.isBlank() || link.contains("/category/") || link.contains("/how-to-") || link.contains("/page/")) {
+                        continue
+                    }
 
-                    val desc = item.selectFirst("description")?.text() ?: ""
-                    val content = item.selectFirst("content\\:encoded")?.text() ?: item.selectFirst("content:encoded")?.text() ?: ""
-                    var poster = Regex("""<img[^>]+src=["']([^"']+\.(?:jpg|jpeg|png|webp)[^"']*)["']""", RegexOption.IGNORE_CASE)
-                        .find(desc)?.groupValues?.get(1)
-                        ?: Regex("""<img[^>]+src=["']([^"']+\.(?:jpg|jpeg|png|webp)[^"']*)["']""", RegexOption.IGNORE_CASE)
-                            .find(content)?.groupValues?.get(1) ?: ""
+                    val posterElem = art.selectFirst("img")
+                    val poster = posterElem?.attr("abs:src")?.ifBlank { posterElem.attr("src") } ?: ""
 
                     val lowerTitle = title.lowercase()
                     val cat = when {
@@ -45,7 +46,7 @@ object NkiriProvider : SiteProvider {
                         else -> "Asian Drama & Movies"
                     }
 
-                    if (link.isNotBlank() && title.isNotBlank()) {
+                    if (results.none { it.url == link }) {
                         results.add(
                             ShowCard(
                                 title = title,
@@ -67,40 +68,51 @@ object NkiriProvider : SiteProvider {
         val show = ShowCard(title = "NKiri Show", url = cleanUrl, site = name)
         try {
             val html = HttpClient.getText(cleanUrl, referer = "$mainUrl/") ?: return ShowDetails(show = show)
-            val doc = Jsoup.parse(html)
+            val doc = Jsoup.parse(html, cleanUrl)
 
             val title = doc.selectFirst("h1.entry-title, h1")?.text()?.trim() ?: "NKiri Show"
             val poster = doc.selectFirst(".entry-content img, .post-thumbnail img, meta[property=og:image]")?.let {
-                if (it.tagName() == "meta") it.attr("content") else it.attr("abs:src")
+                if (it.tagName() == "meta") it.attr("content") else it.attr("abs:src").ifBlank { it.attr("src") }
             } ?: ""
-            val synopsis = doc.selectFirst(".entry-content p")?.text()?.trim() ?: ""
+            val synopsis = doc.selectFirst(".entry-content p, .elementor-widget-theme-post-content p")?.text()?.trim() ?: ""
 
             val episodes = mutableListOf<EpisodeItem>()
-            val lockerSelectors = listOf(
-                ".entry-content a[href*='downloadwella']",
-                ".entry-content a[href*='wetafiles']",
-                ".entry-content a[href*='loadedfiles']",
-                ".entry-content a[href*='waffi']",
-                ".entry-content a[href*='vikingfile']",
-                ".entry-content a[href*='lulacloud']",
-                ".entry-content a[href*='nkiserv']",
-                ".elementor-button-wrapper a[href*='download']",
-                ".entry-content a.elementor-button"
-            )
-
-            val links = doc.select(lockerSelectors.joinToString(", "))
+            val seen = mutableSetOf<String>()
+            val allLinks = doc.select("a[href]")
 
             var count = 1
-            for (a in links) {
-                val href = a.attr("abs:href")
-                val text = a.text().trim()
-                if (href.isNotBlank() && !href.contains("telegram", ignoreCase = true) && !href.contains("dramakey", ignoreCase = true)) {
-                    val epTitle = if (text.isNotBlank() && text.length < 50 && !text.equals("Download Movie", ignoreCase = true)) {
-                        text
-                    } else if (links.size == 1) {
-                        "Full Movie"
-                    } else {
-                        "Episode $count"
+            for (a in allLinks) {
+                val rawHref = a.attr("href")
+                val href = a.attr("abs:href").ifBlank {
+                    if (rawHref.startsWith("http")) rawHref else URI(cleanUrl).resolve(rawHref).toString()
+                }
+                val lowerHref = href.lowercase()
+
+                if (href.isBlank() || href in seen) continue
+                if (lowerHref.contains("telegram") || lowerHref.contains("facebook") || lowerHref.contains("twitter") || lowerHref.contains("whatsapp") || lowerHref.contains("how-to") || lowerHref.contains("cant-download")) {
+                    continue
+                }
+
+                val isLocker = lowerHref.contains("downloadwella.com") ||
+                        lowerHref.contains("wetafiles.com") ||
+                        lowerHref.contains("loadedfiles") ||
+                        lowerHref.contains("nkiserv.com") ||
+                        lowerHref.contains("vikingfile") ||
+                        lowerHref.contains("lulacloud") ||
+                        lowerHref.contains("waffi")
+
+                if (isLocker) {
+                    seen.add(href)
+                    val text = a.text().trim()
+                    val parent = a.parent()
+                    val prevHeading = parent?.previousElementSibling()?.let { elem ->
+                        if (elem.tagName().startsWith("h", ignoreCase = true) || elem.tagName() == "p") elem.text().trim() else null
+                    }
+
+                    val epTitle = when {
+                        !prevHeading.isNullOrBlank() && prevHeading.contains("Episode", ignoreCase = true) -> prevHeading
+                        text.isNotBlank() && text.length < 40 && !text.equals("Download Episode", ignoreCase = true) && !text.equals("Download Movie", ignoreCase = true) && !text.equals("Download", ignoreCase = true) -> text
+                        else -> "Episode $count"
                     }
 
                     episodes.add(

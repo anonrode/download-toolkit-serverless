@@ -35,8 +35,12 @@ class MainActivity : ComponentActivity() {
 
         handleShareIntent(intent)
 
+        val prefs = getSharedPreferences("downloader_settings", android.content.Context.MODE_PRIVATE)
+
         setContent {
-            AnonDownloaderTheme {
+            var themeMode by remember { mutableStateOf(prefs.getString("pref_theme_mode", "dark") ?: "dark") }
+
+            AnonDownloaderTheme(themeMode = themeMode) {
                 val uiState by viewModel.uiState.collectAsState()
                 var currentScreen by remember { mutableStateOf("home") }
                 var showSettings by remember { mutableStateOf(false) }
@@ -100,6 +104,11 @@ class MainActivity : ComponentActivity() {
                 if (showSettings) {
                     SettingsSheet(
                         viewModel = viewModel,
+                        themeMode = themeMode,
+                        onThemeChanged = { newMode ->
+                            themeMode = newMode
+                            prefs.edit().putString("pref_theme_mode", newMode).apply()
+                        },
                         onDismiss = { showSettings = false }
                     )
                 }

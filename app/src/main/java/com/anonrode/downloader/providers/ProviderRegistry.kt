@@ -10,6 +10,12 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 
+import kotlinx.coroutines.flow.channelFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
+
 object ProviderRegistry {
 
     private val staticProviders: List<SiteProvider> = listOf(
@@ -33,7 +39,18 @@ object ProviderRegistry {
         return allProviders.find { it.name.equals(site, ignoreCase = true) }
     }
 
-    fun searchStreaming(query: String, siteFilter: String? = null): Flow<List<ShowCard>> = flow {
+    private val searchCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, List<ShowCard>>>()
+
+    fun searchStreaming(query: String, siteFilter: String? = null): Flow<List<ShowCard>> = channelFlow {
+        val cacheKey = "${query.trim().lowercase()}::${siteFilter ?: "all"}"
+        val now = System.currentTimeMillis()
+        val cached = searchCache[cacheKey]
+
+        // If cached within the last 4 minutes, emit instantly (0ms response time!)
+        if (cached != null && (now - cached.first) < 240_000L && cached.second.isNotEmpty()) {
+            send(cached.second)
+        }
+
         val currentProviders = allProviders
         val targets = if (!siteFilter.isNullOrBlank() && siteFilter != "all") {
             currentProviders.filter { it.name.equals(siteFilter, ignoreCase = true) }
@@ -41,40 +58,32 @@ object ProviderRegistry {
             currentProviders
         }
 
-        val accumulated = mutableListOf<ShowCard>()
+        val accumulated = java.util.Collections.synchronizedList(mutableListOf<ShowCard>())
+        val emitMutex = Mutex()
 
         coroutineScope {
-            val deferreds = targets.map { provider ->
-                async(Dispatchers.IO) {
+            targets.forEach { provider ->
+                launch(Dispatchers.IO) {
                     try {
-                        val items = provider.search(query)
-                        val enriched = items.map { card ->
-                            if (card.posterUrl.isBlank()) {
-                                val tmdbPoster = TmdbPosterResolver.resolvePoster(card.title)
-                                if (!tmdbPoster.isNullOrBlank()) card.copy(posterUrl = tmdbPoster) else card
-                            } else {
-                                card
+                        val items = withTimeoutOrNull(4000L) { provider.search(query) } ?: emptyList()
+                        if (items.isNotEmpty()) {
+                            emitMutex.withLock {
+                                accumulated.addAll(items)
+                                val ranked = RelevanceScorer.filterAndSort(query, accumulated.toList())
+                                send(ranked)
                             }
                         }
-                        Pair(provider.name, enriched)
-                    } catch (_: Exception) {
-                        Pair(provider.name, emptyList<ShowCard>())
-                    }
-                }
-            }
-
-            for (def in deferreds) {
-                val (_, items) = def.await()
-                if (items.isNotEmpty()) {
-                    accumulated.addAll(items)
-                    val ranked = RelevanceScorer.filterAndSort(query, accumulated)
-                    emit(ranked)
+                    } catch (_: Exception) {}
                 }
             }
         }
 
-        if (accumulated.isEmpty()) {
-            emit(emptyList())
+        if (accumulated.isNotEmpty()) {
+            val finalRanked = RelevanceScorer.filterAndSort(query, accumulated.toList())
+            searchCache[cacheKey] = Pair(now, finalRanked)
+            send(finalRanked)
+        } else if (cached == null || cached.second.isEmpty()) {
+            send(emptyList())
         }
     }.flowOn(Dispatchers.IO)
 

@@ -194,6 +194,8 @@ fun HomeScreen(
                     }
                 },
                 singleLine = true,
+                keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(imeAction = androidx.compose.ui.text.input.ImeAction.Search),
+                keyboardActions = androidx.compose.foundation.text.KeyboardActions(onSearch = { viewModel.search() }),
                 shape = RoundedCornerShape(Radius.full),
                 colors = OutlinedTextFieldDefaults.colors(
                     focusedContainerColor = SurfaceCard,
@@ -287,7 +289,7 @@ fun HomeScreen(
             // Live Search Results
             if (uiState.isSearching && uiState.searchResults.isEmpty()) {
                 Box(
-                    modifier = Modifier.fillMaxSize(),
+                    modifier = Modifier.fillMaxWidth().weight(1f),
                     contentAlignment = Alignment.Center
                 ) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -298,14 +300,14 @@ fun HomeScreen(
                 }
             } else if (uiState.searchResults.isEmpty() && uiState.query.isNotBlank() && !uiState.isSearching) {
                 Box(
-                    modifier = Modifier.fillMaxSize(),
+                    modifier = Modifier.fillMaxWidth().weight(1f),
                     contentAlignment = Alignment.Center
                 ) {
                     Text("No results found for \"${uiState.query}\"", color = TextMuted, fontSize = 14.sp)
                 }
             } else if (uiState.searchResults.isEmpty()) {
                 Box(
-                    modifier = Modifier.fillMaxSize(),
+                    modifier = Modifier.fillMaxWidth().weight(1f),
                     contentAlignment = Alignment.Center
                 ) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -317,7 +319,7 @@ fun HomeScreen(
             } else {
                 LazyColumn(
                     verticalArrangement = Arrangement.spacedBy(Spacing.md),
-                    modifier = Modifier.fillMaxSize()
+                    modifier = Modifier.fillMaxWidth().weight(1f)
                 ) {
                     items(uiState.searchResults, key = { it.url }) { show ->
                         ShowCardItem(

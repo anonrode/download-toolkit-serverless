@@ -518,6 +518,8 @@ object PlutoMoviesResolver : BaseResolver {
 // -------------------------------------------------------------
 // 14. DownloadwellaResolver
 // -------------------------------------------------------------
+// 14. DownloadwellaResolver
+// -------------------------------------------------------------
 object DownloadwellaResolver : BaseResolver {
     override fun canResolve(url: String): Boolean {
         val lower = url.lowercase()
@@ -526,27 +528,24 @@ object DownloadwellaResolver : BaseResolver {
 
     override suspend fun resolve(url: String, quality: String): String? {
         try {
-            val html = HttpClient.getText(url) ?: return null
-            val doc = Jsoup.parse(html)
+            val html = HttpClient.getText(url, referer = url) ?: return null
+            val doc = Jsoup.parse(html, url)
+            val formEl = doc.selectFirst("form") ?: return null
 
-            val op = doc.selectFirst("input[name=op]")?.attr("value") ?: "download2"
-            val id = doc.selectFirst("input[name=id]")?.attr("value") ?: ""
-            val rand = doc.selectFirst("input[name=rand]")?.attr("value") ?: ""
-            val methodFree = doc.selectFirst("input[name=method_free]")?.attr("value") ?: "Free Download >>"
-
-            if (id.isBlank()) {
-                val directLink = doc.selectFirst("a[href*='.mkv'], a[href*='.mp4']")?.attr("href")
-                if (!directLink.isNullOrBlank()) return directLink
-                return null
+            val formBuilder = FormBody.Builder()
+            var hasInputs = false
+            for (inp in formEl.select("input[name]")) {
+                val name = inp.attr("name")
+                val value = inp.attr("value")
+                if (name != "method_free") {
+                    formBuilder.add(name, value)
+                    hasInputs = true
+                }
             }
+            if (!hasInputs) return null
+            formBuilder.add("method_free", "Free Download")
 
-            val form = FormBody.Builder()
-                .add("op", op)
-                .add("id", id)
-                .add("rand", rand)
-                .add("method_free", methodFree)
-                .build()
-
+            val form = formBuilder.build()
             val req = Request.Builder()
                 .url(url)
                 .header("User-Agent", HttpClient.DEFAULT_UA)
@@ -557,7 +556,7 @@ object DownloadwellaResolver : BaseResolver {
             HttpClient.shared.newCall(req).execute().use { res ->
                 if (!res.isSuccessful) return null
                 val body = res.body?.string() ?: return null
-                val postDoc = Jsoup.parse(body)
+                val postDoc = Jsoup.parse(body, url)
                 val direct = postDoc.selectFirst("a.btn-download, a[href*='download'], a[href*='.mkv'], a[href*='.mp4']")?.attr("abs:href")
                 if (!direct.isNullOrBlank()) return direct
 
@@ -576,23 +575,70 @@ object DownloadwellaResolver : BaseResolver {
 // -------------------------------------------------------------
 object LoadedfilesResolver : BaseResolver {
     private val HOST_RE = Pattern.compile("""loadedfiles\.[a-z0-9-]+""", Pattern.CASE_INSENSITIVE)
+    private val FALLBACK_TLDS = listOf("st", "net", "org", "to", "com")
+    private var lastWorkingHost: String? = null
 
     override fun canResolve(url: String): Boolean {
         return HOST_RE.matcher(url.lowercase()).find()
     }
 
+    private fun getCandidateHosts(url: String): List<String> {
+        val hosts = mutableListOf<String>()
+        lastWorkingHost?.let { hosts.add(it) }
+        val m = HOST_RE.matcher(url)
+        if (m.find()) {
+            val h = m.group(0).lowercase()
+            if (h !in hosts) hosts.add(h)
+        }
+        for (tld in FALLBACK_TLDS) {
+            val h = "loadedfiles.$tld"
+            if (h !in hosts) hosts.add(h)
+        }
+        return hosts
+    }
+
     override suspend fun resolve(url: String, quality: String): String? {
         try {
-            val html = HttpClient.getText(url, referer = "https://my9jarocks.bz/") ?: return null
-            val m1 = Pattern.compile("""var downloadUrl = '(https://loadedfiles\.[a-z0-9-]+/[^']+)'""", Pattern.CASE_INSENSITIVE).matcher(html)
-            if (m1.find()) {
-                val step1 = m1.group(1) ?: return null
-                val html2 = HttpClient.getText(step1, referer = url) ?: return null
-                val m2 = Pattern.compile("""var downloadUrl = '(https://loadedfiles\.[a-z0-9-]+/[^']+)'""", Pattern.CASE_INSENSITIVE).matcher(html2)
-                if (m2.find()) {
-                    return m2.group(1)
+            val candidateHosts = getCandidateHosts(url)
+            var liveHost = ""
+            var html1: String? = null
+
+            for (host in candidateHosts) {
+                val candidateUrl = url.replace(HOST_RE.toRegex(), host)
+                val testHtml = HttpClient.getText(candidateUrl, referer = "https://my9jarocks.bz/")
+                if (!testHtml.isNullOrBlank()) {
+                    liveHost = host
+                    lastWorkingHost = host
+                    html1 = testHtml
+                    break
                 }
             }
+            if (html1.isNullOrBlank()) return null
+
+            val m1 = Pattern.compile("""var downloadUrl = '(https://loadedfiles\.[a-z0-9-]+/[^']+)'""", Pattern.CASE_INSENSITIVE).matcher(html1)
+            if (!m1.find()) return null
+            val rawStep1 = m1.group(1) ?: return null
+            val step1 = rawStep1.replace(HOST_RE.toRegex(), liveHost)
+
+            val html2 = HttpClient.getText(step1, referer = "https://$liveHost/") ?: return null
+            val m2 = Pattern.compile("""var downloadUrl = '(https://loadedfiles\.[a-z0-9-]+/[^']+)'""", Pattern.CASE_INSENSITIVE).matcher(html2)
+            if (!m2.find()) return null
+            val rawStep2 = m2.group(1) ?: return null
+            val step2 = rawStep2.replace(HOST_RE.toRegex(), liveHost)
+
+            // Step 3: Capture 302 location header
+            val req = Request.Builder()
+                .url(step2)
+                .header("User-Agent", HttpClient.DEFAULT_UA)
+                .header("Referer", "https://$liveHost/")
+                .build()
+
+            val noRedirectClient = HttpClient.shared.newBuilder().followRedirects(false).build()
+            noRedirectClient.newCall(req).execute().use { res ->
+                val loc = res.header("Location")
+                if (!loc.isNullOrBlank()) return loc
+            }
+            return step2
         } catch (_: Exception) {}
         return null
     }
@@ -658,21 +704,40 @@ object VidmolyResolver : BaseResolver {
 // 19. StreamwishResolver
 // -------------------------------------------------------------
 object StreamwishResolver : BaseResolver {
+    private val HOSTS = listOf(
+        "hglink.to", "streamwish.", "strwsh.", "stwish.", "wishembed.",
+        "mwish.", "awish.", "sfastwish.", "swishsrv.", "ajmidyad", "khadhnayad",
+        "obeywish.com", "jodwish.com", "streamwish.to", "embedwish.", "filelions."
+    )
+
     override fun canResolve(url: String): Boolean {
         val lower = url.lowercase()
-        return listOf("streamwish.", "sfastwish.", "embedwish.", "stwish.", "wishembed.", "filelions.", "hglink.to").any { lower.contains(it) }
+        return HOSTS.any { lower.contains(it) }
     }
 
     override suspend fun resolve(url: String, quality: String): String? {
         try {
-            val html = HttpClient.getText(url, referer = url) ?: return null
-            val m3u8 = extractM3u8FromHtml(html)
-            if (!m3u8.isNullOrBlank()) return m3u8
+            val vid = url.trimEnd('/').substringAfterLast('/')
+            val candidates = if (vid.length >= 6) {
+                listOf(
+                    "https://sfastwish.com/e/$vid",
+                    "https://embedwish.com/e/$vid",
+                    url
+                )
+            } else {
+                listOf(url)
+            }
 
-            val unpacked = JsUnpacker.unpack(html)
-            if (!unpacked.isNullOrBlank()) {
-                val direct = extractM3u8FromHtml(unpacked)
-                if (!direct.isNullOrBlank()) return direct
+            for (cand in candidates) {
+                val html = HttpClient.getText(cand, referer = "https://asianc.id/") ?: continue
+                val m3u8 = extractM3u8FromHtml(html)
+                if (!m3u8.isNullOrBlank()) return m3u8
+
+                val unpacked = JsUnpacker.unpack(html)
+                if (!unpacked.isNullOrBlank()) {
+                    val direct = extractM3u8FromHtml(unpacked)
+                    if (!direct.isNullOrBlank()) return direct
+                }
             }
         } catch (_: Exception) {}
         return null
@@ -683,9 +748,15 @@ object StreamwishResolver : BaseResolver {
 // 20. VidhideResolver
 // -------------------------------------------------------------
 object VidhideResolver : BaseResolver {
+    private val HOSTS = listOf(
+        "minochinos.com", "vidhide.", "vidhidepro.", "vidhidevip.",
+        "filelions.", "vid-guard.", "nining.", "peytonepre.com",
+        "techradar.ink", "ryderjet.com"
+    )
+
     override fun canResolve(url: String): Boolean {
         val lower = url.lowercase()
-        return lower.contains("vidhide.") || lower.contains("vidhidepro.") || lower.contains("vidhides.")
+        return HOSTS.any { lower.contains(it) }
     }
 
     override suspend fun resolve(url: String, quality: String): String? {
@@ -708,25 +779,32 @@ object VidhideResolver : BaseResolver {
 // 21. DoodstreamResolver (DYNAMIC HOST FIX)
 // -------------------------------------------------------------
 object DoodstreamResolver : BaseResolver {
+    private val HOSTS = listOf(
+        "dood.", "doodstream.", "ds2play.com", "dooood.com", "d0000d.com",
+        "d000d.com", "vidply.com", "do0od.com", "dood.re"
+    )
+
     override fun canResolve(url: String): Boolean {
         val lower = url.lowercase()
-        return listOf("dood.to", "dood.so", "dood.la", "dood.ws", "dso2.top", "doodstream.com", "d000d.com").any { lower.contains(it) }
+        return HOSTS.any { lower.contains(it) }
     }
 
     override suspend fun resolve(url: String, quality: String): String? {
         try {
             val host = URI(url).host ?: "dood.to"
-            val html = HttpClient.getText(url, referer = url) ?: return null
-            val passPattern = Pattern.compile("""/pass_md5/([^"']+)""")
+            val embedUrl = url.replace("/d/", "/e/")
+            val html = HttpClient.getText(embedUrl, referer = "https://$host/") ?: return null
+            val passPattern = Pattern.compile("""/pass_md5/([^"'\s]+)""")
             val matcher = passPattern.matcher(html)
             if (matcher.find()) {
                 val passPath = matcher.group(1)
                 val passUrl = "https://$host/pass_md5/$passPath"
-                val token = HttpClient.getText(passUrl, referer = url)
+                val token = HttpClient.getText(passUrl, referer = embedUrl)
                 if (!token.isNullOrBlank()) {
+                    val tokenSlug = passPath.trimEnd('/').substringAfterLast('/')
                     val randomStr = (1..10).map { ('a'..'z').random() }.joinToString("")
                     val expiry = System.currentTimeMillis()
-                    return "$token$randomStr?expiry=$expiry"
+                    return "${token.trim()}$randomStr?token=$tokenSlug&expiry=$expiry"
                 }
             }
         } catch (_: Exception) {}
@@ -738,14 +816,18 @@ object DoodstreamResolver : BaseResolver {
 // 22. MixdropResolver
 // -------------------------------------------------------------
 object MixdropResolver : BaseResolver {
+    private val HOSTS = listOf("mixdrop.", "mixdrp.", "mdfx9dc8n.net", "mixdroop.")
+
     override fun canResolve(url: String): Boolean {
         val lower = url.lowercase()
-        return lower.contains("mixdrop.co") || lower.contains("mixdrop.to") || lower.contains("mixdrop.sx")
+        return HOSTS.any { lower.contains(it) }
     }
 
     override suspend fun resolve(url: String, quality: String): String? {
         try {
-            val html = HttpClient.getText(url, referer = url) ?: return null
+            val embedUrl = url.replace("/f/", "/e/")
+            val host = URI(url).host ?: "mixdrop.co"
+            val html = HttpClient.getText(embedUrl, referer = "https://$host/") ?: return null
             val unpacked = JsUnpacker.unpack(html)
             val source = if (!unpacked.isNullOrBlank()) unpacked else html
             val matcher = Pattern.compile("""MDCore\.wurl\s*=\s*["']([^"']+)["']""").matcher(source)
@@ -763,9 +845,11 @@ object MixdropResolver : BaseResolver {
 // 23. StreamtapeResolver
 // -------------------------------------------------------------
 object StreamtapeResolver : BaseResolver {
+    private val HOSTS = listOf("streamtape.", "watchadsontape.", "strtape.tech")
+
     override fun canResolve(url: String): Boolean {
         val lower = url.lowercase()
-        return lower.contains("streamtape.com") || lower.contains("strtape.tech")
+        return HOSTS.any { lower.contains(it) }
     }
 
     override suspend fun resolve(url: String, quality: String): String? {
@@ -796,7 +880,7 @@ object PixelDrainResolver : BaseResolver {
         try {
             val fileId = url.substringAfterLast("/").substringBefore("?")
             if (fileId.isNotBlank()) {
-                return "https://pixeldrain.com/api/file/$fileId"
+                return "https://pixeldrain.com/api/file/$fileId?download"
             }
         } catch (_: Exception) {}
         return null
