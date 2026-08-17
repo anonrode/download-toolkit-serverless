@@ -7,7 +7,9 @@ import android.os.StatFs
 import com.anonrode.downloader.data.models.DownloadTask
 import com.anonrode.downloader.data.models.TaskStatus
 import com.anonrode.downloader.data.net.HttpClient
+import com.anonrode.downloader.providers.ProviderRegistry
 import com.anonrode.downloader.resolvers.ResolverRegistry
+import com.anonrode.downloader.resolvers.isDirectMediaUrl
 import com.anonrode.downloader.security.TorrentSecurityShield
 import com.anonrode.downloader.service.DownloadService
 import com.anonrode.downloader.util.NetworkObserver
@@ -110,7 +112,8 @@ class DownloadEngine(
         isDirect: Boolean,
         backend: String = "aria2c",
         parallelSockets: Int = 16,
-        audioOnly: Boolean = false
+        audioOnly: Boolean = false,
+        site: String = ""
     ): String {
         val taskId = UUID.randomUUID().toString()
         val downloadFolder = getDownloadDirectory(showTitle, createDirs = false)
@@ -131,7 +134,8 @@ class DownloadEngine(
             totalBytes = 100L,
             speedBytesPerSec = 0.0,
             backend = backend,
-            parallelSockets = parallelSockets
+            parallelSockets = parallelSockets,
+            site = site
         )
 
         repository.addFirst(task)
@@ -264,6 +268,10 @@ class DownloadEngine(
     }
 
     private fun isKnownLockerHost(url: String): Boolean {
+        if (url.isBlank()) return false
+        // If it already points to a direct video file (.mp4, .mkv, .m3u8, etc.), it is cracked and NOT an uncracked locker page
+        if (isDirectMediaUrl(url)) return false
+
         val lower = url.lowercase()
         return listOf(
             "downloadwella.com",
@@ -292,7 +300,47 @@ class DownloadEngine(
                     repository.update(task.id) { it.copy(status = TaskStatus.RESOLVING) }
                     updateServiceState()
 
-                    val resolved = ResolverRegistry.resolve(streamUrl, defaultQuality)
+                    var resolved: String? = null
+
+                    // 1. Try direct resolution via ResolverRegistry (for lockers)
+                    resolved = ResolverRegistry.resolve(streamUrl, defaultQuality)
+
+                    // 2. If unresolved or returned a locker, resolve via ProviderRegistry (for provider episode pages like AsianC, Anitaku, DramaKey, Pluto, etc.)
+                    if (resolved.isNullOrBlank() || isKnownLockerHost(resolved)) {
+                        if (task.site.isNotBlank()) {
+                            try {
+                                val recipe = ProviderRegistry.resolveEpisode(task.site, streamUrl, defaultQuality)
+                                if (recipe.directUrl.isNotBlank() && recipe.directUrl != streamUrl) {
+                                    resolved = recipe.directUrl
+                                }
+                            } catch (_: Exception) {}
+                        }
+
+                        if (resolved.isNullOrBlank() || isKnownLockerHost(resolved)) {
+                            for (provider in ProviderRegistry.allProviders) {
+                                if (provider.canHandle(streamUrl)) {
+                                    try {
+                                        val recipe = provider.resolveEpisode(streamUrl, defaultQuality)
+                                        if (recipe.directUrl.isNotBlank() && recipe.directUrl != streamUrl) {
+                                            resolved = recipe.directUrl
+                                            break
+                                        }
+                                    } catch (_: Exception) {}
+                                }
+                            }
+                        }
+                    }
+
+                    // 3. If provider resolved an intermediate locker link (e.g. downloadwella/loadedfiles), resolve locker
+                    if (!resolved.isNullOrBlank() && (isKnownLockerHost(resolved) || !isDirectMediaUrl(resolved))) {
+                        try {
+                            val innerResolved = ResolverRegistry.resolve(resolved, defaultQuality)
+                            if (!innerResolved.isNullOrBlank() && !isKnownLockerHost(innerResolved)) {
+                                resolved = innerResolved
+                            }
+                        } catch (_: Exception) {}
+                    }
+
                     if (activeJobs[task.id] == null) return@launch
 
                     if (!resolved.isNullOrBlank() && !isKnownLockerHost(resolved)) {
@@ -300,7 +348,7 @@ class DownloadEngine(
                     } else {
                         // Check if it's already a direct media URL (ends in .mp4/.mkv/.m3u8) AND not a raw locker page
                         val isLocker = isKnownLockerHost(streamUrl)
-                        val isDirectMedia = listOf(".mp4", ".mkv", ".m3u8", ".webm", ".avi", ".ts").any { streamUrl.substringBefore('?').substringBefore('#').lowercase().endsWith(it) }
+                        val isDirectMedia = isDirectMediaUrl(streamUrl)
                         if (isLocker || !isDirectMedia) {
                             repository.update(task.id) { it.copy(status = TaskStatus.FAILED, errorMessage = "Could not crack stream link ($streamUrl)") }
                             return@launch

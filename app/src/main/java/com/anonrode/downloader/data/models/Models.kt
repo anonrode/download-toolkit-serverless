@@ -63,6 +63,7 @@ data class DownloadTask(
     val filePath: String = "",
     val backend: String = "aria2c",
     val parallelSockets: Int = 16,
+    val site: String = "",
     val headers: Map<String, String> = emptyMap(),
     val errorMessage: String? = null
 )

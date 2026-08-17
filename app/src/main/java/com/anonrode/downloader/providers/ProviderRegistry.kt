@@ -55,11 +55,12 @@ object ProviderRegistry {
 
         val currentProviders = allProviders
         val targets = if (!siteFilter.isNullOrBlank() && siteFilter != "all") {
-            currentProviders.filter { it.name.equals(siteFilter, ignoreCase = true) }
+            currentProviders.filter { it.name.equals(siteFilter, ignoreCase = true) || it.name.contains(siteFilter, ignoreCase = true) || siteFilter.contains(it.name, ignoreCase = true) }
         } else {
             currentProviders
         }
 
+        val timeoutMs = if (targets.size == 1) 15000L else 7000L
         val accumulated = java.util.Collections.synchronizedList(mutableListOf<ShowCard>())
         val emitMutex = Mutex()
 
@@ -67,7 +68,7 @@ object ProviderRegistry {
             targets.forEach { provider ->
                 launch(Dispatchers.IO) {
                     try {
-                        val items = withTimeoutOrNull(4000L) { provider.search(query) } ?: emptyList()
+                        val items = withTimeoutOrNull(timeoutMs) { provider.search(query) } ?: emptyList()
                         if (items.isNotEmpty()) {
                             emitMutex.withLock {
                                 accumulated.addAll(items)
