@@ -25,9 +25,16 @@ object HttpClient {
         .retryOnConnectionFailure(true)
         .build()
 
+    fun safeUrl(url: String): String {
+        if (url.isBlank()) return url
+        val parts = url.split("?", limit = 2)
+        val base = parts[0].replace("[", "%5B").replace("]", "%5D").replace(" ", "%20")
+        return if (parts.size > 1) "$base?${parts[1]}" else base
+    }
+
     fun get(url: String, referer: String? = null, headers: Map<String, String> = emptyMap()): Response {
         val reqBuilder = Request.Builder()
-            .url(url)
+            .url(safeUrl(url))
             .header("User-Agent", DEFAULT_UA)
             .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
             .header("Accept-Language", "en-US,en;q=0.9")
