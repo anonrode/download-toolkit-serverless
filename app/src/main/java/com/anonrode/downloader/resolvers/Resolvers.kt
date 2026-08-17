@@ -606,61 +606,49 @@ object DownloadwellaResolver : BaseResolver {
 // -------------------------------------------------------------
 object LoadedfilesResolver : BaseResolver {
     private val HOST_RE = Pattern.compile("""loadedfiles\.[a-z0-9-]+""", Pattern.CASE_INSENSITIVE)
-    private val PREFERRED_HOSTS = listOf("loadedfiles.st", "loadedfiles.org", "loadedfiles.net", "loadedfiles.to", "loadedfiles.com")
-    private var lastWorkingHost: String = "loadedfiles.st"
 
     override fun canResolve(url: String): Boolean {
         return HOST_RE.matcher(url.lowercase()).find()
     }
 
-    private fun getCandidateHosts(url: String): List<String> {
-        val hosts = mutableListOf<String>()
-        hosts.add(lastWorkingHost)
-        for (h in PREFERRED_HOSTS) {
-            if (h !in hosts) hosts.add(h)
-        }
-        val m = HOST_RE.matcher(url)
-        if (m.find()) {
-            val h = m.group(0).lowercase()
-            if (h !in hosts) hosts.add(h)
-        }
-        return hosts
-    }
-
     override suspend fun resolve(url: String, quality: String): String? {
         try {
-            val candidateHosts = getCandidateHosts(url)
-            for (host in candidateHosts) {
-                try {
-                    val candidateUrl = url.replace(HOST_RE.toRegex(), host)
-                    val html1 = HttpClient.getText(candidateUrl, referer = "https://my9jarocks.bz/") ?: continue
-                    val m1 = Pattern.compile("""var downloadUrl = '(https://loadedfiles\.[a-z0-9-]+/[^']+)'""", Pattern.CASE_INSENSITIVE).matcher(html1)
-                    if (!m1.find()) continue
-                    val rawStep1 = m1.group(1) ?: continue
-                    val step1 = rawStep1.replace(HOST_RE.toRegex(), host)
+            var currUrl = url
+            val noRedirectClient = HttpClient.shared.newBuilder().followRedirects(false).build()
 
-                    val html2 = HttpClient.getText(step1, referer = "https://$host/") ?: continue
-                    val m2 = Pattern.compile("""var downloadUrl = '(https://loadedfiles\.[a-z0-9-]+/[^']+)'""", Pattern.CASE_INSENSITIVE).matcher(html2)
-                    if (!m2.find()) continue
-                    val rawStep2 = m2.group(1) ?: continue
-                    val step2 = rawStep2.replace(HOST_RE.toRegex(), host)
+            for (step in 1..8) {
+                val referer = if (step == 1) "https://my9jarocks.bz/" else currUrl
+                val req = Request.Builder()
+                    .url(currUrl)
+                    .header("User-Agent", HttpClient.DEFAULT_UA)
+                    .header("Referer", referer)
+                    .build()
 
-                    // Step 3: Capture 302 location header
-                    val req = Request.Builder()
-                        .url(step2)
-                        .header("User-Agent", HttpClient.DEFAULT_UA)
-                        .header("Referer", "https://$host/")
-                        .build()
+                noRedirectClient.newCall(req).execute().use { res ->
+                    val loc = res.header("Location")
+                    if (!loc.isNullOrBlank()) {
+                        if (isDirectMediaUrl(loc) || loc.contains("/token/download/") || loc.contains("/d/")) {
+                            if (!loc.contains("?pt=")) {
+                                return loc
+                            }
+                        }
+                        currUrl = loc
+                        return@use
+                    }
 
-                    val noRedirectClient = HttpClient.shared.newBuilder().followRedirects(false).build()
-                    noRedirectClient.newCall(req).execute().use { res ->
-                        val loc = res.header("Location")
-                        if (!loc.isNullOrBlank() && !isRootLockerDomain(loc)) {
-                            lastWorkingHost = host
-                            return loc
+                    if (res.isSuccessful) {
+                        val body = res.body?.string() ?: return@use
+                        val direct = findDirectMediaUrl(body)
+                        if (!direct.isNullOrBlank() && !isRootLockerDomain(direct)) {
+                            return direct
+                        }
+
+                        val m = Pattern.compile("""var downloadUrl = '([^']+)'""", Pattern.CASE_INSENSITIVE).matcher(body)
+                        if (m.find()) {
+                            currUrl = m.group(1) ?: return@use
                         }
                     }
-                } catch (_: Exception) {}
+                }
             }
         } catch (_: Exception) {}
         return null
