@@ -1,23 +1,25 @@
 package com.anonrode.downloader.ui.screens
 
+import androidx.compose.animation.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.rounded.CheckCircle
-import androidx.compose.material.icons.rounded.Download
-import androidx.compose.material.icons.rounded.DownloadForOffline
+import androidx.compose.material.icons.rounded.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -41,7 +43,7 @@ fun EpisodeDrawer(
     var selectedEpisodes by remember(episodes) { mutableStateOf(setOf<EpisodeItem>()) }
     var rangeText by remember { mutableStateOf("") }
 
-    // Parse range string (e.g. "1-5, 8, 10-12")
+    // Parse range string (e.g. "1-5, 8, 10-12", "all", "none")
     fun applyRange(input: String) {
         val clean = input.trim()
         if (clean.isBlank() || clean.equals("none", ignoreCase = true) || clean.equals("clear", ignoreCase = true) || clean.equals("deselect", ignoreCase = true)) {
@@ -72,6 +74,18 @@ fun EpisodeDrawer(
         selectedEpisodes = episodes.filter { it.episodeNum in targetNums }.toSet()
     }
 
+    // Dynamic Season Grouping for 1-Tap Filter Chips
+    val seasonGroups = remember(episodes) {
+        val groups = mutableMapOf<Int, MutableList<EpisodeItem>>()
+        for (ep in episodes) {
+            val seasonMatch = Regex("S([0-9]{1,2})", RegexOption.IGNORE_CASE).find(ep.title)
+            val sNum = seasonMatch?.groupValues?.getOrNull(1)?.toIntOrNull()
+                ?: if (ep.episodeNum >= 100) ep.episodeNum / 100 else 1
+            groups.getOrPut(sNum) { mutableListOf() }.add(ep)
+        }
+        groups.toSortedMap()
+    }
+
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         containerColor = SurfaceElevated,
@@ -91,7 +105,7 @@ fun EpisodeDrawer(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = Spacing.lg)
-                .padding(bottom = Spacing.xxl)
+                .padding(bottom = Spacing.md)
         ) {
             // Header Title & Close
             Row(
@@ -111,7 +125,7 @@ fun EpisodeDrawer(
                         overflow = TextOverflow.Ellipsis
                     )
                     Text(
-                        text = "${show.site.uppercase()} • Direct Stream",
+                        text = "${show.site.uppercase()} • ${episodes.size} Total Episodes",
                         fontSize = 12.sp,
                         color = TextSecondary
                     )
@@ -133,6 +147,82 @@ fun EpisodeDrawer(
             }
 
             if (episodes.isNotEmpty()) {
+                // 1-Tap Batch Season Selector Chips Row
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState())
+                        .padding(vertical = Spacing.xs),
+                    horizontalArrangement = Arrangement.spacedBy(Spacing.xs)
+                ) {
+                    // All Chip
+                    val isAllSelected = selectedEpisodes.size == episodes.size
+                    FilterChip(
+                        selected = isAllSelected,
+                        onClick = {
+                            selectedEpisodes = if (isAllSelected) emptySet() else episodes.toSet()
+                        },
+                        label = { Text("All (${episodes.size})", fontSize = 11.sp, fontWeight = FontWeight.SemiBold) },
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = AccentPrimary,
+                            selectedLabelColor = BackgroundDark,
+                            containerColor = SurfaceCard,
+                            labelColor = TextPrimary
+                        ),
+                        border = FilterChipDefaults.filterChipBorder(
+                            borderColor = BorderHairline,
+                            selectedBorderColor = AccentPrimary,
+                            enabled = true,
+                            selected = isAllSelected
+                        )
+                    )
+
+                    // Individual Season Chips
+                    if (seasonGroups.size > 1) {
+                        for ((sNum, sEps) in seasonGroups) {
+                            val isSeasonSelected = sEps.all { it in selectedEpisodes }
+                            FilterChip(
+                                selected = isSeasonSelected,
+                                onClick = {
+                                    selectedEpisodes = if (isSeasonSelected) {
+                                        selectedEpisodes - sEps.toSet()
+                                    } else {
+                                        selectedEpisodes + sEps.toSet()
+                                    }
+                                },
+                                label = { Text("Season $sNum (${sEps.size})", fontSize = 11.sp) },
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = AccentViolet,
+                                    selectedLabelColor = Color.White,
+                                    containerColor = SurfaceCard,
+                                    labelColor = TextSecondary
+                                ),
+                                border = FilterChipDefaults.filterChipBorder(
+                                    borderColor = BorderHairline,
+                                    selectedBorderColor = AccentViolet,
+                                    enabled = true,
+                                    selected = isSeasonSelected
+                                )
+                            )
+                        }
+                    }
+
+                    // Clear / Invert Chip
+                    if (selectedEpisodes.isNotEmpty()) {
+                        FilterChip(
+                            selected = false,
+                            onClick = { selectedEpisodes = emptySet() },
+                            label = { Text("Clear (${selectedEpisodes.size})", fontSize = 11.sp, color = StatusError) },
+                            colors = FilterChipDefaults.filterChipColors(containerColor = SurfaceCard),
+                            border = FilterChipDefaults.filterChipBorder(
+                                borderColor = StatusError.copy(alpha = 0.4f),
+                                enabled = true,
+                                selected = false
+                            )
+                        )
+                    }
+                }
+
                 // Range Selector Bar
                 Row(
                     modifier = Modifier
@@ -149,100 +239,45 @@ fun EpisodeDrawer(
                         },
                         placeholder = { Text("Range (e.g. 1-5, 8, 10)", color = TextMuted, fontSize = 11.sp) },
                         singleLine = true,
-                        shape = RoundedCornerShape(Radius.md),
+                        modifier = Modifier.weight(1f),
                         colors = OutlinedTextFieldDefaults.colors(
-                            focusedContainerColor = SurfaceCard,
-                            unfocusedContainerColor = SurfaceCard,
                             focusedBorderColor = AccentPrimary,
                             unfocusedBorderColor = BorderHairline,
                             focusedTextColor = TextPrimary,
                             unfocusedTextColor = TextPrimary
                         ),
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(44.dp)
+                        shape = RoundedCornerShape(Radius.md)
                     )
 
                     Button(
                         onClick = {
-                            if (selectedEpisodes.size == episodes.size) {
-                                selectedEpisodes = emptySet()
-                                rangeText = ""
-                            } else {
-                                selectedEpisodes = episodes.toSet()
-                                rangeText = "1-${episodes.size}"
+                            val sorted = episodes.sortedBy { it.episodeNum }
+                            for (ep in sorted) {
+                                viewModel.engine.enqueue(
+                                    showTitle = show.title,
+                                    episodeTitle = "${show.title} - ${ep.title}",
+                                    directUrl = ep.url,
+                                    backend = "aria2c",
+                                    site = show.site
+                                )
                             }
+                            onDismiss()
                         },
                         colors = ButtonDefaults.buttonColors(
-                            containerColor = if (selectedEpisodes.size == episodes.size) AccentPrimary else SurfaceCard,
-                            contentColor = if (selectedEpisodes.size == episodes.size) BackgroundDark else TextPrimary
+                            containerColor = AccentPrimary,
+                            contentColor = BackgroundDark
                         ),
                         shape = RoundedCornerShape(Radius.md),
-                        modifier = Modifier.height(44.dp)
+                        contentPadding = PaddingValues(horizontal = Spacing.md, vertical = 10.dp)
                     ) {
-                        Text(
-                            text = if (selectedEpisodes.size == episodes.size) "Deselect" else "All",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                }
-
-                // Batch Download Actions
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = Spacing.xs),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = if (selectedEpisodes.isEmpty()) "${episodes.size} Episodes" else "${selectedEpisodes.size}/${episodes.size} Selected",
-                        fontSize = 12.sp,
-                        color = if (selectedEpisodes.isEmpty()) TextMuted else AccentPrimary,
-                        fontWeight = if (selectedEpisodes.isEmpty()) FontWeight.Normal else FontWeight.Bold
-                    )
-
-                    if (selectedEpisodes.isNotEmpty()) {
-                        Button(
-                            onClick = {
-                                viewModel.downloadAllEpisodes(selectedEpisodes.toList().sortedBy { it.episodeNum })
-                                onDismiss()
-                            },
-                            colors = ButtonDefaults.buttonColors(containerColor = AccentPrimary, contentColor = BackgroundDark),
-                            shape = RoundedCornerShape(Radius.full),
-                            modifier = Modifier.height(34.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Rounded.DownloadForOffline,
-                                contentDescription = null,
-                                modifier = Modifier.size(15.dp)
-                            )
-                            Spacer(modifier = Modifier.width(Spacing.xs))
-                            Text("Download Selected (${selectedEpisodes.size})", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                        }
-                    } else {
-                        TextButton(
-                            onClick = {
-                                viewModel.downloadAllEpisodes(episodes.sortedBy { it.episodeNum })
-                                onDismiss()
-                            },
-                            colors = ButtonDefaults.textButtonColors(contentColor = AccentPrimary)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Rounded.DownloadForOffline,
-                                contentDescription = null,
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Spacer(modifier = Modifier.width(Spacing.xs))
-                            Text("Download All (${episodes.size})", fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                        }
+                        Text("All", fontSize = 12.sp, fontWeight = FontWeight.Bold)
                     }
                 }
             }
 
             Spacer(modifier = Modifier.height(Spacing.xs))
 
+            // Episodes List
             if (isLoading) {
                 Box(
                     modifier = Modifier
@@ -250,7 +285,15 @@ fun EpisodeDrawer(
                         .height(200.dp),
                     contentAlignment = Alignment.Center
                 ) {
-                    CircularProgressIndicator(color = AccentPrimary, strokeWidth = 2.dp)
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        CircularProgressIndicator(
+                            color = AccentPrimary,
+                            strokeWidth = 3.dp,
+                            modifier = Modifier.size(32.dp)
+                        )
+                        Spacer(modifier = Modifier.height(Spacing.sm))
+                        Text("Scraping episode locker streams...", color = TextSecondary, fontSize = 12.sp)
+                    }
                 }
             } else if (episodes.isEmpty()) {
                 Box(
@@ -259,33 +302,103 @@ fun EpisodeDrawer(
                         .height(150.dp),
                     contentAlignment = Alignment.Center
                 ) {
-                    Text(
-                        text = uiState.episodesError ?: "No episodes found on this page",
-                        color = TextSecondary,
-                        fontSize = 13.sp
-                    )
+                    Text("No stream links found for this title.", color = TextMuted, fontSize = 13.sp)
                 }
             } else {
                 LazyColumn(
-                    verticalArrangement = Arrangement.spacedBy(Spacing.sm),
-                    contentPadding = androidx.compose.foundation.layout.WindowInsets.navigationBars.asPaddingValues(),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .heightIn(max = 420.dp)
+                        .weight(1f, fill = false)
+                        .heightIn(max = 380.dp),
+                    verticalArrangement = Arrangement.spacedBy(Spacing.xs),
+                    contentPadding = WindowInsets.navigationBars.asPaddingValues()
                 ) {
-                    items(episodes) { ep ->
-                        val isChecked = ep in selectedEpisodes
-                        EpisodeRowItem(
+                    items(episodes, key = { it.url }) { ep ->
+                        val isSelected = ep in selectedEpisodes
+                        EpisodeRow(
                             episode = ep,
-                            isChecked = isChecked,
-                            onToggleSelect = {
-                                selectedEpisodes = if (isChecked) selectedEpisodes - ep else selectedEpisodes + ep
+                            isSelected = isSelected,
+                            onToggle = {
+                                selectedEpisodes = if (isSelected) {
+                                    selectedEpisodes - ep
+                                } else {
+                                    selectedEpisodes + ep
+                                }
                             },
-                            onDownload = {
-                                viewModel.downloadEpisode(ep)
+                            onDownloadSingle = {
+                                viewModel.engine.enqueue(
+                                    showTitle = show.title,
+                                    episodeTitle = "${show.title} - ${ep.title}",
+                                    directUrl = ep.url,
+                                    backend = "aria2c",
+                                    site = show.site
+                                )
                                 onDismiss()
                             }
                         )
+                    }
+                }
+            }
+
+            // Sticky Bottom Floating Batch Action Bar
+            AnimatedVisibility(
+                visible = selectedEpisodes.isNotEmpty(),
+                enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
+                exit = slideOutVertically(targetOffsetY = { it }) + fadeOut()
+            ) {
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = Spacing.sm),
+                    shape = RoundedCornerShape(Radius.lg),
+                    color = SurfaceCard,
+                    border = androidx.compose.foundation.BorderStroke(1.dp, BorderHairline)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = Spacing.md, vertical = Spacing.sm),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column {
+                            Text(
+                                text = "${selectedEpisodes.size} Selected",
+                                color = TextPrimary,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = "Ready to queue",
+                                color = TextSecondary,
+                                fontSize = 11.sp
+                            )
+                        }
+
+                        Button(
+                            onClick = {
+                                val sorted = selectedEpisodes.sortedBy { it.episodeNum }
+                                for (ep in sorted) {
+                                    viewModel.engine.enqueue(
+                                        showTitle = show.title,
+                                        episodeTitle = "${show.title} - ${ep.title}",
+                                        directUrl = ep.url,
+                                        backend = "aria2c",
+                                        site = show.site
+                                    )
+                                }
+                                onDismiss()
+                            },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = AccentPrimary,
+                                contentColor = BackgroundDark
+                            ),
+                            shape = RoundedCornerShape(Radius.md)
+                        ) {
+                            Icon(Icons.Rounded.Download, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(Spacing.xs))
+                            Text("Download (${selectedEpisodes.size})", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                        }
                     }
                 }
             }
@@ -294,70 +407,64 @@ fun EpisodeDrawer(
 }
 
 @Composable
-fun EpisodeRowItem(
+fun EpisodeRow(
     episode: EpisodeItem,
-    isChecked: Boolean,
-    onToggleSelect: () -> Unit,
-    onDownload: () -> Unit
+    isSelected: Boolean,
+    onToggle: () -> Unit,
+    onDownloadSingle: () -> Unit
 ) {
-    Box(
+    Row(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(Radius.md))
-            .background(if (isChecked) SurfaceElevated else SurfaceCard)
-            .border(1.dp, if (isChecked) AccentPrimary else BorderHairline, RoundedCornerShape(Radius.md))
-            .clickable { onToggleSelect() }
-            .padding(horizontal = Spacing.md, vertical = Spacing.sm)
+            .background(if (isSelected) SurfaceCard else Color.Transparent)
+            .border(
+                1.dp,
+                if (isSelected) AccentPrimary.copy(alpha = 0.5f) else BorderHairline.copy(alpha = 0.4f),
+                RoundedCornerShape(Radius.md)
+            )
+            .clickable(onClick = onToggle)
+            .padding(horizontal = Spacing.md, vertical = Spacing.sm),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
     ) {
         Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.weight(1f)
         ) {
-            Row(
-                modifier = Modifier.weight(1f),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Checkbox(
-                    checked = isChecked,
-                    onCheckedChange = { onToggleSelect() },
-                    colors = CheckboxDefaults.colors(
-                        checkedColor = AccentPrimary,
-                        uncheckedColor = BorderHairline,
-                        checkmarkColor = BackgroundDark
-                    ),
-                    modifier = Modifier.size(24.dp)
-                )
-                Spacer(modifier = Modifier.width(Spacing.sm))
-                Column {
-                    Text(
-                        text = episode.title,
-                        color = if (isChecked) AccentPrimary else TextPrimary,
-                        fontSize = 13.sp,
-                        fontWeight = if (isChecked) FontWeight.Bold else FontWeight.Medium
-                    )
-                    Text(
-                        text = "Direct Fast Stream",
-                        color = TextMuted,
-                        fontSize = 10.sp
-                    )
-                }
-            }
+            Checkbox(
+                checked = isSelected,
+                onCheckedChange = { onToggle() },
+                colors = CheckboxDefaults.colors(
+                    checkedColor = AccentPrimary,
+                    uncheckedColor = TextMuted,
+                    checkmarkColor = BackgroundDark
+                ),
+                modifier = Modifier.size(24.dp)
+            )
 
-            IconButton(
-                onClick = onDownload,
-                modifier = Modifier
-                    .size(36.dp)
-                    .background(SurfaceElevated, CircleShape)
-                    .border(1.dp, BorderHairline, CircleShape)
-            ) {
-                Icon(
-                    imageVector = Icons.Rounded.Download,
-                    contentDescription = "Download Single",
-                    tint = TextPrimary,
-                    modifier = Modifier.size(18.dp)
-                )
-            }
+            Spacer(modifier = Modifier.width(Spacing.sm))
+
+            Text(
+                text = episode.title,
+                color = if (isSelected) TextPrimary else TextSecondary,
+                fontSize = 13.sp,
+                fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+
+        IconButton(
+            onClick = onDownloadSingle,
+            modifier = Modifier.size(32.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Rounded.DownloadForOffline,
+                contentDescription = "Download Single",
+                tint = if (isSelected) AccentPrimary else TextMuted,
+                modifier = Modifier.size(20.dp)
+            )
         }
     }
 }

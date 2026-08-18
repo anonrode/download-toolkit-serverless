@@ -2,6 +2,8 @@ package com.anonrode.downloader.ui.screens
 
 import android.content.Context
 import android.content.Intent
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -18,6 +20,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -26,6 +30,7 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
 import com.anonrode.downloader.data.models.DownloadTask
 import com.anonrode.downloader.data.models.TaskStatus
+import com.anonrode.downloader.ui.components.MediaPlayerModal
 import com.anonrode.downloader.ui.theme.*
 import com.anonrode.downloader.viewmodel.MainViewModel
 import java.io.File
@@ -37,6 +42,15 @@ fun DownloadsScreen(
 ) {
     val tasks by viewModel.engine.tasks.collectAsState()
     val context = LocalContext.current
+    var activePlaybackTask by remember { mutableStateOf<DownloadTask?>(null) }
+
+    activePlaybackTask?.let { task ->
+        MediaPlayerModal(
+            filePath = task.filePath,
+            title = task.episodeTitle,
+            onDismiss = { activePlaybackTask = null }
+        )
+    }
 
     Column(
         modifier = Modifier
@@ -112,6 +126,7 @@ fun DownloadsScreen(
                     DownloadCard(
                         task = task,
                         context = context,
+                        onPlay = { activePlaybackTask = task },
                         onPause = { viewModel.engine.pause(task.id) },
                         onRetry = { viewModel.engine.retry(task.id) },
                         onCancel = { viewModel.engine.cancel(task.id) }
@@ -126,6 +141,7 @@ fun DownloadsScreen(
 fun DownloadCard(
     task: DownloadTask,
     context: Context,
+    onPlay: () -> Unit,
     onPause: () -> Unit,
     onRetry: () -> Unit,
     onCancel: () -> Unit
@@ -141,12 +157,11 @@ fun DownloadCard(
             .clip(RoundedCornerShape(Radius.lg))
             .background(SurfaceCard)
             .border(1.dp, BorderHairline, RoundedCornerShape(Radius.lg))
-            .clickable(enabled = isCompleted) {
-                playMedia(context, task.filePath)
-            }
+            .clickable(enabled = isCompleted, onClick = onPlay)
             .padding(Spacing.md)
     ) {
         Column {
+            // Title & Status Badge
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -173,31 +188,46 @@ fun DownloadCard(
 
             Spacer(modifier = Modifier.height(Spacing.sm))
 
-            val progressFloat = when {
+            val targetProgress = when {
                 task.totalBytes > 0 -> (task.downloadedBytes.toFloat() / task.totalBytes.toFloat()).coerceIn(0f, 1f)
                 task.downloadedBytes in 1..100 -> (task.downloadedBytes.toFloat() / 100f).coerceIn(0f, 1f)
                 else -> 0f
             }
-            val pctInt = (progressFloat * 100).toInt()
+            val animatedProgress by animateFloatAsState(
+                targetValue = targetProgress,
+                animationSpec = tween(durationMillis = 300),
+                label = "progress"
+            )
+            val pctInt = (animatedProgress * 100).toInt()
 
             if (!isCompleted) {
-                LinearProgressIndicator(
-                    progress = { progressFloat },
+                // Seal-Style Visual Segment Progress Bar
+                Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(4.dp)
-                        .clip(RoundedCornerShape(2.dp)),
-                    color = if (isFailed) StatusError else AccentPrimary,
-                    trackColor = SurfaceElevated
-                )
+                        .height(6.dp)
+                        .clip(RoundedCornerShape(3.dp))
+                        .background(SurfaceElevated)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth(fraction = animatedProgress)
+                            .fillMaxHeight()
+                            .clip(RoundedCornerShape(3.dp))
+                            .background(
+                                if (isFailed) Brush.horizontalGradient(listOf(StatusError, StatusError))
+                                else Brush.horizontalGradient(listOf(AccentViolet, AccentPink, AccentPrimary))
+                            )
+                    )
+                }
 
                 Spacer(modifier = Modifier.height(Spacing.xs))
 
                 val speedMb = task.speedBytesPerSec / (1024.0 * 1024.0)
                 val speedStr = "%.1f".format(java.util.Locale.US, speedMb)
-                val etaStr = if (task.etaSeconds > 0) " • ${formatEta(task.etaSeconds)}" else ""
+                val etaStr = if (task.etaSeconds > 0) " • " + formatEta(task.etaSeconds) else ""
                 val sizeStr = if (task.totalBytes > 0) {
-                    "${formatBytes(task.downloadedBytes)} / ${formatBytes(task.totalBytes)}"
+                    formatBytes(task.downloadedBytes) + " / " + formatBytes(task.totalBytes)
                 } else if (task.downloadedBytes > 100) {
                     formatBytes(task.downloadedBytes)
                 } else {
@@ -225,7 +255,7 @@ fun DownloadCard(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = progressText,
+                        text = progressText ?: "",
                         color = if (isFailed) StatusError else if (task.status == TaskStatus.RESOLVING) AccentPrimary else TextMuted,
                         fontSize = 11.sp,
                         maxLines = 1,
@@ -256,26 +286,39 @@ fun DownloadCard(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(
-                        text = "Tap to play • $sizeText • $extText",
-                        color = TextMuted,
-                        fontSize = 11.sp
-                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(Spacing.xs)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(SurfaceElevated)
+                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                        ) {
+                            Text(text = extText, color = TextPrimary, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                        }
+                        Text(
+                            text = "$sizeText • Tap to Play In-App",
+                            color = TextMuted,
+                            fontSize = 11.sp
+                        )
+                    }
 
                     Row(horizontalArrangement = Arrangement.spacedBy(Spacing.sm)) {
                         IconButton(
-                            onClick = { playMedia(context, task.filePath) },
+                            onClick = onPlay,
                             modifier = Modifier
-                                .size(32.dp)
-                                .background(SurfaceElevated, CircleShape)
+                                .size(34.dp)
+                                .background(AccentPrimary, CircleShape)
                         ) {
-                            Icon(Icons.Rounded.PlayArrow, contentDescription = "Play", tint = AccentPrimary, modifier = Modifier.size(18.dp))
+                            Icon(Icons.Rounded.PlayArrow, contentDescription = "Play", tint = BackgroundDark, modifier = Modifier.size(20.dp))
                         }
 
                         IconButton(
                             onClick = { shareMedia(context, task.filePath) },
                             modifier = Modifier
-                                .size(32.dp)
+                                .size(34.dp)
                                 .background(SurfaceElevated, CircleShape)
                         ) {
                             Icon(Icons.Rounded.Share, contentDescription = "Share", tint = TextSecondary, modifier = Modifier.size(16.dp))
@@ -284,7 +327,7 @@ fun DownloadCard(
                         IconButton(
                             onClick = onCancel,
                             modifier = Modifier
-                                .size(32.dp)
+                                .size(34.dp)
                                 .background(SurfaceElevated, CircleShape)
                         ) {
                             Icon(Icons.Rounded.DeleteOutline, contentDescription = "Delete", tint = TextMuted, modifier = Modifier.size(16.dp))
@@ -317,26 +360,6 @@ fun StatusBadge(status: TaskStatus) {
     }
 }
 
-fun playMedia(context: Context, filePath: String) {
-    try {
-        val file = File(filePath)
-        if (!file.exists()) return
-        val ext = file.extension.lowercase()
-        val mime = when (ext) {
-            "mp3", "m4a", "aac", "wav", "flac", "opus", "ogg" -> "audio/*"
-            "mp4", "mkv", "avi", "mov", "webm", "ts" -> "video/*"
-            "zip", "rar", "7z", "tar", "gz" -> "application/zip"
-            else -> "*/*"
-        }
-        val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
-        val intent = Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(uri, mime)
-            flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK
-        }
-        context.startActivity(intent)
-    } catch (_: Exception) {}
-}
-
 fun shareMedia(context: Context, filePath: String) {
     try {
         val file = File(filePath)
@@ -348,7 +371,7 @@ fun shareMedia(context: Context, filePath: String) {
             "zip", "rar", "7z", "tar", "gz" -> "application/zip"
             else -> "*/*"
         }
-        val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+        val uri = FileProvider.getUriForFile(context, context.packageName + ".fileprovider", file)
         val intent = Intent(Intent.ACTION_SEND).apply {
             type = mime
             putExtra(Intent.EXTRA_STREAM, uri)
