@@ -503,7 +503,8 @@ class DownloadEngine(
                     Pair(false, "File missing")
                 }
 
-                if (producedFile != null && producedFile.exists() && producedFile.length() > 500 * 1024
+                val minSize = if (task.audioOnly) 10 * 1024L else 50 * 1024L
+                if (producedFile != null && producedFile.exists() && producedFile.length() >= minSize
                     && !looksLikeHtml(producedFile) && validation.first) {
                     val finalTitle = producedFile.nameWithoutExtension
                     val finalBytes = producedFile.length()
