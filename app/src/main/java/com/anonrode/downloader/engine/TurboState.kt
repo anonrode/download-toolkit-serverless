@@ -74,6 +74,7 @@ class TurboState(private val file: File) {
             val tmp = File(parent, "${file.name}.tmp")
             tmp.writeText(sb.toString())
             if (tmp.exists()) {
+                if (file.exists()) file.delete()
                 tmp.renameTo(file)
             }
         } catch (_: Exception) {

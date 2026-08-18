@@ -67,6 +67,24 @@ object TurboDownloader {
 
     data class Result(val file: File, val bytes: Long, val segmented: Boolean)
 
+    private fun atomicMove(src: File, dest: File): Boolean {
+        if (!src.exists()) return false
+        try {
+            if (dest.exists()) dest.delete()
+            if (src.renameTo(dest)) return true
+            // Fallback if cross-mount or renameTo failed
+            src.inputStream().use { input ->
+                dest.outputStream().use { output ->
+                    input.copyTo(output)
+                }
+            }
+            src.delete()
+            return true
+        } catch (_: Exception) {
+            return false
+        }
+    }
+
     /**
      * Download [url] to [dest]. Returns null if the transfer did not complete.
      * [onProgress] receives (downloadedBytes, totalBytes, bytesPerSecond).
@@ -95,22 +113,20 @@ object TurboDownloader {
             val ok = segmented(safe, partFile, headers, total, sockets, state, onProgress)
             if (ok) {
                 state.delete()
-                if (partFile.exists()) {
-                    partFile.renameTo(dest)
-                }
+                atomicMove(partFile, dest)
                 Result(dest, dest.length(), true)
             } else {
                 if (!partFile.exists() || partFile.length() == 0L) {
                     state.delete()
                     if (single(safe, partFile, headers, total, onProgress)) {
-                        if (partFile.exists()) partFile.renameTo(dest)
+                        atomicMove(partFile, dest)
                         Result(dest, dest.length(), false)
                     } else null
                 } else null
             }
         } else {
             if (single(safe, partFile, headers, total, onProgress)) {
-                if (partFile.exists()) partFile.renameTo(dest)
+                atomicMove(partFile, dest)
                 Result(dest, dest.length(), false)
             } else null
         }
