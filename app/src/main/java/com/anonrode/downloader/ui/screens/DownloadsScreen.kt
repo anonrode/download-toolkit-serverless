@@ -321,9 +321,16 @@ fun playMedia(context: Context, filePath: String) {
     try {
         val file = File(filePath)
         if (!file.exists()) return
+        val ext = file.extension.lowercase()
+        val mime = when (ext) {
+            "mp3", "m4a", "aac", "wav", "flac", "opus", "ogg" -> "audio/*"
+            "mp4", "mkv", "avi", "mov", "webm", "ts" -> "video/*"
+            "zip", "rar", "7z", "tar", "gz" -> "application/zip"
+            else -> "*/*"
+        }
         val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
         val intent = Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(uri, "video/*")
+            setDataAndType(uri, mime)
             flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK
         }
         context.startActivity(intent)
@@ -334,13 +341,20 @@ fun shareMedia(context: Context, filePath: String) {
     try {
         val file = File(filePath)
         if (!file.exists()) return
+        val ext = file.extension.lowercase()
+        val mime = when (ext) {
+            "mp3", "m4a", "aac", "wav", "flac", "opus", "ogg" -> "audio/*"
+            "mp4", "mkv", "avi", "mov", "webm", "ts" -> "video/*"
+            "zip", "rar", "7z", "tar", "gz" -> "application/zip"
+            else -> "*/*"
+        }
         val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
         val intent = Intent(Intent.ACTION_SEND).apply {
-            type = "video/*"
+            type = mime
             putExtra(Intent.EXTRA_STREAM, uri)
             flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK
         }
-        context.startActivity(Intent.createChooser(intent, "Share Video"))
+        context.startActivity(Intent.createChooser(intent, "Share Media"))
     } catch (_: Exception) {}
 }
 
