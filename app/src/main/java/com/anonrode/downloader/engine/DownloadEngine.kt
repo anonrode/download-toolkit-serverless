@@ -272,6 +272,9 @@ class DownloadEngine(
             return
         }
 
+        repository.update(nextTask.id) { it.copy(status = TaskStatus.RESOLVING) }
+        updateServiceState()
+
         startTask(nextTask)
     }
 
