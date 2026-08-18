@@ -1,8 +1,13 @@
 package com.anonrode.downloader.data.net
 
+import android.util.Log
+import okhttp3.Cookie
+import okhttp3.CookieJar
+import okhttp3.HttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
+import java.util.Collections
 import java.util.concurrent.TimeUnit
 
 object HttpClient {
@@ -14,9 +19,70 @@ object HttpClient {
         maxRequestsPerHost = 32
     }
 
+    /**
+     * In-memory cookie store shared by every request.
+     *
+     * This is load-bearing, not a nicety. OkHttp defaults to CookieJar.NO_COOKIES,
+     * so every Set-Cookie was being dropped -- and the multi-step locker
+     * handshakes are session-based. loadedfiles hands out a fresh `?pt=` token on
+     * each hop and only issues the final 302 to the CDN once it recognises the
+     * session; without cookies the chain loops forever and the resolver reports
+     * "Could not crack stream link". Verified against the live host: identical
+     * requests fail without a cookie jar and reach the CDN in 3 hops with one.
+     *
+     * The Python monolith got this for free because every resolver is handed a
+     * `requests.Session()`, which carries cookies. This restores parity.
+     *
+     * One flat list filtered by Cookie.matches() rather than a host->list map:
+     * matches() honours domain/path/secure rules, so a cookie set on
+     * `.example.com` correctly applies to `www.example.com` (a host-keyed map
+     * would miss it).
+     */
+    private val cookies: MutableList<Cookie> = Collections.synchronizedList(mutableListOf())
+    private const val MAX_COOKIES = 400
+
+    private val sessionCookieJar = object : CookieJar {
+        override fun saveFromResponse(url: HttpUrl, cookieList: List<Cookie>) {
+            if (cookieList.isEmpty()) return
+            synchronized(cookies) {
+                for (c in cookieList) {
+                    // Replace same name+domain+path instead of appending duplicates.
+                    cookies.removeAll { it.name == c.name && it.domain == c.domain && it.path == c.path }
+                    cookies.add(c)
+                }
+                // Bound the store so a long session can't grow without limit.
+                while (cookies.size > MAX_COOKIES) cookies.removeAt(0)
+            }
+        }
+
+        override fun loadForRequest(url: HttpUrl): List<Cookie> {
+            val now = System.currentTimeMillis()
+            synchronized(cookies) {
+                cookies.removeAll { it.expiresAt < now }
+                return cookies.filter { it.matches(url) }
+            }
+        }
+    }
+
+    /** Drop all session cookies (e.g. when a handshake must start clean). */
+    fun clearCookies() {
+        synchronized(cookies) { cookies.clear() }
+    }
+
+    /**
+     * Why the most recent getText() returned null. Every resolver funnels through
+     * getText and swallows failures into null, so all 25 of them produce the same
+     * opaque "Could not crack stream link". Recording the real cause (HTTP code or
+     * exception) makes the next failure diagnosable instead of guesswork.
+     */
+    @Volatile
+    var lastFailure: String? = null
+        private set
+
     val shared: OkHttpClient = OkHttpClient.Builder()
         .connectionPool(pool)
         .dispatcher(dispatcher)
+        .cookieJar(sessionCookieJar)
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(15, TimeUnit.SECONDS)
         .writeTimeout(10, TimeUnit.SECONDS)
@@ -50,9 +116,17 @@ object HttpClient {
     fun getText(url: String, referer: String? = null, headers: Map<String, String> = emptyMap()): String? {
         return try {
             get(url, referer, headers).use { res ->
-                if (res.isSuccessful) res.body?.string() else null
+                if (res.isSuccessful) {
+                    res.body?.string()
+                } else {
+                    lastFailure = "HTTP ${res.code} for ${url.take(120)}"
+                    Log.w("HttpClient", lastFailure!!)
+                    null
+                }
             }
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            lastFailure = "${e.javaClass.simpleName}: ${e.message} for ${url.take(120)}"
+            Log.w("HttpClient", lastFailure!!)
             null
         }
     }

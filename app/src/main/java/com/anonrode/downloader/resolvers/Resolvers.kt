@@ -607,19 +607,54 @@ object DownloadwellaResolver : BaseResolver {
 object LoadedfilesResolver : BaseResolver {
     private val HOST_RE = Pattern.compile("""loadedfiles\.[a-z0-9-]+""", Pattern.CASE_INSENSITIVE)
 
+    // loadedfiles keeps switching TLDs (.st / .net / .org / ...) while every host
+    // serves the same file hashes. Pinning one TLD breaks whenever that host goes
+    // dark, so try the last host that worked, then the link's own TLD, then the
+    // known fallbacks. Ported from the monolith's _candidate_hosts (resolvers.py).
+    private val FALLBACK_TLDS = listOf("st", "net", "org", "to", "com")
+    @Volatile private var lastWorkingHost: String? = null
+
+    private fun rewriteHost(text: String, host: String): String =
+        HOST_RE.matcher(text).replaceAll(host)
+
+    private fun candidateHosts(url: String): List<String> {
+        val m = HOST_RE.matcher(url.lowercase())
+        val urlHost = if (m.find()) m.group() else null
+        val hosts = LinkedHashSet<String>()
+        lastWorkingHost?.let { hosts.add(it) }
+        urlHost?.let { hosts.add(it) }
+        FALLBACK_TLDS.forEach { hosts.add("loadedfiles.$it") }
+        return hosts.toList()
+    }
+
     override fun canResolve(url: String): Boolean {
         return HOST_RE.matcher(url.lowercase()).find()
     }
 
     override suspend fun resolve(url: String, quality: String): String? {
         try {
-            var currUrl = HttpClient.safeUrl(url)
             val noRedirectClient = HttpClient.shared.newBuilder().followRedirects(false).build()
 
+            // Find a host that actually answers, then run the token chain on it.
+            var currUrl: String? = null
+            for (host in candidateHosts(url)) {
+                val candidate = HttpClient.safeUrl(rewriteHost(url, host))
+                val probe = HttpClient.getText(candidate, referer = "https://my9jarocks.bz/")
+                if (probe != null) {
+                    lastWorkingHost = host
+                    currUrl = candidate
+                    break
+                }
+            }
+            if (currUrl == null) {
+                android.util.Log.w("AnonDownload", "Loadedfiles: no live host (${HttpClient.lastFailure})")
+                return null
+            }
+
             for (step in 1..8) {
-                val referer = if (step == 1) "https://my9jarocks.bz/" else currUrl
+                val referer = if (step == 1) "https://my9jarocks.bz/" else currUrl!!
                 val req = Request.Builder()
-                    .url(HttpClient.safeUrl(currUrl))
+                    .url(HttpClient.safeUrl(currUrl!!))
                     .header("User-Agent", HttpClient.DEFAULT_UA)
                     .header("Referer", referer)
                     .build()
@@ -649,7 +684,12 @@ object LoadedfilesResolver : BaseResolver {
 
                         val m = Pattern.compile("""var downloadUrl = '([^']+)'""", Pattern.CASE_INSENSITIVE).matcher(body)
                         if (m.find()) {
-                            currUrl = HttpClient.safeUrl(m.group(1) ?: return@use)
+                            // Keep the chain on the host that answered -- the page can
+                            // hand back a link on a dead sibling TLD.
+                            val next = m.group(1) ?: return@use
+                            currUrl = HttpClient.safeUrl(
+                                lastWorkingHost?.let { rewriteHost(next, it) } ?: next
+                            )
                         }
                     }
                 }
