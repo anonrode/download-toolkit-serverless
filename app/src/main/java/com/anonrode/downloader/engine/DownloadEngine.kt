@@ -429,14 +429,13 @@ class DownloadEngine(
                         configuredSockets = task.parallelSockets,
                         onProgress = { got, tot, bps ->
                             val eta = if (bps > 0 && tot > got) (tot - got) / bps else 0L
-                            repository.update(task.id) {
-                                it.copy(
-                                    downloadedBytes = got,
-                                    totalBytes = tot,
-                                    speedBytesPerSec = bps.toDouble(),
-                                    etaSeconds = eta
-                                )
-                            }
+                            repository.updateProgress(
+                                taskId = task.id,
+                                downloaded = got,
+                                total = tot,
+                                speed = bps.toDouble(),
+                                eta = eta
+                            )
                             updateServiceState()
                         }
                     )
@@ -460,7 +459,13 @@ class DownloadEngine(
                             isExtractorTask = false,
                             onProgress = { progressFloat ->
                                 val pct = progressFloat.toLong().coerceIn(0L, 100L)
-                                repository.update(task.id) { it.copy(downloadedBytes = pct, totalBytes = 100L) }
+                                repository.updateProgress(
+                                    taskId = task.id,
+                                    downloaded = pct,
+                                    total = 100L,
+                                    speed = 0.0,
+                                    eta = 0L
+                                )
                                 updateServiceState()
                             }
                         )
@@ -480,7 +485,13 @@ class DownloadEngine(
                         isExtractorTask = isExtractor,
                         onProgress = { progressFloat ->
                             val pct = progressFloat.toLong().coerceIn(0L, 100L)
-                            repository.update(task.id) { it.copy(downloadedBytes = pct, totalBytes = 100L) }
+                            repository.updateProgress(
+                                taskId = task.id,
+                                downloaded = pct,
+                                total = 100L,
+                                speed = 0.0,
+                                eta = 0L
+                            )
                             updateServiceState()
                         }
                     )
@@ -495,12 +506,15 @@ class DownloadEngine(
                 if (producedFile != null && producedFile.exists() && producedFile.length() > 500 * 1024
                     && !looksLikeHtml(producedFile) && validation.first) {
                     val finalTitle = producedFile.nameWithoutExtension
+                    val finalBytes = producedFile.length()
                     repository.update(task.id) {
                         it.copy(
                             filePath = producedFile.absolutePath,
                             episodeTitle = if (isExtractor) finalTitle else it.episodeTitle,
-                            downloadedBytes = 100L,
-                            totalBytes = 100L,
+                            downloadedBytes = finalBytes,
+                            totalBytes = finalBytes,
+                            speedBytesPerSec = 0.0,
+                            etaSeconds = 0L,
                             status = TaskStatus.COMPLETED
                         )
                     }

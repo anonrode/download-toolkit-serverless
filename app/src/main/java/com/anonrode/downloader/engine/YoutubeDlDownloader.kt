@@ -78,6 +78,7 @@ object YoutubeDlDownloader {
                     addOption("--audio-format", "mp3")
                 } else {
                     addOption("-f", "bestvideo[height<=$height][ext=mp4]+bestaudio[ext=m4a]/best[height<=$height][ext=mp4]/best[height<=$height]/best")
+                    addOption("-S", "height~$height,+size,+br")
                     addOption("--merge-output-format", "mp4")
                 }
                 addOption("--no-playlist")
@@ -86,6 +87,7 @@ object YoutubeDlDownloader {
                 val stem = File(targetDir, preferredFilename.substringBeforeLast('.')).absolutePath
                 addOption("-o", "$stem.%(ext)s")
                 addOption("-f", "best[height<=$height]/best")
+                addOption("-S", "height~$height,+size,+br")
                 addOption("--no-playlist")
             } else {
                 // Direct CDN HTTP multi-socket via aria2c

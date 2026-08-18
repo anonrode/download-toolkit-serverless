@@ -83,4 +83,19 @@ class DownloadRepository {
         }
         persist()
     }
+
+    fun updateProgress(taskId: String, downloaded: Long, total: Long, speed: Double, eta: Long) {
+        _tasks.update { list ->
+            list.map {
+                if (it.id == taskId) {
+                    it.copy(
+                        downloadedBytes = downloaded,
+                        totalBytes = total,
+                        speedBytesPerSec = speed,
+                        etaSeconds = eta
+                    )
+                } else it
+            }
+        }
+    }
 }
