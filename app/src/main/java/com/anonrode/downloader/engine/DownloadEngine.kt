@@ -392,7 +392,7 @@ class DownloadEngine(
                         }
                     }
 
-                    if (activeJobs[task.id] == null) return@launch
+                    if (!coroutineContext.isActive) return@launch
 
                     if (!resolved.isNullOrBlank() && !isKnownLockerHost(resolved)) {
                         streamUrl = resolved

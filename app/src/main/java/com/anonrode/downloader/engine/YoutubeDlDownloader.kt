@@ -263,13 +263,22 @@ object YoutubeDlDownloader {
 
     private fun findAria2Executable(context: Context): File {
         val libDir = File(context.applicationInfo.nativeLibraryDir, "libaria2c.so")
-        if (libDir.exists()) return libDir
+        if (libDir.exists()) {
+            try { libDir.setExecutable(true) } catch (_: Exception) {}
+            return libDir
+        }
 
         val binDir = File(context.filesDir, "bin/aria2c")
-        if (binDir.exists()) return binDir
+        if (binDir.exists()) {
+            try { binDir.setExecutable(true) } catch (_: Exception) {}
+            return binDir
+        }
 
         val packagesDir = File(context.filesDir, "packages/aria2c/usr/bin/aria2c")
-        if (packagesDir.exists()) return packagesDir
+        if (packagesDir.exists()) {
+            try { packagesDir.setExecutable(true) } catch (_: Exception) {}
+            return packagesDir
+        }
 
         return libDir
     }
