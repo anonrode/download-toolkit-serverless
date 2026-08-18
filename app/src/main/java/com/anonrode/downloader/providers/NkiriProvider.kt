@@ -84,7 +84,7 @@ object NkiriProvider : SiteProvider {
             for (a in allLinks) {
                 val rawHref = a.attr("href")
                 val href = a.attr("abs:href").ifBlank {
-                    if (rawHref.startsWith("http")) rawHref else URI(cleanUrl).resolve(rawHref).toString()
+                    HttpClient.safeResolveUri(cleanUrl, rawHref)
                 }
                 val lowerHref = href.lowercase()
 

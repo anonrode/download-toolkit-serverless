@@ -310,9 +310,24 @@ class DownloadEngine(
             "waffi",
             "dood.",
             "streamwish.",
+            "strwsh.",
+            "stwish.",
+            "sfastwish.",
             "vidhide.",
             "kissorgrab.com",
-            "nkiserv.com"
+            "nkiserv.com",
+            "wildshare.net",
+            "vidmoly.",
+            "mixdrop.",
+            "mixdrp.",
+            "streamtape.",
+            "pixeldrain.com/u/",
+            "vidbasic.",
+            "vidb.top",
+            "lightdl.cc",
+            "5play.cc",
+            "megaplay.",
+            "blogger.com"
         ).any { lower.contains(it) }
     }
 

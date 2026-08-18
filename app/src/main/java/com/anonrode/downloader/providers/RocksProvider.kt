@@ -71,7 +71,7 @@ object RocksProvider : SiteProvider {
             val slugMatch = Regex("""season-(\d{1,2})""", RegexOption.IGNORE_CASE).find(showUrl)
                 ?: Regex("""season\s*(\d{1,2})""", RegexOption.IGNORE_CASE).find(title)
             if (slugMatch != null) {
-                currentSeason = slugMatch.groupValues[1].toIntOrNull() ?: 1
+                currentSeason = slugMatch.groupValues.getOrNull(1)?.toIntOrNull() ?: 1
             }
 
             var count = 1
@@ -86,7 +86,7 @@ object RocksProvider : SiteProvider {
                     if (t.length < 60 && !isExclusion) {
                         val sm = Regex("""\b(?:SEASON|S)\s*(\d{1,2})\b(?!\s*-\s*\d+)""", RegexOption.IGNORE_CASE).find(t)
                         if (sm != null) {
-                            currentSeason = sm.groupValues[1].toIntOrNull() ?: currentSeason
+                            currentSeason = sm.groupValues.getOrNull(1)?.toIntOrNull() ?: currentSeason
                         }
                     }
                 }
@@ -94,7 +94,7 @@ object RocksProvider : SiteProvider {
                 if (tagName == "a" && elem.hasAttr("href")) {
                     val rawHref = elem.attr("href")
                     val href = elem.attr("abs:href").ifBlank {
-                        if (rawHref.startsWith("http")) rawHref else java.net.URI(showUrl).resolve(rawHref).toString()
+                        HttpClient.safeResolveUri(showUrl, rawHref)
                     }
                     val lowerHref = href.lowercase()
 
@@ -115,7 +115,7 @@ object RocksProvider : SiteProvider {
                         val zipMatch = Regex("""\b(?:SEASON|S)\s*(\d{1,2})\b.*\bZIP\b""", RegexOption.IGNORE_CASE).find(parentText)
                         val isZip = zipMatch != null || parentText.contains("ZIP", ignoreCase = true) || href.contains("ZIP", ignoreCase = true)
                         if (isZip) {
-                            val zipSeason = zipMatch?.groupValues?.get(1)?.toIntOrNull() ?: currentSeason
+                            val zipSeason = zipMatch?.groupValues?.getOrNull(1)?.toIntOrNull() ?: currentSeason
                             val zipLabel = "S%02d Complete Season ZIP".format(zipSeason)
                             episodes.add(
                                 EpisodeItem(
@@ -132,11 +132,11 @@ object RocksProvider : SiteProvider {
                             ?: Regex("""\b(?:EPISODE|EP|E)\s*(\d{1,3})\b""", RegexOption.IGNORE_CASE).find(parentText)
                             ?: Regex("""\bS\d{1,2}E(\d{1,3})\b""", RegexOption.IGNORE_CASE).find(href)
 
-                        val epNum = epMatch?.groupValues?.get(1)?.toIntOrNull() ?: count
+                        val epNum = epMatch?.groupValues?.getOrNull(1)?.toIntOrNull() ?: count
                         val epCode = "S%02dE%02d".format(currentSeason, epNum)
                         val qMatch = Regex("""\b(\d{3,4}p)\b""", RegexOption.IGNORE_CASE).find(text)
                             ?: Regex("""\b(\d{3,4}p)\b""", RegexOption.IGNORE_CASE).find(parentText)
-                        val qualitySuffix = qMatch?.let { " [${it.groupValues[1]}]" } ?: ""
+                        val qualitySuffix = qMatch?.groupValues?.getOrNull(1)?.let { " [$it]" } ?: ""
 
                         val label = "$epCode$qualitySuffix"
 
@@ -159,7 +159,7 @@ object RocksProvider : SiteProvider {
                 for (a in dls) {
                     val rawHref = a.attr("href")
                     val href = a.attr("abs:href").ifBlank {
-                        if (rawHref.startsWith("http")) rawHref else java.net.URI(showUrl).resolve(rawHref).toString()
+                        HttpClient.safeResolveUri(showUrl, rawHref)
                     }
                     if (href.isNotBlank() && href !in seen) {
                         seen.add(href)

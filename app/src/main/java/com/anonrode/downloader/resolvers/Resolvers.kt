@@ -83,8 +83,7 @@ object VidbasicResolver : BaseResolver {
             val mvMatcher = Pattern.compile("""data-video=["']([^"']+)["']""").matcher(html)
             if (mvMatcher.find()) {
                 var playerUrl = mvMatcher.group(1) ?: ""
-                if (playerUrl.startsWith("//")) playerUrl = "https:$playerUrl"
-                else if (playerUrl.startsWith("/")) playerUrl = URI(url).resolve(playerUrl).toString()
+                playerUrl = HttpClient.safeResolveUri(url, playerUrl)
                 val playerHtml = HttpClient.getText(playerUrl, referer = url)
                 if (!playerHtml.isNullOrBlank()) {
                     val pDirect = decryptPayload(playerHtml)
@@ -95,8 +94,7 @@ object VidbasicResolver : BaseResolver {
             val ifrMatcher = Pattern.compile("""<iframe[^>]+src=["']([^"']+)["']""").matcher(html)
             if (ifrMatcher.find()) {
                 var inner = ifrMatcher.group(1) ?: ""
-                if (inner.startsWith("//")) inner = "https:$inner"
-                else if (inner.startsWith("/")) inner = URI(url).resolve(inner).toString()
+                inner = HttpClient.safeResolveUri(url, inner)
                 if (inner != url) {
                     val innerDirect = resolve(inner, quality)
                     if (!innerDirect.isNullOrBlank()) return innerDirect
@@ -140,7 +138,7 @@ object KissasianResolver : BaseResolver {
             val m = Pattern.compile("""sourceUrl"\s*:\s*"([^"]+)""").matcher(html)
             if (m.find()) {
                 val apiPath = m.group(1) ?: return null
-                val apiUrl = URI(url).resolve(apiPath).toString()
+                val apiUrl = HttpClient.safeResolveUri(url, apiPath)
                 val apiJson = HttpClient.getText(apiUrl, referer = url) ?: return null
                 val obj = JSONObject(apiJson)
                 val src = obj.optString("source")
@@ -177,9 +175,8 @@ object KisskhMegaplayResolver : BaseResolver {
             val doc = Jsoup.parse(html)
             val innerIframe = doc.selectFirst("iframe[src]")
             if (innerIframe != null) {
-                var src = innerIframe.attr("src")
-                if (src.startsWith("//")) src = "https:$src"
-                else if (src.startsWith("/")) src = URI(url).resolve(src).toString()
+                val rawSrc = innerIframe.attr("src")
+                val src = HttpClient.safeResolveUri(url, rawSrc)
                 if (src != url && !src.startsWith("javascript:")) {
                     if (src.contains("blogger.com")) return src
                     val nested = ResolverRegistry.resolve(src, quality)
@@ -311,9 +308,8 @@ object VidsrcResolver : BaseResolver {
             val html = HttpClient.getText(url, referer = url) ?: return null
             val ifr = Jsoup.parse(html).selectFirst("iframe[src]")
             if (ifr != null) {
-                var src = ifr.attr("src")
-                if (src.startsWith("//")) src = "https:$src"
-                else if (src.startsWith("/")) src = URI(url).resolve(src).toString()
+                val rawSrc = ifr.attr("src")
+                val src = HttpClient.safeResolveUri(url, rawSrc)
                 val resolved = ResolverRegistry.resolve(src, quality)
                 if (!resolved.isNullOrBlank()) return resolved
             }
@@ -431,7 +427,7 @@ object DramaGatewayResolver : BaseResolver {
 
     override suspend fun resolve(url: String, quality: String): String? {
         try {
-            val host = URI(url).host ?: "dramarain.com"
+            val host = HttpClient.safeHost(url, "dramarain.com")
             val html = HttpClient.getText(url, referer = "https://$host/") ?: return null
             val m = Pattern.compile("""window\.location\.href\s*=\s*"([^"]+)""").matcher(html)
             if (m.find()) {
@@ -848,8 +844,8 @@ object DoodstreamResolver : BaseResolver {
 
     override suspend fun resolve(url: String, quality: String): String? {
         try {
-            val host = URI(url).host ?: "dood.to"
-            val embedUrl = url.replace("/d/", "/e/")
+            val host = HttpClient.safeHost(url, "dood.to")
+            val embedUrl = url.replace("/d/", "/e/").replace("/f/", "/e/")
             val html = HttpClient.getText(embedUrl, referer = "https://$host/") ?: return null
             val passPattern = Pattern.compile("""/pass_md5/([^"'\s]+)""")
             val matcher = passPattern.matcher(html)
@@ -883,7 +879,7 @@ object MixdropResolver : BaseResolver {
     override suspend fun resolve(url: String, quality: String): String? {
         try {
             val embedUrl = url.replace("/f/", "/e/")
-            val host = URI(url).host ?: "mixdrop.co"
+            val host = HttpClient.safeHost(url, "mixdrop.co")
             val html = HttpClient.getText(embedUrl, referer = "https://$host/") ?: return null
             val unpacked = JsUnpacker.unpack(html)
             val source = if (!unpacked.isNullOrBlank()) unpacked else html

@@ -110,7 +110,7 @@ object AnitakuProvider : SiteProvider {
             for (a in epLinks) {
                 val rawHref = a.attr("href")
                 val href = a.attr("abs:href").ifBlank {
-                    if (rawHref.startsWith("http")) rawHref else URI(showUrl).resolve(rawHref).toString()
+                    HttpClient.safeResolveUri(showUrl, rawHref)
                 }
                 if (href.isBlank() || href in seen || href.contains("/category/") || href.contains("/genre/")) continue
                 seen.add(href)
@@ -149,7 +149,7 @@ object AnitakuProvider : SiteProvider {
             if (malMatch.find() && epMatch.find()) {
                 val malId = malMatch.group(1) ?: ""
                 val ep = epMatch.group(1) ?: ""
-                val host = URI(episodeUrl).host ?: "gogoanime.or.at"
+                val host = HttpClient.safeHost(episodeUrl, "gogoanime.or.at")
                 val ajaxUrl = "https://$host/wp-admin/admin-ajax.php"
 
                 val form = FormBody.Builder()
@@ -197,10 +197,7 @@ object AnitakuProvider : SiteProvider {
                 }
 
                 for (cand in candidates) {
-                    var src = cand
-                    if (src.startsWith("//")) src = "https:$src"
-                    else if (src.startsWith("/")) src = URI(episodeUrl).resolve(src).toString()
-
+                    val src = HttpClient.safeResolveUri(episodeUrl, cand)
                     val resolved = ResolverRegistry.resolve(src, quality)
                     if (!resolved.isNullOrBlank()) {
                         direct = resolved

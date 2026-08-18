@@ -67,7 +67,7 @@ object PlutoProvider : SiteProvider {
                 for (a in epLinks) {
                     val rawHref = a.attr("href")
                     val href = a.attr("abs:href").ifBlank {
-                        if (rawHref.startsWith("http")) rawHref else URI(showUrl).resolve(rawHref).toString()
+                        HttpClient.safeResolveUri(showUrl, rawHref)
                     }
                     if (href.isBlank() || href in seen) continue
                     seen.add(href)

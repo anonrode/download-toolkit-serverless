@@ -76,7 +76,7 @@ object NaijaVaultProvider : SiteProvider {
             for (a in allLinks) {
                 val rawHref = a.attr("href")
                 val href = a.attr("abs:href").ifBlank {
-                    if (rawHref.startsWith("http")) rawHref else URI(showUrl).resolve(rawHref).toString()
+                    HttpClient.safeResolveUri(showUrl, rawHref)
                 }
                 val lowerHref = href.lowercase()
 
@@ -122,14 +122,18 @@ object NaijaVaultProvider : SiteProvider {
                 val html = HttpClient.getText(episodeUrl) ?: ""
                 val duMatch = Regex("var\\s+downloadURL\\s*=\\s*\"([^\"]+)\"").find(html)
                 if (duMatch != null) {
-                    val cdnUrl = duMatch.groupValues[1]
-                    direct = ResolverRegistry.resolve(cdnUrl, quality) ?: cdnUrl
+                    val cdnUrl = duMatch.groupValues.getOrNull(1) ?: ""
+                    if (cdnUrl.isNotBlank()) {
+                        direct = ResolverRegistry.resolve(cdnUrl, quality) ?: cdnUrl
+                    }
                 } else {
                     // Fallback to scanning HTML for locker hosts (vikingfile, lulacloud, etc.)
                     val lockerMatch = Regex("""https?://(?:www\.)?(?:vikingfile|lulacloud|waffi)\.[a-z0-9-]+/[^\s"'<>]+""", RegexOption.IGNORE_CASE).find(html)
                     if (lockerMatch != null) {
-                        val lockerUrl = lockerMatch.groupValues[0]
-                        direct = ResolverRegistry.resolve(lockerUrl, quality) ?: lockerUrl
+                        val lockerUrl = lockerMatch.groupValues.getOrNull(0) ?: ""
+                        if (lockerUrl.isNotBlank()) {
+                            direct = ResolverRegistry.resolve(lockerUrl, quality) ?: lockerUrl
+                        }
                     }
                 }
             } catch (_: Exception) {}
