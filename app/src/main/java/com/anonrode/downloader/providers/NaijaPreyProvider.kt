@@ -67,7 +67,7 @@ object NaijaPreyProvider : SiteProvider {
             for (a in links) {
                 val rawHref = a.attr("href")
                 val href = a.attr("abs:href").ifBlank {
-                    if (rawHref.startsWith("http")) rawHref else URI(showUrl).resolve(rawHref).toString()
+                    HttpClient.safeResolveUri(showUrl, rawHref)
                 }
                 val text = a.text().trim()
                 if (href.isNotBlank() && href !in seen && !href.contains("/category/") && !href.contains("/tag/")) {

@@ -79,6 +79,17 @@ object HttpClient {
     var lastFailure: String? = null
         private set
 
+    /** In-memory cache for DoH-resolved IP addresses to avoid redundant HTTPS lookups */
+    private val dohCache = java.util.concurrent.ConcurrentHashMap<String, List<java.net.InetAddress>>()
+
+    private val bootstrapDohClient by lazy {
+        OkHttpClient.Builder()
+            .dns(okhttp3.Dns.SYSTEM)
+            .connectTimeout(4, TimeUnit.SECONDS)
+            .readTimeout(4, TimeUnit.SECONDS)
+            .build()
+    }
+
     /**
      * Hybrid Smart-DNS:
      * 1. Primary: System DNS (Fastest 15ms latency + local ISP CDN geo-routing for max video download speeds).
@@ -86,6 +97,7 @@ object HttpClient {
      */
     private val hybridDns = object : okhttp3.Dns {
         override fun lookup(hostname: String): List<java.net.InetAddress> {
+            dohCache[hostname]?.let { return it }
             return try {
                 okhttp3.Dns.SYSTEM.lookup(hostname)
             } catch (e: java.net.UnknownHostException) {
@@ -96,11 +108,7 @@ object HttpClient {
                         .url(dohUrl)
                         .header("User-Agent", DEFAULT_UA)
                         .build()
-                    val bootstrap = OkHttpClient.Builder()
-                        .connectTimeout(5, TimeUnit.SECONDS)
-                        .readTimeout(5, TimeUnit.SECONDS)
-                        .build()
-                    bootstrap.newCall(req).execute().use { res ->
+                    bootstrapDohClient.newCall(req).execute().use { res ->
                         if (!res.isSuccessful) throw e
                         val body = res.body?.string() ?: throw e
                         val json = org.json.JSONObject(body)
@@ -113,6 +121,7 @@ object HttpClient {
                             }
                         }
                         if (addrs.isEmpty()) throw e
+                        dohCache[hostname] = addrs
                         addrs
                     }
                 } catch (_: Exception) {
@@ -134,6 +143,34 @@ object HttpClient {
         .followSslRedirects(true)
         .retryOnConnectionFailure(true)
         .build()
+
+    fun safeResolveUri(base: String, relative: String): String {
+        if (relative.startsWith("http://", ignoreCase = true) || relative.startsWith("https://", ignoreCase = true) || relative.startsWith("magnet:", ignoreCase = true)) {
+            return relative
+        }
+        return try {
+            val safeBase = safeUrl(base)
+            val safeRel = relative.replace(" ", "%20").replace("[", "%5B").replace("]", "%5D")
+            java.net.URI(safeBase).resolve(safeRel).toString()
+        } catch (_: Exception) {
+            if (relative.startsWith("/")) {
+                val root = base.substringBefore("://") + "://" + base.substringAfter("://").substringBefore("/")
+                root + relative
+            } else {
+                base.trimEnd('/') + "/" + relative.trimStart('/')
+            }
+        }
+    }
+
+    fun safeHost(url: String, defaultHost: String = ""): String {
+        return try {
+            val clean = url.substringBefore('?').substringBefore('#')
+            val afterProto = if (clean.contains("://")) clean.substringAfter("://") else clean
+            afterProto.substringBefore('/').substringBefore(':').ifBlank { defaultHost }
+        } catch (_: Exception) {
+            defaultHost
+        }
+    }
 
     fun safeUrl(url: String): String {
         if (url.isBlank()) return url

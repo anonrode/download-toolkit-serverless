@@ -65,7 +65,7 @@ object AsianCProvider : SiteProvider {
             for (link in epLinks) {
                 val rawHref = link.attr("href")
                 val href = link.attr("abs:href").ifBlank {
-                    if (rawHref.startsWith("http")) rawHref else URI(showUrl).resolve(rawHref).toString()
+                    HttpClient.safeResolveUri(showUrl, rawHref)
                 }
                 if (href.isBlank() || href in seen) continue
                 seen.add(href)
@@ -106,9 +106,8 @@ object AsianCProvider : SiteProvider {
                 val html = HttpClient.getText(episodeUrl, referer = "$mainUrl/") ?: ""
                 val doc = Jsoup.parse(html, episodeUrl)
                 for (iframe in doc.select("iframe[src]")) {
-                    var src = iframe.attr("abs:src").ifBlank { iframe.attr("src") }
-                    if (src.startsWith("//")) src = "https:$src"
-                    else if (src.startsWith("/")) src = URI(episodeUrl).resolve(src).toString()
+                    val rawSrc = iframe.attr("abs:src").ifBlank { iframe.attr("src") }
+                    val src = HttpClient.safeResolveUri(episodeUrl, rawSrc)
 
                     val resolved = ResolverRegistry.resolve(src, quality)
                     if (!resolved.isNullOrBlank()) {
