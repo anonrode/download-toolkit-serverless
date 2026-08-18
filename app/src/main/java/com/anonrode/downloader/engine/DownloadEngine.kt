@@ -518,7 +518,8 @@ class DownloadEngine(
                     Pair(false, "File missing")
                 }
 
-                val minSize = if (task.audioOnly) 10 * 1024L else 50 * 1024L
+                val isAudio = task.filePath.lowercase().let { it.endsWith(".mp3") || it.endsWith(".m4a") || it.endsWith(".aac") }
+                val minSize = if (isAudio) 10 * 1024L else 50 * 1024L
                 if (producedFile != null && producedFile.exists() && producedFile.length() >= minSize
                     && !looksLikeHtml(producedFile) && validation.first) {
                     val finalTitle = producedFile.nameWithoutExtension
