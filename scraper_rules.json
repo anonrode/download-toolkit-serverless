@@ -1,0 +1,37 @@
+{
+  "version": "2026.08.18.1",
+  "domains": {
+    "nkiri": "https://thenkiri.com",
+    "dramakey": "https://dramakey.com",
+    "asianc": "https://asianc.id",
+    "anitaku": "https://anitaku.com.ro",
+    "pluto": "https://plutomovies.com",
+    "dramarain": "https://dramarain.com",
+    "9jarocks": "https://9jarocks.net",
+    "naijavault": "https://www.naijavault.com",
+    "naijaprey": "https://www.naijaprey.tv",
+    "nepu": "https://nepu.gd",
+    "torrents": "https://apibay.org"
+  },
+  "resolvers": [
+    "loadedfiles",
+    "downloadwella",
+    "wetafiles",
+    "waffi",
+    "nkiserv",
+    "lulacloud",
+    "pixeldrain",
+    "streamwish",
+    "vidhide",
+    "doodstream",
+    "mixdrop",
+    "streamtape",
+    "vidbasic",
+    "kisskh",
+    "vidsrc",
+    "vikingfile",
+    "wildshare",
+    "vidmoly"
+  ],
+  "dynamic_providers": []
+}
