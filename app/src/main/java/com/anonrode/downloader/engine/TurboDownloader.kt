@@ -88,23 +88,31 @@ object TurboDownloader {
         val sockets = socketsFor(safe, configuredSockets)
         val useSegmented = acceptsRanges && total > MIN_SEGMENTED_SIZE && sockets > 1
 
+        val partFile = File(dest.absolutePath + ".part")
         val state = TurboState(File(dest.absolutePath + ".turbo"))
 
         return@withContext if (useSegmented) {
-            val ok = segmented(safe, dest, headers, total, sockets, state, onProgress)
+            val ok = segmented(safe, partFile, headers, total, sockets, state, onProgress)
             if (ok) {
                 state.delete()
+                if (partFile.exists()) {
+                    partFile.renameTo(dest)
+                }
                 Result(dest, dest.length(), true)
             } else {
-                // Do NOT delete file or state if paused/interrupted.
-                // Only fall back to single stream if the file was never allocated or empty.
-                if (!dest.exists() || dest.length() == 0L) {
+                if (!partFile.exists() || partFile.length() == 0L) {
                     state.delete()
-                    if (single(safe, dest, headers, total, onProgress)) Result(dest, dest.length(), false) else null
+                    if (single(safe, partFile, headers, total, onProgress)) {
+                        if (partFile.exists()) partFile.renameTo(dest)
+                        Result(dest, dest.length(), false)
+                    } else null
                 } else null
             }
         } else {
-            if (single(safe, dest, headers, total, onProgress)) Result(dest, dest.length(), false) else null
+            if (single(safe, partFile, headers, total, onProgress)) {
+                if (partFile.exists()) partFile.renameTo(dest)
+                Result(dest, dest.length(), false)
+            } else null
         }
     }
 
@@ -155,7 +163,6 @@ object TurboDownloader {
         }
 
         val speed = SpeedMeter(initialBytes)
-        // Initial progress emit so UI shows the resumed percentage immediately
         onProgress(initialBytes, total, 0L)
 
         RandomAccessFile(dest, "rw").use { raf ->
@@ -182,8 +189,10 @@ object TurboDownloader {
                                 }
                                 val buf = ByteArray(BUFFER)
                                 var pos = chunk.current
+                                var bytesSinceLastCommit = 0L
                                 while (pos <= chunk.end) {
                                     if (!coroutineContext.isActive) {
+                                        state.commit(plan, total)
                                         return@use
                                     }
                                     val want = minOf(buf.size.toLong(), chunk.end - pos + 1).toInt()
@@ -192,14 +201,19 @@ object TurboDownloader {
                                     channel.write(ByteBuffer.wrap(buf, 0, n), pos)
                                     pos += n
                                     chunk.current = pos
-                                    state.commit(plan, total)
+                                    bytesSinceLastCommit += n
+                                    if (bytesSinceLastCommit >= 1024 * 1024L || pos > chunk.end) {
+                                        state.commit(plan, total)
+                                        bytesSinceLastCommit = 0L
+                                    }
                                     val d = done.addAndGet(n.toLong())
                                     val currentSpeed = speed.sample(d)
                                     onProgress(d, total, currentSpeed)
                                 }
+                                state.commit(plan, total)
                             }
                         } catch (_: CancellationException) {
-                            // User pause / cancel: flush and exit without setting failed
+                            state.commit(plan, total)
                         } catch (_: Exception) {
                             failed.set(true)
                         }
@@ -274,10 +288,10 @@ class SpeedMeter(initialBytes: Long = 0L) {
         val now = System.currentTimeMillis()
         val dt = now - lastTime
         if (dt >= 600) {
-            if (totalBytes >= lastBytes) {
+            if (totalBytes > lastBytes) {
                 lastSpeed = ((totalBytes - lastBytes) * 1000 / dt).coerceAtLeast(0)
+                lastBytes = totalBytes
             }
-            lastBytes = totalBytes
             lastTime = now
         }
         return lastSpeed
