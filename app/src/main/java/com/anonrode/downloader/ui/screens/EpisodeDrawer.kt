@@ -44,17 +44,22 @@ fun EpisodeDrawer(
     // Parse range string (e.g. "1-5, 8, 10-12")
     fun applyRange(input: String) {
         val clean = input.trim()
-        if (clean.isBlank()) {
+        if (clean.isBlank() || clean.equals("none", ignoreCase = true) || clean.equals("clear", ignoreCase = true) || clean.equals("deselect", ignoreCase = true)) {
             selectedEpisodes = emptySet()
+            return
+        }
+        if (clean.equals("all", ignoreCase = true) || clean.equals("*", ignoreCase = true)) {
+            selectedEpisodes = episodes.toSet()
             return
         }
         val targetNums = mutableSetOf<Int>()
         val parts = clean.split(',', ';', ' ')
         for (part in parts) {
             val p = part.trim()
+            if (p.isBlank()) continue
             if (p.contains('-')) {
-                val start = p.substringBefore('-').toIntOrNull()
-                val end = p.substringAfter('-').toIntOrNull()
+                val start = p.substringBefore('-').trim().toIntOrNull()
+                val end = p.substringAfter('-').trim().toIntOrNull()
                 if (start != null && end != null) {
                     val rMin = minOf(start, end)
                     val rMax = maxOf(start, end)
