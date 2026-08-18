@@ -25,9 +25,9 @@ object DynamicRulesManager {
         "anitaku" to "https://anitaku.com.ro",
         "pluto" to "https://plutomovies.com",
         "dramarain" to "https://dramarain.com",
-        "9jarocks" to "https://www.my9jarocks.bz",
-        "naijavault" to "https://naijavault.com",
-        "naijaprey" to "https://naijaprey.com",
+        "9jarocks" to "https://9jarocks.net",
+        "naijavault" to "https://www.naijavault.com",
+        "naijaprey" to "https://www.naijaprey.tv",
         "nepu" to "https://nepu.gd",
         "torrents" to "https://apibay.org"
     )
