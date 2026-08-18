@@ -191,7 +191,8 @@ fun DownloadCard(
                     task.status == TaskStatus.RESOLVING -> "Resolving stream link..."
                     task.speedBytesPerSec > 0.0 -> {
                         val speedMb = task.speedBytesPerSec / (1024.0 * 1024.0)
-                        "${task.downloadedBytes}% • %.1f MB/s".format(speedMb)
+                        val speedStr = "%.1f".format(speedMb)
+                        "${task.downloadedBytes}% • $speedStr MB/s"
                     }
                     else -> "${task.downloadedBytes}%"
                 }
