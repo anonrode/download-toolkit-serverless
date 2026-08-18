@@ -16,7 +16,7 @@ data class NetworkStatus(
 )
 
 class NetworkObserver(context: Context) {
-    private val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+    private val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
     private val _status = MutableStateFlow(getCurrentStatus())
     val status: StateFlow<NetworkStatus> = _status.asStateFlow()
 
@@ -39,13 +39,13 @@ class NetworkObserver(context: Context) {
             val request = NetworkRequest.Builder()
                 .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
                 .build()
-            connectivityManager.registerNetworkCallback(request, callback)
+            connectivityManager?.registerNetworkCallback(request, callback)
         } catch (_: Exception) {}
     }
 
     fun getCurrentStatus(): NetworkStatus {
         return try {
-            val active = connectivityManager.activeNetwork ?: return NetworkStatus(isConnected = false)
+            val active = connectivityManager?.activeNetwork ?: return NetworkStatus(isConnected = false)
             val caps = connectivityManager.getNetworkCapabilities(active) ?: return NetworkStatus(isConnected = false)
             val isOnline = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
             val isWifi = caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
