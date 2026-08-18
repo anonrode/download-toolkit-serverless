@@ -379,24 +379,78 @@ class DownloadEngine(
                 val targetFolder = getDownloadDirectory(task.showTitle, createDirs = true)
                 val refererToPass = getRefererForUrl(streamUrl)
 
-                val producedFile = YoutubeDlDownloader.download(
-                    context = context,
-                    taskId = task.id,
-                    sourceUrl = streamUrl,
-                    targetDir = targetFolder,
-                    preferredFilename = File(task.filePath).name,
-                    backend = finalBackend,
-                    referer = refererToPass,
-                    ua = HttpClient.DEFAULT_UA,
-                    parallelSockets = if (finalBackend == "yt-dlp") 1 else task.parallelSockets,
-                    quality = defaultQuality,
-                    isExtractorTask = isExtractor,
-                    onProgress = { progressFloat ->
-                        val pct = progressFloat.toLong().coerceIn(0L, 100L)
-                        repository.update(task.id) { it.copy(downloadedBytes = pct, totalBytes = 100L) }
-                        updateServiceState()
+                // Direct CDN files go through TurboDownloader: multi-socket byte
+                // ranges written at absolute offsets into ONE file. The lockers
+                // throttle per connection, so parallel ranges are measurably
+                // faster (155 KB/s -> ~355 KB/s on the loadedfiles CDN), and
+                // there are no .partN fragments to merge. Socket count is per-host
+                // capped inside TurboDownloader. Magnets and social/HLS still need
+                // yt-dlp/aria2c (peer logic, playlist muxing), so they fall through.
+                val producedFile: File? = if (finalBackend == "aria2c" && !isMagnet) {
+                    val hdrs = mutableMapOf("User-Agent" to HttpClient.DEFAULT_UA)
+                    if (refererToPass.isNotBlank()) hdrs["Referer"] = refererToPass
+                    val dest = File(targetFolder, File(task.filePath).name)
+                    val turbo = TurboDownloader.download(
+                        url = streamUrl,
+                        dest = dest,
+                        headers = hdrs,
+                        configuredSockets = task.parallelSockets,
+                        onProgress = { got, tot, bps ->
+                            val pct = if (tot > 0) (got * 100 / tot).coerceIn(0L, 100L) else 0L
+                            repository.update(task.id) {
+                                it.copy(downloadedBytes = pct, totalBytes = 100L,
+                                        speedBytesPerSec = bps.toDouble())
+                            }
+                            updateServiceState()
+                        }
+                    )
+                    if (turbo != null) {
+                        android.util.Log.d("AnonDownload",
+                            "Turbo done: ${turbo.bytes} bytes, segmented=${turbo.segmented}")
+                        turbo.file
+                    } else {
+                        // Turbo exhausted its own single-stream fallback; let the
+                        // aria2c subprocess try before calling the task failed.
+                        android.util.Log.w("AnonDownload", "Turbo failed, falling back to aria2c")
+                        YoutubeDlDownloader.download(
+                            context = context,
+                            taskId = task.id,
+                            sourceUrl = streamUrl,
+                            targetDir = targetFolder,
+                            preferredFilename = File(task.filePath).name,
+                            backend = finalBackend,
+                            referer = refererToPass,
+                            ua = HttpClient.DEFAULT_UA,
+                            parallelSockets = task.parallelSockets,
+                            quality = defaultQuality,
+                            isExtractorTask = false,
+                            onProgress = { progressFloat ->
+                                val pct = progressFloat.toLong().coerceIn(0L, 100L)
+                                repository.update(task.id) { it.copy(downloadedBytes = pct, totalBytes = 100L) }
+                                updateServiceState()
+                            }
+                        )
                     }
-                )
+                } else {
+                    YoutubeDlDownloader.download(
+                        context = context,
+                        taskId = task.id,
+                        sourceUrl = streamUrl,
+                        targetDir = targetFolder,
+                        preferredFilename = File(task.filePath).name,
+                        backend = finalBackend,
+                        referer = refererToPass,
+                        ua = HttpClient.DEFAULT_UA,
+                        parallelSockets = if (finalBackend == "yt-dlp") 1 else task.parallelSockets,
+                        quality = defaultQuality,
+                        isExtractorTask = isExtractor,
+                        onProgress = { progressFloat ->
+                            val pct = progressFloat.toLong().coerceIn(0L, 100L)
+                            repository.update(task.id) { it.copy(downloadedBytes = pct, totalBytes = 100L) }
+                            updateServiceState()
+                        }
+                    )
+                }
 
                 val validation = if (producedFile != null && producedFile.exists()) {
                     TorrentSecurityShield.validateDownloadedFile(producedFile, targetFolder)
