@@ -96,11 +96,12 @@ object TurboDownloader {
                 state.delete()
                 Result(dest, dest.length(), true)
             } else {
-                // Range was advertised but not honoured (or a worker failed):
-                // start clean rather than trusting a partially-correct file.
-                state.delete()
-                dest.delete()
-                if (single(safe, dest, headers, total, onProgress)) Result(dest, dest.length(), false) else null
+                // Do NOT delete file or state if paused/interrupted.
+                // Only fall back to single stream if the file was never allocated or empty.
+                if (!dest.exists() || dest.length() == 0L) {
+                    state.delete()
+                    if (single(safe, dest, headers, total, onProgress)) Result(dest, dest.length(), false) else null
+                } else null
             }
         } else {
             if (single(safe, dest, headers, total, onProgress)) Result(dest, dest.length(), false) else null
@@ -145,15 +146,18 @@ object TurboDownloader {
         onProgress: (Long, Long, Long) -> Unit
     ): Boolean {
         val plan = state.loadOrCreate(total, sockets)
-        // Bytes already committed by a previous run, so progress resumes truthfully.
-        val done = AtomicLong(plan.sumOf { it.current - it.start })
+        val initialBytes = plan.sumOf { (it.current - it.start).coerceAtLeast(0L) }
+        val done = AtomicLong(initialBytes)
         val failed = java.util.concurrent.atomic.AtomicBoolean(false)
 
         RandomAccessFile(dest, "rw").use { raf ->
             if (raf.length() != total) raf.setLength(total)
         }
 
-        val speed = SpeedMeter()
+        val speed = SpeedMeter(initialBytes)
+        // Initial progress emit so UI shows the resumed percentage immediately
+        onProgress(initialBytes, total, 0L)
+
         RandomAccessFile(dest, "rw").use { raf ->
             val channel: FileChannel = raf.channel
             coroutineScope {
@@ -168,29 +172,34 @@ object TurboDownloader {
                             }.build()
 
                             HttpClient.shared.newCall(req).execute().use { res ->
-                                // A 200 means Range was ignored: the body is the WHOLE
-                                // file, and writing it at this offset would corrupt.
-                                if (res.code != 206) { failed.set(true); return@use }
-                                val src = res.body?.source() ?: run { failed.set(true); return@use }
+                                if (res.code != 206) {
+                                    failed.set(true)
+                                    return@use
+                                }
+                                val src = res.body?.source() ?: run {
+                                    failed.set(true)
+                                    return@use
+                                }
                                 val buf = ByteArray(BUFFER)
                                 var pos = chunk.current
                                 while (pos <= chunk.end) {
-                                    if (!coroutineContext.isActive) return@use
+                                    if (!coroutineContext.isActive) {
+                                        return@use
+                                    }
                                     val want = minOf(buf.size.toLong(), chunk.end - pos + 1).toInt()
                                     val n = src.read(buf, 0, want)
                                     if (n == -1) break
                                     channel.write(ByteBuffer.wrap(buf, 0, n), pos)
                                     pos += n
-                                    // Commit AFTER the write lands: a kill here can
-                                    // re-fetch a few KB but can never skip bytes.
                                     chunk.current = pos
-                                    state.commit(plan)
+                                    state.commit(plan, total)
                                     val d = done.addAndGet(n.toLong())
-                                    onProgress(d, total, speed.sample(d))
+                                    val currentSpeed = speed.sample(d)
+                                    onProgress(d, total, currentSpeed)
                                 }
                             }
                         } catch (_: CancellationException) {
-                            throw CancellationException()
+                            // User pause / cancel: flush and exit without setting failed
                         } catch (_: Exception) {
                             failed.set(true)
                         }
@@ -201,8 +210,6 @@ object TurboDownloader {
         }
 
         if (failed.get()) return false
-        // Every chunk must have reached its end, and the file must be exactly the
-        // advertised size -- otherwise we'd hand back a truncated video.
         if (plan.any { it.current <= it.end }) return false
         return dest.length() == total
     }
@@ -221,7 +228,7 @@ object TurboDownloader {
             if (existing > 0) header("Range", "bytes=$existing-")
         }.build()
 
-        val speed = SpeedMeter()
+        val speed = SpeedMeter(existing)
         try {
             HttpClient.shared.newCall(req).execute().use { res ->
                 if (!res.isSuccessful) return false
@@ -238,13 +245,14 @@ object TurboDownloader {
                         if (n == -1) break
                         raf.write(buf, 0, n)
                         written += n
-                        onProgress(written, if (total > 0) total else written, speed.sample(written))
+                        val currentSpeed = speed.sample(written)
+                        onProgress(written, if (total > 0) total else written, currentSpeed)
                     }
                     if (total > 0 && written != total) return false
                 }
             }
         } catch (_: CancellationException) {
-            throw CancellationException()
+            return false
         } catch (_: Exception) {
             return false
         }
@@ -255,20 +263,23 @@ object TurboDownloader {
 /** One segment's byte window plus how far it has been committed to disk. */
 class TurboChunk(val start: Long, val end: Long, @Volatile var current: Long)
 
-/** Speed over a short window; a whole-transfer average hides real slowdowns. */
-class SpeedMeter {
-    private var lastBytes = 0L
+/** Thread-safe aggregate speed meter over rolling 600ms windows. */
+class SpeedMeter(initialBytes: Long = 0L) {
+    private var lastBytes = initialBytes
     private var lastTime = System.currentTimeMillis()
-    private var last = 0L
+    private var lastSpeed = 0L
 
+    @Synchronized
     fun sample(totalBytes: Long): Long {
         val now = System.currentTimeMillis()
         val dt = now - lastTime
-        if (dt >= 700) {
-            last = ((totalBytes - lastBytes) * 1000 / dt).coerceAtLeast(0)
+        if (dt >= 600) {
+            if (totalBytes >= lastBytes) {
+                lastSpeed = ((totalBytes - lastBytes) * 1000 / dt).coerceAtLeast(0)
+            }
             lastBytes = totalBytes
             lastTime = now
         }
-        return last
+        return lastSpeed
     }
 }

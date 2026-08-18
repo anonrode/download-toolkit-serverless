@@ -20,37 +20,38 @@ class TurboState(private val file: File) {
 
     /**
      * Load a previous plan if it matches this transfer, else build a fresh one.
-     * A sidecar whose total or chunk count differs is treated as stale.
+     * Reuses an existing valid plan across pause/resume even if socket limits change.
      */
     fun loadOrCreate(total: Long, sockets: Int): List<TurboChunk> {
         val existing = read(total)
-        if (existing != null && existing.size == sockets) return existing
+        if (existing != null && existing.isNotEmpty()) {
+            return existing
+        }
 
-        val chunkSize = total / sockets
-        val plan = (0 until sockets).map { i ->
+        val effectiveSockets = sockets.coerceAtLeast(1)
+        val chunkSize = total / effectiveSockets
+        val plan = (0 until effectiveSockets).map { i ->
             val start = i * chunkSize
-            val end = if (i == sockets - 1) total - 1 else (start + chunkSize - 1)
+            val end = if (i == effectiveSockets - 1) total - 1 else (start + chunkSize - 1)
             TurboChunk(start, end, start)
         }
         commit(plan, total)
         return plan
     }
 
-    private fun read(total: Long): List<TurboChunk>? {
+    fun read(total: Long): List<TurboChunk>? {
         if (!file.exists()) return null
         return try {
             val lines = file.readLines().filter { it.isNotBlank() }
             if (lines.isEmpty()) return null
             val header = lines.first().removePrefix("total=").toLongOrNull() ?: return null
-            if (header != total) return null   // different file: discard
+            if (total > 0 && header != total && kotlin.math.abs(header - total) > 1024) return null
             val chunks = lines.drop(1).mapNotNull { line ->
                 val p = line.split(":")
                 if (p.size != 3) return@mapNotNull null
                 val s = p[0].toLongOrNull() ?: return@mapNotNull null
                 val e = p[1].toLongOrNull() ?: return@mapNotNull null
                 val c = p[2].toLongOrNull() ?: return@mapNotNull null
-                // Guard a corrupt sidecar: an offset outside its window would make
-                // a worker write into another chunk's territory.
                 if (c < s || c > e + 1) return@mapNotNull null
                 TurboChunk(s, e, c)
             }
@@ -62,14 +63,21 @@ class TurboState(private val file: File) {
 
     private var cachedTotal: Long = -1L
 
+    @Synchronized
     fun commit(plan: List<TurboChunk>, total: Long = cachedTotal) {
         if (total > 0) cachedTotal = total
         try {
             val sb = StringBuilder("total=").append(cachedTotal).append('\n')
             for (c in plan) sb.append(c.start).append(':').append(c.end).append(':').append(c.current).append('\n')
-            file.writeText(sb.toString())
+            val parent = file.parentFile ?: return
+            if (!parent.exists()) parent.mkdirs()
+            val tmp = File(parent, "${file.name}.tmp")
+            tmp.writeText(sb.toString())
+            if (tmp.exists()) {
+                tmp.renameTo(file)
+            }
         } catch (_: Exception) {
-            // Losing a commit only costs re-downloading a little; never fatal.
+            // Losing a commit only costs re-downloading a small buffer; never fatal.
         }
     }
 
