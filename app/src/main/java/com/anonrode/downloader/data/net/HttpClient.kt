@@ -79,7 +79,51 @@ object HttpClient {
     var lastFailure: String? = null
         private set
 
+    /**
+     * Hybrid Smart-DNS:
+     * 1. Primary: System DNS (Fastest 15ms latency + local ISP CDN geo-routing for max video download speeds).
+     * 2. Fallback: Google Public DNS over HTTPS (Bypasses Nigerian ISP censorship/DNS-poisoning on blocked scraper sites).
+     */
+    private val hybridDns = object : okhttp3.Dns {
+        override fun lookup(hostname: String): List<java.net.InetAddress> {
+            return try {
+                okhttp3.Dns.SYSTEM.lookup(hostname)
+            } catch (e: java.net.UnknownHostException) {
+                try {
+                    val encoded = java.net.URLEncoder.encode(hostname, "UTF-8")
+                    val dohUrl = "https://dns.google/resolve?name=$encoded&type=A"
+                    val req = Request.Builder()
+                        .url(dohUrl)
+                        .header("User-Agent", DEFAULT_UA)
+                        .build()
+                    val bootstrap = OkHttpClient.Builder()
+                        .connectTimeout(5, TimeUnit.SECONDS)
+                        .readTimeout(5, TimeUnit.SECONDS)
+                        .build()
+                    bootstrap.newCall(req).execute().use { res ->
+                        if (!res.isSuccessful) throw e
+                        val body = res.body?.string() ?: throw e
+                        val json = org.json.JSONObject(body)
+                        val answers = json.optJSONArray("Answer") ?: throw e
+                        val addrs = mutableListOf<java.net.InetAddress>()
+                        for (i in 0 until answers.length()) {
+                            val data = answers.getJSONObject(i).optString("data")
+                            if (data.isNotBlank() && !data.contains(":")) {
+                                addrs.add(java.net.InetAddress.getByName(data))
+                            }
+                        }
+                        if (addrs.isEmpty()) throw e
+                        addrs
+                    }
+                } catch (_: Exception) {
+                    throw e
+                }
+            }
+        }
+    }
+
     val shared: OkHttpClient = OkHttpClient.Builder()
+        .dns(hybridDns)
         .connectionPool(pool)
         .dispatcher(dispatcher)
         .cookieJar(sessionCookieJar)
