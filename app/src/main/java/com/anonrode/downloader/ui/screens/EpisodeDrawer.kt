@@ -255,8 +255,10 @@ fun EpisodeDrawer(
                             for (ep in sorted) {
                                 viewModel.engine.enqueue(
                                     showTitle = show.title,
+                                    episodeNum = ep.episodeNum,
                                     episodeTitle = "${show.title} - ${ep.title}",
-                                    directUrl = ep.url,
+                                    sourceUrl = ep.url,
+                                    isDirect = true,
                                     backend = "aria2c",
                                     site = show.site
                                 )
@@ -328,8 +330,10 @@ fun EpisodeDrawer(
                             onDownloadSingle = {
                                 viewModel.engine.enqueue(
                                     showTitle = show.title,
+                                    episodeNum = ep.episodeNum,
                                     episodeTitle = "${show.title} - ${ep.title}",
-                                    directUrl = ep.url,
+                                    sourceUrl = ep.url,
+                                    isDirect = true,
                                     backend = "aria2c",
                                     site = show.site
                                 )
@@ -381,8 +385,10 @@ fun EpisodeDrawer(
                                 for (ep in sorted) {
                                     viewModel.engine.enqueue(
                                         showTitle = show.title,
+                                        episodeNum = ep.episodeNum,
                                         episodeTitle = "${show.title} - ${ep.title}",
-                                        directUrl = ep.url,
+                                        sourceUrl = ep.url,
+                                        isDirect = true,
                                         backend = "aria2c",
                                         site = show.site
                                     )
