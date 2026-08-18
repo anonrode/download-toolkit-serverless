@@ -10,10 +10,8 @@ import com.anonrode.downloader.data.models.ShowCard
 import com.anonrode.downloader.data.router.ParsedUrl
 import com.anonrode.downloader.data.router.UrlRouter
 import com.anonrode.downloader.engine.DownloadEngine
-import com.anonrode.downloader.engine.DownloadRepository
 import com.anonrode.downloader.providers.ProviderRegistry
 import com.anonrode.downloader.providers.RelevanceScorer
-import com.anonrode.downloader.util.NetworkObserver
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -39,8 +37,7 @@ data class HomeUiState(
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
-    private val repository = DownloadRepository()
-    val engine: DownloadEngine = DownloadEngine(application, repository, NetworkObserver(application))
+    val engine: DownloadEngine = (application as com.anonrode.downloader.AnonApp).engine
 
     private val _uiState = MutableStateFlow(HomeUiState())
     val uiState: StateFlow<HomeUiState> = _uiState.asStateFlow()
