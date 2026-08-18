@@ -173,9 +173,16 @@ fun DownloadCard(
 
             Spacer(modifier = Modifier.height(Spacing.sm))
 
+            val progressFloat = when {
+                task.totalBytes > 0 -> (task.downloadedBytes.toFloat() / task.totalBytes.toFloat()).coerceIn(0f, 1f)
+                task.downloadedBytes in 1..100 -> (task.downloadedBytes.toFloat() / 100f).coerceIn(0f, 1f)
+                else -> 0f
+            }
+            val pctInt = (progressFloat * 100).toInt()
+
             if (!isCompleted) {
                 LinearProgressIndicator(
-                    progress = { (task.downloadedBytes.toFloat().coerceIn(0f, 100f)) / 100f },
+                    progress = { progressFloat },
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(4.dp)
@@ -186,15 +193,30 @@ fun DownloadCard(
 
                 Spacer(modifier = Modifier.height(Spacing.xs))
 
+                val speedMb = task.speedBytesPerSec / (1024.0 * 1024.0)
+                val speedStr = "%.1f".format(java.util.Locale.US, speedMb)
+                val etaStr = if (task.etaSeconds > 0) " • ${formatEta(task.etaSeconds)}" else ""
+                val sizeStr = if (task.totalBytes > 0) {
+                    "${formatBytes(task.downloadedBytes)} / ${formatBytes(task.totalBytes)}"
+                } else if (task.downloadedBytes > 100) {
+                    formatBytes(task.downloadedBytes)
+                } else {
+                    ""
+                }
+
                 val progressText = when {
                     task.errorMessage != null -> task.errorMessage
                     task.status == TaskStatus.RESOLVING -> "Resolving stream link..."
-                    task.speedBytesPerSec > 0.0 -> {
-                        val speedMb = task.speedBytesPerSec / (1024.0 * 1024.0)
-                        val speedStr = "%.1f".format(speedMb)
-                        "${task.downloadedBytes}% • $speedStr MB/s"
+                    task.status == TaskStatus.PAUSED -> {
+                        if (sizeStr.isNotBlank()) "Paused • $pctInt% ($sizeStr)" else "Paused • $pctInt%"
                     }
-                    else -> "${task.downloadedBytes}%"
+                    task.speedBytesPerSec > 0.0 -> {
+                        if (sizeStr.isNotBlank()) "$pctInt% • $sizeStr • $speedStr MB/s$etaStr"
+                        else "$pctInt% • $speedStr MB/s$etaStr"
+                    }
+                    else -> {
+                        if (sizeStr.isNotBlank()) "$pctInt% • $sizeStr" else "$pctInt%"
+                    }
                 }
 
                 Row(
@@ -227,13 +249,15 @@ fun DownloadCard(
                     }
                 }
             } else {
+                val sizeText = if (task.totalBytes > 0) formatBytes(task.totalBytes) else formatBytes(task.downloadedBytes)
+                val extText = File(task.filePath).name.substringAfterLast('.').uppercase()
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = "Tap to play • ${File(task.filePath).name.substringAfterLast('.') .uppercase()}",
+                        text = "Tap to play • $sizeText • $extText",
                         color = TextMuted,
                         fontSize = 11.sp
                     )
@@ -318,4 +342,29 @@ fun shareMedia(context: Context, filePath: String) {
         }
         context.startActivity(Intent.createChooser(intent, "Share Video"))
     } catch (_: Exception) {}
+}
+
+fun formatBytes(bytes: Long): String {
+    if (bytes <= 0) return "0 B"
+    val kb = bytes / 1024.0
+    val mb = kb / 1024.0
+    val gb = mb / 1024.0
+    return when {
+        gb >= 1.0 -> "%.2f GB".format(java.util.Locale.US, gb)
+        mb >= 1.0 -> "%.1f MB".format(java.util.Locale.US, mb)
+        kb >= 1.0 -> "%.1f KB".format(java.util.Locale.US, kb)
+        else -> "$bytes B"
+    }
+}
+
+fun formatEta(seconds: Long): String {
+    if (seconds <= 0) return ""
+    val m = seconds / 60
+    val s = seconds % 60
+    val h = m / 60
+    return if (h > 0) {
+        "%02d:%02d:%02d left".format(java.util.Locale.US, h, m % 60, s)
+    } else {
+        "%02d:%02d left".format(java.util.Locale.US, m, s)
+    }
 }

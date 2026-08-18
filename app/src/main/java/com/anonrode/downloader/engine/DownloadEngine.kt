@@ -128,11 +128,13 @@ class DownloadEngine(
             episodeNum = episodeNum,
             episodeTitle = episodeTitle,
             directUrl = sourceUrl,
+            sourceUrl = sourceUrl,
             filePath = targetFile.absolutePath,
             status = TaskStatus.QUEUED,
             downloadedBytes = 0L,
-            totalBytes = 100L,
+            totalBytes = 0L,
             speedBytesPerSec = 0.0,
+            etaSeconds = 0L,
             backend = backend,
             parallelSockets = parallelSockets,
             site = site
@@ -206,7 +208,12 @@ class DownloadEngine(
             }
             else -> base
         }
-        if (createDirs && !dest.exists()) dest.mkdirs()
+        if (dest.exists() && !dest.isDirectory) {
+            try { dest.delete() } catch (_: Exception) {}
+        }
+        if (createDirs && !dest.exists()) {
+            dest.mkdirs()
+        }
         return dest
     }
 
@@ -231,10 +238,11 @@ class DownloadEngine(
         val active = current.filter { it.status == TaskStatus.DOWNLOADING || it.status == TaskStatus.RESOLVING }
         if (active.isNotEmpty()) {
             val first = active.first()
+            val pct = if (first.totalBytes > 0) (first.downloadedBytes * 100 / first.totalBytes).toInt().coerceIn(0, 100) else 0
             DownloadService.updateProgress(
                 context,
                 title = first.episodeTitle,
-                progress = first.downloadedBytes.toInt(),
+                progress = pct,
                 activeCount = active.size
             )
         } else {
@@ -265,6 +273,23 @@ class DownloadEngine(
         }
 
         startTask(nextTask)
+    }
+
+    private fun isTokenAlive(url: String, headers: Map<String, String>): Boolean {
+        if (url.isBlank() || url.startsWith("magnet:", ignoreCase = true)) return true
+        val safe = HttpClient.safeUrl(url)
+        return try {
+            val req = okhttp3.Request.Builder().url(safe).apply {
+                header("User-Agent", headers["User-Agent"] ?: HttpClient.DEFAULT_UA)
+                headers.forEach { (k, v) -> if (!k.equals("User-Agent", true)) header(k, v) }
+                header("Range", "bytes=0-0")
+            }.build()
+            HttpClient.shared.newCall(req).execute().use { res ->
+                res.code in 200..206
+            }
+        } catch (_: Exception) {
+            false
+        }
     }
 
     private fun isKnownLockerHost(url: String): Boolean {
@@ -301,54 +326,66 @@ class DownloadEngine(
                     repository.update(task.id) { it.copy(status = TaskStatus.RESOLVING) }
                     updateServiceState()
 
-                    var resolved: String? = null
+                    val permUrl = task.sourceUrl.ifBlank { streamUrl }
+                    val hdrs = mutableMapOf("User-Agent" to HttpClient.DEFAULT_UA)
+                    val ref = getRefererForUrl(streamUrl)
+                    if (ref.isNotBlank()) hdrs["Referer"] = ref
 
-                    // 1. Try direct resolution via ResolverRegistry (for lockers)
-                    resolved = ResolverRegistry.resolve(streamUrl, defaultQuality)
-                    android.util.Log.d("AnonDownload", "Tier 1 ResolverRegistry resolved: $resolved")
+                    // Check if current streamUrl is already a direct link and still alive
+                    val tokenAlive = if (isDirectMediaUrl(streamUrl) && !isKnownLockerHost(streamUrl)) {
+                        isTokenAlive(streamUrl, hdrs)
+                    } else false
 
-                    // 2. If unresolved or returned a locker, resolve via ProviderRegistry (for provider episode pages like AsianC, Anitaku, DramaKey, Pluto, etc.)
-                    if (resolved.isNullOrBlank() || isKnownLockerHost(resolved)) {
-                        if (task.site.isNotBlank()) {
-                            try {
-                                val recipe = ProviderRegistry.resolveEpisode(task.site, streamUrl, defaultQuality)
-                                if (recipe.directUrl.isNotBlank() && recipe.directUrl != streamUrl) {
-                                    resolved = recipe.directUrl
-                                    android.util.Log.d("AnonDownload", "Tier 2 ProviderRegistry (${task.site}) resolved: $resolved")
-                                }
-                            } catch (e: Exception) {
-                                android.util.Log.w("AnonDownload", "Tier 2 ProviderRegistry error: ${e.message}")
-                            }
-                        }
+                    var resolved: String? = if (tokenAlive) streamUrl else null
 
+                    if (resolved == null) {
+                        // 1. Try direct resolution via ResolverRegistry (for lockers)
+                        resolved = ResolverRegistry.resolve(permUrl, defaultQuality)
+                        android.util.Log.d("AnonDownload", "Tier 1 ResolverRegistry resolved: $resolved")
+
+                        // 2. If unresolved or returned a locker, resolve via ProviderRegistry (for provider episode pages like AsianC, Anitaku, DramaKey, Pluto, etc.)
                         if (resolved.isNullOrBlank() || isKnownLockerHost(resolved)) {
-                            for (provider in ProviderRegistry.allProviders) {
-                                if (provider.canHandle(streamUrl)) {
-                                    try {
-                                        val recipe = provider.resolveEpisode(streamUrl, defaultQuality)
-                                        if (recipe.directUrl.isNotBlank() && recipe.directUrl != streamUrl) {
-                                            resolved = recipe.directUrl
-                                            android.util.Log.d("AnonDownload", "Tier 2 Fallback Provider (${provider.name}) resolved: $resolved")
-                                            break
+                            if (task.site.isNotBlank()) {
+                                try {
+                                    val recipe = ProviderRegistry.resolveEpisode(task.site, permUrl, defaultQuality)
+                                    if (recipe.directUrl.isNotBlank() && recipe.directUrl != permUrl) {
+                                        resolved = recipe.directUrl
+                                        android.util.Log.d("AnonDownload", "Tier 2 ProviderRegistry (${task.site}) resolved: $resolved")
+                                    }
+                                } catch (e: Exception) {
+                                    android.util.Log.w("AnonDownload", "Tier 2 ProviderRegistry error: ${e.message}")
+                                }
+                            }
+
+                            if (resolved.isNullOrBlank() || isKnownLockerHost(resolved)) {
+                                for (provider in ProviderRegistry.allProviders) {
+                                    if (provider.canHandle(permUrl)) {
+                                        try {
+                                            val recipe = provider.resolveEpisode(permUrl, defaultQuality)
+                                            if (recipe.directUrl.isNotBlank() && recipe.directUrl != permUrl) {
+                                                resolved = recipe.directUrl
+                                                android.util.Log.d("AnonDownload", "Tier 2 Fallback Provider (${provider.name}) resolved: $resolved")
+                                                break
+                                            }
+                                        } catch (e: Exception) {
+                                            android.util.Log.w("AnonDownload", "Tier 2 Fallback Provider error: ${e.message}")
                                         }
-                                    } catch (e: Exception) {
-                                        android.util.Log.w("AnonDownload", "Tier 2 Fallback Provider error: ${e.message}")
                                     }
                                 }
                             }
                         }
-                    }
 
-                    // 3. If provider resolved an intermediate locker link (e.g. downloadwella/loadedfiles), resolve locker
-                    if (!resolved.isNullOrBlank() && (isKnownLockerHost(resolved) || !isDirectMediaUrl(resolved))) {
-                        try {
-                            val innerResolved = ResolverRegistry.resolve(resolved, defaultQuality)
-                            if (!innerResolved.isNullOrBlank() && !isKnownLockerHost(innerResolved)) {
-                                resolved = innerResolved
-                                android.util.Log.d("AnonDownload", "Tier 3 Secondary Resolver resolved: $resolved")
+                        // 3. If provider resolved an intermediate locker link (e.g. downloadwella/loadedfiles), resolve locker
+                        if (!resolved.isNullOrBlank() && (isKnownLockerHost(resolved) || !isDirectMediaUrl(resolved))) {
+                            try {
+                                val innerResolved = ResolverRegistry.resolve(resolved, defaultQuality)
+                                if (!innerResolved.isNullOrBlank() && !isKnownLockerHost(innerResolved)) {
+                                    resolved = innerResolved
+                                    android.util.Log.d("AnonDownload", "Tier 3 Secondary Resolver resolved: $resolved")
+                                }
+                            } catch (e: Exception) {
+                                android.util.Log.w("AnonDownload", "Tier 3 Secondary Resolver error: ${e.message}")
                             }
-                        } catch (e: Exception) {
-                            android.util.Log.w("AnonDownload", "Tier 3 Secondary Resolver error: ${e.message}")
                         }
                     }
 
@@ -357,7 +394,6 @@ class DownloadEngine(
                     if (!resolved.isNullOrBlank() && !isKnownLockerHost(resolved)) {
                         streamUrl = resolved
                     } else {
-                        // Check if it's already a direct media URL (ends in .mp4/.mkv/.m3u8) AND not a raw locker page
                         val isLocker = isKnownLockerHost(streamUrl)
                         val isDirectMedia = isDirectMediaUrl(streamUrl)
                         if (isLocker || !isDirectMedia) {
@@ -379,13 +415,6 @@ class DownloadEngine(
                 val targetFolder = getDownloadDirectory(task.showTitle, createDirs = true)
                 val refererToPass = getRefererForUrl(streamUrl)
 
-                // Direct CDN files go through TurboDownloader: multi-socket byte
-                // ranges written at absolute offsets into ONE file. The lockers
-                // throttle per connection, so parallel ranges are measurably
-                // faster (155 KB/s -> ~355 KB/s on the loadedfiles CDN), and
-                // there are no .partN fragments to merge. Socket count is per-host
-                // capped inside TurboDownloader. Magnets and social/HLS still need
-                // yt-dlp/aria2c (peer logic, playlist muxing), so they fall through.
                 val producedFile: File? = if (finalBackend == "aria2c" && !isMagnet) {
                     val hdrs = mutableMapOf("User-Agent" to HttpClient.DEFAULT_UA)
                     if (refererToPass.isNotBlank()) hdrs["Referer"] = refererToPass
@@ -396,10 +425,14 @@ class DownloadEngine(
                         headers = hdrs,
                         configuredSockets = task.parallelSockets,
                         onProgress = { got, tot, bps ->
-                            val pct = if (tot > 0) (got * 100 / tot).coerceIn(0L, 100L) else 0L
+                            val eta = if (bps > 0 && tot > got) (tot - got) / bps else 0L
                             repository.update(task.id) {
-                                it.copy(downloadedBytes = pct, totalBytes = 100L,
-                                        speedBytesPerSec = bps.toDouble())
+                                it.copy(
+                                    downloadedBytes = got,
+                                    totalBytes = tot,
+                                    speedBytesPerSec = bps.toDouble(),
+                                    etaSeconds = eta
+                                )
                             }
                             updateServiceState()
                         }
@@ -409,8 +442,6 @@ class DownloadEngine(
                             "Turbo done: ${turbo.bytes} bytes, segmented=${turbo.segmented}")
                         turbo.file
                     } else {
-                        // Turbo exhausted its own single-stream fallback; let the
-                        // aria2c subprocess try before calling the task failed.
                         android.util.Log.w("AnonDownload", "Turbo failed, falling back to aria2c")
                         YoutubeDlDownloader.download(
                             context = context,
