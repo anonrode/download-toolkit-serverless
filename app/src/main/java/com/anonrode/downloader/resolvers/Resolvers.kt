@@ -100,7 +100,7 @@ object VidbasicResolver : BaseResolver {
         return HOSTS.any { lower.contains(it) } && !lower.endsWith(".m3u8") && !lower.endsWith(".mp4")
     }
 
-    override suspend fun resolve(url: String, quality: String, depth: Int = 0): String? {
+    override suspend fun resolve(url: String, quality: String, depth: Int): String? {
         try {
             val html = HttpClient.getText(url, referer = url) ?: return null
             val direct = decryptPayload(html)
@@ -158,7 +158,7 @@ object KissasianResolver : BaseResolver {
         return lower.contains("kissasian9.ro") && lower.contains("/kisskh/") && !lower.endsWith(".m3u8")
     }
 
-    override suspend fun resolve(url: String, quality: String, depth: Int = 0): String? {
+    override suspend fun resolve(url: String, quality: String, depth: Int): String? {
         try {
             val html = HttpClient.getText(url, referer = url) ?: return null
             val m = Pattern.compile("""sourceUrl"\s*:\s*"([^"]+)""").matcher(html)
@@ -193,7 +193,7 @@ object KisskhMegaplayResolver : BaseResolver {
         return HOSTS.any { lower.contains(it) } || lower.contains("/kisskh/")
     }
 
-    override suspend fun resolve(url: String, quality: String, depth: Int = 0): String? {
+    override suspend fun resolve(url: String, quality: String, depth: Int): String? {
         try {
             // tamilembed serves the real player under HTTP 404 — accept the body
             // (monolith parity, resolvers.py:693-698).
@@ -269,7 +269,7 @@ object BloggerResolver : BaseResolver {
         return low.contains("blogger.com") && (low.contains("video.g") || low.contains("token="))
     }
 
-    override suspend fun resolve(url: String, quality: String, depth: Int = 0): String? {
+    override suspend fun resolve(url: String, quality: String, depth: Int): String? {
         try {
             val html = HttpClient.getText(url) ?: return null
 
@@ -343,7 +343,7 @@ object VidsrcResolver : BaseResolver {
         return HOSTS.any { low.contains(it) }
     }
 
-    override suspend fun resolve(url: String, quality: String, depth: Int = 0): String? {
+    override suspend fun resolve(url: String, quality: String, depth: Int): String? {
         try {
             var embedUrl = url.replace("nepu.to/", "nepu.gd/")
             if (embedUrl.contains("nepu.gd/watch")) {
@@ -412,7 +412,7 @@ object LightDLResolver : BaseResolver {
         return url.lowercase().contains("lightdl.cc")
     }
 
-    override suspend fun resolve(url: String, quality: String, depth: Int = 0): String? {
+    override suspend fun resolve(url: String, quality: String, depth: Int): String? {
         try {
             val code = url.trimEnd('/').substringAfterLast('/')
             if (code.isBlank()) return null
@@ -446,7 +446,7 @@ object FivePlayResolver : BaseResolver {
         return low.contains("5play.cc")
     }
 
-    override suspend fun resolve(url: String, quality: String, depth: Int = 0): String? {
+    override suspend fun resolve(url: String, quality: String, depth: Int): String? {
         try {
             val html = HttpClient.getText(url, referer = "https://dramakey.cc/") ?: return null
             return extractM3u8FromHtml(html) ?: extractMp4FromHtml(html)
@@ -464,7 +464,7 @@ object VikingFileResolver : BaseResolver {
         return low.contains("vikingfile.com") && !low.endsWith(".mp4") && !low.endsWith(".mkv") && !low.endsWith(".m3u8")
     }
 
-    override suspend fun resolve(url: String, quality: String, depth: Int = 0): String? {
+    override suspend fun resolve(url: String, quality: String, depth: Int): String? {
         try {
             val html = HttpClient.getText(url, referer = "https://www.naijavault.com/") ?: return null
             val m = Pattern.compile("""(?:window\.location|location\.href)\s*=\s*["']([^"']+)["']""").matcher(html)
@@ -486,7 +486,7 @@ object LulaCloudResolver : BaseResolver {
         return url.lowercase().contains("lulacloud.com")
     }
 
-    override suspend fun resolve(url: String, quality: String, depth: Int = 0): String? {
+    override suspend fun resolve(url: String, quality: String, depth: Int): String? {
         try {
             val html = HttpClient.getText(url, referer = "https://www.naijavault.com/") ?: return null
             val m = Pattern.compile("""(?:window\.location|location\.href)\s*=\s*["']([^"']+)["']""").matcher(html)
@@ -508,7 +508,7 @@ object DramaGatewayResolver : BaseResolver {
         return (low.contains("dramarain.com") || low.contains("dramakey.cc")) && low.contains("/download")
     }
 
-    override suspend fun resolve(url: String, quality: String, depth: Int = 0): String? {
+    override suspend fun resolve(url: String, quality: String, depth: Int): String? {
         try {
             val host = HttpClient.safeHost(url, "dramarain.com")
             val html = HttpClient.getText(url, referer = "https://$host/") ?: return null
@@ -530,7 +530,7 @@ object NaijaVaultGatewayResolver : BaseResolver {
         return low.contains("naijavault.com") && (low.contains("/dl-") || low.contains("/temp/"))
     }
 
-    override suspend fun resolve(url: String, quality: String, depth: Int = 0): String? {
+    override suspend fun resolve(url: String, quality: String, depth: Int): String? {
         try {
             val html = HttpClient.getText(url, referer = "https://www.naijavault.com/") ?: return null
             val soup = Jsoup.parse(html)
@@ -558,7 +558,7 @@ object EmbedResolver : BaseResolver {
         return KNOWN.any { low.contains(it) }
     }
 
-    override suspend fun resolve(url: String, quality: String, depth: Int = 0): String? {
+    override suspend fun resolve(url: String, quality: String, depth: Int): String? {
         try {
             val html = HttpClient.getText(url, referer = url) ?: return null
             return extractM3u8FromHtml(html) ?: extractMp4FromHtml(html)
@@ -576,7 +576,7 @@ object PlutoMoviesResolver : BaseResolver {
         return lower.contains("dl.plutomovies.com") || lower.contains("plutomovies.com/movie/")
     }
 
-    override suspend fun resolve(url: String, quality: String, depth: Int = 0): String? {
+    override suspend fun resolve(url: String, quality: String, depth: Int): String? {
         try {
             val html = HttpClient.getText(url, referer = "https://plutomovies.com/") ?: return null
             val m = Pattern.compile("""location\.href\s*=\s*['"](https?://[^'"]+)['"]""").matcher(html)
@@ -607,7 +607,7 @@ object DownloadwellaResolver : BaseResolver {
         return lower.contains("downloadwella.com") || lower.contains("wetafiles.com") || lower.contains("kissorgrab.com")
     }
 
-    override suspend fun resolve(url: String, quality: String, depth: Int = 0): String? {
+    override suspend fun resolve(url: String, quality: String, depth: Int): String? {
         try {
             val html = HttpClient.getText(url, referer = url) ?: return null
             val doc = Jsoup.parse(html, url)
@@ -710,7 +710,7 @@ object LoadedfilesResolver : BaseResolver {
         return HOST_RE.matcher(url.lowercase()).find()
     }
 
-    override suspend fun resolve(url: String, quality: String, depth: Int = 0): String? {
+    override suspend fun resolve(url: String, quality: String, depth: Int): String? {
         try {
             val noRedirectClient = HttpClient.shared.newBuilder().followRedirects(false).build()
 
@@ -788,7 +788,7 @@ object WildshareResolver : BaseResolver {
         return url.lowercase().contains("wildshare.net")
     }
 
-    override suspend fun resolve(url: String, quality: String, depth: Int = 0): String? {
+    override suspend fun resolve(url: String, quality: String, depth: Int): String? {
         try {
             val html = HttpClient.getText(url, referer = url) ?: return null
             val ptMatcher = Pattern.compile("""pt=([A-Za-z0-9%+=/]+)""").matcher(html)
@@ -811,7 +811,7 @@ object WaffiCloudResolver : BaseResolver {
         return url.lowercase().contains("waffi.cloud")
     }
 
-    override suspend fun resolve(url: String, quality: String, depth: Int = 0): String? {
+    override suspend fun resolve(url: String, quality: String, depth: Int): String? {
         return if (url.contains("?preview")) url.substringBefore("?preview") else url
     }
 }
@@ -824,7 +824,7 @@ object VidmolyResolver : BaseResolver {
         return url.lowercase().contains("vidmoly.")
     }
 
-    override suspend fun resolve(url: String, quality: String, depth: Int = 0): String? {
+    override suspend fun resolve(url: String, quality: String, depth: Int): String? {
         try {
             val html = HttpClient.getText(url, referer = url) ?: return null
             val m = Pattern.compile("""file\s*:\s*["'](https?://[^"']+\.m3u8[^"']*)["']""").matcher(html)
@@ -851,7 +851,7 @@ object StreamwishResolver : BaseResolver {
         return HOSTS.any { lower.contains(it) }
     }
 
-    override suspend fun resolve(url: String, quality: String, depth: Int = 0): String? {
+    override suspend fun resolve(url: String, quality: String, depth: Int): String? {
         try {
             val vid = url.trimEnd('/').substringAfterLast('/')
             val candidates = if (vid.length >= 6) {
@@ -896,7 +896,7 @@ object VidhideResolver : BaseResolver {
         return HOSTS.any { lower.contains(it) }
     }
 
-    override suspend fun resolve(url: String, quality: String, depth: Int = 0): String? {
+    override suspend fun resolve(url: String, quality: String, depth: Int): String? {
         try {
             val html = HttpClient.getText(url, referer = url) ?: return null
             if (looksLikeDeadPage(html)) return null
@@ -927,7 +927,7 @@ object DoodstreamResolver : BaseResolver {
         return HOSTS.any { lower.contains(it) }
     }
 
-    override suspend fun resolve(url: String, quality: String, depth: Int = 0): String? {
+    override suspend fun resolve(url: String, quality: String, depth: Int): String? {
         try {
             val host = HttpClient.safeHost(url, "dood.to")
             val embedUrl = url.replace("/d/", "/e/").replace("/f/", "/e/")
@@ -962,7 +962,7 @@ object MixdropResolver : BaseResolver {
         return HOSTS.any { lower.contains(it) }
     }
 
-    override suspend fun resolve(url: String, quality: String, depth: Int = 0): String? {
+    override suspend fun resolve(url: String, quality: String, depth: Int): String? {
         try {
             val embedUrl = url.replace("/f/", "/e/")
             val host = HttpClient.safeHost(url, "mixdrop.co")
@@ -992,7 +992,7 @@ object StreamtapeResolver : BaseResolver {
         return HOSTS.any { lower.contains(it) }
     }
 
-    override suspend fun resolve(url: String, quality: String, depth: Int = 0): String? {
+    override suspend fun resolve(url: String, quality: String, depth: Int): String? {
         try {
             val html = HttpClient.getText(url, referer = url) ?: return null
             if (looksLikeDeadPage(html)) return null
@@ -1017,7 +1017,7 @@ object PixelDrainResolver : BaseResolver {
         return url.lowercase().contains("pixeldrain.com")
     }
 
-    override suspend fun resolve(url: String, quality: String, depth: Int = 0): String? {
+    override suspend fun resolve(url: String, quality: String, depth: Int): String? {
         try {
             val fileId = url.substringAfterLast("/").substringBefore("?")
             if (fileId.isNotBlank()) {
@@ -1039,7 +1039,7 @@ object GenericLockerResolver : BaseResolver {
         return HOSTS.any { lower.contains(it) }
     }
 
-    override suspend fun resolve(url: String, quality: String, depth: Int = 0): String? {
+    override suspend fun resolve(url: String, quality: String, depth: Int): String? {
         try {
             val html = HttpClient.getText(url, referer = url) ?: return null
             val m3u8 = extractM3u8FromHtml(html)
