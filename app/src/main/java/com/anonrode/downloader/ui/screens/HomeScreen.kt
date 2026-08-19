@@ -21,6 +21,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -222,7 +223,7 @@ fun HomeScreen(
                             ),
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .androidx.compose.ui.focus.onFocusChanged { isSearchFocused = it.isFocused }
+                                .onFocusChanged { isSearchFocused = it.isFocused }
                         )
                     }
 
