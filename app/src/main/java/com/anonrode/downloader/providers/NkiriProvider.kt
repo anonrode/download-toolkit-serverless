@@ -142,7 +142,7 @@ object NkiriProvider : SiteProvider {
             directUrl = direct,
             filename = direct.substringAfterLast('/').substringBefore('?').ifEmpty { "movie.mkv" },
             backend = if (isHls) "yt-dlp" else "aria2c",
-            parallelSockets = if (isSingleSocket) 1 else 16
+            parallelSockets = 16
         )
     }
 }

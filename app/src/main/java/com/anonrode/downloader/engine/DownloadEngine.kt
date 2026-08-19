@@ -515,7 +515,7 @@ class DownloadEngine(
                         backend = finalBackend,
                         referer = refererToPass,
                         ua = HttpClient.DEFAULT_UA,
-                        parallelSockets = if (finalBackend == "yt-dlp") 1 else task.parallelSockets,
+                        parallelSockets = task.parallelSockets.coerceIn(4, 16),
                         quality = defaultQuality,
                         isExtractorTask = isExtractor,
                         onProgress = { dl, tot, spd, eta ->

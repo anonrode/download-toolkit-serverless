@@ -263,7 +263,7 @@ fun SocialModal(
                         sourceUrl = url,
                         isDirect = false,
                         backend = "yt-dlp",
-                        parallelSockets = 1,
+                        parallelSockets = viewModel.engine.parallelSocketsPerFile,
                         audioOnly = audioOnly
                     )
                     onDismiss()

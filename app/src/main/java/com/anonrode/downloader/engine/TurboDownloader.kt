@@ -24,22 +24,12 @@ object TurboDownloader {
     private const val BUFFER = 256 * 1024 // 256 KB high-throughput buffer
     private const val MIN_SEGMENTED_SIZE = 8L * 1024 * 1024 // 8 MB
 
-    /** Hosts that throttle or drop many-connection clients. */
-    private val SINGLE_SOCKET_HOSTS = listOf(
-        "kissorgrab.com", "downloadwella.com", "wetafiles.com"
-    )
-    private val LOW_SOCKET_HOSTS = listOf(
-        "streamwish.", "vidhide.", "filelions.", "lulacloud.com", "vikingfile.com"
-    )
-
-    /** Per-host socket cap. */
+    /**
+     * Sockets per download: ensures 4 to 16 concurrent range connections
+     * to bypass server-side single-socket 200KB/s throttling.
+     */
     fun socketsFor(url: String, configured: Int): Int {
-        val u = url.lowercase()
-        return when {
-            SINGLE_SOCKET_HOSTS.any { u.contains(it) } -> 1
-            LOW_SOCKET_HOSTS.any { u.contains(it) } -> 2
-            else -> configured.coerceIn(1, 8)
-        }
+        return configured.coerceIn(4, 16)
     }
 
     data class Result(val file: File, val bytes: Long, val segmented: Boolean)
