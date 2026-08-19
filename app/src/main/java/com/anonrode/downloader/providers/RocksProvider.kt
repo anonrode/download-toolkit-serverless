@@ -70,8 +70,9 @@ object RocksProvider : SiteProvider {
             var currentSeason = 1
             val slugMatch = Regex("""season-(\d{1,2})""", RegexOption.IGNORE_CASE).find(showUrl)
                 ?: Regex("""season\s*(\d{1,2})""", RegexOption.IGNORE_CASE).find(title)
-            if (slugMatch != null) {
-                currentSeason = slugMatch.groupValues.getOrNull(1)?.toIntOrNull() ?: 1
+            val isExplicitSingleSeasonPage = slugMatch != null
+            if (isExplicitSingleSeasonPage) {
+                currentSeason = slugMatch?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 1
             }
 
             var count = 1
@@ -79,8 +80,8 @@ object RocksProvider : SiteProvider {
             for (elem in allElements) {
                 val tagName = elem.tagName().lowercase()
 
-                // Track active Season headings in page content
-                if (tagName in listOf("h1", "h2", "h3", "h4", "strong", "b", "p", "div")) {
+                // Track active Season headings in page content (only if not an explicit single-season page)
+                if (!isExplicitSingleSeasonPage && tagName in listOf("h1", "h2", "h3", "h4", "strong", "b", "p", "div")) {
                     val t = elem.text().trim()
                     val isExclusion = Regex("""\b(synopsis|storyline|about|comment|download|how to|click|added)\b""", RegexOption.IGNORE_CASE).containsMatchIn(t)
                     if (t.length < 60 && !isExclusion) {
@@ -128,12 +129,19 @@ object RocksProvider : SiteProvider {
                             continue
                         }
 
+                        val explicitSm = Regex("""\bS(\d{1,2})E(\d{1,3})\b""", RegexOption.IGNORE_CASE).find(text)
+                            ?: Regex("""\bS(\d{1,2})E(\d{1,3})\b""", RegexOption.IGNORE_CASE).find(parentText)
+                            ?: Regex("""\bS(\d{1,2})E(\d{1,3})\b""", RegexOption.IGNORE_CASE).find(href)
+
                         val epMatch = Regex("""\b(?:EPISODE|EP|E)\s*(\d{1,3})\b""", RegexOption.IGNORE_CASE).find(text)
                             ?: Regex("""\b(?:EPISODE|EP|E)\s*(\d{1,3})\b""", RegexOption.IGNORE_CASE).find(parentText)
-                            ?: Regex("""\bS\d{1,2}E(\d{1,3})\b""", RegexOption.IGNORE_CASE).find(href)
 
-                        val epNum = epMatch?.groupValues?.getOrNull(1)?.toIntOrNull() ?: count
-                        val epCode = "S%02dE%02d".format(currentSeason, epNum)
+                        val itemSeason = explicitSm?.groupValues?.getOrNull(1)?.toIntOrNull() ?: currentSeason
+                        val epNum = explicitSm?.groupValues?.getOrNull(2)?.toIntOrNull()
+                            ?: epMatch?.groupValues?.getOrNull(1)?.toIntOrNull()
+                            ?: count
+
+                        val epCode = "S%02dE%02d".format(itemSeason, epNum)
                         val qMatch = Regex("""\b(\d{3,4}p)\b""", RegexOption.IGNORE_CASE).find(text)
                             ?: Regex("""\b(\d{3,4}p)\b""", RegexOption.IGNORE_CASE).find(parentText)
                         val qualitySuffix = qMatch?.groupValues?.getOrNull(1)?.let { " [$it]" } ?: ""
@@ -144,7 +152,7 @@ object RocksProvider : SiteProvider {
                             EpisodeItem(
                                 title = label,
                                 url = href,
-                                episodeNum = currentSeason * 100 + epNum,
+                                episodeNum = itemSeason * 100 + epNum,
                                 site = name
                             )
                         )

@@ -125,7 +125,9 @@ object TurboDownloader {
                 } else null
             }
         } else {
+            state.delete()
             if (single(safe, partFile, headers, total, onProgress)) {
+                state.delete()
                 atomicMove(partFile, dest)
                 Result(dest, dest.length(), false)
             } else null
@@ -276,7 +278,7 @@ object TurboDownloader {
                         raf.write(buf, 0, n)
                         written += n
                         val currentSpeed = speed.sample(written)
-                        onProgress(written, if (total > 0) total else written, currentSpeed)
+                        onProgress(written, if (total > 0) total else 0L, currentSpeed)
                     }
                     if (total > 0 && written != total) return false
                 }
@@ -304,10 +306,12 @@ class SpeedMeter(initialBytes: Long = 0L) {
         val now = System.currentTimeMillis()
         val dt = now - lastTime
         if (dt >= 600) {
-            if (totalBytes > lastBytes) {
-                lastSpeed = ((totalBytes - lastBytes) * 1000 / dt).coerceAtLeast(0)
-                lastBytes = totalBytes
+            lastSpeed = if (totalBytes > lastBytes) {
+                ((totalBytes - lastBytes) * 1000 / dt).coerceAtLeast(0)
+            } else {
+                0L
             }
+            lastBytes = totalBytes
             lastTime = now
         }
         return lastSpeed

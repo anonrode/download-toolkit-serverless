@@ -85,7 +85,9 @@ class DownloadEngine(
         quality: String,
         autoOrganize: Boolean,
         storageGuard: Double,
-        wifiOnlyTorrents: Boolean
+        wifiOnlyTorrents: Boolean,
+        instantSocial: Boolean = false,
+        showPosters: Boolean = true
     ) {
         this.maxConcurrentDownloads = maxConcurrent
         this.parallelSocketsPerFile = parallelSockets
@@ -93,6 +95,8 @@ class DownloadEngine(
         this.autoOrganizeByShow = autoOrganize
         this.storageGuardGb = storageGuard
         this.wifiOnlyTorrents = wifiOnlyTorrents
+        this.instantSocialDownload = instantSocial
+        this.showPostersInResults = showPosters
 
         context.getSharedPreferences("downloader_settings", Context.MODE_PRIVATE).edit()
             .putInt("pref_max_downloads", maxConcurrent)
@@ -101,6 +105,8 @@ class DownloadEngine(
             .putBoolean("pref_auto_organize", autoOrganize)
             .putFloat("pref_storage_guard", storageGuard.toFloat())
             .putBoolean("pref_torrents_wifi_only", wifiOnlyTorrents)
+            .putBoolean("pref_instant_social", instantSocial)
+            .putBoolean("pref_show_posters", showPosters)
             .apply()
     }
 
@@ -239,9 +245,11 @@ class DownloadEngine(
         if (active.isNotEmpty()) {
             val first = active.first()
             val pct = if (first.totalBytes > 0) (first.downloadedBytes * 100 / first.totalBytes).toInt().coerceIn(0, 100) else 0
+            val speedMb = first.speedBytesPerSec / (1024.0 * 1024.0)
+            val speedStr = if (speedMb > 0.05) " • %.1f MB/s".format(java.util.Locale.US, speedMb) else ""
             DownloadService.updateProgress(
                 context,
-                title = first.episodeTitle,
+                title = "${first.episodeTitle}$speedStr",
                 progress = pct,
                 activeCount = active.size
             )
@@ -332,8 +340,14 @@ class DownloadEngine(
     }
 
     private fun startTask(task: DownloadTask) {
+        val existingJob = activeJobs[task.id]
+        if (existingJob != null && existingJob.isActive) {
+            return
+        }
+
         val job = engineScope.launch {
             try {
+                if (!isActive) return@launch
                 var streamUrl = task.directUrl
                 val isMagnet = streamUrl.startsWith("magnet:", ignoreCase = true)
                 val isSocial = task.showTitle.startsWith("Social/", ignoreCase = true) || task.backend.contains("yt-dlp")
@@ -459,6 +473,7 @@ class DownloadEngine(
                             "Turbo done: ${turbo.bytes} bytes, segmented=${turbo.segmented}")
                         turbo.file
                     } else {
+                        if (!coroutineContext.isActive) return@launch
                         android.util.Log.w("AnonDownload", "Turbo failed, falling back to aria2c")
                         YoutubeDlDownloader.download(
                             context = context,
@@ -537,6 +552,11 @@ class DownloadEngine(
                     }
 
                     try {
+                        File(producedFile.absolutePath + ".turbo").delete()
+                        File(producedFile.absolutePath + ".part").delete()
+                    } catch (_: Throwable) {}
+
+                    try {
                         MediaScannerConnection.scanFile(
                             context,
                             arrayOf(producedFile.absolutePath),
@@ -555,7 +575,9 @@ class DownloadEngine(
             } catch (e: Exception) {
                 repository.update(task.id) { it.copy(status = TaskStatus.FAILED, errorMessage = e.message ?: "Download error") }
             } finally {
-                activeJobs.remove(task.id)
+                if (activeJobs[task.id] === job) {
+                    activeJobs.remove(task.id)
+                }
                 updateServiceState()
                 processQueue()
             }

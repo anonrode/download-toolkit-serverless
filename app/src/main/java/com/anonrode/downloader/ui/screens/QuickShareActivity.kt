@@ -77,6 +77,7 @@ class QuickShareActivity : ComponentActivity() {
                         onDownload = { quality, audioOnly, makeInstant ->
                             if (makeInstant) {
                                 prefs.edit().putBoolean("pref_instant_social", true).apply()
+                                (application as? AnonApp)?.engine?.instantSocialDownload = true
                             }
                             dispatchDownload(parsed, sharedText, quality, audioOnly)
                             Toast.makeText(this@QuickShareActivity, "🚀 Download queued in background", Toast.LENGTH_SHORT).show()
