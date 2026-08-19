@@ -92,6 +92,14 @@ object YoutubeDlDownloader {
                     addOption("--merge-output-format", "mp4")
                 }
                 addOption("--no-playlist")
+                // Embed/watch-page cracks (nepu, social, etc.) often resolve to HLS.
+                // Parallel fragments keep multi-socket speed instead of a single
+                // rate-capped connection.
+                val frags = parallelSockets.coerceIn(4, 16)
+                addOption("-N", "$frags")
+                addOption("--concurrent-fragments", "$frags")
+                addOption("--buffer-size", "1M")
+                addOption("--http-chunk-size", "10M")
             } else if (isM3u8) {
                 // HLS m3u8 stream variant selection with multi-fragment parallel downloading
                 val stem = File(targetDir, preferredFilename.substringBeforeLast('.')).absolutePath

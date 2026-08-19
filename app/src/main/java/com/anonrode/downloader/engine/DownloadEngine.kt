@@ -409,8 +409,11 @@ class DownloadEngine(
             }
         }
 
-        // 3. Unpack secondary lockers if present
-        if (!resolved.isNullOrBlank() && (isKnownLockerHost(resolved) || !isDirectMediaUrl(resolved))) {
+        // 3. Unpack secondary lockers if present. Non-direct URLs that are NOT known
+        // lockers are embed/watch pages (e.g. vidsrc.mov): the registry can't crack
+        // their token-gated chains, so don't waste fetches — startTask routes them
+        // straight to yt-dlp.
+        if (!resolved.isNullOrBlank() && isKnownLockerHost(resolved)) {
             try {
                 val inner = ResolverRegistry.resolve(resolved, defaultQual)
                 if (!inner.isNullOrBlank() && !isKnownLockerHost(inner)) {
