@@ -575,7 +575,8 @@ class DownloadEngine(
             } catch (e: Exception) {
                 repository.update(task.id) { it.copy(status = TaskStatus.FAILED, errorMessage = e.message ?: "Download error") }
             } finally {
-                if (activeJobs[task.id] === job) {
+                val thisJob = coroutineContext[Job]
+                if (thisJob != null && activeJobs[task.id] === thisJob) {
                     activeJobs.remove(task.id)
                 }
                 updateServiceState()

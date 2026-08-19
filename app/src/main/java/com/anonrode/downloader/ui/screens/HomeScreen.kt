@@ -158,8 +158,7 @@ fun HomeScreen(
             Spacer(modifier = Modifier.height(Spacing.sm))
 
             // Search Bar Component
-            val searchInteractionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
-            val isSearchFocused by searchInteractionSource.collectIsFocusedAsState()
+            var isSearchFocused by remember { mutableStateOf(false) }
 
             Box(
                 modifier = Modifier
@@ -221,8 +220,9 @@ fun HomeScreen(
                                     viewModel.search()
                                 }
                             ),
-                            interactionSource = searchInteractionSource,
-                            modifier = Modifier.fillMaxWidth()
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .androidx.compose.ui.focus.onFocusChanged { isSearchFocused = it.isFocused }
                         )
                     }
 
