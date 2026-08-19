@@ -269,7 +269,16 @@ class DownloadEngine(
         val low = url.lowercase()
         return when {
             low.contains("gogoanime") || low.contains("anitaku") || low.contains("workers.dev") -> "https://gogoanime.or.at/"
-            low.contains("asianc") || low.contains("vidbasic") || low.contains("vidb") -> "https://asianc.id/"
+            low.contains("asianc") -> "https://asianc.id/"
+            // Vidbasic's segment host (hls.vidbasic.top / jisooido.top) allowlists the
+            // player origin as Referer and serves an HTML decoy to everything else —
+            // any other referer makes every fragment 416 and the download produces an
+            // unplayable file (monolith parity, downloader.py get_referer_for_url).
+            low.contains("vidbasic") || low.contains("vidb") || low.contains("jisooido") -> "https://vidb.top/"
+            low.contains("tamilembed") || low.contains("animesama") || low.contains("kickassanime") -> "https://anitaku.com.ro/"
+            low.contains("megap.") -> "https://megaplay.buzz/"
+            low.contains("blogger.com") -> "https://anitaku.com.ro/"
+            low.contains("googlevideo") -> "https://www.blogger.com/"
             low.contains("pluto") || low.contains("kissorgrab.com") -> "https://plutomovies.com/"
             low.contains("thenkiri") || low.contains("nkiri") -> "https://thenkiri.com/"
             low.contains("9jarocks") || low.contains("loadedfiles") -> "https://my9jarocks.bz/"
@@ -279,6 +288,21 @@ class DownloadEngine(
             low.contains("dramarain") -> "https://dramarain.com/"
             else -> ""
         }
+    }
+
+    // Adaptive-streaming manifest detection (monolith is_streaming_link parity):
+    // DASH/ISM/F4M manifests and player-token URLs must go to yt-dlp, or the
+    // segmented downloader grabs manifest XML and produces a corrupt file.
+    private fun isStreamingLink(url: String): Boolean {
+        val low = url.lowercase()
+        if (low.contains(".m3u8") || low.contains("manifest") || low.contains("kickassanime")) return true
+        val path = low.substringBefore('?').substringBefore('#')
+        if (path.endsWith(".mpd") || path.endsWith(".m3u") || path.endsWith(".ism") || path.endsWith(".f4m")) return true
+        return STREAMING_QUERY_PATTERN.containsMatchIn(low)
+    }
+
+    companion object {
+        private val STREAMING_QUERY_PATTERN = Regex("""[?&][^=&]*=(?:mpd|dash|hls)(?:&|$)""")
     }
 
     private var lastNotificationTime: Long = 0L
@@ -458,10 +482,14 @@ class DownloadEngine(
                     }
                 }
 
-                val isHlsStream = streamUrl.lowercase().contains(".m3u8") || streamUrl.lowercase().contains("manifest")
+                val isHlsStream = isStreamingLink(streamUrl)
                 val isEmbedOrPage = !isMagnet && !isDirectMediaUrl(streamUrl)
                 val finalBackend = if (isSocial || isHlsStream || isEmbedOrPage || task.audioOnly) "yt-dlp" else "aria2c"
                 val isExtractor = isSocial || task.audioOnly || isEmbedOrPage
+
+                // kissorgrab.com rejects multi-connection downloads; force a single
+                // socket there (monolith parity, downloader.py aria2c forced 1/1).
+                val effectiveSockets = if (streamUrl.lowercase().contains("kissorgrab.com")) 1 else task.parallelSockets
 
                 coroutineContext.ensureActive()
                 repository.update(task.id) { it.copy(status = TaskStatus.DOWNLOADING, directUrl = streamUrl) }
@@ -482,7 +510,7 @@ class DownloadEngine(
                         url = streamUrl,
                         dest = dest,
                         headers = hdrs,
-                        configuredSockets = task.parallelSockets,
+                        configuredSockets = effectiveSockets,
                         onProgress = { got, tot, bps ->
                             val eta = if (bps > 0 && tot > got) (tot - got) / bps else 0L
                             repository.updateProgress(
@@ -526,7 +554,7 @@ class DownloadEngine(
                                     url = streamUrl,
                                     dest = dest,
                                     headers = freshHdrs,
-                                    configuredSockets = task.parallelSockets,
+                                    configuredSockets = effectiveSockets,
                                     onProgress = { got, tot, bps ->
                                         val eta = if (bps > 0 && tot > got) (tot - got) / bps else 0L
                                         repository.updateProgress(
@@ -558,7 +586,7 @@ class DownloadEngine(
                             backend = finalBackend,
                             referer = refererToPass,
                             ua = HttpClient.DEFAULT_UA,
-                            parallelSockets = task.parallelSockets,
+                            parallelSockets = effectiveSockets,
                             quality = defaultQuality,
                             isExtractorTask = false,
                             audioOnly = task.audioOnly,
@@ -584,7 +612,7 @@ class DownloadEngine(
                         backend = finalBackend,
                         referer = refererToPass,
                         ua = HttpClient.DEFAULT_UA,
-                        parallelSockets = task.parallelSockets.coerceIn(4, 16),
+                        parallelSockets = effectiveSockets.coerceIn(4, 16),
                         quality = defaultQuality,
                         isExtractorTask = isExtractor,
                         audioOnly = task.audioOnly,

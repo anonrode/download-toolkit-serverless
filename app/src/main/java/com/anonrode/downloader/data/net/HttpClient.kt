@@ -200,10 +200,10 @@ object HttpClient {
         return shared.newCall(reqBuilder.build()).execute()
     }
 
-    fun getText(url: String, referer: String? = null, headers: Map<String, String> = emptyMap()): String? {
+    fun getText(url: String, referer: String? = null, headers: Map<String, String> = emptyMap(), acceptStatus: Set<Int> = emptySet()): String? {
         return try {
             get(url, referer, headers).use { res ->
-                if (res.isSuccessful) {
+                if (res.isSuccessful || res.code in acceptStatus) {
                     res.body?.string()
                 } else {
                     lastFailure = "HTTP ${res.code} for ${url.take(120)}"
