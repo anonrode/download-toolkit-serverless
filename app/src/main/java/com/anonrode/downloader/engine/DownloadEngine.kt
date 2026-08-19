@@ -54,13 +54,25 @@ class DownloadEngine(
             }
             networkObserver.status.collect { net ->
                 if (net.isConnected) {
-                    // Auto-resume tasks that were parked by a connectivity drop (or Wi-Fi-only gate)
+                    if (lastNetworkTag != null && net.networkTag != null && lastNetworkTag != net.networkTag) {
+                        // Network identity changed while still connected (Wi-Fi -> mobile, VPN toggle):
+                        // restart active jobs losslessly on the new network instead of letting
+                        // their sockets stall against the dead one.
+                        activeJobs.keys.toList().forEach { id -> pauseForNetwork(id) }
+                    }
+                    lastNetworkTag = net.networkTag
+                    // Auto-resume tasks parked by a connectivity drop
                     repository.tasks.value
-                        .filter { it.status == TaskStatus.PAUSED && it.errorMessage?.startsWith("Waiting for") == true }
+                        .filter { it.status == TaskStatus.PAUSED && it.errorMessage == NETWORK_PAUSE_MESSAGE }
+                        .forEach { repository.update(it.id) { t -> t.copy(status = TaskStatus.QUEUED, errorMessage = null) } }
+                    // Wi-Fi-gated torrents resume only once an actual Wi-Fi network is back
+                    repository.tasks.value
+                        .filter { it.status == TaskStatus.PAUSED && it.errorMessage?.startsWith("Waiting for Wi-Fi") == true && net.isWifi }
                         .forEach { repository.update(it.id) { t -> t.copy(status = TaskStatus.QUEUED, errorMessage = null) } }
                     processQueue()
                 } else {
                     // Park active jobs so a reconnect resumes them instead of failing them
+                    lastNetworkTag = null
                     activeJobs.keys.toList().forEach { id -> pauseForNetwork(id) }
                 }
             }
@@ -150,7 +162,8 @@ class DownloadEngine(
             etaSeconds = 0L,
             backend = backend,
             parallelSockets = parallelSockets,
-            site = site
+            site = site,
+            audioOnly = audioOnly
         )
 
         repository.addFirst(task)
@@ -270,6 +283,7 @@ class DownloadEngine(
 
     private var lastNotificationTime: Long = 0L
     private val NETWORK_PAUSE_MESSAGE = "Waiting for network..."
+    private var lastNetworkTag: String? = null
 
     private fun updateServiceState(force: Boolean = false) {
         val now = System.currentTimeMillis()
@@ -308,7 +322,11 @@ class DownloadEngine(
         val nextTask = currentTasks.firstOrNull { it.status == TaskStatus.QUEUED } ?: return
 
         if (!checkStorageAvailable()) {
-            repository.update(nextTask.id) { it.copy(status = TaskStatus.PAUSED, errorMessage = "Storage limit reached (< ${storageGuardGb}GB free)") }
+            // Park every queued task, not just the head, so the whole queue drains to PAUSED
+            // in one pass instead of stalling on a single task per processQueue call.
+            currentTasks.filter { it.status == TaskStatus.QUEUED }.forEach { queued ->
+                repository.update(queued.id) { t -> t.copy(status = TaskStatus.PAUSED, errorMessage = "Storage limit reached (< ${storageGuardGb}GB free)") }
+            }
             return
         }
 
@@ -437,9 +455,10 @@ class DownloadEngine(
                 }
 
                 val isHlsStream = streamUrl.lowercase().contains(".m3u8") || streamUrl.lowercase().contains("manifest")
-                val finalBackend = if (isSocial || isHlsStream) "yt-dlp" else "aria2c"
-                val isExtractor = isSocial
+                val finalBackend = if (isSocial || isHlsStream || task.audioOnly) "yt-dlp" else "aria2c"
+                val isExtractor = isSocial || task.audioOnly
 
+                coroutineContext.ensureActive()
                 repository.update(task.id) { it.copy(status = TaskStatus.DOWNLOADING, directUrl = streamUrl) }
                 updateServiceState(force = true)
 
@@ -537,6 +556,7 @@ class DownloadEngine(
                             parallelSockets = task.parallelSockets,
                             quality = defaultQuality,
                             isExtractorTask = false,
+                            audioOnly = task.audioOnly,
                             onProgress = { dl, tot, spd, eta ->
                                 repository.updateProgress(
                                     taskId = task.id,
@@ -562,6 +582,7 @@ class DownloadEngine(
                         parallelSockets = task.parallelSockets.coerceIn(4, 16),
                         quality = defaultQuality,
                         isExtractorTask = isExtractor,
+                        audioOnly = task.audioOnly,
                         onProgress = { dl, tot, spd, eta ->
                             repository.updateProgress(
                                 taskId = task.id,
@@ -616,8 +637,10 @@ class DownloadEngine(
                     DownloadService.notifyCompleted(context, finalTitle)
                 } else {
                     val errReason = when {
+                        producedFile != null && looksLikeHtml(producedFile) -> "Server returned an HTML page instead of the file"
                         !validation.first -> validation.second
-                        turboFailure?.httpStatus != null -> "Download rejected by server (HTTP ${turboFailure.httpStatus}) — retry to refresh the link"
+                        producedFile == null && turboFailure?.httpStatus != null -> "Download rejected by server (HTTP ${turboFailure.httpStatus}) — retry to refresh the link"
+                        producedFile == null -> "Download failed — the server never produced a file"
                         else -> "Output file was too small or corrupted"
                     }
                     repository.update(task.id) { it.copy(status = TaskStatus.FAILED, errorMessage = errReason) }
@@ -625,7 +648,18 @@ class DownloadEngine(
             } catch (e: CancellationException) {
                 // Cancelled
             } catch (e: Exception) {
-                repository.update(task.id) { it.copy(status = TaskStatus.FAILED, errorMessage = e.message ?: "Download error") }
+                if (coroutineContext.isActive) {
+                    repository.update(task.id) { it.copy(status = TaskStatus.FAILED, errorMessage = e.message ?: "Download error") }
+                } else {
+                    // Cancelled (pause/cancel/network park): native-process teardown can surface
+                    // as a plain exception, so never report that as FAILED. Also unwedge a task
+                    // that was still marked DOWNLOADING when the job was cancelled.
+                    repository.update(task.id) { t ->
+                        if (t.status == TaskStatus.DOWNLOADING || t.status == TaskStatus.RESOLVING) {
+                            t.copy(status = TaskStatus.PAUSED, speedBytesPerSec = 0.0)
+                        } else t
+                    }
+                }
             } finally {
                 val thisJob = coroutineContext[Job]
                 if (thisJob != null && activeJobs[task.id] === thisJob) {

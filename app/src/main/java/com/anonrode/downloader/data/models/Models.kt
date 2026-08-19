@@ -67,5 +67,6 @@ data class DownloadTask(
     val parallelSockets: Int = 16,
     val site: String = "",
     val headers: Map<String, String> = emptyMap(),
+    val audioOnly: Boolean = false,
     val errorMessage: String? = null
 )

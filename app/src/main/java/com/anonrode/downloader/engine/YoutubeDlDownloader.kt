@@ -170,11 +170,6 @@ object YoutubeDlDownloader {
                     }
                 }
 
-                if (totBytes <= 0L && progress > 0f) {
-                    dlBytes = progress.toLong().coerceIn(0L, 100L)
-                    totBytes = 100L
-                }
-
                 lastDl = dlBytes
                 lastTot = totBytes
                 onProgress(dlBytes, totBytes, spdBps, eta)
