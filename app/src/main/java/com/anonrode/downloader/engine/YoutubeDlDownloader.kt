@@ -107,20 +107,25 @@ object YoutubeDlDownloader {
                 }
                 addOption("--no-playlist")
             } else if (isM3u8) {
-                // HLS m3u8 stream variant selection based on user quality setting
+                // HLS m3u8 stream variant selection with multi-fragment parallel downloading
                 val stem = File(targetDir, preferredFilename.substringBeforeLast('.')).absolutePath
                 addOption("-o", "$stem.%(ext)s")
                 addOption("-f", "best[height<=$height]/best")
                 addOption("-S", "height~$height,+size,+br")
                 addOption("--no-playlist")
+                val frags = parallelSockets.coerceIn(4, 16)
+                addOption("-N", "$frags")
+                addOption("--concurrent-fragments", "$frags")
+                addOption("--buffer-size", "1M")
+                addOption("--http-chunk-size", "10M")
             } else {
                 // Direct CDN HTTP multi-socket via aria2c
                 val stem = File(targetDir, preferredFilename.substringBeforeLast('.')).absolutePath
                 addOption("-o", "$stem.%(ext)s")
                 addOption("--downloader", "libaria2c.so")
-                val conns = if (isConnectionSensitive(sourceUrl)) 1 else parallelSockets.coerceIn(1, 16)
+                val conns = parallelSockets.coerceIn(4, 16)
                 val aria2Args = buildString {
-                    append("aria2c:-x $conns -s $conns --min-split-size=1M --continue=true --disk-cache=32M")
+                    append("aria2c:-x $conns -s $conns -j $conns -k 1M --max-connection-per-server=$conns --split=$conns --min-split-size=1M --continue=true --disk-cache=64M")
                     if (origin.isNotBlank()) append(" --header=\"Origin: $origin\"")
                     if (referer.isNotBlank()) append(" --header=\"Referer: $referer\"")
                     if (ua.isNotBlank()) append(" --header=\"User-Agent: $ua\"")

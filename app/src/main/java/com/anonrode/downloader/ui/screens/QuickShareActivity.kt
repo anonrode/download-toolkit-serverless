@@ -124,7 +124,7 @@ class QuickShareActivity : ComponentActivity() {
                     sourceUrl = parsed.cleanUrl,
                     isDirect = false,
                     backend = "yt-dlp",
-                    parallelSockets = 1,
+                    parallelSockets = engine.parallelSocketsPerFile,
                     audioOnly = audioOnly
                 )
             }
@@ -169,7 +169,7 @@ class QuickShareActivity : ComponentActivity() {
                     sourceUrl = rawUrl,
                     isDirect = false,
                     backend = "yt-dlp",
-                    parallelSockets = 1,
+                    parallelSockets = engine.parallelSocketsPerFile,
                     audioOnly = audioOnly
                 )
             }

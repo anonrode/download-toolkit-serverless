@@ -86,7 +86,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         sourceUrl = parsed.cleanUrl,
                         isDirect = false,
                         backend = "yt-dlp",
-                        parallelSockets = 1
+                        parallelSockets = engine.parallelSocketsPerFile
                     )
                 } else {
                     onOpenSocial(parsed.platform, parsed.cleanUrl)

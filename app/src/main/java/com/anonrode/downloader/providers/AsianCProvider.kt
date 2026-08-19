@@ -124,7 +124,7 @@ object AsianCProvider : SiteProvider {
             directUrl = target,
             filename = target.substringAfterLast('/').substringBefore('?').ifEmpty { "episode.mp4" },
             backend = if (isHls) "yt-dlp" else "aria2c",
-            parallelSockets = if (isHls) 1 else 16
+            parallelSockets = 16
         )
     }
 }

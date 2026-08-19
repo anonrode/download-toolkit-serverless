@@ -72,7 +72,7 @@ object NepuProvider : SiteProvider {
             directUrl = direct,
             filename = direct.substringAfterLast('/').substringBefore('?').ifEmpty { "movie.mp4" },
             backend = if (isHls) "ytdlp" else "aria2c",
-            parallelSockets = if (isHls) 1 else 16
+            parallelSockets = 16
         )
     }
 }
