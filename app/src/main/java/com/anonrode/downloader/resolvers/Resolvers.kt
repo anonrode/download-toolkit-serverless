@@ -3,6 +3,7 @@ package com.anonrode.downloader.resolvers
 import com.anonrode.downloader.data.net.HttpClient
 import okhttp3.FormBody
 import okhttp3.Request
+import org.json.JSONArray
 import org.json.JSONObject
 import org.jsoup.Jsoup
 import java.net.URI
@@ -295,26 +296,78 @@ object BloggerResolver : BaseResolver {
 }
 
 // -------------------------------------------------------------
-// 5. VidsrcResolver
+// 5. VidsrcResolver (vidsrc / nepu watch pages -> token-stamped HLS)
 // -------------------------------------------------------------
 object VidsrcResolver : BaseResolver {
+    private val HOSTS = listOf(
+        "vidsrc.mov", "vidsrc.me", "vidsrc.net", "vidsrc.cc", "vidsrc.to",
+        "vidsrc.in", "vidsrc.pm", "vidsrc.xyz", "vsembed.ru",
+        "cloudorchestranova.com", "data.vidsrcme.ru",
+        "nepu.gd/watch", "nepu.to/watch"
+    )
+    private val TMDB_PATTERN = Pattern.compile("""/(?:movie|tv)/(\d+)(?:/(\d+)/(\d+))?""")
+    private val ORIGIN_PATTERN = Pattern.compile("""https?://[^/]+""")
+
     override fun canResolve(url: String): Boolean {
         val low = url.lowercase()
-        return listOf("vidsrc.mov", "vidsrc.net", "vidsrc.cc", "vidsrc.to", "vidsrc.in", "vidsrc.pm", "vidsrc.xyz").any { low.contains(it) }
+        return HOSTS.any { low.contains(it) }
     }
 
     override suspend fun resolve(url: String, quality: String): String? {
         try {
-            val html = HttpClient.getText(url, referer = url) ?: return null
-            val ifr = Jsoup.parse(html).selectFirst("iframe[src]")
-            if (ifr != null) {
-                val rawSrc = ifr.attr("src")
-                val src = HttpClient.safeResolveUri(url, rawSrc)
-                val resolved = ResolverRegistry.resolve(src, quality)
-                if (!resolved.isNullOrBlank()) return resolved
+            var embedUrl = url.replace("nepu.to/", "nepu.gd/")
+            if (embedUrl.contains("nepu.gd/watch")) {
+                // Watch pages hide the player in iframe#playerFrame (or a
+                // vidsrc-src iframe) — hop through it to the embed URL.
+                val html = HttpClient.getText(embedUrl, referer = "https://nepu.gd/") ?: return null
+                val doc = Jsoup.parse(html)
+                val iframe = doc.selectFirst("iframe#playerFrame")
+                    ?: doc.selectFirst("iframe[src*=vidsrc]")
+                    ?: return null
+                embedUrl = HttpClient.safeResolveUri(embedUrl, iframe.attr("src"))
             }
-            val m3u8 = extractM3u8FromHtml(html)
-            if (!m3u8.isNullOrBlank()) return m3u8
+
+            // The embed URL carries the TMDB id (and season/episode for TV).
+            val m = TMDB_PATTERN.matcher(embedUrl)
+            if (!m.find()) return null
+            val tmdb = m.group(1) ?: return null
+            val apiUrl = if (embedUrl.contains("/tv/")) {
+                val season = m.group(2) ?: return null
+                val episode = m.group(3) ?: return null
+                "https://data.vidsrcme.ru/api.php?type=tv&tmdb=$tmdb&season=$season&episode=$episode&stream_urls"
+            } else {
+                "https://data.vidsrcme.ru/api.php?type=movie&tmdb=$tmdb&stream_urls"
+            }
+
+            val json = HttpClient.getText(apiUrl, referer = "https://cloudorchestranova.com/") ?: return null
+            val root = JSONObject(json)
+            val data = root.optJSONObject("data") ?: return null
+            val streamUrl: String = when (val su = data.opt("stream_urls")) {
+                is JSONArray -> if (su.length() > 0) su.getString(0) else null
+                is String -> {
+                    // Encrypted: the key lives in a freshly-built wasm module
+                    // that rotates every ~5 minutes, so fetch it and extract
+                    // the key from its own instruction stream.
+                    val wasmUrl = root.optJSONObject("vs")?.optString("wasm_url") ?: return null
+                    val wasm = HttpClient.get(wasmUrl, referer = "https://cloudorchestranova.com/").use { res ->
+                        if (res.isSuccessful) res.body?.bytes() else null
+                    } ?: return null
+                    val key = VidsrcWasmCrypto.extractKey(wasm) ?: return null
+                    VidsrcWasmCrypto.decrypt(su, key).firstOrNull()
+                }
+                else -> null
+            } ?: return null
+
+            // Playlist URLs are CDN-gated by an IP-bound JWT issued by the
+            // origin's generate.php; without it the CDN answers 401.
+            val om = ORIGIN_PATTERN.matcher(streamUrl)
+            val origin = if (om.find()) om.group() else return null
+            val token = HttpClient.getText("$origin/generate.php")?.trim().orEmpty()
+            val cleaned = streamUrl.replace(Regex("[?&]token=[^&]*"), "")
+            return if (token.isNotEmpty()) {
+                if (cleaned.contains("__TOKEN__")) cleaned.replace("__TOKEN__", token)
+                else cleaned + (if (cleaned.contains("?")) "&" else "?") + "token=$token"
+            } else cleaned
         } catch (_: Exception) {}
         return null
     }
