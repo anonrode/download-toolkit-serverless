@@ -446,17 +446,19 @@ class DownloadEngine(
                     val resolved = resolveStreamUrl(permUrl, task.site, defaultQuality)
                     if (!resolved.isNullOrBlank()) {
                         streamUrl = resolved
-                    } else {
-                        if (isKnownLockerHost(streamUrl) || !isDirectMediaUrl(streamUrl)) {
-                            repository.update(task.id) { it.copy(status = TaskStatus.FAILED, errorMessage = "Could not crack stream link ($streamUrl)") }
-                            return@launch
-                        }
+                    } else if (isKnownLockerHost(streamUrl) || !isDirectMediaUrl(streamUrl)) {
+                        // Our resolver chain came up empty (e.g. a JS-driven watch page
+                        // whose embed network is token-gated). Hand the raw URL to
+                        // yt-dlp's generic extractor instead of failing outright — it
+                        // cracks many embed chains our registry doesn't know.
+                        android.util.Log.w("AnonDownload", "Resolver chain empty for $streamUrl, handing to yt-dlp")
                     }
                 }
 
                 val isHlsStream = streamUrl.lowercase().contains(".m3u8") || streamUrl.lowercase().contains("manifest")
-                val finalBackend = if (isSocial || isHlsStream || task.audioOnly) "yt-dlp" else "aria2c"
-                val isExtractor = isSocial || task.audioOnly
+                val isEmbedOrPage = !isMagnet && !isDirectMediaUrl(streamUrl)
+                val finalBackend = if (isSocial || isHlsStream || isEmbedOrPage || task.audioOnly) "yt-dlp" else "aria2c"
+                val isExtractor = isSocial || task.audioOnly || isEmbedOrPage
 
                 coroutineContext.ensureActive()
                 repository.update(task.id) { it.copy(status = TaskStatus.DOWNLOADING, directUrl = streamUrl) }
