@@ -61,11 +61,16 @@ class TurboState(private val file: File) {
         }
     }
 
-    private var cachedTotal: Long = -1L
+    private var lastCommitTime: Long = 0L
 
     @Synchronized
-    fun commit(plan: List<TurboChunk>, total: Long = cachedTotal) {
+    fun commit(plan: List<TurboChunk>, total: Long = cachedTotal, force: Boolean = false) {
         if (total > 0) cachedTotal = total
+        val now = System.currentTimeMillis()
+        if (!force && now - lastCommitTime < 2000L) {
+            return
+        }
+        lastCommitTime = now
         try {
             val sb = StringBuilder("total=").append(cachedTotal).append('\n')
             for (c in plan) sb.append(c.start).append(':').append(c.end).append(':').append(c.current).append('\n')

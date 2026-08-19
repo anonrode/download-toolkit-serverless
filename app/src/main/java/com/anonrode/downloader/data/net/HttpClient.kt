@@ -144,6 +144,12 @@ object HttpClient {
         .retryOnConnectionFailure(true)
         .build()
 
+    val downloadClient: OkHttpClient = shared.newBuilder()
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(30, TimeUnit.SECONDS)
+        .writeTimeout(15, TimeUnit.SECONDS)
+        .build()
+
     fun safeResolveUri(base: String, relative: String): String {
         if (relative.startsWith("http://", ignoreCase = true) || relative.startsWith("https://", ignoreCase = true) || relative.startsWith("magnet:", ignoreCase = true)) {
             return relative

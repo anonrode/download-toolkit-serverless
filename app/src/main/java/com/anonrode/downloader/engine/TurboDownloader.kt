@@ -1,12 +1,7 @@
 package com.anonrode.downloader.engine
 
 import com.anonrode.downloader.data.net.HttpClient
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.*
 import okhttp3.Request
 import java.io.File
 import java.io.RandomAccessFile
@@ -16,38 +11,20 @@ import java.util.concurrent.atomic.AtomicLong
 import kotlin.coroutines.coroutineContext
 
 /**
- * Multi-socket segmented downloader for direct CDN files (IDM/1DM style).
+ * High-performance multi-socket segmented downloader for direct CDN files.
  *
- * Why this exists: free lockers throttle PER CONNECTION, not per client. Measured
- * against the loadedfiles CDN: one socket sustained ~155 KB/s while four parallel
- * ranges over the same file moved ~355 KB/s (2.3x). Gains are real but SUB-LINEAR,
- * so the socket count is deliberately modest and per-host capped rather than a
- * blanket 16 -- the previous 16-socket engine collapsed to ~40 KB/s on
- * downloadwella because that host punishes high concurrency.
- *
- * Correctness notes (these are the parts that bit us before):
- *
- * 1. RESUME IS EXPLICIT. Every worker writes at its absolute file offset into one
- *    pre-allocated file, so there are no .partN fragments to merge -- but a
- *    pre-allocated file is zero-filled, which makes "how far did chunk 3 get?"
- *    unanswerable from the file alone. A sidecar `<file>.turbo` records each
- *    chunk's committed offset (the same job aria2c's .aria2 control file does).
- *    Without it, resume either restarts or silently corrupts.
- *
- * 2. OFFSETS ARE COMMITTED ONLY AFTER THE WRITE LANDS, so a kill mid-write can
- *    re-download a few KB but can never skip bytes.
- *
- * 3. RANGE SUPPORT IS VERIFIED, NOT ASSUMED. A server that ignores Range replies
- *    200 with the whole body; writing that at a chunk offset would corrupt the
- *    file. Any worker that does not get 206 aborts the segmented attempt and we
- *    fall back to a single stream.
+ * Designed with:
+ * 1. Definitive Range verification (probe with fallback bytes=0-0 GET).
+ * 2. Decoupled telemetry ticker (250ms cadence) with EMA speed smoothing.
+ * 3. Non-blocking parallel worker streams writing to pre-allocated FileChannels.
+ * 4. Throttled sidecar resume state commits.
  */
 object TurboDownloader {
 
-    private const val BUFFER = 128 * 1024
-    private const val MIN_SEGMENTED_SIZE = 8L * 1024 * 1024   // below this, 1 socket is fine
+    private const val BUFFER = 256 * 1024 // 256 KB high-throughput buffer
+    private const val MIN_SEGMENTED_SIZE = 8L * 1024 * 1024 // 8 MB
 
-    /** Hosts that throttle or drop many-connection clients (monolith's lesson). */
+    /** Hosts that throttle or drop many-connection clients. */
     private val SINGLE_SOCKET_HOSTS = listOf(
         "kissorgrab.com", "downloadwella.com", "wetafiles.com"
     )
@@ -55,7 +32,7 @@ object TurboDownloader {
         "streamwish.", "vidhide.", "filelions.", "lulacloud.com", "vikingfile.com"
     )
 
-    /** Per-host socket cap. Never a blanket 16 -- see the class note. */
+    /** Per-host socket cap. */
     fun socketsFor(url: String, configured: Int): Int {
         val u = url.lowercase()
         return when {
@@ -72,7 +49,6 @@ object TurboDownloader {
         try {
             if (dest.exists()) dest.delete()
             if (src.renameTo(dest)) return true
-            // Fallback if cross-mount or renameTo failed
             src.inputStream().use { input ->
                 dest.outputStream().use { output ->
                     input.copyTo(output)
@@ -134,32 +110,52 @@ object TurboDownloader {
         }
     }
 
-    /** HEAD first (cheap); some hosts only answer a ranged GET, so fall back. */
+    /**
+     * Definitive range probe:
+     * 1. Check HEAD. If Content-Length > 0 and Accept-Ranges is explicit, return (len, true).
+     * 2. If Accept-Ranges is omitted on HEAD (common on CDNs), test Range: bytes=0-0.
+     * 3. If server responds with HTTP 206 Partial Content, return (total, true).
+     */
     private fun probe(url: String, headers: Map<String, String>): Pair<Long, Boolean> {
-        fun build(head: Boolean) = Request.Builder().url(url).apply {
+        fun buildReq(head: Boolean) = Request.Builder().url(url).apply {
             header("User-Agent", headers["User-Agent"] ?: HttpClient.DEFAULT_UA)
             headers.forEach { (k, v) -> if (!k.equals("User-Agent", true)) header(k, v) }
             if (head) head() else header("Range", "bytes=0-0")
         }.build()
 
+        var totalLength = -1L
+
+        // 1. Try HEAD request
         try {
-            HttpClient.shared.newCall(build(true)).execute().use { r ->
+            HttpClient.downloadClient.newCall(buildReq(true)).execute().use { r ->
                 val len = r.header("Content-Length")?.toLongOrNull() ?: -1L
                 val ranges = r.header("Accept-Ranges")?.contains("bytes", true) == true
-                if (r.isSuccessful && len > 0) return Pair(len, ranges)
+                if (r.isSuccessful && len > 0) {
+                    totalLength = len
+                    if (ranges) {
+                        return Pair(totalLength, true)
+                    }
+                }
             }
         } catch (_: Exception) {}
 
+        // 2. If Accept-Ranges was not explicit on HEAD, probe with Range: bytes=0-0
         try {
-            HttpClient.shared.newCall(build(false)).execute().use { r ->
-                // "bytes 0-0/12345" -> total is after the slash.
+            HttpClient.downloadClient.newCall(buildReq(false)).execute().use { r ->
                 val cr = r.header("Content-Range")
-                val total = cr?.substringAfter('/')?.toLongOrNull() ?: -1L
-                return Pair(total, r.code == 206)
+                val totalFromCr = cr?.substringAfter('/')?.trim()?.toLongOrNull() ?: -1L
+                val is206 = r.code == 206
+                if (is206) {
+                    val finalTotal = if (totalFromCr > 0) totalFromCr else totalLength
+                    return Pair(finalTotal, true)
+                } else if (r.isSuccessful && totalLength <= 0) {
+                    val len = r.header("Content-Length")?.toLongOrNull() ?: -1L
+                    if (len > 0) totalLength = len
+                }
             }
         } catch (_: Exception) {}
 
-        return Pair(-1L, false)
+        return Pair(totalLength, false)
     }
 
     private suspend fun segmented(
@@ -170,7 +166,7 @@ object TurboDownloader {
         sockets: Int,
         state: TurboState,
         onProgress: (Long, Long, Long) -> Unit
-    ): Boolean {
+    ): Boolean = coroutineScope {
         val plan = state.loadOrCreate(total, sockets)
         val initialBytes = plan.sumOf { (it.current - it.start).coerceAtLeast(0L) }
         val done = AtomicLong(initialBytes)
@@ -183,67 +179,86 @@ object TurboDownloader {
         val speed = SpeedMeter(initialBytes)
         onProgress(initialBytes, total, 0L)
 
-        RandomAccessFile(dest, "rw").use { raf ->
-            val channel: FileChannel = raf.channel
-            coroutineScope {
-                for (chunk in plan) {
-                    if (chunk.current > chunk.end) continue      // already complete
-                    launch {
-                        try {
-                            val req = Request.Builder().url(url).apply {
-                                header("User-Agent", headers["User-Agent"] ?: HttpClient.DEFAULT_UA)
-                                headers.forEach { (k, v) -> if (!k.equals("User-Agent", true)) header(k, v) }
-                                header("Range", "bytes=${chunk.current}-${chunk.end}")
-                            }.build()
+        // Decoupled Telemetry Dispatcher: Ticks every 250ms with smoothed EMA speed
+        val telemetryTicker = launch(Dispatchers.Default) {
+            while (isActive) {
+                delay(250)
+                val currentDone = done.get()
+                val currentSpeed = speed.sample(currentDone)
+                onProgress(currentDone, total, currentSpeed)
+            }
+        }
 
-                            HttpClient.shared.newCall(req).execute().use { res ->
-                                if (res.code != 206) {
-                                    failed.set(true)
-                                    return@use
-                                }
-                                val src = res.body?.source() ?: run {
-                                    failed.set(true)
-                                    return@use
-                                }
-                                val buf = ByteArray(BUFFER)
-                                var pos = chunk.current
-                                var bytesSinceLastCommit = 0L
-                                while (pos <= chunk.end) {
-                                    if (!coroutineContext.isActive) {
-                                        state.commit(plan, total)
+        try {
+            RandomAccessFile(dest, "rw").use { raf ->
+                val channel: FileChannel = raf.channel
+                coroutineScope {
+                    for (chunk in plan) {
+                        if (chunk.current > chunk.end) continue // already complete
+                        launch {
+                            try {
+                                val req = Request.Builder().url(url).apply {
+                                    header("User-Agent", headers["User-Agent"] ?: HttpClient.DEFAULT_UA)
+                                    headers.forEach { (k, v) -> if (!k.equals("User-Agent", true)) header(k, v) }
+                                    header("Range", "bytes=${chunk.current}-${chunk.end}")
+                                }.build()
+
+                                HttpClient.downloadClient.newCall(req).execute().use { res ->
+                                    if (res.code != 206) {
+                                        failed.set(true)
                                         return@use
                                     }
-                                    val want = minOf(buf.size.toLong(), chunk.end - pos + 1).toInt()
-                                    val n = src.read(buf, 0, want)
-                                    if (n == -1) break
-                                    channel.write(ByteBuffer.wrap(buf, 0, n), pos)
-                                    pos += n
-                                    chunk.current = pos
-                                    bytesSinceLastCommit += n
-                                    if (bytesSinceLastCommit >= 1024 * 1024L || pos > chunk.end) {
-                                        state.commit(plan, total)
-                                        bytesSinceLastCommit = 0L
+                                    val src = res.body?.source() ?: run {
+                                        failed.set(true)
+                                        return@use
                                     }
-                                    val d = done.addAndGet(n.toLong())
-                                    val currentSpeed = speed.sample(d)
-                                    onProgress(d, total, currentSpeed)
+                                    val buf = ByteArray(BUFFER)
+                                    var pos = chunk.current
+                                    var bytesSinceLastCommit = 0L
+                                    while (pos <= chunk.end) {
+                                        if (!coroutineContext.isActive) {
+                                            state.commit(plan, total, force = true)
+                                            return@use
+                                        }
+                                        val want = minOf(buf.size.toLong(), chunk.end - pos + 1).toInt()
+                                        val n = src.read(buf, 0, want)
+                                        if (n == -1) break
+                                        
+                                        // Synchronized block on channel write
+                                        synchronized(channel) {
+                                            channel.write(ByteBuffer.wrap(buf, 0, n), pos)
+                                        }
+                                        
+                                        pos += n
+                                        chunk.current = pos
+                                        done.addAndGet(n.toLong())
+
+                                        bytesSinceLastCommit += n
+                                        if (bytesSinceLastCommit >= 2 * 1024 * 1024L || pos > chunk.end) {
+                                            state.commit(plan, total, force = false)
+                                            bytesSinceLastCommit = 0L
+                                        }
+                                    }
+                                    state.commit(plan, total, force = true)
                                 }
-                                state.commit(plan, total)
+                            } catch (_: CancellationException) {
+                                state.commit(plan, total, force = true)
+                            } catch (_: Exception) {
+                                failed.set(true)
                             }
-                        } catch (_: CancellationException) {
-                            state.commit(plan, total)
-                        } catch (_: Exception) {
-                            failed.set(true)
                         }
                     }
                 }
+                channel.force(true)
             }
-            channel.force(true)
+        } finally {
+            telemetryTicker.cancel()
+            onProgress(done.get(), total, speed.getSpeed())
         }
 
-        if (failed.get()) return false
-        if (plan.any { it.current <= it.end }) return false
-        return dest.length() == total
+        if (failed.get()) return@coroutineScope false
+        if (plan.any { it.current <= it.end }) return@coroutineScope false
+        return@coroutineScope dest.length() == total
     }
 
     private suspend fun single(
@@ -252,7 +267,7 @@ object TurboDownloader {
         headers: Map<String, String>,
         total: Long,
         onProgress: (Long, Long, Long) -> Unit
-    ): Boolean {
+    ): Boolean = coroutineScope {
         val existing = if (dest.exists()) dest.length() else 0L
         val req = Request.Builder().url(url).apply {
             header("User-Agent", headers["User-Agent"] ?: HttpClient.DEFAULT_UA)
@@ -260,60 +275,88 @@ object TurboDownloader {
             if (existing > 0) header("Range", "bytes=$existing-")
         }.build()
 
+        val done = AtomicLong(existing)
         val speed = SpeedMeter(existing)
+        onProgress(existing, if (total > 0) total else 0L, 0L)
+
+        // Decoupled Telemetry Dispatcher: Ticks every 250ms
+        val telemetryTicker = launch(Dispatchers.Default) {
+            while (isActive) {
+                delay(250)
+                val currentDone = done.get()
+                val currentSpeed = speed.sample(currentDone)
+                onProgress(currentDone, if (total > 0) total else 0L, currentSpeed)
+            }
+        }
+
         try {
-            HttpClient.shared.newCall(req).execute().use { res ->
-                if (!res.isSuccessful) return false
+            HttpClient.downloadClient.newCall(req).execute().use { res ->
+                if (!res.isSuccessful) return@coroutineScope false
                 val resuming = res.code == 206
-                val src = res.body?.source() ?: return false
+                val src = res.body?.source() ?: return@coroutineScope false
                 val startAt = if (resuming) existing else 0L
                 RandomAccessFile(dest, "rw").use { raf ->
                     raf.seek(startAt)
                     val buf = ByteArray(BUFFER)
                     var written = startAt
                     while (true) {
-                        if (!coroutineContext.isActive) return false
+                        if (!coroutineContext.isActive) return@coroutineScope false
                         val n = src.read(buf)
                         if (n == -1) break
                         raf.write(buf, 0, n)
                         written += n
-                        val currentSpeed = speed.sample(written)
-                        onProgress(written, if (total > 0) total else 0L, currentSpeed)
+                        done.set(written)
                     }
-                    if (total > 0 && written != total) return false
+                    if (total > 0 && written != total) return@coroutineScope false
                 }
             }
         } catch (_: CancellationException) {
-            return false
+            return@coroutineScope false
         } catch (_: Exception) {
-            return false
+            return@coroutineScope false
+        } finally {
+            telemetryTicker.cancel()
+            onProgress(done.get(), if (total > 0) total else 0L, speed.getSpeed())
         }
-        return true
+        return@coroutineScope true
     }
 }
 
 /** One segment's byte window plus how far it has been committed to disk. */
 class TurboChunk(val start: Long, val end: Long, @Volatile var current: Long)
 
-/** Thread-safe aggregate speed meter over rolling 600ms windows. */
+/**
+ * Thread-safe aggregate speed meter utilizing Exponential Moving Average (EMA).
+ *
+ * Uses alpha = 0.25 across 250ms measurement samples to eliminate TCP burst jitter
+ * while faithfully tracking true transfer throughput.
+ */
 class SpeedMeter(initialBytes: Long = 0L) {
     private var lastBytes = initialBytes
     private var lastTime = System.currentTimeMillis()
-    private var lastSpeed = 0L
+    private var emaSpeed = 0.0
+    private var initialized = false
 
     @Synchronized
     fun sample(totalBytes: Long): Long {
         val now = System.currentTimeMillis()
         val dt = now - lastTime
-        if (dt >= 600) {
-            lastSpeed = if (totalBytes > lastBytes) {
-                ((totalBytes - lastBytes) * 1000 / dt).coerceAtLeast(0)
+        if (dt >= 250) {
+            val delta = (totalBytes - lastBytes).coerceAtLeast(0L)
+            val instantBps = (delta * 1000.0) / dt
+            if (!initialized) {
+                emaSpeed = instantBps
+                initialized = true
             } else {
-                0L
+                val alpha = 0.25
+                emaSpeed = (alpha * instantBps) + ((1.0 - alpha) * emaSpeed)
             }
             lastBytes = totalBytes
             lastTime = now
         }
-        return lastSpeed
+        return emaSpeed.toLong().coerceAtLeast(0L)
     }
+
+    @Synchronized
+    fun getSpeed(): Long = emaSpeed.toLong().coerceAtLeast(0L)
 }
