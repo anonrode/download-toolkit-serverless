@@ -242,7 +242,7 @@ fun DownloadCard(
                         else if (sizeStr.isNotBlank()) "Paused • $sizeStr"
                         else "Paused"
                     }
-                    task.status == TaskStatus.DOWNLOADING && task.speedBytesPerSec > 0.0 -> {
+                    task.status == TaskStatus.DOWNLOADING -> {
                         if (task.totalBytes > 0) "$pctInt% • $sizeStr • $speedStr$etaStr"
                         else if (sizeStr.isNotBlank()) "$sizeStr • $speedStr"
                         else speedStr

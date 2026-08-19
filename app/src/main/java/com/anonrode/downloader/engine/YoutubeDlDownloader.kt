@@ -7,15 +7,6 @@ import java.io.File
 
 object YoutubeDlDownloader {
 
-    private val LOCKER_HOSTS = listOf(
-        "downloadwella.com",
-        "wetafiles.com",
-        "kissorgrab.com",
-        "streamwish.",
-        "sfastwish.",
-        "vidhide."
-    )
-
     private val TIER1_TRACKERS = listOf(
         "udp://tracker.opentrackr.org:1337/announce",
         "udp://open.stealth.si:80/announce",
@@ -28,11 +19,6 @@ object YoutubeDlDownloader {
         "http://tracker.openbittorrent.com:80/announce",
         "udp://tracker.openbittorrent.com:6969/announce"
     ).joinToString(",")
-
-    fun isConnectionSensitive(url: String): Boolean {
-        val lower = url.lowercase()
-        return LOCKER_HOSTS.any { lower.contains(it) }
-    }
 
     private fun parseByteString(str: String): Long {
         val clean = str.trim().uppercase()
@@ -272,7 +258,8 @@ object YoutubeDlDownloader {
 
         activeNativeProcesses[taskId] = process
 
-        val progressRegex = Regex("""\(([\d.]+)%\).*?([\d.]+[KMGT]?i?B)/([\d.]+[KMGT]?i?B).*?DL:\s*([\d.]+[KMGT]?i?B(?:/s)?)""", RegexOption.IGNORE_CASE)
+        // aria2c summary lines put sizes before the percentage: [#d5f4b1 45MiB/65MiB(69%) CN:8 DL:3.8MiB ETA:5s]
+        val progressRegex = Regex("""([\d.]+[KMGT]?i?B)/([\d.]+[KMGT]?i?B)\([\d.]+%\).*?DL:\s*([\d.]+[KMGT]?i?B(?:/s)?)""", RegexOption.IGNORE_CASE)
         val fallbackRegex = Regex("""\((\d+)%\).*?DL:\s*([\d.]+[KMGT]?i?B)""", RegexOption.IGNORE_CASE)
         val reader = process.inputStream.bufferedReader()
         val logBuffer = mutableListOf<String>()
@@ -288,9 +275,9 @@ object YoutubeDlDownloader {
                 }
                 val match = progressRegex.find(line)
                 if (match != null) {
-                    val dl = parseByteString(match.groupValues[2])
-                    val tot = parseByteString(match.groupValues[3])
-                    val spd = parseSpeedString(match.groupValues[4])
+                    val dl = parseByteString(match.groupValues[1])
+                    val tot = parseByteString(match.groupValues[2])
+                    val spd = parseSpeedString(match.groupValues[3])
                     val eta = if (spd > 0 && tot > dl) ((tot - dl) / spd).toLong() else 0L
                     onProgress(dl, tot, spd, eta)
                 } else {

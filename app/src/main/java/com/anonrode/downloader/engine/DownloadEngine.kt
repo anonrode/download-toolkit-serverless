@@ -54,7 +54,14 @@ class DownloadEngine(
             }
             networkObserver.status.collect { net ->
                 if (net.isConnected) {
+                    // Auto-resume tasks that were parked by a connectivity drop (or Wi-Fi-only gate)
+                    repository.tasks.value
+                        .filter { it.status == TaskStatus.PAUSED && it.errorMessage?.startsWith("Waiting for") == true }
+                        .forEach { repository.update(it.id) { t -> t.copy(status = TaskStatus.QUEUED, errorMessage = null) } }
                     processQueue()
+                } else {
+                    // Park active jobs so a reconnect resumes them instead of failing them
+                    activeJobs.keys.toList().forEach { id -> pauseForNetwork(id) }
                 }
             }
         }
@@ -160,10 +167,32 @@ class DownloadEngine(
         processQueue()
     }
 
-    fun cancel(taskId: String) {
+    private fun pauseForNetwork(taskId: String) {
+        val task = repository.find(taskId) ?: return
+        if (task.status != TaskStatus.DOWNLOADING && task.status != TaskStatus.RESOLVING) return
         activeJobs[taskId]?.cancel()
         activeJobs.remove(taskId)
         YoutubeDlDownloader.killProcess(taskId)
+        repository.update(taskId) { it.copy(status = TaskStatus.PAUSED, speedBytesPerSec = 0.0, errorMessage = NETWORK_PAUSE_MESSAGE) }
+        updateServiceState(force = true)
+    }
+
+    fun cancel(taskId: String) {
+        val task = repository.find(taskId)
+        activeJobs[taskId]?.cancel()
+        activeJobs.remove(taskId)
+        YoutubeDlDownloader.killProcess(taskId)
+        if (task != null) {
+            // Remove every partial artifact so cancelled downloads cannot leave orphaned files
+            try {
+                val target = File(task.filePath)
+                target.delete()
+                File(task.filePath + ".part").delete()
+                File(task.filePath + ".ytdl").delete()
+                File(task.filePath + ".aria2").delete()
+                File(task.filePath + ".turbo").delete()
+            } catch (_: Throwable) {}
+        }
         repository.remove(taskId)
         updateServiceState(force = true)
         processQueue()
@@ -240,6 +269,7 @@ class DownloadEngine(
     }
 
     private var lastNotificationTime: Long = 0L
+    private val NETWORK_PAUSE_MESSAGE = "Waiting for network..."
 
     private fun updateServiceState(force: Boolean = false) {
         val now = System.currentTimeMillis()
@@ -278,7 +308,7 @@ class DownloadEngine(
         val nextTask = currentTasks.firstOrNull { it.status == TaskStatus.QUEUED } ?: return
 
         if (!checkStorageAvailable()) {
-            repository.update(nextTask.id) { it.copy(status = TaskStatus.FAILED, errorMessage = "Storage limit reached (< ${storageGuardGb}GB free)") }
+            repository.update(nextTask.id) { it.copy(status = TaskStatus.PAUSED, errorMessage = "Storage limit reached (< ${storageGuardGb}GB free)") }
             return
         }
 
@@ -417,13 +447,14 @@ class DownloadEngine(
                 val refererToPass = getRefererForUrl(streamUrl)
 
                 var producedFile: File? = null
+                var turboFailure: TurboDownloader.TurboResult.Failure? = null
 
                 if (finalBackend == "aria2c" && !isMagnet) {
                     val hdrs = mutableMapOf("User-Agent" to HttpClient.DEFAULT_UA)
                     if (refererToPass.isNotBlank()) hdrs["Referer"] = refererToPass
                     val dest = File(targetFolder, File(task.filePath).name)
 
-                    var turboResult = TurboDownloader.download(
+                    var turboResult: TurboDownloader.TurboResult = TurboDownloader.download(
                         url = streamUrl,
                         dest = dest,
                         headers = hdrs,
@@ -441,45 +472,58 @@ class DownloadEngine(
                         }
                     )
 
-                    // Self-healing token refresh if initial direct link failed
-                    if (turboResult == null && coroutineContext.isActive && !isSocial) {
-                        android.util.Log.w("AnonDownload", "Direct download failed, refreshing stream token...")
-                        repository.update(task.id) { it.copy(status = TaskStatus.RESOLVING) }
-                        updateServiceState(force = true)
+                    if (turboResult is TurboDownloader.TurboResult.Success) {
+                        producedFile = turboResult.file
+                    } else if (turboResult is TurboDownloader.TurboResult.Failure) {
+                        val failure = turboResult
+                        turboFailure = failure
 
-                        val freshUrl = resolveStreamUrl(permUrl, task.site, defaultQuality)
-                        if (!freshUrl.isNullOrBlank() && freshUrl != streamUrl) {
-                            streamUrl = freshUrl
-                            repository.update(task.id) { it.copy(status = TaskStatus.DOWNLOADING, directUrl = streamUrl) }
+                        // Self-healing token refresh: only re-scrape when the CDN rejected the
+                        // link outright (expired/token-gated). Transient failures (timeouts,
+                        // 5xx, 416) skip the 5-15s resolver chain and fall straight to aria2c.
+                        val tokenExpired = failure.httpStatus == 401 || failure.httpStatus == 403 ||
+                            failure.httpStatus == 404 || failure.httpStatus == 410
+                        if (tokenExpired && coroutineContext.isActive && !isSocial) {
+                            android.util.Log.w("AnonDownload", "Direct link rejected (HTTP ${failure.httpStatus}), refreshing stream token...")
+                            repository.update(task.id) { it.copy(status = TaskStatus.RESOLVING) }
                             updateServiceState(force = true)
 
-                            val freshReferer = getRefererForUrl(streamUrl)
-                            val freshHdrs = mutableMapOf("User-Agent" to HttpClient.DEFAULT_UA)
-                            if (freshReferer.isNotBlank()) freshHdrs["Referer"] = freshReferer
+                            val freshUrl = resolveStreamUrl(permUrl, task.site, defaultQuality)
+                            if (!freshUrl.isNullOrBlank() && freshUrl != streamUrl) {
+                                streamUrl = freshUrl
+                                repository.update(task.id) { it.copy(status = TaskStatus.DOWNLOADING, directUrl = streamUrl) }
+                                updateServiceState(force = true)
 
-                            turboResult = TurboDownloader.download(
-                                url = streamUrl,
-                                dest = dest,
-                                headers = freshHdrs,
-                                configuredSockets = task.parallelSockets,
-                                onProgress = { got, tot, bps ->
-                                    val eta = if (bps > 0 && tot > got) (tot - got) / bps else 0L
-                                    repository.updateProgress(
-                                        taskId = task.id,
-                                        downloaded = got,
-                                        total = tot,
-                                        speed = bps.toDouble(),
-                                        eta = eta
-                                    )
-                                    updateServiceState(force = false)
+                                val freshReferer = getRefererForUrl(streamUrl)
+                                val freshHdrs = mutableMapOf("User-Agent" to HttpClient.DEFAULT_UA)
+                                if (freshReferer.isNotBlank()) freshHdrs["Referer"] = freshReferer
+
+                                turboResult = TurboDownloader.download(
+                                    url = streamUrl,
+                                    dest = dest,
+                                    headers = freshHdrs,
+                                    configuredSockets = task.parallelSockets,
+                                    onProgress = { got, tot, bps ->
+                                        val eta = if (bps > 0 && tot > got) (tot - got) / bps else 0L
+                                        repository.updateProgress(
+                                            taskId = task.id,
+                                            downloaded = got,
+                                            total = tot,
+                                            speed = bps.toDouble(),
+                                            eta = eta
+                                        )
+                                        updateServiceState(force = false)
+                                    }
+                                )
+                                when (turboResult) {
+                                    is TurboDownloader.TurboResult.Success -> producedFile = turboResult.file
+                                    is TurboDownloader.TurboResult.Failure -> turboFailure = turboResult
                                 }
-                            )
+                            }
                         }
                     }
 
-                    if (turboResult != null) {
-                        producedFile = turboResult.file
-                    } else if (coroutineContext.isActive) {
+                    if (producedFile == null && coroutineContext.isActive) {
                         android.util.Log.w("AnonDownload", "Turbo failed, falling back to aria2c")
                         producedFile = YoutubeDlDownloader.download(
                             context = context,
@@ -571,7 +615,11 @@ class DownloadEngine(
 
                     DownloadService.notifyCompleted(context, finalTitle)
                 } else {
-                    val errReason = if (!validation.first) validation.second else "Output file was too small or corrupted"
+                    val errReason = when {
+                        !validation.first -> validation.second
+                        turboFailure?.httpStatus != null -> "Download rejected by server (HTTP ${turboFailure.httpStatus}) — retry to refresh the link"
+                        else -> "Output file was too small or corrupted"
+                    }
                     repository.update(task.id) { it.copy(status = TaskStatus.FAILED, errorMessage = errReason) }
                 }
             } catch (e: CancellationException) {

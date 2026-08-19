@@ -7,7 +7,9 @@ import java.io.File
 import java.io.RandomAccessFile
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.coroutines.coroutineContext
 
 /**
@@ -32,7 +34,11 @@ object TurboDownloader {
         return configured.coerceIn(4, 16)
     }
 
-    data class Result(val file: File, val bytes: Long, val segmented: Boolean)
+    /** Outcome of a transfer: either a completed file or a failure with the server status when known. */
+    sealed interface TurboResult {
+        data class Success(val file: File, val bytes: Long, val segmented: Boolean) : TurboResult
+        data class Failure(val httpStatus: Int?, val message: String) : TurboResult
+    }
 
     private fun atomicMove(src: File, dest: File): Boolean {
         if (!src.exists()) return false
@@ -52,7 +58,10 @@ object TurboDownloader {
     }
 
     /**
-     * Download [url] to [dest]. Returns null if the transfer did not complete.
+     * Download [url] to [dest]. Returns [TurboResult.Success] on completion or
+     * [TurboResult.Failure] with the HTTP status (when the server answered) and a
+     * human-readable cause. Cancellation propagates as CancellationException so a
+     * paused job never surfaces as a failure.
      * [onProgress] receives (downloadedBytes, totalBytes, bytesPerSecond).
      */
     suspend fun download(
@@ -61,7 +70,7 @@ object TurboDownloader {
         headers: Map<String, String> = emptyMap(),
         configuredSockets: Int = 8,
         onProgress: (Long, Long, Long) -> Unit = { _, _, _ -> }
-    ): Result? = withContext(Dispatchers.IO) {
+    ): TurboResult = withContext(Dispatchers.IO) {
         dest.parentFile?.mkdirs()
         val safe = HttpClient.safeUrl(url)
 
@@ -74,30 +83,37 @@ object TurboDownloader {
 
         val partFile = File(dest.absolutePath + ".part")
         val state = TurboState(File(dest.absolutePath + ".turbo"))
+        val failureStatus = AtomicInteger(0)
+        val failureMessage = AtomicReference<String?>(null)
 
         return@withContext if (useSegmented) {
-            val ok = segmented(safe, partFile, headers, total, sockets, state, onProgress)
+            val ok = segmented(safe, partFile, headers, total, sockets, state, failureStatus, failureMessage, onProgress)
             if (ok) {
                 state.delete()
                 atomicMove(partFile, dest)
-                Result(dest, dest.length(), true)
-            } else {
-                if (!partFile.exists() || partFile.length() == 0L) {
-                    state.delete()
-                    if (single(safe, partFile, headers, total, onProgress)) {
-                        atomicMove(partFile, dest)
-                        Result(dest, dest.length(), false)
-                    } else null
-                } else null
-            }
+                TurboResult.Success(dest, dest.length(), true)
+            } else if (!partFile.exists() || partFile.length() == 0L) {
+                state.delete()
+                if (single(safe, partFile, headers, total, failureStatus, failureMessage, onProgress)) {
+                    atomicMove(partFile, dest)
+                    TurboResult.Success(dest, dest.length(), false)
+                } else failure(failureStatus, failureMessage)
+            } else failure(failureStatus, failureMessage)
         } else {
             state.delete()
-            if (single(safe, partFile, headers, total, onProgress)) {
+            if (single(safe, partFile, headers, total, failureStatus, failureMessage, onProgress)) {
                 state.delete()
                 atomicMove(partFile, dest)
-                Result(dest, dest.length(), false)
-            } else null
+                TurboResult.Success(dest, dest.length(), false)
+            } else failure(failureStatus, failureMessage)
         }
+    }
+
+    /** Builds a Failure outcome, rethrowing cancellation so a paused job never looks like a server error. */
+    private suspend fun failure(status: AtomicInteger, message: AtomicReference<String?>): TurboResult.Failure {
+        coroutineContext.ensureActive()
+        val code = status.get()
+        return TurboResult.Failure(code.takeIf { it != 0 }, message.get() ?: "Download failed")
     }
 
     /**
@@ -155,6 +171,8 @@ object TurboDownloader {
         total: Long,
         sockets: Int,
         state: TurboState,
+        failureStatus: AtomicInteger,
+        failureMessage: AtomicReference<String?>,
         onProgress: (Long, Long, Long) -> Unit
     ): Boolean = coroutineScope {
         val plan = state.loadOrCreate(total, sockets)
@@ -195,17 +213,19 @@ object TurboDownloader {
 
                                 HttpClient.downloadClient.newCall(req).execute().use { res ->
                                     if (res.code != 206) {
+                                        failureStatus.compareAndSet(0, res.code)
                                         failed.set(true)
                                         return@use
                                     }
                                     val src = res.body?.source() ?: run {
+                                        failureMessage.compareAndSet(null, "Empty response body from server")
                                         failed.set(true)
                                         return@use
                                     }
                                     val buf = ByteArray(BUFFER)
                                     var pos = chunk.current
                                     var bytesSinceLastCommit = 0L
-                                    while (pos <= chunk.end) {
+                                    while (pos <= chunk.end && !failed.get()) {
                                         if (!coroutineContext.isActive) {
                                             state.commit(plan, total, force = true)
                                             return@use
@@ -233,7 +253,8 @@ object TurboDownloader {
                                 }
                             } catch (_: CancellationException) {
                                 state.commit(plan, total, force = true)
-                            } catch (_: Exception) {
+                            } catch (e: Exception) {
+                                failureMessage.compareAndSet(null, e.message ?: e.javaClass.simpleName)
                                 failed.set(true)
                             }
                         }
@@ -256,6 +277,8 @@ object TurboDownloader {
         dest: File,
         headers: Map<String, String>,
         total: Long,
+        failureStatus: AtomicInteger,
+        failureMessage: AtomicReference<String?>,
         onProgress: (Long, Long, Long) -> Unit
     ): Boolean = coroutineScope {
         val existing = if (dest.exists()) dest.length() else 0L
@@ -281,9 +304,15 @@ object TurboDownloader {
 
         try {
             HttpClient.downloadClient.newCall(req).execute().use { res ->
-                if (!res.isSuccessful) return@coroutineScope false
+                if (!res.isSuccessful) {
+                    failureStatus.compareAndSet(0, res.code)
+                    return@coroutineScope false
+                }
                 val resuming = res.code == 206
-                val src = res.body?.source() ?: return@coroutineScope false
+                val src = res.body?.source() ?: run {
+                    failureMessage.compareAndSet(null, "Empty response body from server")
+                    return@coroutineScope false
+                }
                 val startAt = if (resuming) existing else 0L
                 RandomAccessFile(dest, "rw").use { raf ->
                     raf.seek(startAt)
@@ -302,7 +331,8 @@ object TurboDownloader {
             }
         } catch (_: CancellationException) {
             return@coroutineScope false
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            failureMessage.compareAndSet(null, e.message ?: e.javaClass.simpleName)
             return@coroutineScope false
         } finally {
             telemetryTicker.cancel()
