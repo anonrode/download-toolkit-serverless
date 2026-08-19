@@ -9,7 +9,6 @@ import com.anonrode.downloader.data.net.HttpClient
 import com.anonrode.downloader.engine.DownloadEngine
 import com.anonrode.downloader.engine.DownloadRepository
 import com.yausername.ffmpeg.FFmpeg
-import com.yausername.aria2c.Aria2c
 import com.yausername.youtubedl_android.YoutubeDL
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -36,7 +35,6 @@ class AnonApp : Application(), ImageLoaderFactory {
                     try {
                         YoutubeDL.getInstance().init(this@AnonApp)
                         FFmpeg.getInstance().init(this@AnonApp)
-                        Aria2c.getInstance().init(this@AnonApp)
                         ytdlpReady = true
                     } catch (t: Throwable) {
                         Log.e("AnonApp", "youtubedl-android init failed", t)

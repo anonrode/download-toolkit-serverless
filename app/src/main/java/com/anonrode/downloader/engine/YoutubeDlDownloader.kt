@@ -248,6 +248,7 @@ object YoutubeDlDownloader {
         val before = targetDir.listFiles()?.map { it.absolutePath }?.toSet() ?: emptySet()
 
         val aria2Exec = findAria2Executable(context)
+            ?: throw IllegalStateException("aria2c binary missing: libaria2c.so not found in native libs")
         val conns = parallelSockets
         val cmd = mutableListOf(
             aria2Exec.absolutePath,
@@ -278,13 +279,8 @@ object YoutubeDlDownloader {
         )
 
         val pb = ProcessBuilder(cmd)
-        try {
-            val nativeLibDir = context.applicationInfo.nativeLibraryDir
-            pb.environment()["LD_LIBRARY_PATH"] = nativeLibDir
-            pb.environment()["TMPDIR"] = context.cacheDir.absolutePath
-            val currentPath = System.getenv("PATH") ?: ""
-            pb.environment()["PATH"] = "$nativeLibDir:$currentPath"
-        } catch (_: Exception) {}
+        // Statically linked binary (see NOTICE): no LD_LIBRARY_PATH/PATH needed.
+        pb.environment()["TMPDIR"] = context.cacheDir.absolutePath
         pb.directory(targetDir)
         pb.redirectErrorStream(true)
         val process = pb.start()
@@ -352,25 +348,12 @@ object YoutubeDlDownloader {
             ?: candidates.maxByOrNull { it.lastModified() }
     }
 
-    private fun findAria2Executable(context: Context): File {
-        val libDir = File(context.applicationInfo.nativeLibraryDir, "libaria2c.so")
-        if (libDir.exists()) {
-            try { libDir.setExecutable(true) } catch (_: Exception) {}
-            return libDir
+    private fun findAria2Executable(context: Context): File? {
+        val libFile = File(context.applicationInfo.nativeLibraryDir, "libaria2c.so")
+        if (libFile.exists()) {
+            try { libFile.setExecutable(true) } catch (_: Exception) {}
+            return libFile
         }
-
-        val binDir = File(context.filesDir, "bin/aria2c")
-        if (binDir.exists()) {
-            try { binDir.setExecutable(true) } catch (_: Exception) {}
-            return binDir
-        }
-
-        val packagesDir = File(context.filesDir, "packages/aria2c/usr/bin/aria2c")
-        if (packagesDir.exists()) {
-            try { packagesDir.setExecutable(true) } catch (_: Exception) {}
-            return packagesDir
-        }
-
-        return libDir
+        return null
     }
 }

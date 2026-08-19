@@ -106,11 +106,10 @@ dependencies {
     // Coil Image Loading
     implementation("io.coil-kt:coil-compose:2.7.0")
 
-    // yt-dlp + ffmpeg + aria2c native engines
+    // yt-dlp + ffmpeg native engines (aria2c comes from jniLibs, see NOTICE)
     val youtubedlAndroid = "0.18.1"
     implementation("io.github.junkfood02.youtubedl-android:library:$youtubedlAndroid")
     implementation("io.github.junkfood02.youtubedl-android:ffmpeg:$youtubedlAndroid")
-    implementation("io.github.junkfood02.youtubedl-android:aria2c:$youtubedlAndroid")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
