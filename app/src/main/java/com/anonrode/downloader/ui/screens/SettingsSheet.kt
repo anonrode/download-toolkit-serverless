@@ -338,7 +338,12 @@ fun SettingsSheet(
                         onValueChange = { sockets = it.toInt() },
                         valueRange = 1f..16f,
                         steps = 15,
-                        colors = SliderDefaults.colors(thumbColor = AccentPrimary, activeTrackColor = AccentPrimary)
+                        thumb = { SettingsSliderThumb() },
+                        colors = SliderDefaults.colors(
+                            thumbColor = AccentPrimary,
+                            activeTrackColor = AccentPrimary,
+                            inactiveTrackColor = SurfaceElevated
+                        )
                     )
                 }
 
@@ -367,7 +372,12 @@ fun SettingsSheet(
                         onValueChange = { maxConcurrent = it.toInt() },
                         valueRange = 1f..5f,
                         steps = 3,
-                        colors = SliderDefaults.colors(thumbColor = AccentPrimary, activeTrackColor = AccentPrimary)
+                        thumb = { SettingsSliderThumb() },
+                        colors = SliderDefaults.colors(
+                            thumbColor = AccentPrimary,
+                            activeTrackColor = AccentPrimary,
+                            inactiveTrackColor = SurfaceElevated
+                        )
                     )
                 }
 
@@ -396,7 +406,12 @@ fun SettingsSheet(
                         onValueChange = { storageGuard = it },
                         valueRange = 0.5f..5.0f,
                         steps = 9,
-                        colors = SliderDefaults.colors(thumbColor = AccentPrimary, activeTrackColor = AccentPrimary)
+                        thumb = { SettingsSliderThumb() },
+                        colors = SliderDefaults.colors(
+                            thumbColor = AccentPrimary,
+                            activeTrackColor = AccentPrimary,
+                            inactiveTrackColor = SurfaceElevated
+                        )
                     )
                 }
 
@@ -484,7 +499,9 @@ fun SettingsSheet(
                         quality = quality,
                         autoOrganize = autoOrganize,
                         storageGuard = storageGuard.toDouble(),
-                        wifiOnlyTorrents = wifiOnlyTorrents
+                        wifiOnlyTorrents = wifiOnlyTorrents,
+                        instantSocial = instantSocial,
+                        showPosters = showPosters
                     )
                     Toast.makeText(context, "Settings saved successfully", Toast.LENGTH_SHORT).show()
                     onDismiss()
@@ -581,4 +598,15 @@ fun SettingsActionRow(
 
         action()
     }
+}
+
+@Composable
+fun SettingsSliderThumb() {
+    Box(
+        modifier = Modifier
+            .size(18.dp)
+            .clip(CircleShape)
+            .background(AccentPrimary)
+            .border(2.dp, SurfaceCard, CircleShape)
+    )
 }

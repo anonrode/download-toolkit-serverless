@@ -157,64 +157,111 @@ fun HomeScreen(
 
             Spacer(modifier = Modifier.height(Spacing.sm))
 
-            // Search Bar
-            OutlinedTextField(
-                value = uiState.query,
-                onValueChange = { viewModel.onQueryChanged(it) },
-                placeholder = {
-                    Text(
-                        "Search series, anime, movies, torrents...",
-                        color = TextMuted,
-                        fontSize = 14.sp
+            // Search Bar Component
+            val searchInteractionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
+            val isSearchFocused by searchInteractionSource.collectIsFocusedAsState()
+
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(52.dp)
+                    .clip(CircleShape)
+                    .background(SurfaceCard)
+                    .border(
+                        width = 1.dp,
+                        color = if (isSearchFocused) AccentPrimary else BorderHairline,
+                        shape = CircleShape
                     )
-                },
-                leadingIcon = {
+                    .padding(start = Spacing.md, end = Spacing.xs),
+                contentAlignment = Alignment.CenterStart
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxSize(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
                     Icon(
                         imageVector = Icons.Default.Search,
                         contentDescription = null,
-                        tint = TextSecondary,
+                        tint = if (isSearchFocused) AccentPrimary else TextSecondary,
                         modifier = Modifier.size(20.dp)
                     )
-                },
-                trailingIcon = {
+
+                    Spacer(modifier = Modifier.width(Spacing.sm))
+
+                    Box(
+                        modifier = Modifier.weight(1f),
+                        contentAlignment = Alignment.CenterStart
+                    ) {
+                        if (uiState.query.isEmpty()) {
+                            Text(
+                                text = "Search series, anime, movies, torrents...",
+                                color = TextMuted,
+                                fontSize = 13.5.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+
+                        androidx.compose.foundation.text.BasicTextField(
+                            value = uiState.query,
+                            onValueChange = { viewModel.onQueryChanged(it) },
+                            singleLine = true,
+                            textStyle = androidx.compose.ui.text.TextStyle(
+                                color = TextPrimary,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Medium
+                            ),
+                            cursorBrush = androidx.compose.ui.graphics.SolidColor(AccentPrimary),
+                            keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                                imeAction = androidx.compose.ui.text.input.ImeAction.Search
+                            ),
+                            keyboardActions = androidx.compose.foundation.text.KeyboardActions(
+                                onSearch = {
+                                    keyboardController?.hide()
+                                    viewModel.search()
+                                }
+                            ),
+                            interactionSource = searchInteractionSource,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+
                     if (uiState.query.isNotBlank()) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            IconButton(onClick = { viewModel.onQueryChanged("") }) {
-                                Icon(Icons.Default.Clear, contentDescription = "Clear", tint = TextSecondary, modifier = Modifier.size(18.dp))
-                            }
-                            IconButton(
-                                onClick = {
+                        IconButton(
+                            onClick = { viewModel.onQueryChanged("") },
+                            modifier = Modifier.size(28.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Clear,
+                                contentDescription = "Clear",
+                                tint = TextSecondary,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.width(Spacing.xs))
+
+                        Box(
+                            modifier = Modifier
+                                .size(36.dp)
+                                .clip(CircleShape)
+                                .background(AccentPrimary)
+                                .clickable {
                                     keyboardController?.hide()
                                     viewModel.search()
                                 },
-                                modifier = Modifier
-                                    .padding(end = 4.dp)
-                                    .size(32.dp)
-                                    .background(AccentPrimary, CircleShape)
-                            ) {
-                                Icon(Icons.Rounded.ArrowForward, contentDescription = "Search", tint = BackgroundDark, modifier = Modifier.size(16.dp))
-                            }
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.ArrowForward,
+                                contentDescription = "Search",
+                                tint = BackgroundDark,
+                                modifier = Modifier.size(18.dp)
+                            )
                         }
                     }
-                },
-                singleLine = true,
-                keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(imeAction = androidx.compose.ui.text.input.ImeAction.Search),
-                keyboardActions = androidx.compose.foundation.text.KeyboardActions(onSearch = {
-                    keyboardController?.hide()
-                    viewModel.search()
-                }),
-                shape = RoundedCornerShape(Radius.full),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedContainerColor = SurfaceCard,
-                    unfocusedContainerColor = SurfaceCard,
-                    focusedBorderColor = AccentPrimary,
-                    unfocusedBorderColor = BorderHairline,
-                    focusedTextColor = TextPrimary,
-                    unfocusedTextColor = TextPrimary,
-                    cursorColor = AccentPrimary
-                ),
-                modifier = Modifier.fillMaxWidth()
-            )
+                }
+            }
 
             // Smart Clipboard Banner
             val snippetText = clipboardSnippet
@@ -289,6 +336,7 @@ fun HomeScreen(
                         shape = RoundedCornerShape(Radius.full)
                     )
                 }
+                Spacer(modifier = Modifier.width(Spacing.md))
             }
 
             Spacer(modifier = Modifier.height(Spacing.md))
@@ -305,7 +353,7 @@ fun HomeScreen(
                         Text("Streaming search across all providers...", color = TextSecondary, fontSize = 13.sp)
                     }
                 }
-            } else if (uiState.searchResults.isEmpty() && uiState.query.isNotBlank() && !uiState.isSearching) {
+            } else if (uiState.searchResults.isEmpty() && uiState.query.trim().length >= 2 && !uiState.isSearching) {
                 Box(
                     modifier = Modifier.fillMaxWidth().weight(1f),
                     contentAlignment = Alignment.Center
@@ -372,10 +420,10 @@ fun ShowCardItem(
             Text(
                 text = show.title,
                 color = TextPrimary,
-                fontSize = 16.sp,
+                fontSize = 15.5.sp,
                 fontWeight = FontWeight.SemiBold,
-                lineHeight = 20.sp,
-                maxLines = 2,
+                lineHeight = 21.sp,
+                maxLines = 3,
                 overflow = TextOverflow.Ellipsis
             )
             Spacer(modifier = Modifier.height(3.dp))

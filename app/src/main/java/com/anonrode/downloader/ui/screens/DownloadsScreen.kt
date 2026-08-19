@@ -238,14 +238,19 @@ fun DownloadCard(
                     task.errorMessage != null -> task.errorMessage
                     task.status == TaskStatus.RESOLVING -> "Resolving stream link..."
                     task.status == TaskStatus.PAUSED -> {
-                        if (sizeStr.isNotBlank()) "Paused • $pctInt% ($sizeStr)" else "Paused • $pctInt%"
+                        if (task.totalBytes > 0) "Paused • $pctInt% ($sizeStr)"
+                        else if (sizeStr.isNotBlank()) "Paused • $sizeStr"
+                        else "Paused"
                     }
                     task.speedBytesPerSec > 0.0 -> {
-                        if (sizeStr.isNotBlank()) "$pctInt% • $sizeStr • $speedStr MB/s$etaStr"
-                        else "$pctInt% • $speedStr MB/s$etaStr"
+                        if (task.totalBytes > 0) "$pctInt% • $sizeStr • $speedStr MB/s$etaStr"
+                        else if (sizeStr.isNotBlank()) "$sizeStr • $speedStr MB/s"
+                        else "$speedStr MB/s"
                     }
                     else -> {
-                        if (sizeStr.isNotBlank()) "$pctInt% • $sizeStr" else "$pctInt%"
+                        if (task.totalBytes > 0) "$pctInt% • $sizeStr"
+                        else if (sizeStr.isNotBlank()) sizeStr
+                        else "Queued"
                     }
                 }
 
@@ -309,7 +314,7 @@ fun DownloadCard(
                         IconButton(
                             onClick = onPlay,
                             modifier = Modifier
-                                .size(34.dp)
+                                .size(36.dp)
                                 .background(AccentPrimary, CircleShape)
                         ) {
                             Icon(Icons.Rounded.PlayArrow, contentDescription = "Play", tint = BackgroundDark, modifier = Modifier.size(20.dp))
@@ -318,19 +323,21 @@ fun DownloadCard(
                         IconButton(
                             onClick = { shareMedia(context, task.filePath) },
                             modifier = Modifier
-                                .size(34.dp)
+                                .size(36.dp)
                                 .background(SurfaceElevated, CircleShape)
+                                .border(1.dp, BorderHairline, CircleShape)
                         ) {
-                            Icon(Icons.Rounded.Share, contentDescription = "Share", tint = TextSecondary, modifier = Modifier.size(16.dp))
+                            Icon(Icons.Rounded.Share, contentDescription = "Share", tint = TextSecondary, modifier = Modifier.size(17.dp))
                         }
 
                         IconButton(
                             onClick = onCancel,
                             modifier = Modifier
-                                .size(34.dp)
+                                .size(36.dp)
                                 .background(SurfaceElevated, CircleShape)
+                                .border(1.dp, BorderHairline, CircleShape)
                         ) {
-                            Icon(Icons.Rounded.DeleteOutline, contentDescription = "Delete", tint = TextMuted, modifier = Modifier.size(16.dp))
+                            Icon(Icons.Rounded.DeleteOutline, contentDescription = "Delete", tint = TextMuted, modifier = Modifier.size(17.dp))
                         }
                     }
                 }

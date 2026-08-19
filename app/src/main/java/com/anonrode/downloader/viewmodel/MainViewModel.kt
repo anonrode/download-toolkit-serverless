@@ -217,7 +217,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         quality: String,
         autoOrganize: Boolean,
         storageGuard: Double,
-        wifiOnlyTorrents: Boolean
+        wifiOnlyTorrents: Boolean,
+        instantSocial: Boolean,
+        showPosters: Boolean
     ) {
         engine.saveAllSettings(
             maxConcurrent = maxConcurrent,
@@ -225,7 +227,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             quality = quality,
             autoOrganize = autoOrganize,
             storageGuard = storageGuard,
-            wifiOnlyTorrents = wifiOnlyTorrents
+            wifiOnlyTorrents = wifiOnlyTorrents,
+            instantSocial = instantSocial,
+            showPosters = showPosters
         )
     }
 
