@@ -74,7 +74,7 @@ object YoutubeDlDownloader {
         }
 
         if (isMagnet) {
-            return downloadMagnetAria2c(context, taskId, sourceUrl, targetDir, preferredFilename, onProgress)
+            return downloadMagnetAria2c(context, taskId, sourceUrl, targetDir, preferredFilename, parallelSockets, onProgress)
         }
 
         val request = YoutubeDLRequest(sourceUrl).apply {
@@ -100,18 +100,31 @@ object YoutubeDlDownloader {
                 addOption("--concurrent-fragments", "$frags")
                 addOption("--buffer-size", "1M")
                 addOption("--http-chunk-size", "10M")
+                addOption("--retries", "10")
+                addOption("--fragment-retries", "10")
+                addOption("--retry-sleep", "10")
+                addOption("--retry-sleep", "fragment:exp=1:20")
+                // Fail loudly instead of letting yt-dlp skip missing fragments
+                // and silently produce a video with gaps in it.
+                addOption("--abort-on-unavailable-fragments")
             } else if (isM3u8) {
                 // HLS m3u8 stream variant selection with multi-fragment parallel downloading
                 val stem = File(targetDir, preferredFilename.substringBeforeLast('.')).absolutePath
                 addOption("-o", "$stem.%(ext)s")
-                addOption("-f", "best[height<=$height]/best")
+                addOption("-f", "bestvideo[height<=$height]+bestaudio/best[height<=$height]/best")
                 addOption("-S", "height~$height,+size,+br")
+                addOption("--merge-output-format", "mp4")
                 addOption("--no-playlist")
                 val frags = parallelSockets.coerceIn(4, 16)
                 addOption("-N", "$frags")
                 addOption("--concurrent-fragments", "$frags")
                 addOption("--buffer-size", "1M")
                 addOption("--http-chunk-size", "10M")
+                addOption("--retries", "10")
+                addOption("--fragment-retries", "10")
+                addOption("--retry-sleep", "10")
+                addOption("--retry-sleep", "fragment:exp=1:20")
+                addOption("--abort-on-unavailable-fragments")
             } else {
                 // Direct CDN HTTP multi-socket via aria2c
                 val stem = File(targetDir, preferredFilename.substringBeforeLast('.')).absolutePath
@@ -135,9 +148,21 @@ object YoutubeDlDownloader {
             addOption("--no-check-certificate")
             addOption("--newline")
             addOption("--progress")
+            // Refuse outside config files: a stray yt-dlp.conf could override
+            // -o/-f and silently break the output path (monolith parity).
+            addOption("--ignore-config")
 
             if (referer.isNotBlank()) addOption("--referer", referer)
             if (ua.isNotBlank()) addOption("--user-agent", ua)
+
+            // Origin header from the referer's base domain, like the monolith's
+            // HLS path always sends it.
+            val originToPass = origin.ifBlank {
+                referer.takeIf { it.isNotBlank() }?.let { r ->
+                    Regex("""https?://[^/]+""").find(r)?.value ?: ""
+                } ?: ""
+            }
+            if (originToPass.isNotBlank()) addOption("--add-header", "Origin: $originToPass")
 
             for ((k, v) in customHeaders) {
                 if (k.isNotBlank() && v.isNotBlank()) {
@@ -217,26 +242,36 @@ object YoutubeDlDownloader {
         magnetUrl: String,
         targetDir: File,
         preferredFilename: String,
+        parallelSockets: Int = 16,
         onProgress: (downloaded: Long, total: Long, speed: Double, eta: Long) -> Unit
     ): File? {
         val before = targetDir.listFiles()?.map { it.absolutePath }?.toSet() ?: emptySet()
 
         val aria2Exec = findAria2Executable(context)
+        val conns = parallelSockets
         val cmd = mutableListOf(
             aria2Exec.absolutePath,
             "--enable-dht=true",
             "--bt-enable-lpd=true",
             "--enable-peer-exchange=true",
             "--dht-entry-point=router.bittorrent.com:6881",
+            "--dht-entry-point6=[2400:cb00:2049:1::a29f:9877]:6881",
             "--seed-time=0",
             "--seed-ratio=0.0",
             "--summary-interval=1",
-            "--bt-max-peers=80",
+            "--bt-max-peers=${(conns * 4).coerceIn(60, 250)}",
+            "--bt-request-peer-speed-limit=50M",
+            "--bt-stop-timeout=300",
+            "--bt-tracker-connect-timeout=30",
             "--file-allocation=none",
             "--check-certificate=false",
             "--continue=true",
             "--follow-torrent=mem",
-            "--bt-save-metadata=false",
+            "--bt-save-metadata=true",
+            "--bt-load-saved-metadata=true",
+            "--auto-save-interval=15",
+            "--allow-overwrite=false",
+            "--console-log-level=error",
             "--bt-tracker=$TIER1_TRACKERS",
             "-d", targetDir.absolutePath,
             magnetUrl
@@ -306,7 +341,8 @@ object YoutubeDlDownloader {
         }
 
         fun isFinal(f: File) = f.length() > 0 &&
-                !f.name.endsWith(".aria2") && !f.name.endsWith(".part") && !f.name.endsWith(".ytdl")
+                !f.name.endsWith(".aria2") && !f.name.endsWith(".part") &&
+                !f.name.endsWith(".ytdl") && !f.name.endsWith(".torrent")
 
         val candidates = targetDir.listFiles { f -> isFinal(f) }?.toList() ?: emptyList()
         val fresh = candidates.filter { it.absolutePath !in before }
