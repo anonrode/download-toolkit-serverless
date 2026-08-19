@@ -12,7 +12,8 @@ import kotlinx.coroutines.flow.asStateFlow
 data class NetworkStatus(
     val isConnected: Boolean = true,
     val isWifi: Boolean = false,
-    val isMetered: Boolean = false
+    val isMetered: Boolean = false,
+    val networkTag: String? = null
 )
 
 class NetworkObserver(context: Context) {
@@ -50,7 +51,7 @@ class NetworkObserver(context: Context) {
             val isOnline = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
             val isWifi = caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
             val isMetered = !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)
-            NetworkStatus(isConnected = isOnline, isWifi = isWifi, isMetered = isMetered)
+            NetworkStatus(isConnected = isOnline, isWifi = isWifi, isMetered = isMetered, networkTag = active.toString())
         } catch (_: Exception) {
             NetworkStatus(isConnected = true, isWifi = false, isMetered = true)
         }
