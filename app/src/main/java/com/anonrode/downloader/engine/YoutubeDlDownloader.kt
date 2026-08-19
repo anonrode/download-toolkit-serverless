@@ -34,6 +34,30 @@ object YoutubeDlDownloader {
         return LOCKER_HOSTS.any { lower.contains(it) }
     }
 
+    private fun parseByteString(str: String): Long {
+        val clean = str.trim().uppercase()
+        val numPart = clean.takeWhile { it.isDigit() || it == '.' }.toDoubleOrNull() ?: return 0L
+        return when {
+            clean.endsWith("GIB") || clean.endsWith("GB") -> (numPart * 1024 * 1024 * 1024).toLong()
+            clean.endsWith("MIB") || clean.endsWith("MB") -> (numPart * 1024 * 1024).toLong()
+            clean.endsWith("KIB") || clean.endsWith("KB") -> (numPart * 1024).toLong()
+            clean.endsWith("B") -> numPart.toLong()
+            else -> (numPart * 1024 * 1024).toLong()
+        }
+    }
+
+    private fun parseSpeedString(str: String): Double {
+        val clean = str.trim().uppercase()
+        val numPart = clean.takeWhile { it.isDigit() || it == '.' }.toDoubleOrNull() ?: return 0.0
+        return when {
+            clean.contains("GB") || clean.contains("GIB") -> numPart * 1024 * 1024 * 1024
+            clean.contains("MB") || clean.contains("MIB") -> numPart * 1024 * 1024
+            clean.contains("KB") || clean.contains("KIB") -> numPart * 1024
+            clean.contains("B/S") || clean.contains("BPS") -> numPart
+            else -> numPart * 1024 * 1024
+        }
+    }
+
     suspend fun download(
         context: Context,
         taskId: String,
@@ -49,7 +73,7 @@ object YoutubeDlDownloader {
         quality: String = "720p",
         isExtractorTask: Boolean = false,
         audioOnly: Boolean = false,
-        onProgress: (Float) -> Unit
+        onProgress: (downloaded: Long, total: Long, speed: Double, eta: Long) -> Unit
     ): File? {
         if (!targetDir.exists()) targetDir.mkdirs()
 
@@ -123,18 +147,46 @@ object YoutubeDlDownloader {
             }
         }
 
-        // Snapshot the folder BEFORE downloading. The target dir is shared across
-        // a show's episodes, so "newest file in the folder" (the old logic) would
-        // return a previously-downloaded episode when this download failed, or let
-        // two concurrent downloads grab each other's files -- both marked COMPLETED
-        // pointing at the wrong video.
         val before = targetDir.listFiles()?.map { it.absolutePath }?.toSet() ?: emptySet()
-
         val stem = preferredFilename.substringBeforeLast('.')
 
-        YoutubeDL.getInstance().execute(request, taskId) { progress, _, _ ->
+        var lastDl = 0L
+        var lastTot = 0L
+
+        YoutubeDL.getInstance().execute(request, taskId) { progress, etaInSeconds, line ->
             if (progress >= 0f) {
-                onProgress(progress)
+                var dlBytes = lastDl
+                var totBytes = lastTot
+                var spdBps = 0.0
+                val eta = if (etaInSeconds > 0) etaInSeconds else 0L
+
+                if (!line.isNullOrBlank()) {
+                    // Check aria2c format: [#123456 45MiB/65MiB(69%) CN:4 DL:3.8MiB ETA:5s]
+                    val ariaMatch = Regex("""\s*([\d.]+[KMGT]?i?B)/([\d.]+[KMGT]?i?B).*?DL:\s*([\d.]+[KMGT]?i?B(?:/s)?)""", RegexOption.IGNORE_CASE).find(line)
+                    if (ariaMatch != null) {
+                        dlBytes = parseByteString(ariaMatch.groupValues[1])
+                        totBytes = parseByteString(ariaMatch.groupValues[2])
+                        spdBps = parseSpeedString(ariaMatch.groupValues[3])
+                    } else {
+                        // Check yt-dlp format: [download]  45.2% of ~65.00MiB at 4.20MiB/s ETA 00:08
+                        val ytdlMatch = Regex("""([\d.]+)%\s+of\s+~?([\d.]+[KMGT]?i?B).*?at\s+([\d.]+[KMGT]?i?B/s)""", RegexOption.IGNORE_CASE).find(line)
+                        if (ytdlMatch != null) {
+                            val pct = ytdlMatch.groupValues[1].toDoubleOrNull() ?: progress.toDouble()
+                            totBytes = parseByteString(ytdlMatch.groupValues[2])
+                            dlBytes = if (totBytes > 0) (totBytes * (pct / 100.0)).toLong() else 0L
+                            spdBps = parseSpeedString(ytdlMatch.groupValues[3])
+                        }
+                    }
+                }
+
+                if (totBytes <= 0L && progress > 0f) {
+                    dlBytes = progress.toLong().coerceIn(0L, 100L)
+                    totBytes = 100L
+                }
+
+                lastDl = dlBytes
+                lastTot = totBytes
+                onProgress(dlBytes, totBytes, spdBps, eta)
             }
         }
 
@@ -143,9 +195,6 @@ object YoutubeDlDownloader {
 
         val candidates = targetDir.listFiles { f -> isFinal(f) }?.toList() ?: emptyList()
 
-        // Prefer a genuinely NEW file (not present before this run). If the run
-        // overwrote an existing name (resume), fall back to one matching our stem,
-        // then to the newest new file. Never silently return an unrelated episode.
         val fresh = candidates.filter { it.absolutePath !in before }
         return fresh.firstOrNull { it.nameWithoutExtension == stem || it.name.startsWith("$stem.") }
             ?: fresh.maxByOrNull { it.lastModified() }
@@ -174,7 +223,7 @@ object YoutubeDlDownloader {
         magnetUrl: String,
         targetDir: File,
         preferredFilename: String,
-        onProgress: (Float) -> Unit
+        onProgress: (downloaded: Long, total: Long, speed: Double, eta: Long) -> Unit
     ): File? {
         val before = targetDir.listFiles()?.map { it.absolutePath }?.toSet() ?: emptySet()
 
@@ -218,7 +267,8 @@ object YoutubeDlDownloader {
 
         activeNativeProcesses[taskId] = process
 
-        val progressRegex = Regex("""\((\d+)%\).*?DL:\s*([\d.]+[KMGT]?i?B)""", RegexOption.IGNORE_CASE)
+        val progressRegex = Regex("""\(([\d.]+)%\).*?([\d.]+[KMGT]?i?B)/([\d.]+[KMGT]?i?B).*?DL:\s*([\d.]+[KMGT]?i?B(?:/s)?)""", RegexOption.IGNORE_CASE)
+        val fallbackRegex = Regex("""\((\d+)%\).*?DL:\s*([\d.]+[KMGT]?i?B)""", RegexOption.IGNORE_CASE)
         val reader = process.inputStream.bufferedReader()
         val logBuffer = mutableListOf<String>()
 
@@ -233,8 +283,18 @@ object YoutubeDlDownloader {
                 }
                 val match = progressRegex.find(line)
                 if (match != null) {
-                    val pct = match.groupValues[1].toFloatOrNull() ?: 0f
-                    onProgress(pct)
+                    val dl = parseByteString(match.groupValues[2])
+                    val tot = parseByteString(match.groupValues[3])
+                    val spd = parseSpeedString(match.groupValues[4])
+                    val eta = if (spd > 0 && tot > dl) ((tot - dl) / spd).toLong() else 0L
+                    onProgress(dl, tot, spd, eta)
+                } else {
+                    val fb = fallbackRegex.find(line)
+                    if (fb != null) {
+                        val pct = fb.groupValues[1].toLongOrNull() ?: 0L
+                        val spd = parseSpeedString(fb.groupValues[2])
+                        onProgress(pct, 100L, spd, 0L)
+                    }
                 }
                 line = reader.readLine()
             }

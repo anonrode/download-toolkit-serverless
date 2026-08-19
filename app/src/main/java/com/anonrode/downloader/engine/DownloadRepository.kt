@@ -88,9 +88,17 @@ class DownloadRepository {
         _tasks.update { list ->
             list.map {
                 if (it.id == taskId) {
+                    val finalDl = if (downloaded > 0 && it.status == TaskStatus.DOWNLOADING) {
+                        maxOf(it.downloadedBytes, downloaded)
+                    } else if (downloaded > 0) {
+                        downloaded
+                    } else {
+                        it.downloadedBytes
+                    }
+                    val finalTot = if (total > 0) total else it.totalBytes
                     it.copy(
-                        downloadedBytes = downloaded,
-                        totalBytes = total,
+                        downloadedBytes = finalDl,
+                        totalBytes = finalTot,
                         speedBytesPerSec = speed,
                         etaSeconds = eta
                     )

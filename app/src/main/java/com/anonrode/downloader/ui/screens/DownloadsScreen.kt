@@ -224,8 +224,8 @@ fun DownloadCard(
                 Spacer(modifier = Modifier.height(Spacing.xs))
 
                 val speedMb = task.speedBytesPerSec / (1024.0 * 1024.0)
-                val speedStr = "%.1f".format(java.util.Locale.US, speedMb)
-                val etaStr = if (task.etaSeconds > 0) " • " + formatEta(task.etaSeconds) else ""
+                val speedStr = if (speedMb >= 0.1) "%.1f MB/s".format(java.util.Locale.US, speedMb) else if (task.speedBytesPerSec > 0) "%.0f KB/s".format(java.util.Locale.US, task.speedBytesPerSec / 1024.0) else "0.0 MB/s"
+                val etaStr = if (task.etaSeconds > 0) " • " + formatEta(task.etaSeconds) else if (task.status == TaskStatus.DOWNLOADING && task.speedBytesPerSec < 1024.0 && task.totalBytes > task.downloadedBytes) " • Estimating..." else ""
                 val sizeStr = if (task.totalBytes > 0) {
                     formatBytes(task.downloadedBytes) + " / " + formatBytes(task.totalBytes)
                 } else if (task.downloadedBytes > 100) {
@@ -242,10 +242,10 @@ fun DownloadCard(
                         else if (sizeStr.isNotBlank()) "Paused • $sizeStr"
                         else "Paused"
                     }
-                    task.speedBytesPerSec > 0.0 -> {
-                        if (task.totalBytes > 0) "$pctInt% • $sizeStr • $speedStr MB/s$etaStr"
-                        else if (sizeStr.isNotBlank()) "$sizeStr • $speedStr MB/s"
-                        else "$speedStr MB/s"
+                    task.status == TaskStatus.DOWNLOADING && task.speedBytesPerSec > 0.0 -> {
+                        if (task.totalBytes > 0) "$pctInt% • $sizeStr • $speedStr$etaStr"
+                        else if (sizeStr.isNotBlank()) "$sizeStr • $speedStr"
+                        else speedStr
                     }
                     else -> {
                         if (task.totalBytes > 0) "$pctInt% • $sizeStr"
