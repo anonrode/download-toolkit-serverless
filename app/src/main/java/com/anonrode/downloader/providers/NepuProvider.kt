@@ -8,6 +8,7 @@ import com.anonrode.downloader.data.models.ShowDetails
 import com.anonrode.downloader.data.net.HttpClient
 import com.anonrode.downloader.resolvers.ResolverRegistry
 import org.json.JSONObject
+import org.jsoup.Jsoup
 import java.net.URLEncoder
 
 object NepuProvider : SiteProvider {
@@ -66,12 +67,27 @@ object NepuProvider : SiteProvider {
     }
 
     override suspend fun resolveEpisode(episodeUrl: String, quality: String): DownloadRecipe {
-        val direct = ResolverRegistry.resolve(episodeUrl, quality) ?: episodeUrl
-        val isHls = direct.contains(".m3u8") || direct.contains("manifest")
+        // Watch pages don't point at a file — they embed a vidsrc-style player
+        // (e.g. https://vidsrc.mov/embed/movie/969681) whose multi-hop chain is
+        // token-gated. Our resolvers can't crack that, so hand the embed URL to
+        // the engine, which runs yt-dlp's generic extractor on it.
+        var direct = ResolverRegistry.resolve(episodeUrl, quality)
+        if (direct.isNullOrBlank()) {
+            try {
+                val html = HttpClient.getText(episodeUrl, referer = "$mainUrl/") ?: ""
+                val doc = Jsoup.parse(html, episodeUrl)
+                val iframe = doc.selectFirst("iframe[src]")
+                if (iframe != null) {
+                    val embed = HttpClient.safeResolveUri(episodeUrl, iframe.attr("src"))
+                    if (embed.isNotBlank()) direct = embed
+                }
+            } catch (_: Exception) {}
+        }
+        if (direct.isNullOrBlank()) direct = episodeUrl
         return DownloadRecipe(
             directUrl = direct,
             filename = direct.substringAfterLast('/').substringBefore('?').ifEmpty { "movie.mp4" },
-            backend = if (isHls) "ytdlp" else "aria2c",
+            backend = "ytdlp",
             parallelSockets = 16
         )
     }
