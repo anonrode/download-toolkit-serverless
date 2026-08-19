@@ -61,6 +61,7 @@ class TurboState(private val file: File) {
         }
     }
 
+    private var cachedTotal: Long = -1L
     private var lastCommitTime: Long = 0L
 
     @Synchronized
