@@ -98,6 +98,27 @@ class TurboState(private val file: File) {
         }
     }
 
+    /**
+     * Longest fully-downloaded contiguous prefix (bytes 0..N-1) recorded in the
+     * sidecar, or null when the sidecar is missing or unreadable. Used to hand a
+     * partial download to aria2c, which can only resume a contiguous prefix.
+     */
+    fun contiguousPrefixBytes(): Long? {
+        if (!file.exists()) return null
+        val total = try {
+            file.readLines().firstOrNull()?.removePrefix("total=")?.toLongOrNull()
+        } catch (_: Exception) {
+            null
+        } ?: return null
+        val plan = read(total) ?: return null
+        var prefix = 0L
+        for (chunk in plan) {
+            if (chunk.current <= chunk.end) break
+            prefix = chunk.end + 1
+        }
+        return prefix
+    }
+
     fun delete() {
         try {
             if (file.exists()) file.delete()

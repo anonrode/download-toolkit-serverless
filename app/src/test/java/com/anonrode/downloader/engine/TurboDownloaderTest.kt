@@ -95,6 +95,31 @@ class TurboDownloaderTest {
         assertTrue(File(dir, "video.mp4").readBytes().contentEquals(payload))
     }
 
+    @Test
+    fun contiguousPrefixBytes_readsLongestCompletePrefix() {
+        val state = TurboState(File(dir, "video.mp4.turbo"))
+        state.commit(
+            listOf(
+                TurboChunk(0, 99, 100),   // complete
+                TurboChunk(100, 199, 100), // incomplete
+                TurboChunk(200, 299, 300)  // complete
+            ),
+            total = 300,
+            force = true
+        )
+        assertEquals(100L, state.contiguousPrefixBytes())
+    }
+
+    @Test
+    fun contiguousPrefixBytes_allCompleteAndMissingSidecar() {
+        val sidecar = File(dir, "video.mp4.turbo")
+        val state = TurboState(sidecar)
+        state.commit(listOf(TurboChunk(0, 99, 100)), total = 100, force = true)
+        assertEquals(100L, state.contiguousPrefixBytes())
+        sidecar.delete()
+        assertEquals(null, state.contiguousPrefixBytes())
+    }
+
     private fun downloadTo(destName: String): TurboDownloader.TurboResult = runBlocking {
         TurboDownloader.download(
             url = server.url("/video.mp4").toString(),
