@@ -2,18 +2,21 @@ package com.anonrode.downloader.engine
 
 import java.io.File
 
+private const val PIECE_SIZE = 1024L * 1024 // 1 MiB, aria2c -k 1M parity
+private const val MAX_PIECES_PER_SOCKET = 8 // queue cap: sockets * 8 pieces max
+
 /**
  * Sidecar resume state for [TurboDownloader], the equivalent of aria2c's .aria2
  * control file.
  *
  * A segmented download pre-allocates the target file, which zero-fills it. That
  * makes the file alone useless for resume: a zero byte could be downloaded data
- * or untouched padding. This records, per chunk, the absolute offset that has
+ * or untouched padding. This records, per piece, the absolute offset that has
  * actually been committed to disk, so a resumed run restarts each worker exactly
  * where it stopped instead of restarting the file (or worse, skipping bytes and
  * producing a video that plays until it cuts out).
  *
- * Format is one line per chunk, `start:end:current`, with a `total` header so a
+ * Format is one line per piece, `start:end:current`, with a `total` header so a
  * stale sidecar from a different file size is rejected rather than trusted.
  */
 class TurboState(private val file: File) {
@@ -28,11 +31,18 @@ class TurboState(private val file: File) {
             return existing
         }
 
-        val effectiveSockets = sockets.coerceAtLeast(1)
-        val chunkSize = total / effectiveSockets
-        val plan = (0 until effectiveSockets).map { i ->
-            val start = i * chunkSize
-            val end = if (i == effectiveSockets - 1) total - 1 else (start + chunkSize - 1)
+        if (total <= 0) return listOf(TurboChunk(0, 0, 1))
+
+        // Fixed-size pieces instead of socket windows: any worker can pick up any
+        // unfinished piece, so a slow connection can't hold up the download tail.
+        val s = sockets.coerceAtLeast(1)
+        val pieceCount = ((total + PIECE_SIZE - 1) / PIECE_SIZE)
+            .coerceIn(1L, s.toLong() * MAX_PIECES_PER_SOCKET)
+            .toInt()
+        val pieceSize = (total + pieceCount - 1) / pieceCount
+        val plan = (0 until pieceCount).map { i ->
+            val start = i * pieceSize
+            val end = minOf(start + pieceSize - 1, total - 1)
             TurboChunk(start, end, start)
         }
         commit(plan, total)

@@ -119,4 +119,6 @@ dependencies {
     // Real org.json for unit tests; the android.jar stub throws "Stub!" on any
     // call, so fixtures that exercise resolvers (JSONObject) need the JVM impl.
     testImplementation("org.json:json:20240303")
+    // MockWebServer for engine tests: flaky-connection, retry, and resume scenarios.
+    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
 }
