@@ -17,6 +17,7 @@ import com.yausername.youtubedl_android.YoutubeDL
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.StateFlow
 import java.io.File
+import java.io.RandomAccessFile
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
@@ -506,22 +507,24 @@ class DownloadEngine(
                     if (refererToPass.isNotBlank()) hdrs["Referer"] = refererToPass
                     val dest = File(targetFolder, File(task.filePath).name)
 
+                    val progressCb: (Long, Long, Long) -> Unit = { got, tot, bps ->
+                        val eta = if (bps > 0 && tot > got) (tot - got) / bps else 0L
+                        repository.updateProgress(
+                            taskId = task.id,
+                            downloaded = got,
+                            total = tot,
+                            speed = bps.toDouble(),
+                            eta = eta
+                        )
+                        updateServiceState(force = false)
+                    }
+
                     var turboResult: TurboDownloader.TurboResult = TurboDownloader.download(
                         url = streamUrl,
                         dest = dest,
                         headers = hdrs,
                         configuredSockets = effectiveSockets,
-                        onProgress = { got, tot, bps ->
-                            val eta = if (bps > 0 && tot > got) (tot - got) / bps else 0L
-                            repository.updateProgress(
-                                taskId = task.id,
-                                downloaded = got,
-                                total = tot,
-                                speed = bps.toDouble(),
-                                eta = eta
-                            )
-                            updateServiceState(force = false)
-                        }
+                        onProgress = progressCb
                     )
 
                     if (turboResult is TurboDownloader.TurboResult.Success) {
@@ -555,17 +558,7 @@ class DownloadEngine(
                                     dest = dest,
                                     headers = freshHdrs,
                                     configuredSockets = effectiveSockets,
-                                    onProgress = { got, tot, bps ->
-                                        val eta = if (bps > 0 && tot > got) (tot - got) / bps else 0L
-                                        repository.updateProgress(
-                                            taskId = task.id,
-                                            downloaded = got,
-                                            total = tot,
-                                            speed = bps.toDouble(),
-                                            eta = eta
-                                        )
-                                        updateServiceState(force = false)
-                                    }
+                                    onProgress = progressCb
                                 )
                                 when (turboResult) {
                                     is TurboDownloader.TurboResult.Success -> producedFile = turboResult.file
@@ -576,6 +569,26 @@ class DownloadEngine(
                     }
 
                     if (producedFile == null && coroutineContext.isActive) {
+                        // Turbo → aria2c resume handoff: hand over the longest contiguous
+                        // prefix so the fallback continues instead of restarting. Only when
+                        // the output name matches what yt-dlp's aria2c will write, and never
+                        // over an existing partial (which may carry its own .aria2 resume state).
+                        // The sidecar is deleted with the rename: it describes the .part file,
+                        // which no longer exists once the prefix becomes the aria2c target.
+                        try {
+                            val urlExt = streamUrl.substringBefore('?').substringBefore('#').substringAfterLast('.', "")
+                            if (urlExt.isNotBlank() && urlExt.equals(File(task.filePath).extension, ignoreCase = true) && !dest.exists()) {
+                                val partFile = File(dest.absolutePath + ".part")
+                                val prefix = TurboState(File(dest.absolutePath + ".turbo")).contiguousPrefixBytes()
+                                if (prefix != null && prefix > 0 && prefix <= partFile.length() && partFile.exists()) {
+                                    RandomAccessFile(partFile, "rw").use { it.setLength(prefix) }
+                                    if (partFile.renameTo(dest)) {
+                                        TurboState(File(dest.absolutePath + ".turbo")).delete()
+                                        android.util.Log.w("AnonDownload", "Handed ${prefix / 1024 / 1024} MiB prefix to aria2c for resume")
+                                    }
+                                }
+                            }
+                        } catch (_: Throwable) {}
                         android.util.Log.w("AnonDownload", "Turbo failed, falling back to aria2c")
                         producedFile = YoutubeDlDownloader.download(
                             context = context,
@@ -601,6 +614,53 @@ class DownloadEngine(
                                 updateServiceState(force = false)
                             }
                         )
+                    }
+
+                    // aria2c → Turbo rescue: resume from whichever state is freshest on
+                    // disk — Turbo's own sidecar, or aria2c's control file converted to
+                    // Turbo's piece map. Only when nothing else produced a file yet.
+                    if (producedFile == null && coroutineContext.isActive) {
+                        try {
+                            val turboState = TurboState(File(dest.absolutePath + ".turbo"))
+                            val partFile = File(dest.absolutePath + ".part")
+                            var resumable = partFile.exists() && partFile.length() > 0 &&
+                                turboState.contiguousPrefixBytes() != null
+                            if (!resumable) {
+                                val control = File(dest.absolutePath + ".aria2")
+                                val parsed = if (control.exists()) Aria2Control.parse(control) else null
+                                if (parsed != null && dest.exists() && dest.length() > 0) {
+                                    val hadPart = partFile.exists()
+                                    if (hadPart) partFile.delete()
+                                    if (dest.renameTo(partFile)) {
+                                        turboState.commit(parsed.pieces, parsed.fileLength, force = true)
+                                        control.delete()
+                                        resumable = true
+                                    } else if (hadPart) {
+                                        // The sidecar describes the deleted .part: without it,
+                                        // the map must not survive or the next run would skip
+                                        // bytes that are not actually on disk.
+                                        turboState.delete()
+                                    }
+                                }
+                            }
+                            if (resumable) {
+                                android.util.Log.w("AnonDownload", "Resuming partial download with Turbo")
+                                val rescueHdrs = mutableMapOf("User-Agent" to HttpClient.DEFAULT_UA)
+                                val rescueReferer = getRefererForUrl(streamUrl)
+                                if (rescueReferer.isNotBlank()) rescueHdrs["Referer"] = rescueReferer
+                                turboResult = TurboDownloader.download(
+                                    url = streamUrl,
+                                    dest = dest,
+                                    headers = rescueHdrs,
+                                    configuredSockets = effectiveSockets,
+                                    onProgress = progressCb
+                                )
+                                when (turboResult) {
+                                    is TurboDownloader.TurboResult.Success -> producedFile = turboResult.file
+                                    is TurboDownloader.TurboResult.Failure -> turboFailure = turboResult
+                                }
+                            }
+                        } catch (_: Throwable) {}
                     }
                 } else {
                     producedFile = YoutubeDlDownloader.download(
@@ -656,6 +716,7 @@ class DownloadEngine(
                     try {
                         File(producedFile.absolutePath + ".turbo").delete()
                         File(producedFile.absolutePath + ".part").delete()
+                        File(producedFile.absolutePath + ".aria2").delete()
                     } catch (_: Throwable) {}
 
                     try {
