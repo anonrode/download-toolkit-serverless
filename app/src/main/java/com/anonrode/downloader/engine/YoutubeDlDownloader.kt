@@ -3,9 +3,16 @@ package com.anonrode.downloader.engine
 import android.content.Context
 import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.youtubedl_android.YoutubeDLRequest
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.isActive
+import kotlin.coroutines.coroutineContext
 import java.io.File
 
 object YoutubeDlDownloader {
+
+    // Task-level retries for magnet downloads: aria2c resumes via its .aria2
+    // control file, so each retry continues instead of restarting.
+    private const val MAGNET_MAX_ATTEMPTS = 3
 
     private val TIER1_TRACKERS = listOf(
         "udp://tracker.opentrackr.org:1337/announce",
@@ -74,7 +81,11 @@ object YoutubeDlDownloader {
         }
 
         if (isMagnet) {
-            return downloadMagnetAria2c(context, taskId, sourceUrl, targetDir, preferredFilename, parallelSockets, onProgress)
+            // isActiveCheck keeps the task-level retry loop from relaunching
+            // aria2c after the user paused or cancelled the job.
+            return downloadMagnetAria2c(
+                context, taskId, sourceUrl, targetDir, preferredFilename, parallelSockets, onProgress
+            ) { coroutineContext.isActive }
         }
 
         val request = YoutubeDLRequest(sourceUrl).apply {
@@ -236,14 +247,15 @@ object YoutubeDlDownloader {
         }
     }
 
-    private fun downloadMagnetAria2c(
+    private suspend fun downloadMagnetAria2c(
         context: Context,
         taskId: String,
         magnetUrl: String,
         targetDir: File,
         preferredFilename: String,
         parallelSockets: Int = 16,
-        onProgress: (downloaded: Long, total: Long, speed: Double, eta: Long) -> Unit
+        onProgress: (downloaded: Long, total: Long, speed: Double, eta: Long) -> Unit,
+        isActiveCheck: suspend () -> Boolean = { true }
     ): File? {
         val before = targetDir.listFiles()?.map { it.absolutePath }?.toSet() ?: emptySet()
 
@@ -267,6 +279,8 @@ object YoutubeDlDownloader {
             "--file-allocation=none",
             "--check-certificate=false",
             "--continue=true",
+            "--max-tries=10",
+            "--retry-wait=1",
             "--follow-torrent=mem",
             "--bt-save-metadata=true",
             "--bt-load-saved-metadata=true",
@@ -278,74 +292,115 @@ object YoutubeDlDownloader {
             magnetUrl
         )
 
-        val pb = ProcessBuilder(cmd)
-        // Statically linked binary (see NOTICE): no LD_LIBRARY_PATH/PATH needed.
-        pb.environment()["TMPDIR"] = context.cacheDir.absolutePath
-        pb.directory(targetDir)
-        pb.redirectErrorStream(true)
-        val process = pb.start()
+        val errors = StringBuilder()
+        var produced: File? = null
+        var attempts = 0
 
-        if (Thread.currentThread().isInterrupted) {
-            process.destroy()
-            throw InterruptedException("Task was cancelled before process started")
-        }
+        fun runOnce(): File? {
+            val pb = ProcessBuilder(cmd)
+            // Statically linked binary (see NOTICE): no LD_LIBRARY_PATH/PATH needed.
+            pb.environment()["TMPDIR"] = context.cacheDir.absolutePath
+            pb.directory(targetDir)
+            pb.redirectErrorStream(true)
+            val process = pb.start()
 
-        activeNativeProcesses[taskId] = process
-
-        // aria2c summary lines put sizes before the percentage: [#d5f4b1 45MiB/65MiB(69%) CN:8 DL:3.8MiB ETA:5s]
-        val progressRegex = Regex("""([\d.]+[KMGT]?i?B)/([\d.]+[KMGT]?i?B)\([\d.]+%\).*?DL:\s*([\d.]+[KMGT]?i?B(?:/s)?)""", RegexOption.IGNORE_CASE)
-        val fallbackRegex = Regex("""\((\d+)%\).*?DL:\s*([\d.]+[KMGT]?i?B)""", RegexOption.IGNORE_CASE)
-        val reader = process.inputStream.bufferedReader()
-        val logBuffer = mutableListOf<String>()
-
-        try {
-            var line: String? = reader.readLine()
-            while (line != null) {
-                if (logBuffer.size < 50) {
-                    logBuffer.add(line)
-                } else {
-                    logBuffer.removeAt(0)
-                    logBuffer.add(line)
-                }
-                val match = progressRegex.find(line)
-                if (match != null) {
-                    val dl = parseByteString(match.groupValues[1])
-                    val tot = parseByteString(match.groupValues[2])
-                    val spd = parseSpeedString(match.groupValues[3])
-                    val eta = if (spd > 0 && tot > dl) ((tot - dl) / spd).toLong() else 0L
-                    onProgress(dl, tot, spd, eta)
-                } else {
-                    val fb = fallbackRegex.find(line)
-                    if (fb != null) {
-                        val pct = fb.groupValues[1].toLongOrNull() ?: 0L
-                        val spd = parseSpeedString(fb.groupValues[2])
-                        onProgress(pct, 100L, spd, 0L)
-                    }
-                }
-                line = reader.readLine()
+            if (Thread.currentThread().isInterrupted) {
+                process.destroy()
+                throw InterruptedException("Task was cancelled before process started")
             }
-            val exitCode = process.waitFor()
+
+            activeNativeProcesses[taskId] = process
+
+            // aria2c summary lines put sizes before the percentage: [#d5f4b1 45MiB/65MiB(69%) CN:8 DL:3.8MiB ETA:5s]
+            val progressRegex = Regex("""([\d.]+[KMGT]?i?B)/([\d.]+[KMGT]?i?B)\([\d.]+%\).*?DL:\s*([\d.]+[KMGT]?i?B(?:/s)?)""", RegexOption.IGNORE_CASE)
+            val fallbackRegex = Regex("""\((\d+)%\).*?DL:\s*([\d.]+[KMGT]?i?B)""", RegexOption.IGNORE_CASE)
+            val reader = process.inputStream.bufferedReader()
+            val logBuffer = mutableListOf<String>()
+
+            var exitCode: Int? = null
+            try {
+                var line: String? = reader.readLine()
+                while (line != null) {
+                    if (logBuffer.size < 50) {
+                        logBuffer.add(line)
+                    } else {
+                        logBuffer.removeAt(0)
+                        logBuffer.add(line)
+                    }
+                    val match = progressRegex.find(line)
+                    if (match != null) {
+                        val dl = parseByteString(match.groupValues[1])
+                        val tot = parseByteString(match.groupValues[2])
+                        val spd = parseSpeedString(match.groupValues[3])
+                        val eta = if (spd > 0 && tot > dl) ((tot - dl) / spd).toLong() else 0L
+                        onProgress(dl, tot, spd, eta)
+                    } else {
+                        val fb = fallbackRegex.find(line)
+                        if (fb != null) {
+                            val pct = fb.groupValues[1].toLongOrNull() ?: 0L
+                            val spd = parseSpeedString(fb.groupValues[2])
+                            onProgress(pct, 100L, spd, 0L)
+                        }
+                    }
+                    line = reader.readLine()
+                }
+                exitCode = process.waitFor()
+            } catch (e: Exception) {
+                process.destroy()
+                errors.append("run ").append(attempts).append(": ").append(e.message ?: e.javaClass.simpleName).append('\n')
+                return null
+            } finally {
+                activeNativeProcesses.remove(taskId)
+            }
+
             if (exitCode != 0) {
                 val errSummary = logBuffer.takeLast(3).joinToString(" | ")
-                throw Exception("aria2c failed (code $exitCode): $errSummary")
+                errors.append("run ").append(attempts).append(" exit ").append(exitCode).append(": ").append(errSummary).append('\n')
+                return null
             }
-        } catch (e: Exception) {
-            process.destroy()
-            throw e
-        } finally {
-            activeNativeProcesses.remove(taskId)
+
+            fun isFinal(f: File) = f.length() > 0 &&
+                    !f.name.endsWith(".aria2") && !f.name.endsWith(".part") &&
+                    !f.name.endsWith(".ytdl") && !f.name.endsWith(".torrent")
+
+            val candidates = targetDir.listFiles { f -> isFinal(f) }?.toList() ?: emptyList()
+            val fresh = candidates.filter { it.absolutePath !in before }
+            val stem = preferredFilename.substringBeforeLast('.')
+            val found = fresh.firstOrNull { it.nameWithoutExtension == stem || it.name.startsWith("$stem.") }
+                ?: fresh.maxByOrNull { it.lastModified() }
+                ?: candidates.maxByOrNull { it.lastModified() }
+
+            // A sibling .aria2 control file marks the data file as still partial
+            // (resume bookkeeping), so never treat it as a finished download.
+            if (found != null && !File(found.absolutePath + ".aria2").exists()) return found
+
+            errors.append("run ").append(attempts).append(": no complete file (control file still present)\n")
+            return null
         }
 
-        fun isFinal(f: File) = f.length() > 0 &&
-                !f.name.endsWith(".aria2") && !f.name.endsWith(".part") &&
-                !f.name.endsWith(".ytdl") && !f.name.endsWith(".torrent")
-
-        val candidates = targetDir.listFiles { f -> isFinal(f) }?.toList() ?: emptyList()
-        val fresh = candidates.filter { it.absolutePath !in before }
-        val stem = preferredFilename.substringBeforeLast('.')
-        return fresh.firstOrNull { it.nameWithoutExtension == stem || it.name.startsWith("$stem.") }
-            ?: fresh.maxByOrNull { it.lastModified() }
-            ?: candidates.maxByOrNull { it.lastModified() }
+        // Task-level retry with resume: the .aria2 control file keeps aria2c's
+        // per-piece progress across runs, so a retry continues instead of
+        // restarting (BitTorrent piece-queue parity). Never relaunch after the
+        // job was paused or cancelled.
+        while (attempts < MAGNET_MAX_ATTEMPTS && produced == null) {
+            attempts++
+            if (!isActiveCheck()) throw CancellationException("Task was cancelled before magnet retry")
+            produced = runOnce()
+            if (produced == null && attempts < MAGNET_MAX_ATTEMPTS) {
+                try {
+                    Thread.sleep(2_000L * attempts)
+                } catch (_: InterruptedException) {
+                    throw InterruptedException("Task was cancelled during magnet retry wait")
+                }
+                if (Thread.currentThread().isInterrupted) {
+                    throw InterruptedException("Task was cancelled before magnet retry")
+                }
+            }
+        }
+        if (produced == null) {
+            throw Exception("aria2c failed after $attempts attempt(s): ${errors.toString().trim()}")
+        }
+        return produced
     }
 
     private fun findAria2Executable(context: Context): File? {
