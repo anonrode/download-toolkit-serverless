@@ -7,6 +7,7 @@ enum class TaskStatus {
     QUEUED,
     RESOLVING,
     DOWNLOADING,
+    VALIDATING,
     PAUSED,
     COMPLETED,
     FAILED

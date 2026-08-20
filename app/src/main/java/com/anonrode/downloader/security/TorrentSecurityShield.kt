@@ -288,6 +288,49 @@ object TorrentSecurityShield {
     }
 
     // -------------------------------------------------------------
+    // Selective-file support: per-file shield checks (Layers 2/6 + traversal)
+    // -------------------------------------------------------------
+
+    /** One file inside a torrent as reported by aria2c --show-files. */
+    data class TorrentFileEntry(
+        val index: Int,          // 1-based aria2c index (what --select-file uses)
+        val originalPath: String, // raw path from the swarm (untrusted)
+        val length: Long,
+        val blocked: Boolean = false,    // Layer 2: blocked extension / hidden exe
+        val traversal: Boolean = false,  // path escapes base dir
+        val sizeOk: Boolean = true       // Layer 6: plausible for the name
+    ) {
+        /** Name safe for display: basename only, control chars stripped. */
+        val displayName: String
+            get() {
+                val base = originalPath.substringAfterLast('/').substringAfterLast('\\')
+                return SHELL_DANGER.matcher(base).replaceAll("").trim()
+                    .ifBlank { "file_$index" }
+            }
+
+        /** True when every shield layer passes; only these are offered for selection. */
+        val isSafe: Boolean get() = !blocked && !traversal && sizeOk
+    }
+
+    private val TRAVERSAL_RE = Pattern.compile("""(?i)(?:\.\./|\.\.\\|^/|^[A-Za-z]:[\\/])""")
+
+    /** Validate one torrent file entry. Blocked entries are never selectable. */
+    fun checkTorrentFileEntry(originalPath: String, length: Long, parentTitle: String): TorrentFileEntry {
+        val base = originalPath.substringAfterLast('/').substringAfterLast('\\')
+        val extCheck = checkExtensions(base)
+        val traversal = TRAVERSAL_RE.matcher(originalPath).find()
+        val sizeCheck = checkSizePlausible("$parentTitle $base", length)
+        return TorrentFileEntry(
+            index = 0, // filled by caller
+            originalPath = originalPath,
+            length = length,
+            blocked = !extCheck.first,
+            traversal = traversal,
+            sizeOk = sizeCheck.first
+        )
+    }
+
+    // -------------------------------------------------------------
     // LAYER 7: Post-Download Magic-Byte & Path Traversal Inspector
     // -------------------------------------------------------------
     fun validateDownloadedFile(file: File, baseDir: File): Pair<Boolean, String> {

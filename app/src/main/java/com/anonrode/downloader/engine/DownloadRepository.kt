@@ -95,7 +95,7 @@ class DownloadRepository {
                     } else {
                         it.downloadedBytes
                     }
-                    val finalTot = if (total > 0) maxOf(it.totalBytes, total) else it.totalBytes
+                    val finalTot = if (total > 0) total else it.totalBytes
                     it.copy(
                         downloadedBytes = finalDl,
                         totalBytes = finalTot,
