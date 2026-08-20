@@ -151,14 +151,19 @@ fun DownloadCard(
     val isPaused = task.status == TaskStatus.PAUSED
     val isFailed = task.status == TaskStatus.FAILED
 
+    // FAILED cards get a subtle error tint on the surface + border, so they read
+    // as failed at a glance (not just via the badge).
+    val cardSurface = if (isFailed) StatusError.copy(alpha = 0.06f) else SurfaceCard
+    val cardBorder = if (isFailed) StatusError.copy(alpha = 0.45f) else BorderHairline
+
     Box(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(Radius.lg))
-            .background(SurfaceCard)
-            .border(1.dp, BorderHairline, RoundedCornerShape(Radius.lg))
+            .background(cardSurface)
+            .border(1.dp, cardBorder, RoundedCornerShape(Radius.lg))
             .clickable(enabled = isCompleted, onClick = onPlay)
-            .padding(Spacing.md)
+            .padding(Spacing.lg)
     ) {
         Column {
             // Title & Status Badge
@@ -173,13 +178,16 @@ fun DownloadCard(
                         color = TextPrimary,
                         fontSize = 14.sp,
                         fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
+                        maxLines = 2,
                         overflow = TextOverflow.Ellipsis
                     )
+                    Spacer(modifier = Modifier.height(Spacing.xxs))
                     Text(
                         text = if (task.showTitle != "Direct Downloads") task.showTitle else "Direct Media",
                         color = TextSecondary,
-                        fontSize = 11.sp
+                        fontSize = 11.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
 
@@ -200,20 +208,87 @@ fun DownloadCard(
             )
             val pctInt = (animatedProgress * 100).toInt()
 
-            if (!isCompleted) {
-                // Seal-Style Visual Segment Progress Bar
+            if (isCompleted) {
+                // ---- COMPLETED: ext chip + size + Play / Share / Delete ----
+                val sizeText = if (task.totalBytes > 0) formatBytes(task.totalBytes) else formatBytes(task.downloadedBytes)
+                val extText = File(task.filePath).name.substringAfterLast('.').uppercase()
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        modifier = Modifier.weight(1f),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(Spacing.xs)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(Radius.xs))
+                                .background(SurfaceElevated)
+                                .padding(horizontal = Spacing.sm, vertical = 2.dp)
+                        ) {
+                            Text(text = extText, color = TextPrimary, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                        }
+                        Text(
+                            text = "$sizeText • Tap to Play In-App",
+                            color = TextMuted,
+                            fontSize = 11.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(Spacing.sm)
+                    ) {
+                        IconButton(
+                            onClick = onPlay,
+                            modifier = Modifier
+                                .size(36.dp)
+                                .background(AccentPrimary, CircleShape)
+                        ) {
+                            Icon(Icons.Rounded.PlayArrow, contentDescription = "Play", tint = BackgroundDark, modifier = Modifier.size(18.dp))
+                        }
+
+                        IconButton(
+                            onClick = { shareMedia(context, task.filePath) },
+                            modifier = Modifier
+                                .size(36.dp)
+                                .background(SurfaceElevated, CircleShape)
+                                .border(1.dp, BorderHairline, CircleShape)
+                        ) {
+                            Icon(Icons.Rounded.Share, contentDescription = "Share", tint = TextSecondary, modifier = Modifier.size(18.dp))
+                        }
+
+                        IconButton(
+                            onClick = onCancel,
+                            modifier = Modifier
+                                .size(36.dp)
+                                .background(SurfaceElevated, CircleShape)
+                                .border(1.dp, BorderHairline, CircleShape)
+                        ) {
+                            Icon(Icons.Rounded.DeleteOutline, contentDescription = "Delete", tint = TextMuted, modifier = Modifier.size(18.dp))
+                        }
+                    }
+                }
+            } else {
+                // ---- ACTIVE / QUEUED / PAUSED / FAILED ----
+                // Seal-Style Visual Segment Progress Bar (frozen at 0 for QUEUED)
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(6.dp)
-                        .clip(RoundedCornerShape(3.dp))
+                        .clip(RoundedCornerShape(Radius.xs))
                         .background(SurfaceElevated)
                 ) {
                     Box(
                         modifier = Modifier
                             .fillMaxWidth(fraction = animatedProgress)
                             .fillMaxHeight()
-                            .clip(RoundedCornerShape(3.dp))
+                            .clip(RoundedCornerShape(Radius.xs))
                             .background(
                                 if (isFailed) Brush.horizontalGradient(listOf(StatusError, StatusError))
                                 else Brush.horizontalGradient(listOf(AccentViolet, AccentPink, AccentPrimary))
@@ -221,11 +296,8 @@ fun DownloadCard(
                     )
                 }
 
-                Spacer(modifier = Modifier.height(Spacing.xs))
+                Spacer(modifier = Modifier.height(Spacing.sm))
 
-                val speedMb = task.speedBytesPerSec / (1024.0 * 1024.0)
-                val speedStr = if (speedMb >= 0.1) "%.1f MB/s".format(java.util.Locale.US, speedMb) else if (task.speedBytesPerSec > 0) "%.0f KB/s".format(java.util.Locale.US, task.speedBytesPerSec / 1024.0) else "0.0 MB/s"
-                val etaStr = if (task.etaSeconds > 0) " • " + formatEta(task.etaSeconds) else if (task.status == TaskStatus.DOWNLOADING && task.speedBytesPerSec < 1024.0 && task.totalBytes > task.downloadedBytes) " • Estimating..." else ""
                 val sizeStr = if (task.totalBytes > 0) {
                     formatBytes(task.downloadedBytes) + " / " + formatBytes(task.totalBytes)
                 } else if (task.downloadedBytes > 100) {
@@ -234,36 +306,54 @@ fun DownloadCard(
                     ""
                 }
 
-                val progressText = when {
-                    task.errorMessage != null -> task.errorMessage
-                    task.status == TaskStatus.RESOLVING -> "Resolving stream link..."
-                    task.status == TaskStatus.PAUSED -> {
-                        if (task.totalBytes > 0) "Paused • $pctInt% ($sizeStr)"
-                        else if (sizeStr.isNotBlank()) "Paused • $sizeStr"
+                // Speed is only rendered while the task is actually transferring;
+                // paused/queued cards never show a stale "0.0 MB/s".
+                val speedMb = task.speedBytesPerSec / (1024.0 * 1024.0)
+                val speedStr = when {
+                    speedMb >= 0.1 -> "%.1f MB/s".format(java.util.Locale.US, speedMb)
+                    task.speedBytesPerSec >= 1024.0 -> "%.0f KB/s".format(java.util.Locale.US, task.speedBytesPerSec / 1024.0)
+                    else -> null
+                }
+                val etaStr = if (task.etaSeconds > 0) formatEta(task.etaSeconds) else null
+                val estimating = task.status == TaskStatus.DOWNLOADING && task.speedBytesPerSec < 1024.0 && task.totalBytes > task.downloadedBytes
+
+                val progressText = when (task.status) {
+                    TaskStatus.QUEUED -> "Queued • Waiting to start"
+                    TaskStatus.RESOLVING -> "Resolving stream link..."
+                    TaskStatus.VALIDATING -> "Checking downloaded file..."
+                    TaskStatus.PAUSED -> {
+                        if (task.totalBytes > 0) "Paused at $pctInt% • $sizeStr"
+                        else if (sizeStr.isNotBlank()) "Paused at $sizeStr"
                         else "Paused"
                     }
-                    task.status == TaskStatus.DOWNLOADING -> {
-                        if (task.totalBytes > 0) "$pctInt% • $sizeStr • $speedStr$etaStr"
-                        else if (sizeStr.isNotBlank()) "$sizeStr • $speedStr"
-                        else speedStr
+                    TaskStatus.DOWNLOADING -> {
+                        // With an unknown total (e.g. HLS) show size + speed, no percentage.
+                        val parts = mutableListOf<String>()
+                        if (task.totalBytes > 0) parts += "$pctInt%"
+                        if (sizeStr.isNotBlank()) parts += sizeStr
+                        speedStr?.let { parts += it }
+                        etaStr?.let { parts += it }
+                        if (estimating && etaStr == null) parts += "Estimating..."
+                        parts.joinToString(" • ").ifBlank { "Starting..." }
                     }
-                    else -> {
-                        if (task.totalBytes > 0) "$pctInt% • $sizeStr"
-                        else if (sizeStr.isNotBlank()) sizeStr
-                        else "Queued"
-                    }
+                    TaskStatus.FAILED -> task.errorMessage ?: "Download failed"
+                    else -> "Queued • Waiting to start"
                 }
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
+                    horizontalArrangement = Arrangement.spacedBy(Spacing.sm),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = progressText ?: "",
-                        color = if (isFailed) StatusError else if (task.status == TaskStatus.RESOLVING) AccentPrimary else TextMuted,
+                        text = progressText,
+                        color = when {
+                            isFailed -> StatusError
+                            task.status == TaskStatus.RESOLVING || task.status == TaskStatus.VALIDATING -> AccentPrimary
+                            else -> TextMuted
+                        },
                         fontSize = 11.sp,
-                        maxLines = 1,
+                        maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f)
                     )
@@ -275,69 +365,25 @@ fun DownloadCard(
                             }
                         } else if (isPaused || isFailed) {
                             IconButton(onClick = onRetry) {
-                                Icon(Icons.Rounded.PlayArrow, contentDescription = "Resume", tint = AccentPrimary, modifier = Modifier.size(20.dp))
+                                Box(
+                                    modifier = Modifier
+                                        .size(36.dp)
+                                        .clip(CircleShape)
+                                        .background(AccentPrimary)
+                                ) {
+                                    Icon(
+                                        imageVector = if (isFailed) Icons.Rounded.Refresh else Icons.Rounded.PlayArrow,
+                                        contentDescription = if (isFailed) "Retry" else "Resume",
+                                        tint = BackgroundDark,
+                                        modifier = Modifier
+                                            .size(18.dp)
+                                            .align(Alignment.Center)
+                                    )
+                                }
                             }
                         }
                         IconButton(onClick = onCancel) {
                             Icon(Icons.Rounded.Close, contentDescription = "Cancel", tint = TextMuted, modifier = Modifier.size(20.dp))
-                        }
-                    }
-                }
-            } else {
-                val sizeText = if (task.totalBytes > 0) formatBytes(task.totalBytes) else formatBytes(task.downloadedBytes)
-                val extText = File(task.filePath).name.substringAfterLast('.').uppercase()
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(Spacing.xs)
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(4.dp))
-                                .background(SurfaceElevated)
-                                .padding(horizontal = 6.dp, vertical = 2.dp)
-                        ) {
-                            Text(text = extText, color = TextPrimary, fontSize = 9.sp, fontWeight = FontWeight.Bold)
-                        }
-                        Text(
-                            text = "$sizeText • Tap to Play In-App",
-                            color = TextMuted,
-                            fontSize = 11.sp
-                        )
-                    }
-
-                    Row(horizontalArrangement = Arrangement.spacedBy(Spacing.sm)) {
-                        IconButton(
-                            onClick = onPlay,
-                            modifier = Modifier
-                                .size(36.dp)
-                                .background(AccentPrimary, CircleShape)
-                        ) {
-                            Icon(Icons.Rounded.PlayArrow, contentDescription = "Play", tint = BackgroundDark, modifier = Modifier.size(20.dp))
-                        }
-
-                        IconButton(
-                            onClick = { shareMedia(context, task.filePath) },
-                            modifier = Modifier
-                                .size(36.dp)
-                                .background(SurfaceElevated, CircleShape)
-                                .border(1.dp, BorderHairline, CircleShape)
-                        ) {
-                            Icon(Icons.Rounded.Share, contentDescription = "Share", tint = TextSecondary, modifier = Modifier.size(17.dp))
-                        }
-
-                        IconButton(
-                            onClick = onCancel,
-                            modifier = Modifier
-                                .size(36.dp)
-                                .background(SurfaceElevated, CircleShape)
-                                .border(1.dp, BorderHairline, CircleShape)
-                        ) {
-                            Icon(Icons.Rounded.DeleteOutline, contentDescription = "Delete", tint = TextMuted, modifier = Modifier.size(17.dp))
                         }
                     }
                 }
@@ -352,6 +398,7 @@ fun StatusBadge(status: TaskStatus) {
         TaskStatus.QUEUED -> Triple("QUEUED", SurfaceElevated, TextMuted)
         TaskStatus.RESOLVING -> Triple("RESOLVING", SurfaceElevated, AccentPrimary)
         TaskStatus.DOWNLOADING -> Triple("DOWNLOADING", StatusSuccess.copy(alpha = 0.15f), StatusSuccess)
+        TaskStatus.VALIDATING -> Triple("CHECKING", StatusWarning.copy(alpha = 0.15f), StatusWarning)
         TaskStatus.PAUSED -> Triple("PAUSED", SurfaceElevated, TextSecondary)
         TaskStatus.COMPLETED -> Triple("DONE", StatusSuccess.copy(alpha = 0.15f), StatusSuccess)
         TaskStatus.FAILED -> Triple("FAILED", StatusError.copy(alpha = 0.15f), StatusError)

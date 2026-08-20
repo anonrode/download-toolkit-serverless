@@ -31,6 +31,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.anonrode.downloader.ui.theme.AccentPrimary
 import com.anonrode.downloader.ui.theme.BackgroundDark
+import com.anonrode.downloader.ui.theme.Radius
+import com.anonrode.downloader.ui.theme.Spacing
 import com.anonrode.downloader.ui.theme.SurfaceElevated
 import com.anonrode.downloader.ui.theme.TextPrimary
 import com.anonrode.downloader.ui.theme.TextSecondary
@@ -62,7 +64,7 @@ fun SplashContent() {
             Box(
                 modifier = Modifier
                     .size(64.dp)
-                    .clip(RoundedCornerShape(18.dp))
+                    .clip(RoundedCornerShape(Radius.lg))
                     .background(SurfaceElevated),
                 contentAlignment = Alignment.Center
             ) {
@@ -80,14 +82,14 @@ fun SplashContent() {
                 fontSize = 30.sp,
                 fontWeight = FontWeight.Black,
                 letterSpacing = 3.sp,
-                modifier = Modifier.padding(top = 20.dp)
+                modifier = Modifier.padding(top = Spacing.lg)
             )
             Text(
                 text = "100% Serverless Downloader",
                 color = TextSecondary,
                 fontSize = 12.sp,
                 fontWeight = FontWeight.Medium,
-                modifier = Modifier.padding(top = 6.dp)
+                modifier = Modifier.padding(top = Spacing.xs)
             )
         }
 
@@ -96,7 +98,7 @@ fun SplashContent() {
             trackColor = SurfaceElevated,
             modifier = Modifier
                 .align(Alignment.BottomCenter)
-                .padding(bottom = 64.dp)
+                .padding(bottom = Spacing.xxxl)
                 .height(3.dp)
                 .size(width = 120.dp, height = 3.dp)
         )

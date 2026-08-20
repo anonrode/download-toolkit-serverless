@@ -82,22 +82,22 @@ fun HomeScreen(
         modifier = Modifier
             .fillMaxSize()
             .background(BackgroundDark)
-            .statusBarsPadding()
     ) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
+                .statusBarsPadding()
+                .navigationBarsPadding()
                 .padding(horizontal = Spacing.lg)
         ) {
             // Header Bar
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(vertical = Spacing.md),
-                horizontalArrangement = Arrangement.SpaceBetween,
+                    .padding(top = Spacing.xl, bottom = Spacing.md),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column {
+                Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = "ANONRODE",
                         fontSize = 22.sp,
@@ -105,52 +105,54 @@ fun HomeScreen(
                         color = TextPrimary,
                         letterSpacing = 1.sp
                     )
+                    Spacer(modifier = Modifier.height(Spacing.xxs))
                     Text(
                         text = "100% Serverless • Native Multi-Provider Engine",
                         fontSize = 11.sp,
-                        color = TextMuted
+                        color = TextMuted,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
+
+                Spacer(modifier = Modifier.width(Spacing.lg))
 
                 Row(horizontalArrangement = Arrangement.spacedBy(Spacing.sm)) {
                     IconButton(
                         onClick = onOpenDownloads,
                         modifier = Modifier
-                            .size(40.dp)
+                            .size(48.dp)
+                            .clip(CircleShape)
                             .background(SurfaceCard, CircleShape)
                     ) {
-                        BadgedBox(
-                            badge = {
-                                if (activeTasks.isNotEmpty()) {
-                                    Badge(
-                                        containerColor = AccentPrimary,
-                                        contentColor = BackgroundDark
-                                    ) {
-                                        Text("${activeTasks.size}", fontWeight = FontWeight.Bold)
-                                    }
-                                }
-                            }
+                        Box(
+                            modifier = Modifier.fillMaxSize(),
+                            contentAlignment = Alignment.Center
                         ) {
                             Icon(
                                 imageVector = Icons.Rounded.Download,
                                 contentDescription = "Downloads",
                                 tint = TextPrimary,
-                                modifier = Modifier.size(20.dp)
+                                modifier = Modifier.size(22.dp)
                             )
+                            if (activeTasks.isNotEmpty()) {
+                                ActiveTaskBadge(count = activeTasks.size)
+                            }
                         }
                     }
 
                     IconButton(
                         onClick = onOpenSettings,
                         modifier = Modifier
-                            .size(40.dp)
+                            .size(48.dp)
+                            .clip(CircleShape)
                             .background(SurfaceCard, CircleShape)
                     ) {
                         Icon(
                             imageVector = Icons.Rounded.Settings,
                             contentDescription = "Settings",
                             tint = TextPrimary,
-                            modifier = Modifier.size(20.dp)
+                            modifier = Modifier.size(22.dp)
                         )
                     }
                 }
@@ -164,7 +166,7 @@ fun HomeScreen(
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(52.dp)
+                    .height(56.dp)
                     .clip(CircleShape)
                     .background(SurfaceCard)
                     .border(
@@ -230,13 +232,13 @@ fun HomeScreen(
                     if (uiState.query.isNotBlank()) {
                         IconButton(
                             onClick = { viewModel.onQueryChanged("") },
-                            modifier = Modifier.size(28.dp)
+                            modifier = Modifier.size(48.dp)
                         ) {
                             Icon(
                                 imageVector = Icons.Default.Clear,
                                 contentDescription = "Clear",
                                 tint = TextSecondary,
-                                modifier = Modifier.size(16.dp)
+                                modifier = Modifier.size(18.dp)
                             )
                         }
 
@@ -244,21 +246,28 @@ fun HomeScreen(
 
                         Box(
                             modifier = Modifier
-                                .size(36.dp)
+                                .size(48.dp)
                                 .clip(CircleShape)
-                                .background(AccentPrimary)
                                 .clickable {
                                     keyboardController?.hide()
                                     viewModel.search()
                                 },
                             contentAlignment = Alignment.Center
                         ) {
-                            Icon(
-                                imageVector = Icons.Rounded.ArrowForward,
-                                contentDescription = "Search",
-                                tint = BackgroundDark,
-                                modifier = Modifier.size(18.dp)
-                            )
+                            Box(
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .clip(CircleShape)
+                                    .background(AccentPrimary),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.ArrowForward,
+                                    contentDescription = "Search",
+                                    tint = BackgroundDark,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
                         }
                     }
                 }
@@ -302,7 +311,7 @@ fun HomeScreen(
                 }
             }
 
-            Spacer(modifier = Modifier.height(Spacing.md))
+            Spacer(modifier = Modifier.height(Spacing.lg))
 
             // Filter Chips Carousel
             Row(
@@ -340,7 +349,7 @@ fun HomeScreen(
                 Spacer(modifier = Modifier.width(Spacing.md))
             }
 
-            Spacer(modifier = Modifier.height(Spacing.md))
+            Spacer(modifier = Modifier.height(Spacing.lg))
 
             // Live Search Results
             if (uiState.isSearching && uiState.searchResults.isEmpty()) {
@@ -368,8 +377,10 @@ fun HomeScreen(
                 ) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Icon(Icons.Rounded.Search, contentDescription = null, tint = TextMuted, modifier = Modifier.size(48.dp))
-                        Spacer(modifier = Modifier.height(Spacing.sm))
+                        Spacer(modifier = Modifier.height(Spacing.md))
                         Text("Search dramas, anime, torrents or paste a link", color = TextSecondary, fontSize = 14.sp)
+                        Spacer(modifier = Modifier.height(Spacing.xs))
+                        Text("Narrow the hunt with a site filter above", color = TextMuted, fontSize = 12.sp)
                     }
                 }
             } else {
@@ -396,6 +407,34 @@ fun HomeScreen(
                 onDismiss = { viewModel.closeEpisodeDrawer() }
             )
         }
+
+        // Torrent selective-file picker (engine -> IO thread -> this dialog)
+        TorrentFilePickerHost()
+    }
+}
+
+/** Polls the engine's torrent-file-selection bridge and renders the picker
+ *  dialog while a request is outstanding. Completes the deferred with the
+ *  user's choice (null = whole torrent). */
+@Composable
+private fun TorrentFilePickerHost() {
+    var request by remember { mutableStateOf<TorrentFilePicker.Request?>(null) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            val r = TorrentFilePicker.consume()
+            if (r != null) {
+                request = r
+                val result = runCatching { r.deferred.await() }.getOrNull()
+                request = null
+            }
+            kotlinx.coroutines.delay(250)
+        }
+    }
+    request?.let { req ->
+        TorrentFilePickerDialog(
+            request = req,
+            onDismiss = { selection -> req.deferred.complete(selection) }
+        )
     }
 }
 
@@ -424,10 +463,10 @@ fun ShowCardItem(
                 fontSize = 15.5.sp,
                 fontWeight = FontWeight.SemiBold,
                 lineHeight = 21.sp,
-                maxLines = 3,
+                maxLines = 2,
                 overflow = TextOverflow.Ellipsis
             )
-            Spacer(modifier = Modifier.height(3.dp))
+            Spacer(modifier = Modifier.height(Spacing.xs))
             Text(
                 text = specLine(show),
                 color = TextSecondary,
@@ -436,13 +475,13 @@ fun ShowCardItem(
                 overflow = TextOverflow.Ellipsis
             )
 
-            Spacer(modifier = Modifier.height(9.dp))
+            Spacer(modifier = Modifier.height(Spacing.sm))
             Row(horizontalArrangement = Arrangement.spacedBy(Spacing.xs)) {
                 CardBadge(show.site.uppercase(), accent = true)
                 secondaryBadge(show)?.let { CardBadge(it, accent = false) }
             }
 
-            Spacer(modifier = Modifier.height(10.dp))
+            Spacer(modifier = Modifier.height(Spacing.md))
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -459,11 +498,11 @@ fun ShowCardItem(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Box(
                         modifier = Modifier
-                            .size(7.dp)
+                            .size(8.dp)
                             .clip(CircleShape)
                             .background(StatusSuccess)
                     )
-                    Spacer(modifier = Modifier.width(6.dp))
+                    Spacer(modifier = Modifier.width(Spacing.xs))
                     Text(
                         text = rightMetric(show),
                         color = StatusSuccess,
@@ -526,7 +565,33 @@ private fun CardBadge(text: String, accent: Boolean) {
             text = text,
             color = if (accent) AccentPrimary else TextSecondary,
             fontSize = 10.5.sp,
-            fontWeight = FontWeight.Bold
+            fontWeight = FontWeight.Bold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
+/** Active-task count badge pinned at the top-end of the downloads circle button.
+ *  Inset by the spacing rhythm so the badge stays fully inside the 48dp circle:
+ *  it never extends past the button border and never collides with neighbours. */
+@Composable
+private fun ActiveTaskBadge(count: Int) {
+    Box(
+        modifier = Modifier
+            .align(Alignment.TopEnd)
+            .padding(Spacing.sm)
+            .defaultMinSize(minWidth = 20.dp, minHeight = 20.dp)
+            .clip(CircleShape)
+            .background(AccentPrimary),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = count.toString(),
+            color = BackgroundDark,
+            fontSize = 10.sp,
+            fontWeight = FontWeight.Bold,
+            maxLines = 1
         )
     }
 }
