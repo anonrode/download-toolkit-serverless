@@ -11,6 +11,7 @@ import org.junit.Before
 import org.junit.Test
 import java.io.File
 import java.net.ServerSocket
+import java.net.Socket
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.io.path.createTempDirectory
