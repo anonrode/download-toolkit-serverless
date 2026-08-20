@@ -184,7 +184,7 @@ object KisskhMegaplayResolver : BaseResolver {
     private val HOSTS = listOf(
         "kisskh.megaplay.", "megaplays.se", "embtaku.", "takuembed.",
         "anihdplay.", "gogohd.", "megaplay.", "animesama.", "tamilembed.",
-        "gogoanime.me.uk", "vkspeed.com", "ansembed.net"
+        "gogoanime.me.uk", "vkspeed.com", "ansembed.net", "sibnet.ru"
     )
 
     override fun canResolve(url: String): Boolean {
@@ -260,6 +260,14 @@ object KisskhMegaplayResolver : BaseResolver {
                         if (!fileUrl.isNullOrBlank()) return fileUrl
                     }
                 }
+            }
+
+            // sibnet.ru shell: the source is a RELATIVE path in inline JS --
+            // player.src([{src: "/v/<hash>/<id>.mp4", ...}]) -- which 302s to a
+            // signed CDN URL. Absolute-URL regexes never see it.
+            val sibMatcher = Pattern.compile("""player\.src\(\[\{src:\s*["']([^"']+)["']""").matcher(html)
+            if (sibMatcher.find() && sibMatcher.group(1)?.startsWith("/") == true) {
+                return "https://video.sibnet.ru" + sibMatcher.group(1)
             }
 
             val direct = extractM3u8FromHtml(html)
