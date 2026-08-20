@@ -64,7 +64,7 @@ class Aria2Control(
                 if (pos + blen > data.size) return null
                 val bf = data.copyOfRange(pos, pos + blen); pos += blen
                 fileLength = len
-                pieceLength = plen
+                pieceLength = plen.toLong()
                 bitfield = bf
             }
 
