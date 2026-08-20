@@ -184,7 +184,7 @@ object KisskhMegaplayResolver : BaseResolver {
     private val HOSTS = listOf(
         "kisskh.megaplay.", "megaplays.se", "embtaku.", "takuembed.",
         "anihdplay.", "gogohd.", "megaplay.", "animesama.", "tamilembed.",
-        "gogoanime.me.uk", "vkspeed.com"
+        "gogoanime.me.uk", "vkspeed.com", "ansembed.net"
     )
 
     override fun canResolve(url: String): Boolean {
