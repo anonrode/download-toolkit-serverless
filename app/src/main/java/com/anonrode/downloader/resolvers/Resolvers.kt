@@ -196,9 +196,11 @@ object KisskhMegaplayResolver : BaseResolver {
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
         try {
             // tamilembed serves the real player under HTTP 404 — accept the body
-            // (monolith parity, resolvers.py:693-698).
+            // (monolith parity, resolvers.py:693-698). LIVE (2026-08): tamilembed
+            // now 403s when the fetch carries a referer; it needs referer=null.
             val html = HttpClient.getText(
-                url, referer = url,
+                url,
+                referer = if (url.contains("tamilembed")) null else url,
                 acceptStatus = if (url.contains("tamilembed")) setOf(404) else emptySet()
             ) ?: return null
 
@@ -232,13 +234,26 @@ object KisskhMegaplayResolver : BaseResolver {
             }
 
             // megaplay.buzz getSources API
+            // LIVE (2026-08): the API keys on data-id (the file id), NOT
+            // data-realid / the /stream/ URL id, and 403s without the
+            // X-Requested-With: XMLHttpRequest header.
             if (url.contains("megaplay")) {
+                val dataIdMatcher = Pattern.compile("""data-id=["'](\d+)["']""").matcher(html)
                 val realIdMatcher = Pattern.compile("""data-realid=["'](\d+)["']""").matcher(html)
                 val epIdMatcher = Pattern.compile("""/stream/(?:s-\d+/)?(\d+)""").matcher(url)
-                val streamId = if (realIdMatcher.find()) realIdMatcher.group(1) else if (epIdMatcher.find()) epIdMatcher.group(1) else null
+                val streamId = when {
+                    dataIdMatcher.find() -> dataIdMatcher.group(1)
+                    realIdMatcher.find() -> realIdMatcher.group(1)
+                    epIdMatcher.find() -> epIdMatcher.group(1)
+                    else -> null
+                }
                 if (!streamId.isNullOrBlank()) {
                     val apiUrl = "https://megaplay.buzz/stream/getSources?id=$streamId"
-                    val apiJson = HttpClient.getText(apiUrl, referer = url)
+                    val apiJson = HttpClient.getText(
+                        apiUrl,
+                        referer = url,
+                        headers = mapOf("X-Requested-With" to "XMLHttpRequest")
+                    )
                     if (!apiJson.isNullOrBlank()) {
                         val data = JSONObject(apiJson)
                         val fileUrl = data.optJSONObject("sources")?.optString("file")
@@ -615,18 +630,16 @@ object DownloadwellaResolver : BaseResolver {
 
             val formAction = formEl.attr("abs:action").ifBlank { url }
 
+            // LIVE (2026-08): the server rejects the POST when method_free is
+            // forced to "Free Download" — submit every form input verbatim
+            // (including method_free="" as rendered), exactly like a browser.
             val formBuilder = FormBody.Builder()
             var hasInputs = false
             for (inp in formEl.select("input[name]")) {
-                val name = inp.attr("name")
-                val value = inp.attr("value")
-                if (name != "method_free") {
-                    formBuilder.add(name, value)
-                    hasInputs = true
-                }
+                formBuilder.add(inp.attr("name"), inp.attr("value"))
+                hasInputs = true
             }
             if (!hasInputs) return null
-            formBuilder.add("method_free", "Free Download")
 
             val form = formBuilder.build()
             val req = Request.Builder()
@@ -730,12 +743,24 @@ object LoadedfilesResolver : BaseResolver {
                 return null
             }
 
+            var ptHops = 0
             for (step in 1..8) {
-                val referer = if (step == 1) "https://my9jarocks.bz/" else currUrl!!
+                // Wait-page chain: the second ?pt= hop only redirects to the CDN
+                // when sent WITHOUT a Referer -- any Referer makes the server
+                // rotate tokens forever (monolith parity: resolvers.py
+                // LoadedfilesResolver). Plain redirect chains keep the old
+                // self-referer behavior; the first wait page gets the host root.
+                val referer = when {
+                    ptHops >= 1 && currUrl!!.contains("?pt=") -> null
+                    currUrl!!.contains("?pt=") ->
+                        lastWorkingHost?.let { "https://$it/" } ?: "https://my9jarocks.bz/"
+                    step == 1 -> "https://my9jarocks.bz/"
+                    else -> currUrl
+                }
                 val req = Request.Builder()
                     .url(HttpClient.safeUrl(currUrl!!))
                     .header("User-Agent", HttpClient.DEFAULT_UA)
-                    .header("Referer", referer)
+                    .apply { referer?.let { header("Referer", it) } }
                     .build()
 
                 noRedirectClient.newCall(req).execute().use { res ->
@@ -769,6 +794,7 @@ object LoadedfilesResolver : BaseResolver {
                             currUrl = HttpClient.safeUrl(
                                 lastWorkingHost?.let { rewriteHost(next, it) } ?: next
                             )
+                            ptHops++
                         }
                     }
                 }
@@ -885,11 +911,28 @@ object StreamwishResolver : BaseResolver {
 // 20. VidhideResolver
 // -------------------------------------------------------------
 object VidhideResolver : BaseResolver {
+    // filelions network: frontend domains rotate (vidhidepro.com -> vidhidefast.com,
+    // 2026-08) and every frontend serves the same file-id space under the same
+    // /e/ /f/ /d/ paths. A pasted link on a dead frontend (522 / conn error) is
+    // retried on the live mirrors instead of failing outright.
     private val HOSTS = listOf(
-        "minochinos.com", "vidhide.", "vidhidepro.", "vidhidevip.",
+        "vidhidefast.", "minochinos.com", "vidhide.", "vidhidepro.", "vidhidevip.",
         "filelions.", "vid-guard.", "nining.", "peytonepre.com",
         "techradar.ink", "ryderjet.com"
     )
+    private val MIRROR_HOSTS = listOf(
+        "vidhide.com", "minochinos.com", "vidhidefast.com",
+        "vidhidevip.com", "vidhidepro.com", "filelions.to"
+    )
+    @Volatile private var lastWorkingHost: String? = null
+    private val HOST_PART = Pattern.compile("""(https?://)([^/:]+)""", Pattern.CASE_INSENSITIVE)
+
+    private fun rewriteHost(url: String, host: String): String {
+        val m = HOST_PART.matcher(url)
+        return if (m.find()) {
+            HttpClient.safeUrl(url.substring(0, m.start(2)) + host + url.substring(m.end(2)))
+        } else url
+    }
 
     override fun canResolve(url: String): Boolean {
         val lower = url.lowercase()
@@ -898,15 +941,28 @@ object VidhideResolver : BaseResolver {
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
         try {
-            val html = HttpClient.getText(url, referer = url) ?: return null
-            if (looksLikeDeadPage(html)) return null
-            val m3u8 = extractM3u8FromHtml(html)
-            if (!m3u8.isNullOrBlank()) return m3u8
-
-            val unpacked = JsUnpacker.unpack(html)
-            if (!unpacked.isNullOrBlank()) {
-                val direct = extractM3u8FromHtml(unpacked)
-                if (!direct.isNullOrBlank()) return direct
+            val urlHost = HttpClient.safeHost(url).lowercase()
+            val candidates = LinkedHashSet<String>()
+            lastWorkingHost?.let { candidates.add(it) }
+            candidates.add(urlHost)
+            candidates.addAll(MIRROR_HOSTS)
+            for (host in candidates) {
+                val cand = if (host == urlHost) url else rewriteHost(url, host)
+                val html = HttpClient.getText(cand, referer = cand) ?: continue
+                if (looksLikeDeadPage(html)) continue
+                val m3u8 = extractM3u8FromHtml(html)
+                if (!m3u8.isNullOrBlank()) {
+                    lastWorkingHost = host
+                    return m3u8
+                }
+                val unpacked = JsUnpacker.unpack(html)
+                if (!unpacked.isNullOrBlank()) {
+                    val direct = extractM3u8FromHtml(unpacked)
+                    if (!direct.isNullOrBlank()) {
+                        lastWorkingHost = host
+                        return direct
+                    }
+                }
             }
         } catch (_: Exception) {}
         return null
