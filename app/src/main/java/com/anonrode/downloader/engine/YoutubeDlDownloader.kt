@@ -147,7 +147,9 @@ object YoutubeDlDownloader {
                 addOption("--downloader", "libaria2c.so")
                 val conns = parallelSockets.coerceIn(4, 16)
                 val aria2Args = buildString {
-                    append("aria2c:-x $conns -s $conns -j $conns -k 1M --max-connection-per-server=$conns --split=$conns --min-split-size=1M --continue=true --disk-cache=64M")
+                    // --max-tries/--retry-wait mirror the magnet path: without them
+                    // aria2c hammers a flaky connection 5x with zero wait.
+                    append("aria2c:-x $conns -s $conns -j $conns -k 1M --max-connection-per-server=$conns --split=$conns --min-split-size=1M --continue=true --max-tries=10 --retry-wait=1 --disk-cache=64M")
                     if (origin.isNotBlank()) append(" --header=\"Origin: $origin\"")
                     if (referer.isNotBlank()) append(" --header=\"Referer: $referer\"")
                     if (ua.isNotBlank()) append(" --header=\"User-Agent: $ua\"")
