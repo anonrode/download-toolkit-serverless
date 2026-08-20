@@ -294,6 +294,9 @@ object TurboDownloader {
                             return false
                         } catch (e: Exception) {
                             failureMessage.compareAndSet(null, e.message ?: e.javaClass.simpleName)
+                            // Persist the mid-piece position so a pause after this
+                            // failure resumes from here instead of the piece start.
+                            state.commit(plan, total, force = true)
                         }
                         if (attempt < MAX_ATTEMPTS) delay(backoffMillis(attempt))
                     }
@@ -354,40 +357,49 @@ object TurboDownloader {
         var attemptCount = 0
         try {
             suspend fun attempt(): Boolean {
-                val resumeAt = if (dest.exists()) dest.length() else 0L
-                val req = Request.Builder().url(url).apply {
-                    header("User-Agent", headers["User-Agent"] ?: HttpClient.DEFAULT_UA)
-                    headers.forEach { (k, v) -> if (!k.equals("User-Agent", true)) header(k, v) }
-                    if (resumeAt > 0) header("Range", "bytes=$resumeAt-")
-                }.build()
+                try {
+                    val resumeAt = if (dest.exists()) dest.length() else 0L
+                    val req = Request.Builder().url(url).apply {
+                        header("User-Agent", headers["User-Agent"] ?: HttpClient.DEFAULT_UA)
+                        headers.forEach { (k, v) -> if (!k.equals("User-Agent", true)) header(k, v) }
+                        if (resumeAt > 0) header("Range", "bytes=$resumeAt-")
+                    }.build()
 
-                client.newCall(req).execute().use { res ->
-                    if (!res.isSuccessful) {
-                        failureStatus.compareAndSet(0, res.code)
-                        return false
-                    }
-                    val resuming = res.code == 206
-                    val src = res.body?.source() ?: run {
-                        failureMessage.compareAndSet(null, "Empty response body from server")
-                        return false
-                    }
-                    val startAt = if (resuming) resumeAt else 0L
-                    RandomAccessFile(dest, "rw").use { raf ->
-                        if (raf.length() < startAt) raf.setLength(startAt)
-                        raf.seek(startAt)
-                        val buf = ByteArray(BUFFER)
-                        var written = startAt
-                        while (true) {
-                            if (!coroutineContext.isActive) return false
-                            val n = src.read(buf)
-                            if (n == -1) break
-                            raf.write(buf, 0, n)
-                            written += n
+                    client.newCall(req).execute().use { res ->
+                        if (!res.isSuccessful) {
+                            failureStatus.compareAndSet(0, res.code)
+                            return false
                         }
-                        if (total > 0 && written != total) return false
+                        val resuming = res.code == 206
+                        val src = res.body?.source() ?: run {
+                            failureMessage.compareAndSet(null, "Empty response body from server")
+                            return false
+                        }
+                        val startAt = if (resuming) resumeAt else 0L
+                        RandomAccessFile(dest, "rw").use { raf ->
+                            if (raf.length() < startAt) raf.setLength(startAt)
+                            raf.seek(startAt)
+                            val buf = ByteArray(BUFFER)
+                            var written = startAt
+                            while (true) {
+                                if (!coroutineContext.isActive) return false
+                                val n = src.read(buf)
+                                if (n == -1) break
+                                raf.write(buf, 0, n)
+                                written += n
+                            }
+                            if (total > 0 && written != total) return false
+                        }
                     }
+                    return true
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    // One attempt failing (disconnect, timeout) must not abort the
+                    // retry loop: record the cause and let the next attempt resume.
+                    failureMessage.compareAndSet(null, e.message ?: e.javaClass.simpleName)
+                    return false
                 }
-                return true
             }
 
             while (attemptCount < MAX_ATTEMPTS && !success) {

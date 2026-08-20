@@ -201,7 +201,9 @@ private class SlowHttpServer(
             } else 0
 
             val end = content.size - 1
-            val isRange = range != null && start > 0
+            // A real server answers ANY Range header (including bytes=0-) with
+            // 206; only requests without a Range header get a full 200.
+            val isRange = range != null
 
             if (isRange) {
                 out.write("HTTP/1.1 206 Partial Content\r\nContent-Range: bytes $start-$end/${content.size}\r\nContent-Length: ${end - start + 1}\r\nConnection: close\r\n\r\n".toByteArray())
