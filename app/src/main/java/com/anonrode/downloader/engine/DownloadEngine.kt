@@ -370,9 +370,12 @@ class DownloadEngine(
 
     private fun isKnownLockerHost(url: String): Boolean {
         if (url.isBlank()) return false
-        if (isDirectMediaUrl(url)) return false
-
         val lower = url.lowercase()
+        // Host-based, not extension-based: locker pages carry the media filename
+        // in their path (loadedfiles.net/.../Episode.mkv), so a .mkv/.mp4 suffix
+        // must NOT exempt them from resolution — the host decides whether a URL
+        // is a page to crack or a direct file.
+        val host = lower.substringAfter("://", "").substringBefore('/').substringBefore(':')
         return listOf(
             "downloadwella.com",
             "loadedfiles.",
@@ -393,14 +396,14 @@ class DownloadEngine(
             "mixdrop.",
             "mixdrp.",
             "streamtape.",
-            "pixeldrain.com/u/",
+            "pixeldrain.com",
             "vidbasic.",
             "vidb.top",
             "lightdl.cc",
             "5play.cc",
             "megaplay.",
             "blogger.com"
-        ).any { lower.contains(it) }
+        ).any { host.contains(it) }
     }
 
     private suspend fun resolveStreamUrl(permUrl: String, site: String, defaultQual: String): String? {
@@ -484,7 +487,10 @@ class DownloadEngine(
                 }
 
                 val isHlsStream = isStreamingLink(streamUrl)
-                val isEmbedOrPage = !isMagnet && !isDirectMediaUrl(streamUrl)
+                // A known locker host is never a direct file, even when its page
+                // URL ends in a media extension — route it through yt-dlp rather
+                // than downloading the page as a video.
+                val isEmbedOrPage = !isMagnet && (!isDirectMediaUrl(streamUrl) || isKnownLockerHost(streamUrl))
                 val finalBackend = if (isSocial || isHlsStream || isEmbedOrPage || task.audioOnly) "yt-dlp" else "aria2c"
                 val isExtractor = isSocial || task.audioOnly || isEmbedOrPage
 
@@ -534,10 +540,12 @@ class DownloadEngine(
                         turboFailure = failure
 
                         // Self-healing token refresh: only re-scrape when the CDN rejected the
-                        // link outright (expired/token-gated). Transient failures (timeouts,
-                        // 5xx, 416) skip the 5-15s resolver chain and fall straight to aria2c.
+                        // link outright (expired/token-gated) or the probe proved it serves an
+                        // HTML page (locker page misrouted, expired download_token redirecting
+                        // to an error page). Transient failures (timeouts, 5xx, 416) skip the
+                        // 5-15s resolver chain and fall straight to aria2c.
                         val tokenExpired = failure.httpStatus == 401 || failure.httpStatus == 403 ||
-                            failure.httpStatus == 404 || failure.httpStatus == 410
+                            failure.httpStatus == 404 || failure.httpStatus == 410 || failure.htmlPage
                         if (tokenExpired && coroutineContext.isActive && !isSocial) {
                             android.util.Log.w("AnonDownload", "Direct link rejected (HTTP ${failure.httpStatus}), refreshing stream token...")
                             repository.update(task.id) { it.copy(status = TaskStatus.RESOLVING) }
@@ -733,6 +741,7 @@ class DownloadEngine(
                     val errReason = when {
                         producedFile != null && looksLikeHtml(producedFile) -> "Server returned an HTML page instead of the file"
                         !validation.first -> validation.second
+                        producedFile == null && turboFailure?.htmlPage == true -> "Server returned an HTML page instead of the file — the link expired; retry to refresh it"
                         producedFile == null && turboFailure?.httpStatus != null -> "Download rejected by server (HTTP ${turboFailure.httpStatus}) — retry to refresh the link"
                         producedFile == null -> "Download failed — the server never produced a file"
                         else -> "Output file was too small or corrupted"

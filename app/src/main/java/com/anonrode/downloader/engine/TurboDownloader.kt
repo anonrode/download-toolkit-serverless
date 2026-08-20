@@ -52,7 +52,21 @@ object TurboDownloader {
     /** Outcome of a transfer: either a completed file or a failure with the server status when known. */
     sealed interface TurboResult {
         data class Success(val file: File, val bytes: Long, val segmented: Boolean) : TurboResult
-        data class Failure(val httpStatus: Int?, val message: String) : TurboResult
+
+        /** [htmlPage] is set when the probe proved the URL serves HTML, not a media file. */
+        data class Failure(val httpStatus: Int?, val message: String, val htmlPage: Boolean = false) : TurboResult
+    }
+
+    /** Outcome of the pre-download probe. */
+    internal sealed class ProbeResult {
+        /** The URL answers with a downloadable file. */
+        data class File(val total: Long, val acceptsRanges: Boolean) : ProbeResult()
+
+        /** The URL answers with an HTML page (locker page, expired-token error page). */
+        object HtmlPage : ProbeResult()
+
+        /** The server could not be reached or answered without usable headers. */
+        data class Unreachable(val total: Long) : ProbeResult()
     }
 
     private fun atomicMove(src: File, dest: File): Boolean {
@@ -91,8 +105,24 @@ object TurboDownloader {
         val safe = HttpClient.safeUrl(url)
 
         val probe = probe(safe, headers, client)
-        val total = probe.first
-        val acceptsRanges = probe.second
+        val total: Long
+        val acceptsRanges: Boolean
+        when (probe) {
+            is ProbeResult.File -> {
+                total = probe.total
+                acceptsRanges = probe.acceptsRanges
+            }
+            ProbeResult.HtmlPage -> {
+                // The URL answers with an HTML page (locker page, expired-token
+                // error page): fail before downloading any bytes, and mark it so
+                // the engine can re-resolve instead of blaming the file.
+                return@withContext TurboResult.Failure(null, "Server returned an HTML page instead of a file", htmlPage = true)
+            }
+            is ProbeResult.Unreachable -> {
+                total = probe.total
+                acceptsRanges = false
+            }
+        }
 
         val sockets = socketsFor(safe, configuredSockets)
         val useSegmented = acceptsRanges && total > MIN_SEGMENTED_SIZE && sockets > 1
@@ -137,25 +167,34 @@ object TurboDownloader {
      * 1. Check HEAD. If Content-Length > 0 and Accept-Ranges is explicit, return (len, true).
      * 2. If Accept-Ranges is omitted on HEAD (common on CDNs), test Range: bytes=0-0.
      * 3. If server responds with HTTP 206 Partial Content, return (total, true).
+     * Any step that proves the URL serves an HTML page (Content-Type text/html)
+     * short-circuits to HtmlPage so the caller never downloads a locker page or
+     * expired-token error page as a video file.
      */
-    private fun probe(url: String, headers: Map<String, String>, client: OkHttpClient): Pair<Long, Boolean> {
+    private fun probe(url: String, headers: Map<String, String>, client: OkHttpClient): ProbeResult {
         fun buildReq(head: Boolean) = Request.Builder().url(url).apply {
             header("User-Agent", headers["User-Agent"] ?: HttpClient.DEFAULT_UA)
             headers.forEach { (k, v) -> if (!k.equals("User-Agent", true)) header(k, v) }
             if (head) head() else header("Range", "bytes=0-0")
         }.build()
 
+        fun isHtmlPage(contentType: String?): Boolean {
+            val ct = contentType?.lowercase() ?: return false
+            return ct.startsWith("text/html") || ct.startsWith("application/xhtml")
+        }
+
         var totalLength = -1L
 
         // 1. Try HEAD request
         try {
             client.newCall(buildReq(true)).execute().use { r ->
+                if (isHtmlPage(r.header("Content-Type"))) return ProbeResult.HtmlPage
                 val len = r.header("Content-Length")?.toLongOrNull() ?: -1L
                 val ranges = r.header("Accept-Ranges")?.contains("bytes", true) == true
                 if (r.isSuccessful && len > 0) {
                     totalLength = len
                     if (ranges) {
-                        return Pair(totalLength, true)
+                        return ProbeResult.File(totalLength, true)
                     }
                 }
             }
@@ -164,12 +203,13 @@ object TurboDownloader {
         // 2. If Accept-Ranges was not explicit on HEAD, probe with Range: bytes=0-0
         try {
             client.newCall(buildReq(false)).execute().use { r ->
+                if (isHtmlPage(r.header("Content-Type"))) return ProbeResult.HtmlPage
                 val cr = r.header("Content-Range")
                 val totalFromCr = cr?.substringAfter('/')?.trim()?.toLongOrNull() ?: -1L
                 val is206 = r.code == 206
                 if (is206) {
                     val finalTotal = if (totalFromCr > 0) totalFromCr else totalLength
-                    return Pair(finalTotal, true)
+                    return ProbeResult.File(finalTotal, true)
                 } else if (r.isSuccessful && totalLength <= 0) {
                     val len = r.header("Content-Length")?.toLongOrNull() ?: -1L
                     if (len > 0) totalLength = len
@@ -177,7 +217,7 @@ object TurboDownloader {
             }
         } catch (_: Exception) {}
 
-        return Pair(totalLength, false)
+        return ProbeResult.Unreachable(totalLength)
     }
 
     private suspend fun segmented(

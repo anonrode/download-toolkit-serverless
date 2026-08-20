@@ -120,6 +120,23 @@ class TurboDownloaderTest {
         assertEquals(null, state.contiguousPrefixBytes())
     }
 
+    @Test
+    fun download_rejectsHtmlPageAtProbe() {
+        val html = "<!doctype html><html><body>not a video</body></html>"
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                return MockResponse()
+                    .setHeader("Content-Type", "text/html; charset=UTF-8")
+                    .setBody(html)
+            }
+        }
+        val result = downloadTo("video.mp4")
+        assertTrue("expected Failure, got $result", result is TurboDownloader.TurboResult.Failure)
+        val failure = result as TurboDownloader.TurboResult.Failure
+        assertTrue("htmlPage should be true", failure.htmlPage)
+        assertFalse("no partial file should be created", File(dir, "video.mp4.part").exists())
+    }
+
     private fun downloadTo(destName: String): TurboDownloader.TurboResult = runBlocking {
         TurboDownloader.download(
             url = server.url("/video.mp4").toString(),
