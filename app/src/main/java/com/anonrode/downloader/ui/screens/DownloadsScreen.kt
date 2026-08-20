@@ -57,6 +57,7 @@ fun DownloadsScreen(
             .fillMaxSize()
             .background(BackgroundDark)
             .statusBarsPadding()
+            .navigationBarsPadding()
             .padding(horizontal = Spacing.lg)
     ) {
         // Header
@@ -69,7 +70,7 @@ fun DownloadsScreen(
             IconButton(
                 onClick = onBack,
                 modifier = Modifier
-                    .size(40.dp)
+                    .size(48.dp)
                     .background(SurfaceElevated, CircleShape)
                     .border(1.dp, BorderHairline, CircleShape)
             ) {
@@ -246,31 +247,49 @@ fun DownloadCard(
                     ) {
                         IconButton(
                             onClick = onPlay,
-                            modifier = Modifier
-                                .size(36.dp)
-                                .background(AccentPrimary, CircleShape)
+                            modifier = Modifier.size(48.dp)
                         ) {
-                            Icon(Icons.Rounded.PlayArrow, contentDescription = "Play", tint = BackgroundDark, modifier = Modifier.size(18.dp))
+                            Box(
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .clip(CircleShape)
+                                    .background(AccentPrimary),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(Icons.Rounded.PlayArrow, contentDescription = "Play", tint = BackgroundDark, modifier = Modifier.size(18.dp))
+                            }
                         }
 
                         IconButton(
                             onClick = { shareMedia(context, task.filePath) },
-                            modifier = Modifier
-                                .size(36.dp)
-                                .background(SurfaceElevated, CircleShape)
-                                .border(1.dp, BorderHairline, CircleShape)
+                            modifier = Modifier.size(48.dp)
                         ) {
-                            Icon(Icons.Rounded.Share, contentDescription = "Share", tint = TextSecondary, modifier = Modifier.size(18.dp))
+                            Box(
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .clip(CircleShape)
+                                    .background(SurfaceElevated)
+                                    .border(1.dp, BorderHairline, CircleShape),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(Icons.Rounded.Share, contentDescription = "Share", tint = TextSecondary, modifier = Modifier.size(18.dp))
+                            }
                         }
 
                         IconButton(
                             onClick = onCancel,
-                            modifier = Modifier
-                                .size(36.dp)
-                                .background(SurfaceElevated, CircleShape)
-                                .border(1.dp, BorderHairline, CircleShape)
+                            modifier = Modifier.size(48.dp)
                         ) {
-                            Icon(Icons.Rounded.DeleteOutline, contentDescription = "Delete", tint = TextMuted, modifier = Modifier.size(18.dp))
+                            Box(
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .clip(CircleShape)
+                                    .background(SurfaceElevated)
+                                    .border(1.dp, BorderHairline, CircleShape),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(Icons.Rounded.DeleteOutline, contentDescription = "Delete", tint = TextMuted, modifier = Modifier.size(18.dp))
+                            }
                         }
                     }
                 }

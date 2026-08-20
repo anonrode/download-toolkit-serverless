@@ -251,18 +251,25 @@ fun QuickShareCard(
 
                 Box(
                     modifier = Modifier
-                        .size(32.dp)
+                        .size(48.dp)
                         .clip(CircleShape)
-                        .background(SurfaceCard)
                         .clickable(onClick = onDismiss),
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.Close,
-                        contentDescription = "Close",
-                        tint = TextSecondary,
-                        modifier = Modifier.size(16.dp)
-                    )
+                    Box(
+                        modifier = Modifier
+                            .size(32.dp)
+                            .clip(CircleShape)
+                            .background(SurfaceCard),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "Close",
+                            tint = TextSecondary,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
                 }
             }
 
@@ -460,7 +467,7 @@ private fun FormatSegment(
     Row(
         modifier = Modifier
             .weight(1f)
-            .height(44.dp)
+            .height(48.dp)
             .clip(RoundedCornerShape(Radius.sm))
             .background(if (selected) AccentViolet.copy(alpha = 0.16f) else Color.Transparent)
             .clickable(onClick = onClick),
