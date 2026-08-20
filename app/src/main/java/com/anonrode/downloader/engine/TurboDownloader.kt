@@ -2,11 +2,14 @@ package com.anonrode.downloader.engine
 
 import com.anonrode.downloader.data.net.HttpClient
 import kotlinx.coroutines.*
+import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
+import java.io.IOException
 import java.io.RandomAccessFile
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
@@ -20,11 +23,23 @@ import kotlin.coroutines.coroutineContext
  * 2. Decoupled telemetry ticker (250ms cadence) with EMA speed smoothing.
  * 3. Non-blocking parallel worker streams writing to pre-allocated FileChannels.
  * 4. Throttled sidecar resume state commits.
+ * 5. BitTorrent-style shared piece queue with per-piece retry and exponential
+ *    backoff: a flaky connection costs one piece, not the whole download.
  */
 object TurboDownloader {
 
     private const val BUFFER = 256 * 1024 // 256 KB high-throughput buffer
     private const val MIN_SEGMENTED_SIZE = 8L * 1024 * 1024 // 8 MB
+    private const val MAX_ATTEMPTS = 5 // retries per piece / per single-stream attempt
+    private const val RETRY_CAP = 8L // backoff ceiling, in multiples of the base delay
+
+    /** Test hook: collapses exponential backoff so retry tests run fast. */
+    internal var retryBaseDelayMs: Long = 1000L
+
+    private fun backoffMillis(attempt: Int): Long {
+        val factor = (1L shl (attempt - 1).coerceIn(0, 3)).coerceAtMost(RETRY_CAP)
+        return (factor * retryBaseDelayMs).coerceAtMost(RETRY_CAP * retryBaseDelayMs)
+    }
 
     /**
      * Sockets per download: ensures 4 to 16 concurrent range connections
@@ -69,12 +84,13 @@ object TurboDownloader {
         dest: File,
         headers: Map<String, String> = emptyMap(),
         configuredSockets: Int = 8,
-        onProgress: (Long, Long, Long) -> Unit = { _, _, _ -> }
+        onProgress: (Long, Long, Long) -> Unit = { _, _, _ -> },
+        client: OkHttpClient = HttpClient.downloadClient
     ): TurboResult = withContext(Dispatchers.IO) {
         dest.parentFile?.mkdirs()
         val safe = HttpClient.safeUrl(url)
 
-        val probe = probe(safe, headers)
+        val probe = probe(safe, headers, client)
         val total = probe.first
         val acceptsRanges = probe.second
 
@@ -87,21 +103,21 @@ object TurboDownloader {
         val failureMessage = AtomicReference<String?>(null)
 
         return@withContext if (useSegmented) {
-            val ok = segmented(safe, partFile, headers, total, sockets, state, failureStatus, failureMessage, onProgress)
+            val ok = segmented(safe, partFile, headers, total, sockets, state, failureStatus, failureMessage, onProgress, client)
             if (ok) {
                 state.delete()
                 atomicMove(partFile, dest)
                 TurboResult.Success(dest, dest.length(), true)
             } else if (!partFile.exists() || partFile.length() == 0L) {
                 state.delete()
-                if (single(safe, partFile, headers, total, failureStatus, failureMessage, onProgress)) {
+                if (single(safe, partFile, headers, total, failureStatus, failureMessage, onProgress, client)) {
                     atomicMove(partFile, dest)
                     TurboResult.Success(dest, dest.length(), false)
                 } else failure(failureStatus, failureMessage)
             } else failure(failureStatus, failureMessage)
         } else {
             state.delete()
-            if (single(safe, partFile, headers, total, failureStatus, failureMessage, onProgress)) {
+            if (single(safe, partFile, headers, total, failureStatus, failureMessage, onProgress, client)) {
                 state.delete()
                 atomicMove(partFile, dest)
                 TurboResult.Success(dest, dest.length(), false)
@@ -122,7 +138,7 @@ object TurboDownloader {
      * 2. If Accept-Ranges is omitted on HEAD (common on CDNs), test Range: bytes=0-0.
      * 3. If server responds with HTTP 206 Partial Content, return (total, true).
      */
-    private fun probe(url: String, headers: Map<String, String>): Pair<Long, Boolean> {
+    private fun probe(url: String, headers: Map<String, String>, client: OkHttpClient): Pair<Long, Boolean> {
         fun buildReq(head: Boolean) = Request.Builder().url(url).apply {
             header("User-Agent", headers["User-Agent"] ?: HttpClient.DEFAULT_UA)
             headers.forEach { (k, v) -> if (!k.equals("User-Agent", true)) header(k, v) }
@@ -133,7 +149,7 @@ object TurboDownloader {
 
         // 1. Try HEAD request
         try {
-            HttpClient.downloadClient.newCall(buildReq(true)).execute().use { r ->
+            client.newCall(buildReq(true)).execute().use { r ->
                 val len = r.header("Content-Length")?.toLongOrNull() ?: -1L
                 val ranges = r.header("Accept-Ranges")?.contains("bytes", true) == true
                 if (r.isSuccessful && len > 0) {
@@ -147,7 +163,7 @@ object TurboDownloader {
 
         // 2. If Accept-Ranges was not explicit on HEAD, probe with Range: bytes=0-0
         try {
-            HttpClient.downloadClient.newCall(buildReq(false)).execute().use { r ->
+            client.newCall(buildReq(false)).execute().use { r ->
                 val cr = r.header("Content-Range")
                 val totalFromCr = cr?.substringAfter('/')?.trim()?.toLongOrNull() ?: -1L
                 val is206 = r.code == 206
@@ -173,12 +189,14 @@ object TurboDownloader {
         state: TurboState,
         failureStatus: AtomicInteger,
         failureMessage: AtomicReference<String?>,
-        onProgress: (Long, Long, Long) -> Unit
+        onProgress: (Long, Long, Long) -> Unit,
+        client: OkHttpClient
     ): Boolean = coroutineScope {
         val plan = state.loadOrCreate(total, sockets)
         val initialBytes = plan.sumOf { (it.current - it.start).coerceAtLeast(0L) }
         val done = AtomicLong(initialBytes)
-        val failed = java.util.concurrent.atomic.AtomicBoolean(false)
+        val failed = AtomicBoolean(false)
+        val nextPiece = AtomicInteger(0)
 
         RandomAccessFile(dest, "rw").use { raf ->
             if (raf.length() != total) raf.setLength(total)
@@ -200,28 +218,39 @@ object TurboDownloader {
         try {
             RandomAccessFile(dest, "rw").use { raf ->
                 val channel: FileChannel = raf.channel
-                coroutineScope {
-                    for (chunk in plan) {
-                        if (chunk.current > chunk.end) continue // already complete
-                        launch {
-                            try {
-                                val req = Request.Builder().url(url).apply {
-                                    header("User-Agent", headers["User-Agent"] ?: HttpClient.DEFAULT_UA)
-                                    headers.forEach { (k, v) -> if (!k.equals("User-Agent", true)) header(k, v) }
-                                    header("Range", "bytes=${chunk.current}-${chunk.end}")
-                                }.build()
 
-                                HttpClient.downloadClient.newCall(req).execute().use { res ->
-                                    if (res.code != 206) {
-                                        failureStatus.compareAndSet(0, res.code)
-                                        failed.set(true)
-                                        return@use
-                                    }
-                                    val src = res.body?.source() ?: run {
-                                        failureMessage.compareAndSet(null, "Empty response body from server")
-                                        failed.set(true)
-                                        return@use
-                                    }
+                // Shared piece queue (BitTorrent style): workers pull the next unfinished
+                // piece, so a slow connection never holds up the download tail.
+                fun claimNext(): Int? {
+                    while (true) {
+                        val idx = nextPiece.getAndIncrement()
+                        if (idx >= plan.size) return null
+                        if (plan[idx].current <= plan[idx].end) return idx
+                    }
+                }
+
+                /**
+                 * Download one piece, retrying with exponential backoff. Each retry
+                 * re-requests from the piece's committed offset, so a mid-body drop
+                 * resumes the piece instead of restarting it. The global failure flag
+                 * is only set once a piece exhausts all attempts, so a single hiccup
+                 * never aborts the siblings.
+                 */
+                suspend fun downloadPiece(chunk: TurboChunk): Boolean {
+                    var attempt = 0
+                    while (attempt < MAX_ATTEMPTS) {
+                        attempt++
+                        if (failed.get() || !coroutineContext.isActive) return false
+                        var completed = false
+                        try {
+                            val req = Request.Builder().url(url).apply {
+                                header("User-Agent", headers["User-Agent"] ?: HttpClient.DEFAULT_UA)
+                                headers.forEach { (k, v) -> if (!k.equals("User-Agent", true)) header(k, v) }
+                                header("Range", "bytes=${chunk.current}-${chunk.end}")
+                            }.build()
+                            client.newCall(req).execute().use { res ->
+                                if (res.code == 206) {
+                                    val src = res.body?.source() ?: throw IOException("Empty response body from server")
                                     val buf = ByteArray(BUFFER)
                                     var pos = chunk.current
                                     var bytesSinceLastCommit = 0L
@@ -233,12 +262,11 @@ object TurboDownloader {
                                         val want = minOf(buf.size.toLong(), chunk.end - pos + 1).toInt()
                                         val n = src.read(buf, 0, want)
                                         if (n == -1) break
-                                        
-                                        // Synchronized block on channel write
+
                                         synchronized(channel) {
                                             channel.write(ByteBuffer.wrap(buf, 0, n), pos)
                                         }
-                                        
+
                                         pos += n
                                         chunk.current = pos
                                         done.addAndGet(n.toLong())
@@ -250,12 +278,39 @@ object TurboDownloader {
                                         }
                                     }
                                     state.commit(plan, total, force = true)
+                                    completed = pos > chunk.end
+                                } else {
+                                    failureStatus.compareAndSet(0, res.code)
+                                }
+                            }
+                            if (completed) return true
+                            if (failed.get() || !coroutineContext.isActive) return false
+                            failureMessage.compareAndSet(
+                                null,
+                                "Piece ${chunk.start}-${chunk.end} incomplete (attempt $attempt of $MAX_ATTEMPTS)"
+                            )
+                        } catch (_: CancellationException) {
+                            state.commit(plan, total, force = true)
+                            return false
+                        } catch (e: Exception) {
+                            failureMessage.compareAndSet(null, e.message ?: e.javaClass.simpleName)
+                        }
+                        if (attempt < MAX_ATTEMPTS) delay(backoffMillis(attempt))
+                    }
+                    failed.set(true)
+                    return false
+                }
+
+                coroutineScope {
+                    repeat(minOf(sockets, plan.size)) {
+                        launch {
+                            try {
+                                while (isActive && !failed.get()) {
+                                    val idx = claimNext() ?: break
+                                    if (!downloadPiece(plan[idx])) break
                                 }
                             } catch (_: CancellationException) {
                                 state.commit(plan, total, force = true)
-                            } catch (e: Exception) {
-                                failureMessage.compareAndSet(null, e.message ?: e.javaClass.simpleName)
-                                failed.set(true)
                             }
                         }
                     }
@@ -279,66 +334,79 @@ object TurboDownloader {
         total: Long,
         failureStatus: AtomicInteger,
         failureMessage: AtomicReference<String?>,
-        onProgress: (Long, Long, Long) -> Unit
+        onProgress: (Long, Long, Long) -> Unit,
+        client: OkHttpClient
     ): Boolean = coroutineScope {
-        val existing = if (dest.exists()) dest.length() else 0L
-        val req = Request.Builder().url(url).apply {
-            header("User-Agent", headers["User-Agent"] ?: HttpClient.DEFAULT_UA)
-            headers.forEach { (k, v) -> if (!k.equals("User-Agent", true)) header(k, v) }
-            if (existing > 0) header("Range", "bytes=$existing-")
-        }.build()
-
-        val done = AtomicLong(existing)
-        val speed = SpeedMeter(existing)
-        onProgress(existing, if (total > 0) total else 0L, 0L)
+        val speed = SpeedMeter(0L)
+        onProgress(0L, if (total > 0) total else 0L, 0L)
 
         // Decoupled Telemetry Dispatcher: Ticks every 250ms
         val telemetryTicker = launch(Dispatchers.Default) {
             while (isActive) {
                 delay(250)
-                val currentDone = done.get()
+                val currentDone = if (dest.exists()) dest.length() else 0L
                 val currentSpeed = speed.sample(currentDone)
                 onProgress(currentDone, if (total > 0) total else 0L, currentSpeed)
             }
         }
 
+        var success = false
+        var attemptCount = 0
         try {
-            HttpClient.downloadClient.newCall(req).execute().use { res ->
-                if (!res.isSuccessful) {
-                    failureStatus.compareAndSet(0, res.code)
-                    return@coroutineScope false
-                }
-                val resuming = res.code == 206
-                val src = res.body?.source() ?: run {
-                    failureMessage.compareAndSet(null, "Empty response body from server")
-                    return@coroutineScope false
-                }
-                val startAt = if (resuming) existing else 0L
-                RandomAccessFile(dest, "rw").use { raf ->
-                    raf.seek(startAt)
-                    val buf = ByteArray(BUFFER)
-                    var written = startAt
-                    while (true) {
-                        if (!coroutineContext.isActive) return@coroutineScope false
-                        val n = src.read(buf)
-                        if (n == -1) break
-                        raf.write(buf, 0, n)
-                        written += n
-                        done.set(written)
+            suspend fun attempt(): Boolean {
+                val resumeAt = if (dest.exists()) dest.length() else 0L
+                val req = Request.Builder().url(url).apply {
+                    header("User-Agent", headers["User-Agent"] ?: HttpClient.DEFAULT_UA)
+                    headers.forEach { (k, v) -> if (!k.equals("User-Agent", true)) header(k, v) }
+                    if (resumeAt > 0) header("Range", "bytes=$resumeAt-")
+                }.build()
+
+                client.newCall(req).execute().use { res ->
+                    if (!res.isSuccessful) {
+                        failureStatus.compareAndSet(0, res.code)
+                        return false
                     }
-                    if (total > 0 && written != total) return@coroutineScope false
+                    val resuming = res.code == 206
+                    val src = res.body?.source() ?: run {
+                        failureMessage.compareAndSet(null, "Empty response body from server")
+                        return false
+                    }
+                    val startAt = if (resuming) resumeAt else 0L
+                    RandomAccessFile(dest, "rw").use { raf ->
+                        if (raf.length() < startAt) raf.setLength(startAt)
+                        raf.seek(startAt)
+                        val buf = ByteArray(BUFFER)
+                        var written = startAt
+                        while (true) {
+                            if (!coroutineContext.isActive) return false
+                            val n = src.read(buf)
+                            if (n == -1) break
+                            raf.write(buf, 0, n)
+                            written += n
+                        }
+                        if (total > 0 && written != total) return false
+                    }
+                }
+                return true
+            }
+
+            while (attemptCount < MAX_ATTEMPTS && !success) {
+                attemptCount++
+                if (attempt()) {
+                    success = true
+                } else if (attemptCount < MAX_ATTEMPTS) {
+                    delay(backoffMillis(attemptCount))
                 }
             }
         } catch (_: CancellationException) {
-            return@coroutineScope false
+            // A paused job never surfaces as a failure.
         } catch (e: Exception) {
             failureMessage.compareAndSet(null, e.message ?: e.javaClass.simpleName)
-            return@coroutineScope false
         } finally {
             telemetryTicker.cancel()
-            onProgress(done.get(), if (total > 0) total else 0L, speed.getSpeed())
+            onProgress(if (dest.exists()) dest.length() else 0L, if (total > 0) total else 0L, speed.getSpeed())
         }
-        return@coroutineScope true
+        return@coroutineScope success
     }
 }
 
