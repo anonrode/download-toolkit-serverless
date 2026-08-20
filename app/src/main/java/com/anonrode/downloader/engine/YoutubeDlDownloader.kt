@@ -14,6 +14,10 @@ object YoutubeDlDownloader {
     // control file, so each retry continues instead of restarting.
     private const val MAGNET_MAX_ATTEMPTS = 3
 
+    // Task-level retries for yt-dlp downloads: .part (native) and .aria2
+    // (external aria2c) keep progress across runs, so retries continue.
+    private const val YTDLP_MAX_ATTEMPTS = 3
+
     private val TIER1_TRACKERS = listOf(
         "udp://tracker.opentrackr.org:1337/announce",
         "udp://open.stealth.si:80/announce",
@@ -185,50 +189,85 @@ object YoutubeDlDownloader {
         val before = targetDir.listFiles()?.map { it.absolutePath }?.toSet() ?: emptySet()
         val stem = preferredFilename.substringBeforeLast('.')
 
-        var lastDl = 0L
-        var lastTot = 0L
+        val errors = StringBuilder()
+        var produced: File? = null
+        var attempts = 0
 
-        YoutubeDL.getInstance().execute(request, taskId) { progress, etaInSeconds, line ->
-            if (progress >= 0f) {
-                var dlBytes = lastDl
-                var totBytes = lastTot
-                var spdBps = 0.0
-                val eta = if (etaInSeconds > 0) etaInSeconds else 0L
+        fun attemptOnce(): File? {
+            var lastDl = 0L
+            var lastTot = 0L
 
-                if (!line.isNullOrBlank()) {
-                    // Check aria2c format: [#123456 45MiB/65MiB(69%) CN:4 DL:3.8MiB ETA:5s]
-                    val ariaMatch = Regex("""\s*([\d.]+[KMGT]?i?B)/([\d.]+[KMGT]?i?B).*?DL:\s*([\d.]+[KMGT]?i?B(?:/s)?)""", RegexOption.IGNORE_CASE).find(line)
-                    if (ariaMatch != null) {
-                        dlBytes = parseByteString(ariaMatch.groupValues[1])
-                        totBytes = parseByteString(ariaMatch.groupValues[2])
-                        spdBps = parseSpeedString(ariaMatch.groupValues[3])
-                    } else {
-                        // Check yt-dlp format: [download]  45.2% of ~65.00MiB at 4.20MiB/s ETA 00:08
-                        val ytdlMatch = Regex("""([\d.]+)%\s+of\s+~?([\d.]+[KMGT]?i?B).*?at\s+([\d.]+[KMGT]?i?B/s)""", RegexOption.IGNORE_CASE).find(line)
-                        if (ytdlMatch != null) {
-                            val pct = ytdlMatch.groupValues[1].toDoubleOrNull() ?: progress.toDouble()
-                            totBytes = parseByteString(ytdlMatch.groupValues[2])
-                            dlBytes = if (totBytes > 0) (totBytes * (pct / 100.0)).toLong() else 0L
-                            spdBps = parseSpeedString(ytdlMatch.groupValues[3])
+            try {
+                YoutubeDL.getInstance().execute(request, taskId) { progress, etaInSeconds, line ->
+                    if (progress >= 0f) {
+                        var dlBytes = lastDl
+                        var totBytes = lastTot
+                        var spdBps = 0.0
+                        val eta = if (etaInSeconds > 0) etaInSeconds else 0L
+
+                        if (!line.isNullOrBlank()) {
+                            // Check aria2c format: [#123456 45MiB/65MiB(69%) CN:4 DL:3.8MiB ETA:5s]
+                            val ariaMatch = Regex("""\s*([\d.]+[KMGT]?i?B)/([\d.]+[KMGT]?i?B).*?DL:\s*([\d.]+[KMGT]?i?B(?:/s)?)""", RegexOption.IGNORE_CASE).find(line)
+                            if (ariaMatch != null) {
+                                dlBytes = parseByteString(ariaMatch.groupValues[1])
+                                totBytes = parseByteString(ariaMatch.groupValues[2])
+                                spdBps = parseSpeedString(ariaMatch.groupValues[3])
+                            } else {
+                                // Check yt-dlp format: [download]  45.2% of ~65.00MiB at 4.20MiB/s ETA 00:08
+                                val ytdlMatch = Regex("""([\d.]+)%\s+of\s+~?([\d.]+[KMGT]?i?B).*?at\s+([\d.]+[KMGT]?i?B/s)""", RegexOption.IGNORE_CASE).find(line)
+                                if (ytdlMatch != null) {
+                                    val pct = ytdlMatch.groupValues[1].toDoubleOrNull() ?: progress.toDouble()
+                                    totBytes = parseByteString(ytdlMatch.groupValues[2])
+                                    dlBytes = if (totBytes > 0) (totBytes * (pct / 100.0)).toLong() else 0L
+                                    spdBps = parseSpeedString(ytdlMatch.groupValues[3])
+                                }
+                            }
                         }
+
+                        lastDl = dlBytes
+                        lastTot = totBytes
+                        onProgress(dlBytes, totBytes, spdBps, eta)
                     }
                 }
-
-                lastDl = dlBytes
-                lastTot = totBytes
-                onProgress(dlBytes, totBytes, spdBps, eta)
+            } catch (e: Exception) {
+                errors.append("run ").append(attempts).append(": ").append(e.message ?: e.javaClass.simpleName).append('\n')
+                return null
             }
+
+            fun isFinal(f: File) = f.length() > 0 &&
+                !f.name.endsWith(".aria2") && !f.name.endsWith(".part") && !f.name.endsWith(".ytdl")
+
+            val candidates = targetDir.listFiles { f -> isFinal(f) }?.toList() ?: emptyList()
+
+            val fresh = candidates.filter { it.absolutePath !in before }
+            return fresh.firstOrNull { it.nameWithoutExtension == stem || it.name.startsWith("$stem.") }
+                ?: fresh.maxByOrNull { it.lastModified() }
+                ?: candidates.firstOrNull { it.nameWithoutExtension == stem || it.name.startsWith("$stem.") }
         }
 
-        fun isFinal(f: File) = f.length() > 0 &&
-            !f.name.endsWith(".aria2") && !f.name.endsWith(".part") && !f.name.endsWith(".ytdl")
-
-        val candidates = targetDir.listFiles { f -> isFinal(f) }?.toList() ?: emptyList()
-
-        val fresh = candidates.filter { it.absolutePath !in before }
-        return fresh.firstOrNull { it.nameWithoutExtension == stem || it.name.startsWith("$stem.") }
-            ?: fresh.maxByOrNull { it.lastModified() }
-            ?: candidates.firstOrNull { it.nameWithoutExtension == stem || it.name.startsWith("$stem.") }
+        // Same-engine retry with resume: yt-dlp's .part (native) and aria2c's
+        // .aria2 control file (external downloader) keep progress across runs,
+        // so a retry continues instead of restarting. Never relaunch after the
+        // job was paused or cancelled.
+        while (attempts < YTDLP_MAX_ATTEMPTS && produced == null) {
+            attempts++
+            if (!coroutineContext.isActive) throw CancellationException("Task was cancelled before yt-dlp retry")
+            produced = attemptOnce()
+            if (produced == null && attempts < YTDLP_MAX_ATTEMPTS) {
+                try {
+                    Thread.sleep(2_000L * attempts)
+                } catch (_: InterruptedException) {
+                    throw InterruptedException("Task was cancelled during yt-dlp retry wait")
+                }
+                if (Thread.currentThread().isInterrupted) {
+                    throw InterruptedException("Task was cancelled before yt-dlp retry")
+                }
+            }
+        }
+        if (produced == null && errors.isNotBlank()) {
+            throw Exception("yt-dlp failed after $attempts attempt(s): ${errors.toString().trim()}")
+        }
+        return produced
     }
 
     private val activeNativeProcesses = java.util.concurrent.ConcurrentHashMap<String, Process>()
