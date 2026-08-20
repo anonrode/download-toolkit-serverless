@@ -41,6 +41,20 @@ class DownloadEngine(
     var showPostersInResults: Boolean = true
     var storageGuardGb: Double = 1.0
 
+    // No byte movement (parsed progress or filesystem bytes) for this long while
+    // DOWNLOADING means the backend is hung; the watchdog kills it so the retry
+    // wrapper can relaunch, and the task eventually FAILED instead of hanging.
+    private val STALL_TIMEOUT_MS = 60_000L
+
+    /**
+     * Set by the UI: called when a torrent's swarm exposes more than one safe
+     * file (season packs). Receives the shield-checked file list and must
+     * return the selected 1-based aria2c indexes, or null to download the
+     * whole torrent. Runs on the engine's IO dispatcher — the UI should
+     * bridge it to the main thread (e.g. a Compose dialog).
+     */
+    var onTorrentFileSelection: (suspend (List<TorrentSecurityShield.TorrentFileEntry>) -> List<Int>?)? = null
+
     val tasks: StateFlow<List<DownloadTask>> = repository.tasks
 
     init {
@@ -227,6 +241,28 @@ class DownloadEngine(
             head.startsWith("<!doctype html") || head.startsWith("<html") || head.startsWith("<head") || head.startsWith("<!--")
         } catch (_: Exception) {
             false
+        }
+    }
+
+    /**
+     * Actual bytes this task has written to disk: the final file, its .part /
+     * .ytdl partials, and yt-dlp's concurrent fragment files. The UI progress
+     * watchdog uses this as the source of truth when backend output parsing
+     * reports nothing, and it is what stall detection compares against.
+     */
+    private fun computeDiskBytes(task: DownloadTask): Long {
+        return try {
+            val dir = File(task.filePath).parentFile ?: return 0L
+            val files = dir.listFiles() ?: return 0L
+            val base = File(task.filePath).name
+            files.sumOf { f ->
+                if (!f.isFile) 0L
+                else if (f.name.startsWith(base) && !f.name.endsWith(".turbo")) f.length()
+                else if (f.name.contains(".part") || f.name.endsWith(".ytdl")) f.length()
+                else 0L
+            }
+        } catch (_: Exception) {
+            0L
         }
     }
 
@@ -502,6 +538,52 @@ class DownloadEngine(
                 repository.update(task.id) { it.copy(status = TaskStatus.DOWNLOADING, directUrl = streamUrl) }
                 updateServiceState(force = true)
 
+                // Progress watchdog: keeps the UI honest with filesystem truth and
+                // kills a stalled backend so a hung download cannot stay DOWNLOADING
+                // forever with 0.0 MB/s. Runs until the job is paused/cancelled or
+                // the task leaves DOWNLOADING.
+                launch {
+                    var lastDisk = 0L
+                    var lastParsed = 0L
+                    var lastActivity = System.currentTimeMillis()
+                    while (isActive) {
+                        delay(2000)
+                        if (!isActive) break
+                        val t = repository.find(task.id) ?: break
+                        if (t.status != TaskStatus.DOWNLOADING) continue
+                        val now = System.currentTimeMillis()
+                        val disk = computeDiskBytes(t)
+                        val parsed = t.downloadedBytes
+                        val diskDelta = disk - lastDisk
+                        val diskGrew = disk > lastDisk
+                        val parsedGrew = parsed > lastParsed
+                        if (diskGrew) lastDisk = disk
+                        if (parsedGrew) lastParsed = parsed
+                        if (diskGrew || parsedGrew) lastActivity = now
+                        // Feed the UI from the filesystem when the backend reports
+                        // nothing (fragment downloads, hung output parsing).
+                        if (disk > t.downloadedBytes) {
+                            val speed = if (t.speedBytesPerSec > 0.0) t.speedBytesPerSec
+                            else diskDelta.coerceAtLeast(0L) * 1000.0 / 2000.0
+                            repository.updateProgress(
+                                taskId = task.id,
+                                downloaded = disk,
+                                total = t.totalBytes,
+                                speed = speed,
+                                eta = 0L
+                            )
+                        }
+                        // A task with no byte movement (parsed or on disk) for a full
+                        // minute is stalled: kill the backend so the retry wrapper
+                        // relaunches it, and eventually FAILED instead of hanging.
+                        if (now - lastActivity > STALL_TIMEOUT_MS) {
+                            android.util.Log.w("AnonDownload", "No download progress for ${t.episodeTitle}, killing backend")
+                            YoutubeDlDownloader.killProcess(task.id)
+                            lastActivity = now
+                        }
+                    }
+                }
+
                 val targetFolder = getDownloadDirectory(task.showTitle, createDirs = true)
                 val refererToPass = getRefererForUrl(streamUrl)
 
@@ -671,14 +753,14 @@ class DownloadEngine(
                         } catch (_: Throwable) {}
                     }
                 } else {
-                    producedFile = YoutubeDlDownloader.download(
+                    suspend fun runYtdlp(url: String): File? = YoutubeDlDownloader.download(
                         context = context,
                         taskId = task.id,
-                        sourceUrl = streamUrl,
+                        sourceUrl = url,
                         targetDir = targetFolder,
                         preferredFilename = File(task.filePath).name,
                         backend = finalBackend,
-                        referer = refererToPass,
+                        referer = getRefererForUrl(url),
                         ua = HttpClient.DEFAULT_UA,
                         parallelSockets = effectiveSockets.coerceIn(4, 16),
                         quality = defaultQuality,
@@ -693,8 +775,33 @@ class DownloadEngine(
                                 eta = eta
                             )
                             updateServiceState(force = false)
-                        }
+                        },
+                        onTorrentFiles = onTorrentFileSelection
                     )
+
+                    producedFile = runYtdlp(streamUrl)
+                    // HLS/embed tokenized URLs (master.m3u8?token=...) expire
+                    // mid-flight: on failure, re-resolve for a fresh URL and try
+                    // once more, mirroring the token refresh on the direct path.
+                    if (producedFile == null && coroutineContext.isActive) {
+                        val freshUrl = resolveStreamUrl(permUrl, task.site, defaultQuality)
+                        if (!freshUrl.isNullOrBlank() && freshUrl != streamUrl) {
+                            android.util.Log.w("AnonDownload", "yt-dlp failed, re-resolving for a fresh URL")
+                            streamUrl = freshUrl
+                            producedFile = runYtdlp(freshUrl)
+                        }
+                    }
+                }
+
+                // A paused or cancelled job must never flip to a final state: the
+                // download may have finished right as pause landed. The exception
+                // propagates as CancellationException, which the catch below treats
+                // as silent, leaving the PAUSED status intact.
+                coroutineContext.ensureActive()
+
+                if (producedFile != null && producedFile.exists()) {
+                    repository.update(task.id) { it.copy(status = TaskStatus.VALIDATING) }
+                    updateServiceState(force = true)
                 }
 
                 val validation = if (producedFile != null && producedFile.exists()) {

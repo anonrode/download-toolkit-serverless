@@ -1,10 +1,12 @@
 package com.anonrode.downloader.engine
 
 import android.content.Context
+import com.anonrode.downloader.security.TorrentSecurityShield
 import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.youtubedl_android.YoutubeDLRequest
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.coroutines.coroutineContext
 import java.io.File
 
@@ -18,17 +20,18 @@ object YoutubeDlDownloader {
     // (external aria2c) keep progress across runs, so retries continue.
     private const val YTDLP_MAX_ATTEMPTS = 3
 
+    // Trackers probed live (2026-08): the 3 dropped entries below were dead
+    // (no reply / DNS fail); explodie.org and anirena.com verified alive.
+    // anirena is an anime tracker -- relevant for this app's content.
     private val TIER1_TRACKERS = listOf(
         "udp://tracker.opentrackr.org:1337/announce",
         "udp://open.stealth.si:80/announce",
-        "udp://tracker.torrent.eu.org:451/announce",
         "udp://tracker.bittor.pw:1337/announce",
-        "udp://public.popcorn-tracker.org:6969/announce",
         "udp://tracker.dler.org:6969/announce",
         "udp://exodus.desync.com:6969/announce",
         "udp://open.demonii.com:1337/announce",
-        "http://tracker.openbittorrent.com:80/announce",
-        "udp://tracker.openbittorrent.com:6969/announce"
+        "udp://explodie.org:6969/announce",
+        "http://tracker.anirena.com:80/announce"
     ).joinToString(",")
 
     private fun parseByteString(str: String): Long {
@@ -70,7 +73,8 @@ object YoutubeDlDownloader {
         quality: String = "720p",
         isExtractorTask: Boolean = false,
         audioOnly: Boolean = false,
-        onProgress: (downloaded: Long, total: Long, speed: Double, eta: Long) -> Unit
+        onProgress: (downloaded: Long, total: Long, speed: Double, eta: Long) -> Unit,
+        onTorrentFiles: (suspend (List<TorrentSecurityShield.TorrentFileEntry>) -> List<Int>?)? = null
     ): File? {
         if (!targetDir.exists()) targetDir.mkdirs()
 
@@ -85,10 +89,30 @@ object YoutubeDlDownloader {
         }
 
         if (isMagnet) {
+            // Selective-file pass: probe the swarm for its file list; when more
+            // than one safe file exists, ask the UI which to download. A single
+            // safe file is auto-selected (no picker). Null/empty selection or a
+            // failed probe falls back to the full download.
+            var selectIndexes: List<Int>? = null
+            if (onTorrentFiles != null) {
+                val files = listTorrentFiles(context, sourceUrl, File(preferredFilename).nameWithoutExtension)
+                if (files != null) {
+                    val safe = files.filter { it.isSafe }
+                    when {
+                        safe.size > 1 -> selectIndexes = onTorrentFiles(files)
+                        safe.size == 1 -> selectIndexes = listOf(safe.first().index)
+                    }
+                    if (safe.size != files.size) {
+                        android.util.Log.w("AnonDownload",
+                            "listTorrentFiles: ${files.size - safe.size} of ${files.size} entries blocked by shield")
+                    }
+                }
+            }
             // isActiveCheck keeps the task-level retry loop from relaunching
             // aria2c after the user paused or cancelled the job.
             return downloadMagnetAria2c(
-                context, taskId, sourceUrl, targetDir, preferredFilename, parallelSockets, onProgress
+                context, taskId, sourceUrl, targetDir, preferredFilename, parallelSockets, onProgress,
+                selectIndexes = selectIndexes
             ) { coroutineContext.isActive }
         }
 
@@ -115,6 +139,7 @@ object YoutubeDlDownloader {
                 addOption("--concurrent-fragments", "$frags")
                 addOption("--buffer-size", "1M")
                 addOption("--http-chunk-size", "10M")
+                addOption("--socket-timeout", "15")
                 addOption("--retries", "10")
                 addOption("--fragment-retries", "10")
                 addOption("--retry-sleep", "10")
@@ -135,6 +160,7 @@ object YoutubeDlDownloader {
                 addOption("--concurrent-fragments", "$frags")
                 addOption("--buffer-size", "1M")
                 addOption("--http-chunk-size", "10M")
+                addOption("--socket-timeout", "15")
                 addOption("--retries", "10")
                 addOption("--fragment-retries", "10")
                 addOption("--retry-sleep", "10")
@@ -288,6 +314,134 @@ object YoutubeDlDownloader {
         }
     }
 
+    /**
+     * Fetch a magnet's file list from the swarm WITHOUT downloading any data.
+     *
+     * Two phases (--show-files only reads real .torrent files, not magnets):
+     *   1. `--bt-metadata-only --bt-save-metadata` fetches metadata and writes
+     *      `<hex-infohash>.torrent` into a cache dir (no data downloaded).
+     *   2. `--show-files <torrent>` prints the table; each entry is run through
+     *      [TorrentSecurityShield.checkTorrentFileEntry] (Layers 2/6 + traversal),
+     *      so blocked/unsafe files are flagged and never selectable.
+     *
+     * Returns null when metadata can't be fetched (dead swarm, timeout) — the
+     * caller should fall back to a full download rather than fail the task.
+     */
+    suspend fun listTorrentFiles(
+        context: Context,
+        magnetUrl: String,
+        parentTitle: String = ""
+    ): List<TorrentSecurityShield.TorrentFileEntry>? {
+        val aria2Exec = findAria2Executable(context)
+            ?: throw IllegalStateException("aria2c binary missing: libaria2c.so not found in native libs")
+
+        // ---- Phase 1: metadata -> .torrent (no data) ----
+        val metaDir = File(context.cacheDir, "torrent_meta").apply { mkdirs() }
+        val infoHash = Regex("""(?i)btih:([a-f0-9]{40})""").find(magnetUrl)?.groupValues?.get(1)
+            ?: return null
+        val torrentFile = File(metaDir, "$infoHash.torrent")
+
+        // Reuse an already-cached .torrent when present (instant list, no swarm contact).
+        if (!torrentFile.exists()) {
+            val fetchCmd = mutableListOf(
+                aria2Exec.absolutePath,
+                "--enable-dht=true",
+                "--bt-enable-lpd=true",
+                "--enable-peer-exchange=true",
+                "--dht-entry-point=router.bittorrent.com:6881",
+                "--dht-entry-point=dht.transmissionbt.com:6881",
+                "--dht-entry-point=dht.libtorrent.org:25401",
+                "--dht-entry-point6=[2400:cb00:2049:1::a29f:9877]:6881",
+                "--dht-file-path=${context.cacheDir.absolutePath}/dht.dat",
+                "--seed-time=0",
+                "--seed-ratio=0.0",
+                "--summary-interval=0",
+                "--bt-max-peers=64",
+                "--bt-request-peer-speed-limit=50M",
+                "--bt-stop-timeout=45",
+                "--bt-tracker-connect-timeout=10",
+                "--bt-tracker-timeout=10",
+                "--bt-tracker=$TIER1_TRACKERS",
+                "--bt-metadata-only=true",
+                "--bt-save-metadata=true",
+                "-d", metaDir.absolutePath,
+                magnetUrl
+            )
+            val fetchPb = ProcessBuilder(fetchCmd)
+            fetchPb.environment()["TMPDIR"] = context.cacheDir.absolutePath
+            fetchPb.redirectErrorStream(true)
+            val fetchProc = try {
+                fetchPb.start()
+            } catch (e: Exception) {
+                android.util.Log.w("AnonDownload", "listTorrentFiles: launch failed: ${e.message}")
+                return null
+            }
+            val fetchOk = withTimeoutOrNull(45_000) {
+                fetchProc.waitFor()
+            } ?: run {
+                fetchProc.destroy()
+                return null
+            }
+            if (fetchOk != 0 || !torrentFile.exists()) {
+                android.util.Log.w("AnonDownload", "listTorrentFiles: metadata fetch failed (code=$fetchOk)")
+                return null
+            }
+        }
+
+        // ---- Phase 2: --show-files on the .torrent ----
+        val showCmd = listOf(
+            aria2Exec.absolutePath,
+            "--show-files=true",
+            torrentFile.absolutePath
+        )
+        val showPb = ProcessBuilder(showCmd)
+        showPb.redirectErrorStream(true)
+        val showProc = try {
+            showPb.start()
+        } catch (e: Exception) {
+            android.util.Log.w("AnonDownload", "listTorrentFiles: show-files launch failed: ${e.message}")
+            return null
+        }
+        val output = withTimeoutOrNull(15_000) {
+            showProc.inputStream.bufferedReader().readText()
+        } ?: run {
+            showProc.destroy()
+            return null
+        }
+
+        // aria2c --show-files prints two lines per entry (verified live):
+        //   "  1|./Sintel/Sintel.de.srt"      then "   |1.6KiB (1,652)"
+        val entries = mutableListOf<TorrentSecurityShield.TorrentFileEntry>()
+        val pathRe = Regex("""^\s*(\d+)\|(.+)$""")
+        val sizeRe = Regex("""\(\s*([\d,]+)\s*\)$""")
+        val lines = output.lineSequence().toList()
+        var i = 0
+        while (i < lines.size) {
+            val pm = pathRe.matchEntire(lines[i].trimEnd())
+            if (pm != null) {
+                val index = pm.groupValues[1].toInt()
+                val path = pm.groupValues[2]
+                var length = 0L
+                if (i + 1 < lines.size) {
+                    sizeRe.find(lines[i + 1])?.let { m ->
+                        length = m.groupValues[1].replace(",", "").toLongOrNull() ?: 0L
+                    }
+                }
+                val checked = TorrentSecurityShield.checkTorrentFileEntry(path, length, parentTitle)
+                entries.add(checked.copy(index = index))
+                i += 2
+                continue
+            }
+            i += 1
+        }
+
+        if (entries.isEmpty()) {
+            android.util.Log.w("AnonDownload", "listTorrentFiles: no entries parsed")
+            return null
+        }
+        return entries
+    }
+
     private suspend fun downloadMagnetAria2c(
         context: Context,
         taskId: String,
@@ -296,7 +450,8 @@ object YoutubeDlDownloader {
         preferredFilename: String,
         parallelSockets: Int = 16,
         onProgress: (downloaded: Long, total: Long, speed: Double, eta: Long) -> Unit,
-        isActiveCheck: suspend () -> Boolean = { true }
+        isActiveCheck: suspend () -> Boolean = { true },
+        selectIndexes: List<Int>? = null
     ): File? {
         val before = targetDir.listFiles()?.map { it.absolutePath }?.toSet() ?: emptySet()
 
@@ -308,16 +463,27 @@ object YoutubeDlDownloader {
             "--enable-dht=true",
             "--bt-enable-lpd=true",
             "--enable-peer-exchange=true",
+            // Live-verified 2026-08: router.bittorrent.com does not answer DHT
+            // pings from some networks; transmissionbt + libtorrent.org do.
             "--dht-entry-point=router.bittorrent.com:6881",
+            "--dht-entry-point=dht.transmissionbt.com:6881",
+            "--dht-entry-point=dht.libtorrent.org:25401",
             "--dht-entry-point6=[2400:cb00:2049:1::a29f:9877]:6881",
+            // Android has no $HOME, so aria2c's default ~/.aria2/dht.dat never
+            // persists: every launch cold-starts an empty DHT table. Pin it into
+            // cacheDir so the routing table survives across downloads AND runs.
+            "--dht-file-path=${context.cacheDir.absolutePath}/dht.dat",
             "--seed-time=0",
             "--seed-ratio=0.0",
             "--summary-interval=1",
-            "--bt-max-peers=${(conns * 4).coerceIn(60, 250)}",
+            "--bt-max-peers=${(conns * 8).coerceIn(60, 500)}",
             "--bt-request-peer-speed-limit=50M",
             "--bt-stop-timeout=300",
-            "--bt-tracker-connect-timeout=30",
-            "--file-allocation=none",
+            // Fail fast on dead trackers: 30s connect + 60s default announce
+            // timeout burned a minute per dead tracker before.
+            "--bt-tracker-connect-timeout=10",
+            "--bt-tracker-timeout=10",
+            "--file-allocation=falloc",
             "--check-certificate=false",
             "--continue=true",
             "--max-tries=10",
@@ -330,8 +496,14 @@ object YoutubeDlDownloader {
             "--console-log-level=error",
             "--bt-tracker=$TIER1_TRACKERS",
             "-d", targetDir.absolutePath,
-            magnetUrl
-        )
+        ]
+        // Selective download (season packs): --select-file takes only numeric
+        // indexes, never names -- the swarm's file paths never reach the command
+        // line, so there is no injection surface from untrusted torrent names.
+        if (!selectIndexes.isNullOrEmpty()) {
+            cmd += "--select-file=" + selectIndexes.joinToString(",")
+        }
+        cmd += magnetUrl
 
         val errors = StringBuilder()
         var produced: File? = null
