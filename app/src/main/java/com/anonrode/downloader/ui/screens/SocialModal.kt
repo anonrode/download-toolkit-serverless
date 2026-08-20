@@ -75,7 +75,7 @@ fun SocialModal(
                     Box(
                         modifier = Modifier
                             .background(AccentViolet.copy(alpha = 0.15f), RoundedCornerShape(Radius.sm))
-                            .padding(horizontal = 10.dp, vertical = 4.dp)
+                            .padding(horizontal = Spacing.sm, vertical = Spacing.xs)
                     ) {
                         Text(
                             text = cleanPlatform,
@@ -136,8 +136,8 @@ fun SocialModal(
                     .clip(RoundedCornerShape(Radius.full))
                     .background(SurfaceCard)
                     .border(1.dp, BorderHairline, RoundedCornerShape(Radius.full))
-                    .padding(3.dp),
-                horizontalArrangement = Arrangement.spacedBy(2.dp)
+                    .padding(Spacing.xxs),
+                horizontalArrangement = Arrangement.spacedBy(Spacing.xxs)
             ) {
                 // Video Tab
                 Box(
@@ -146,7 +146,7 @@ fun SocialModal(
                         .clip(RoundedCornerShape(Radius.full))
                         .background(if (!audioOnly) AccentPrimary else Color.Transparent)
                         .clickable { audioOnly = false }
-                        .padding(vertical = 8.dp),
+                        .padding(vertical = Spacing.sm),
                     contentAlignment = Alignment.Center
                 ) {
                     Row(
@@ -175,7 +175,7 @@ fun SocialModal(
                         .clip(RoundedCornerShape(Radius.full))
                         .background(if (audioOnly) AccentPrimary else Color.Transparent)
                         .clickable { audioOnly = true }
-                        .padding(vertical = 8.dp),
+                        .padding(vertical = Spacing.sm),
                     contentAlignment = Alignment.Center
                 ) {
                     Row(
@@ -214,7 +214,7 @@ fun SocialModal(
                                 .background(if (isSel) AccentViolet else SurfaceCard)
                                 .border(1.dp, if (isSel) AccentViolet else BorderHairline, RoundedCornerShape(Radius.sm))
                                 .clickable { selectedQuality = q }
-                                .padding(vertical = 8.dp),
+                                .padding(vertical = Spacing.sm),
                             contentAlignment = Alignment.Center
                         ) {
                             Text(

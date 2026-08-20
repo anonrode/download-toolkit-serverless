@@ -270,7 +270,7 @@ fun EpisodeDrawer(
                             contentColor = BackgroundDark
                         ),
                         shape = RoundedCornerShape(Radius.md),
-                        contentPadding = PaddingValues(horizontal = Spacing.md, vertical = 10.dp)
+                        contentPadding = PaddingValues(horizontal = Spacing.md, vertical = Spacing.sm)
                     ) {
                         Text("All", fontSize = 12.sp, fontWeight = FontWeight.Bold)
                     }

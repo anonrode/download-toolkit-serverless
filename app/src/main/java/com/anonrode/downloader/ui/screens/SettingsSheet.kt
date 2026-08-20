@@ -60,7 +60,7 @@ fun SettingsSheet(
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
-        containerColor = BackgroundDark,
+        containerColor = SurfaceElevated,
         contentColor = TextPrimary,
         shape = RoundedCornerShape(topStart = Radius.xl, topEnd = Radius.xl),
         dragHandle = {
@@ -245,18 +245,18 @@ fun SettingsSheet(
                         }
                     }
 
-                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(Spacing.xs)) {
                         listOf("Dark" to "dark", "Light" to "light", "Auto" to "system").forEach { (label, mode) ->
                             val isSel = currentThemeMode.equals(mode, ignoreCase = true)
                             Box(
                                 modifier = Modifier
-                                    .clip(RoundedCornerShape(8.dp))
+                                    .clip(RoundedCornerShape(Radius.sm))
                                     .background(if (isSel) AccentPrimary else SurfaceElevated)
                                     .clickable {
                                         currentThemeMode = mode
                                         onThemeChanged(mode)
                                     }
-                                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                                    .padding(horizontal = Spacing.sm, vertical = Spacing.xs),
                                 contentAlignment = Alignment.Center
                             ) {
                                 Text(
