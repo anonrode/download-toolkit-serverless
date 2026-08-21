@@ -76,12 +76,18 @@ object YoutubeDlDownloader {
         ytdlpMaxAttempts: Int = 3,
         hlsFragments: Int = -1,
         speedLimitKbs: Int = 0,
-        torrentPeers: Int = -1
+        torrentPeers: Int = -1,
+        // Locally rewritten HLS master (scheme-relative segment URLs fixed to
+        // absolute https) — yt-dlp is fed the file instead of the original URL.
+        hlsMasterFile: String? = null
     ): File? {
         if (!targetDir.exists()) targetDir.mkdirs()
 
         val isMagnet = sourceUrl.startsWith("magnet:", ignoreCase = true)
-        val isM3u8 = sourceUrl.lowercase().contains(".m3u8")
+        // When a rewritten master file is supplied, yt-dlp consumes that file
+        // (file:// + --enable-file-urls) — the m3u8 branch still applies.
+        val inputUrl = if (hlsMasterFile != null) "file://$hlsMasterFile" else sourceUrl
+        val isM3u8 = inputUrl.lowercase().contains(".m3u8")
 
         val height = when (quality.lowercase()) {
             "480p", "480" -> 480
@@ -124,7 +130,11 @@ object YoutubeDlDownloader {
             )
         }
 
-        val request = YoutubeDLRequest(sourceUrl).apply {
+        val request = YoutubeDLRequest(inputUrl).apply {
+            if (hlsMasterFile != null) {
+                // The input is our own rewritten playlist file in the app cache.
+                addOption("--enable-file-urls")
+            }
             if (isExtractorTask) {
                 // True Monolith Metadata Naming Template with user-configured quality
                 val outTemplate = File(targetDir, "%(uploader,creator,channel)s - %(title).80s [%(id)s].%(ext)s").absolutePath
@@ -290,7 +300,7 @@ object YoutubeDlDownloader {
         while (attempts < ytdlpMaxAttempts && produced == null) {
             attempts++
             if (!coroutineContext.isActive) throw CancellationException("Task was cancelled before yt-dlp retry")
-            com.anonrode.downloader.util.DebugLog.backend("task=$taskId yt-dlp attempt $attempts/$ytdlpMaxAttempts url=${sourceUrl.take(110)}")
+            com.anonrode.downloader.util.DebugLog.backend("task=$taskId yt-dlp attempt $attempts/$ytdlpMaxAttempts url=${inputUrl.take(110)}")
             produced = attemptOnce()
             if (produced != null) {
                 com.anonrode.downloader.util.DebugLog.backend("task=$taskId yt-dlp attempt $attempts produced ${produced.name} (${produced.length() / 1048576} MiB)")

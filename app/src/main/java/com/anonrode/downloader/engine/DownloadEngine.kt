@@ -20,6 +20,7 @@ import java.io.File
 import java.io.RandomAccessFile
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import java.util.regex.Pattern
 
 class DownloadEngine(
     private val context: Context,
@@ -502,6 +503,11 @@ class DownloadEngine(
     }
 
     companion object {
+        // URI="..." inside HLS tags (EXT-X-KEY, EXT-X-MAP, EXT-X-MEDIA) — the
+        // URI value may be scheme-relative or relative and needs the same
+        // absolute-https rewrite as segment URIs.
+        private val URI_VALUE = Pattern.compile("""URI="([^"]+)"""")
+
         private val STREAMING_QUERY_PATTERN = Regex("""[?&][^=&]*=(?:mpd|dash|hls)(?:&|$)""")
 
         // Windows-reserved device names: a folder/file named CON, PRN, AUX,
@@ -711,53 +717,148 @@ class DownloadEngine(
     }
 
     /**
-     * HLS pre-flight: fetch the master playlist and probe the first segment
-     * host BEFORE handing the URL to yt-dlp. A dead segment CDN used to pin
-     * the task in DOWNLOADING at 0 bytes for minutes — yt-dlp retries for ~45s
-     * per fragment, the watchdog kills it, and 3 attempts replay the whole
-     * zombie (user-reported "stuck on starting" for asianc/vidbasic streams,
-     * reproduced live: cdn.jiminido.top accepts connections but never sends
-     * data). Probing first turns that into a clean failure in seconds.
+     * HLS pre-flight: fetch the master playlist, probe the first segment host,
+     * and — when the playlist carries scheme-relative (//cdn/...) or relative
+     * segment URIs — rewrite them to absolute https into a local file that
+     * yt-dlp consumes instead of the original URL.
      *
-     * Returns an error message, or null when the stream looks reachable.
+     * Why the rewrite is load-bearing: yt-dlp joins a scheme-relative segment
+     * URI to http:// (port 80) while browsers (hls.js) use https:// — these
+     * CDNs answer 443 and hang port 80. Live-verified: the same vidbasic
+     * master stalled forever at port 80 and downloaded from a rewritten
+     * https master. A dead segment CDN additionally used to pin the task in
+     * DOWNLOADING at 0 bytes for minutes (watchdog kills + 3 attempts =
+     * user-reported "stuck on starting"); the probe turns that into a clean
+     * failure in seconds.
+     *
+     * Returns the rewritten master file (null = original URL is fine), and
+     * throws a user-facing message when the stream is unreachable.
      */
-    private suspend fun preflightHls(masterUrl: String, referer: String?): String? {
-        try {
-            var currentUrl = masterUrl
-            var playlist = HttpClient.getText(currentUrl, referer = referer, tag = "preflight")
-                ?: return "Stream server unreachable — the playlist did not load. Try again later."
-            var hops = 0
-            while (hops < 2) {
-                val firstUri = playlist.lineSequence().map { it.trim() }
-                    .firstOrNull { it.isNotBlank() && !it.startsWith("#") } ?: return null
-                val segment = resolveSegmentUrl(currentUrl, firstUri) ?: return null
-                // A variant playlist (EXT-X-STREAM-INF) references another .m3u8
-                // — hop once to its first real segment.
-                if (segment.contains(".m3u8") && hops < 1) {
-                    val variant = HttpClient.getText(segment, referer = referer, tag = "preflight")
-                    if (variant == null) {
-                        return "Stream server unreachable — the playlist did not load. Try again later."
+    private suspend fun preflightHls(context: Context, taskId: String, masterUrl: String, referer: String?): File? {
+        val cacheDir = File(context.cacheDir, "hls").apply { mkdirs() }
+        val created = mutableListOf<File>()
+        var currentUrl = masterUrl
+        var playlist = try {
+            HttpClient.getText(currentUrl, referer = referer, tag = "preflight")
+        } catch (_: Exception) { null }
+        if (playlist == null) {
+            throw Exception("Stream server unreachable — the playlist did not load. Try again later.")
+        }
+        var masterFile = rewriteHlsMaster(playlist, currentUrl, "hls-$taskId.m3u8", cacheDir)
+        if (masterFile != null) created.add(masterFile)
+
+        // Walk one variant level: rewrite referenced variant playlists to
+        // local files too and repoint the master at them (relative name),
+        // so their segments also go over https.
+        val mediaLines = playlist.lineSequence()
+            .map { it.trim() }
+            .filter { it.isNotBlank() && !it.startsWith("#") }
+            .toList()
+        var probeUrl: String? = null
+        if (mediaLines.isNotEmpty()) {
+            var firstResolved = resolveSegmentUrl(currentUrl, mediaLines[0])
+            if (firstResolved != null && firstResolved.contains(".m3u8")) {
+                for ((idx, line) in mediaLines.withIndex()) {
+                    val vUrl = resolveSegmentUrl(currentUrl, line) ?: continue
+                    if (!vUrl.contains(".m3u8")) continue
+                    val variant = try {
+                        HttpClient.getText(vUrl, referer = referer, tag = "preflight")
+                    } catch (_: Exception) { null }
+                    if (variant == null) continue
+                    val vFile = rewriteHlsMaster(variant, vUrl, "hls-$taskId-v$idx.m3u8", cacheDir)
+                    if (vFile != null) created.add(vFile)
+                    if (vFile != null && masterFile != null) {
+                        // Repoint this variant's URI in the local master at the
+                        // local variant file (same directory → relative name).
+                        try {
+                            masterFile.writeText(
+                                masterFile.readText().replace(vUrl, vFile.name)
+                            )
+                        } catch (_: Exception) {}
                     }
-                    currentUrl = segment
-                    playlist = variant
-                    hops++
-                    continue
+                    if (idx == 0) {
+                        val vSeg = variant.lineSequence().map { it.trim() }
+                            .firstOrNull { it.isNotBlank() && !it.startsWith("#") }
+                        if (vSeg != null) probeUrl = resolveSegmentUrl(vUrl, vSeg)
+                    }
                 }
-                // Probe the segment host exactly as yt-dlp will reach it. The
-                // scheme-relative URLs these CDNs emit (//cdn.example/...) are
-                // joined to http:// by yt-dlp while browsers use https:// — so
-                // probe https first, and only accept when at least one answers.
-                if (HttpClient.probe(segment, referer, timeoutMs = 10_000L, tag = "preflight")) return null
-                if (segment.startsWith("https:")) {
-                    val httpVariant = "http:" + segment.substringAfter("https:")
-                    if (HttpClient.probe(httpVariant, referer, timeoutMs = 8_000L, tag = "preflight")) return null
-                }
-                val host = segment.substringAfter("://").substringBefore('/')
-                return "Stream CDN not responding ($host) — the source server is down or blocking this network. Try again later."
+            } else {
+                probeUrl = firstResolved
             }
-            return null
+        }
+
+        // Probe the segment host exactly as yt-dlp will reach it after the
+        // rewrite — https first, http only as a fallback for https-dead CDNs.
+        if (probeUrl != null) {
+            if (!HttpClient.probe(probeUrl, referer, timeoutMs = 10_000L, tag = "preflight")) {
+                val httpVariant = if (probeUrl.startsWith("https:")) {
+                    "http:" + probeUrl.substringAfter("https:")
+                } else null
+                if (httpVariant == null || !HttpClient.probe(httpVariant, referer, timeoutMs = 8_000L, tag = "preflight")) {
+                    val host = probeUrl.substringAfter("://").substringBefore('/')
+                    for (f in created) {
+                        try { f.delete() } catch (_: Exception) {}
+                    }
+                    throw Exception("Stream CDN not responding ($host) — the source server is down or blocking this network. Try again later.")
+                }
+            }
+        }
+        return masterFile
+    }
+
+    /**
+     * Rewrite a playlist's scheme-relative (//host/...) and relative segment
+     * URIs to absolute https. Returns the rewritten file, or null when the
+     * playlist already uses absolute URLs (nothing to fix).
+     */
+    private fun rewriteHlsMaster(playlist: String, baseUrl: String, outName: String, dir: File): File? {
+        val sb = StringBuilder()
+        var changed = false
+        for (rawLine in playlist.lineSequence()) {
+            val line = rawLine.trimEnd('\r')
+            when {
+                line.startsWith("//") -> {
+                    sb.append("https:").append(line).append('\n')
+                    changed = true
+                }
+                line.startsWith("#") -> {
+                    var l = line
+                    val m = URI_VALUE.matcher(l)
+                    if (m.find()) {
+                        val out = StringBuffer()
+                        do {
+                            val u = m.group(1) ?: ""
+                            val repl = when {
+                                u.startsWith("//") -> "https:$u"
+                                u.startsWith("http://") || u.startsWith("https://") -> u
+                                else -> resolveSegmentUrl(baseUrl, u) ?: u
+                            }
+                            m.appendReplacement(out, "URI=\"" + java.util.regex.Matcher.quoteReplacement(repl) + "\"")
+                        } while (m.find())
+                        m.appendTail(out)
+                        l = out.toString()
+                        if (l != line) changed = true
+                    }
+                    sb.append(l).append('\n')
+                }
+                else -> {
+                    val resolved = resolveSegmentUrl(baseUrl, line)
+                    if (resolved != null && resolved != line) {
+                        sb.append(resolved).append('\n')
+                        changed = true
+                    } else {
+                        sb.append(line).append('\n')
+                    }
+                }
+            }
+        }
+        if (!changed) return null
+        return try {
+            val f = File(dir, outName)
+            f.writeText(sb.toString())
+            f
         } catch (_: Exception) {
-            return null
+            null
         }
     }
 
@@ -770,10 +871,12 @@ class DownloadEngine(
             val qIdx = uri.indexOf('?')
             val pathPart = if (qIdx >= 0) uri.substring(0, qIdx) else uri
             val queryPart = if (qIdx >= 0) uri.substring(qIdx + 1) else null
-            java.net.URI(
-                b.scheme, null, b.host, b.port,
-                b.path.substringBeforeLast('/') + "/" + pathPart, queryPart, null
-            ).toString()
+            val joined = if (pathPart.startsWith("/")) {
+                pathPart
+            } else {
+                b.path.substringBeforeLast('/') + "/" + pathPart
+            }
+            java.net.URI(b.scheme, null, b.host, b.port, joined, queryPart, null).toString()
         } catch (_: Exception) {
             null
         }
@@ -986,12 +1089,11 @@ class DownloadEngine(
                 // HLS pre-flight: probe the segment CDN before yt-dlp so a dead
                 // stream host fails cleanly in seconds instead of pinning the
                 // task at 0 bytes for minutes (watchdog kills + 3 attempts).
+                // Also returns a locally rewritten master (scheme-relative
+                // segment URLs fixed to absolute https) for yt-dlp to consume.
+                var hlsMasterFile: File? = null
                 if (finalBackend == "yt-dlp" && isHlsStream) {
-                    val preflightError = preflightHls(streamUrl, refererToPass)
-                    if (preflightError != null) {
-                        com.anonrode.downloader.util.DebugLog.error("task=${task.id} HLS preflight: $preflightError")
-                        throw Exception(preflightError)
-                    }
+                    hlsMasterFile = preflightHls(context, task.id, streamUrl, refererToPass)
                 }
 
                 var producedFile: File? = null
@@ -1168,7 +1270,7 @@ class DownloadEngine(
                         } catch (_: Throwable) {}
                     }
                 } else {
-                    suspend fun runYtdlp(url: String): File? = YoutubeDlDownloader.download(
+                    suspend fun runYtdlp(url: String, masterFile: File?): File? = YoutubeDlDownloader.download(
                         context = context,
                         taskId = task.id,
                         sourceUrl = url,
@@ -1196,7 +1298,8 @@ class DownloadEngine(
                         ytdlpMaxAttempts = ytdlpMaxAttempts,
                         hlsFragments = hlsFragmentConcurrency,
                         speedLimitKbs = globalSpeedLimitKbs,
-                        torrentPeers = torrentPeers
+                        torrentPeers = torrentPeers,
+                        hlsMasterFile = masterFile?.absolutePath
                     )
 
                     // YoutubeDlDownloader.download throws on final failure (after
@@ -1205,7 +1308,7 @@ class DownloadEngine(
                     // the task dies with the first URL's errors.
                     var firstError: Exception? = null
                     producedFile = try {
-                        runYtdlp(streamUrl)
+                        runYtdlp(streamUrl, hlsMasterFile)
                     } catch (e: kotlinx.coroutines.CancellationException) {
                         throw e
                     } catch (e: Exception) {
@@ -1217,13 +1320,27 @@ class DownloadEngine(
                     // once more, mirroring the token refresh on the direct path.
                     // A fresh resolve also lands a fresh edge node/session, which
                     // resets a CDN byte-quota throttle (the observed recovery).
+                    // The re-resolved URL invalidates the old rewritten master —
+                    // run its own preflight (probe + rewrite) on the retry.
                     if (producedFile == null && coroutineContext.isActive) {
                         val freshUrl = resolveStreamUrl(permUrl, task.site, task.quality ?: defaultQuality)
                         if (!freshUrl.isNullOrBlank() && freshUrl != streamUrl) {
                             android.util.Log.w("AnonDownload", "yt-dlp failed, re-resolving for a fresh URL")
                             streamUrl = freshUrl
+                            var freshMaster: File? = null
+                            if (isHlsStream) {
+                                try {
+                                    freshMaster = preflightHls(context, task.id, freshUrl, getRefererForUrl(freshUrl))
+                                } catch (e: kotlinx.coroutines.CancellationException) {
+                                    throw e
+                                } catch (e: Exception) {
+                                    // Fresh stream unreachable — report the first
+                                    // chain's error instead.
+                                    throw firstError ?: e
+                                }
+                            }
                             try {
-                                producedFile = runYtdlp(freshUrl)
+                                producedFile = runYtdlp(freshUrl, freshMaster)
                             } catch (e: kotlinx.coroutines.CancellationException) {
                                 throw e
                             } catch (e: Exception) {
@@ -1232,6 +1349,16 @@ class DownloadEngine(
                                 throw firstError ?: e
                             }
                         }
+                    }
+                    // Rewritten masters are scratch files in the cache dir —
+                    // remove them once the chain is done (they can be large:
+                    // 950+ rewritten segment lines).
+                    if (hlsMasterFile != null) {
+                        try {
+                            val cacheDir = File(context.cacheDir, "hls")
+                            cacheDir.listFiles { f -> f.name.startsWith("hls-${task.id}") }?.forEach { it.delete() }
+                        } catch (_: Exception) {}
+                        hlsMasterFile = null
                     }
                     if (producedFile == null && firstError != null) throw firstError
                 }
