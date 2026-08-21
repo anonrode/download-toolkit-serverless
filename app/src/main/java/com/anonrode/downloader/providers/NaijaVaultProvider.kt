@@ -59,7 +59,12 @@ object NaijaVaultProvider : SiteProvider {
     override suspend fun loadEpisodes(showUrl: String): ShowDetails {
         val show = ShowCard(title = "NaijaVault Media", url = showUrl, site = name)
         try {
-            val html = HttpClient.getText(showUrl) ?: return ShowDetails(show = show)
+            val html = HttpClient.getText(showUrl)
+            if (html.isNullOrBlank()) {
+                com.anonrode.downloader.util.DebugLog.error("naijavault loadEpisodes: fetch returned null for $showUrl (lastFailure=${HttpClient.lastFailure})")
+                return ShowDetails(show = show)
+            }
+            com.anonrode.downloader.util.DebugLog.resolve("naijavault loadEpisodes: ${html.length / 1024}KiB from $showUrl")
             val doc = Jsoup.parse(html, showUrl)
 
             val title = doc.selectFirst("h1.entry-title, h1")?.text()?.trim() ?: "Movie"

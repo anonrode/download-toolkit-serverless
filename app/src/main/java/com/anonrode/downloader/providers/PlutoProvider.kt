@@ -52,7 +52,16 @@ object PlutoProvider : SiteProvider {
     override suspend fun loadEpisodes(showUrl: String): ShowDetails {
         val show = ShowCard(title = "Pluto Title", url = showUrl, site = name)
         try {
-            val html = HttpClient.getText(showUrl, referer = "$mainUrl/") ?: return ShowDetails(show = show)
+            val html = HttpClient.getText(showUrl, referer = "$mainUrl/")
+            if (html.isNullOrBlank()) {
+                com.anonrode.downloader.util.DebugLog.error("pluto loadEpisodes: fetch returned null for $showUrl (lastFailure=${HttpClient.lastFailure})")
+                return ShowDetails(show = show)
+            }
+            if (looksLikeSecurityChallenge(html)) {
+                com.anonrode.downloader.util.DebugLog.error("pluto loadEpisodes: site returned a security challenge (Cloudflare) for $showUrl")
+                return ShowDetails(show = show)
+            }
+            com.anonrode.downloader.util.DebugLog.resolve("pluto loadEpisodes: ${html.length / 1024}KiB from $showUrl")
             val doc = Jsoup.parse(html, showUrl)
             val episodes = mutableListOf<EpisodeItem>()
 
@@ -122,9 +131,17 @@ object PlutoProvider : SiteProvider {
             }
 
             return ShowDetails(show = show.copy(title = title, posterUrl = poster), episodes = episodes)
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            com.anonrode.downloader.util.DebugLog.error("pluto loadEpisodes exception: ${e.javaClass.simpleName}: ${e.message}")
             return ShowDetails(show = show)
         }
+    }
+
+    /** Cloudflare/JS-challenge pages answer HTTP 200 with no real content. */
+    private fun looksLikeSecurityChallenge(html: String): Boolean {
+        val low = html.lowercase()
+        return low.contains("just a moment") || low.contains("cf-challenge") ||
+            low.contains("challenge-platform") || (low.contains("cloudflare") && low.contains("verify"))
     }
 
     override suspend fun resolveEpisode(episodeUrl: String, quality: String): DownloadRecipe {
