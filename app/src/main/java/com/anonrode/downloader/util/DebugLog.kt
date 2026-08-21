@@ -1,7 +1,6 @@
 package com.anonrode.downloader.util
 
 import android.content.Context
-import com.anonrode.downloader.BuildConfig
 import java.io.File
 import java.io.FileWriter
 import java.text.SimpleDateFormat
@@ -46,7 +45,14 @@ object DebugLog {
     fun init(context: Context) {
         logDir = File(context.filesDir, "logs").apply { mkdirs() }
         purgeOldDays()
-        engine("=== app started (v${BuildConfig.VERSION_NAME} build ${BuildConfig.VERSION_CODE}) ===")
+        // Version banner lets a shared log identify which build produced it
+        // (a log from an old APK was once misdiagnosed as a live bug).
+        val version = try {
+            context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "?"
+        } catch (_: Exception) {
+            "?"
+        }
+        engine("=== app started (v$version) ===")
     }
 
     fun setEnabled(on: Boolean) {

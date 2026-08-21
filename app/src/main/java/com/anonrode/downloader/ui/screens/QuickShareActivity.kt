@@ -23,9 +23,9 @@ import androidx.compose.material.icons.rounded.Audiotrack
 import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Link
+import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Videocam
-import androidx.compose.material.icons.rounded.YouTube
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -419,7 +419,7 @@ fun QuickShareCard(
                 EngineSegment(
                     selected = engineOverride == "yt-dlp",
                     onClick = { engineOverride = "yt-dlp" },
-                    icon = Icons.Rounded.YouTube,
+                    icon = Icons.Rounded.PlayArrow,
                     label = "Extractor",
                     modifier = Modifier.weight(1f)
                 )
