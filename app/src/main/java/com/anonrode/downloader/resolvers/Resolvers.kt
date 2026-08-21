@@ -65,6 +65,21 @@ object ResolverRegistry {
                     com.anonrode.downloader.util.DebugLog.resolve(
                         "HIT ${resolver::class.simpleName} -> ${direct.take(110)}"
                     )
+                    // Reference parity (resolvers.py:2185): an intermediate
+                    // result that differs from the input flows BACK through
+                    // the registry — gateway chains (dramarain download?link=
+                    // -> waffi.cloud?preview) need the second pass to crack
+                    // the real file URL. Skipped only when the SAME resolver
+                    // re-claims a clean media path (its final answer).
+                    if (direct != trimmed && depth < RESOLVE_DEPTH_LIMIT) {
+                        val path = direct.substringBefore('?').substringBefore('#').lowercase()
+                        val mediaPath = listOf(".mkv", ".mp4", ".webm", ".avi", ".m3u8", ".ts").any { path.endsWith(it) }
+                        val sameResolverReclaims = resolver.canResolve(direct)
+                        if (!(sameResolverReclaims && mediaPath)) {
+                            val deeper = resolve(direct, quality, depth + 1)
+                            if (!deeper.isNullOrBlank()) return deeper
+                        }
+                    }
                     return direct
                 }
                 com.anonrode.downloader.util.DebugLog.resolve(
@@ -114,10 +129,44 @@ object VidbasicResolver : BaseResolver {
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
         try {
-            val html = HttpClient.getText(url, referer = url) ?: return null
+            // Reference parity (resolvers.py:557): the page is fetched WITHOUT a
+            // Referer header.
+            val html = HttpClient.getText(url) ?: return null
+
+            // 1) this page already carries the encrypted payload (3rdplayer.html)
             val direct = decryptPayload(html)
             if (!direct.isNullOrBlank()) return direct
 
+            // 1b) server-selector layout: vidb.top serves a multi-server page whose
+            // data-video / data-src / iframe attrs point at EXTERNAL mirror embeds
+            // (streamwish, vidhide, doodstream, streamtape). Try resolving the
+            // candidates via the registry, falling through to the next mirror if
+            // one is dead/expired (resolvers.py:571-589).
+            val cands = mutableListOf<String>()
+            val attrMatcher = Pattern.compile("""data-(?:video|src|embed|link)=["']([^"']+)["']""").matcher(html)
+            while (attrMatcher.find()) cands.add(attrMatcher.group(1) ?: "")
+            val iframeSrcMatcher = Pattern.compile("""<iframe[^>]+src=["']([^"']+)["']""").matcher(html)
+            while (iframeSrcMatcher.find()) cands.add(iframeSrcMatcher.group(1) ?: "")
+            val seen = mutableSetOf<String>()
+            for (raw in cands) {
+                var cand = raw.trim().replace("&amp;", "&")
+                cand = HttpClient.safeResolveUri(url, cand)
+                if (!cand.startsWith("http") || cand == url || !seen.add(cand)) continue
+                for (other in ResolverRegistry.RESOLVERS) {
+                    if (other is VidbasicResolver) continue
+                    try {
+                        if (other.canResolve(cand)) {
+                            val resolved = ResolverRegistry.resolve(cand, quality, depth + 1)
+                            if (!resolved.isNullOrBlank()) return resolved
+                            break
+                        }
+                    } catch (_: Exception) {
+                        continue
+                    }
+                }
+            }
+
+            // 2) embed page points at /3rdplayer.html — fetch and decrypt
             val mvMatcher = Pattern.compile("""data-video=["']([^"']+)["']""").matcher(html)
             if (mvMatcher.find()) {
                 var playerUrl = mvMatcher.group(1) ?: ""
@@ -129,9 +178,13 @@ object VidbasicResolver : BaseResolver {
                 }
             }
 
-            val ifrMatcher = Pattern.compile("""<iframe[^>]+src=["']([^"']+)["']""").matcher(html)
-            if (ifrMatcher.find() && depth < ResolverRegistry.RESOLVE_DEPTH_LIMIT) {
-                var inner = ifrMatcher.group(1) ?: ""
+            // 3) embedload.cfd wrapper iframes the real vidbasic host. This
+            // recursion is our own counter capped at 3 so A->B->A cycles end
+            // instead of spinning through the registry depth limit
+            // (resolvers.py:606-611).
+            val miMatcher = Pattern.compile("""<iframe[^>]+src=["']([^"']*(?:vidbasic|vidb\.top)[^"']*)["']""").matcher(html)
+            if (miMatcher.find() && depth < 3) {
+                var inner = miMatcher.group(1) ?: ""
                 inner = HttpClient.safeResolveUri(url, inner)
                 if (inner != url) {
                     val innerDirect = resolve(inner, quality, depth + 1)
@@ -143,8 +196,13 @@ object VidbasicResolver : BaseResolver {
     }
 
     private fun decryptPayload(html: String): String? {
-        val m = Pattern.compile("""data-(?:name=["']crypto["'][^>]*?data-)?value=["']([^"']+)["']""").matcher(html)
-        if (!m.find()) return null
+        // Attribute order varies between deployments -- try crypto-first,
+        // then a bare data-value tag.
+        var m = Pattern.compile("""data-name=["']crypto["'][^>]*?data-value=["']([^"']+)["']""").matcher(html)
+        if (!m.find()) {
+            m = Pattern.compile("""data-value=["']([^"']+)["']""").matcher(html)
+            if (!m.find()) return null
+        }
         val b64 = m.group(1) ?: return null
         try {
             val cipherBytes = android.util.Base64.decode(b64, android.util.Base64.DEFAULT)
@@ -153,7 +211,9 @@ object VidbasicResolver : BaseResolver {
             val ivSpec = IvParameterSpec(IV)
             cipher.init(Cipher.DECRYPT_MODE, keySpec, ivSpec)
             val decrypted = String(cipher.doFinal(cipherBytes), Charsets.UTF_8).trim()
-            if (decrypted.startsWith("http") && (decrypted.contains(".m3u8") || decrypted.contains(".mp4"))) {
+            if (decrypted.startsWith("http") &&
+                (decrypted.contains(".m3u8") || decrypted.contains(".mp4") || decrypted.contains(".mkv"))
+            ) {
                 return decrypted
             }
         } catch (_: Exception) {}
@@ -424,15 +484,16 @@ object VidsrcResolver : BaseResolver {
             } ?: return null
 
             // Playlist URLs are CDN-gated by an IP-bound JWT issued by the
-            // origin's generate.php; without it the CDN answers 401.
+            // origin's generate.php; without it the CDN answers 401. A URL that
+            // already carries a token is authoritative — stripping and
+            // re-stamping rotates a valid token into a dead one.
+            if (streamUrl.contains("token=")) return streamUrl
             val om = ORIGIN_PATTERN.matcher(streamUrl)
             val origin = if (om.find()) om.group() else return null
             val token = HttpClient.getText("$origin/generate.php")?.trim().orEmpty()
-            val cleaned = streamUrl.replace(Regex("[?&]token=[^&]*"), "")
-            return if (token.isNotEmpty()) {
-                if (cleaned.contains("__TOKEN__")) cleaned.replace("__TOKEN__", token)
-                else cleaned + (if (cleaned.contains("?")) "&" else "?") + "token=$token"
-            } else cleaned
+            if (token.isEmpty()) return streamUrl
+            return if (streamUrl.contains("__TOKEN__")) streamUrl.replace("__TOKEN__", token)
+            else streamUrl + (if (streamUrl.contains("?")) "&" else "?") + "token=$token"
         } catch (_: Exception) {}
         return null
     }
@@ -797,6 +858,13 @@ object LoadedfilesResolver : BaseResolver {
                     val loc = res.header("Location")
                     if (!loc.isNullOrBlank()) {
                         val safeLoc = HttpClient.safeUrl(loc)
+                        // Second-or-later ?pt= hop: the Location IS the answer
+                        // (monolith parity, resolvers.py hop-3:
+                        // `return r3.headers.get('location')`) -- no gating.
+                        if (ptHops >= 1) {
+                            android.util.Log.d("AnonDownload", "Loadedfiles cracked redirect URL: $safeLoc")
+                            return safeLoc
+                        }
                         if (isDirectMediaUrl(safeLoc) || safeLoc.contains("/token/download/") || safeLoc.contains("/d/")) {
                             if (!safeLoc.contains("?pt=")) {
                                 android.util.Log.d("AnonDownload", "Loadedfiles cracked direct URL: $safeLoc")
@@ -829,14 +897,13 @@ object LoadedfilesResolver : BaseResolver {
                             return safeDirect
                         }
 
-                        val m = Pattern.compile("""var downloadUrl = '([^']+)'""", Pattern.CASE_INSENSITIVE).matcher(body)
+                        val m = Pattern.compile("""var downloadUrl = '(https://loadedfiles\.[a-z0-9-]+/[^']+)'""", Pattern.CASE_INSENSITIVE).matcher(body)
                         if (m.find()) {
-                            // Keep the chain on the host that answered -- the page can
-                            // hand back a link on a dead sibling TLD.
+                            // Use the matched URL VERBATIM: the token is bound to
+                            // the host in the link -- rewriting it onto the last
+                            // working host breaks the chain (live-verified).
                             val next = m.group(1) ?: return@use
-                            currUrl = HttpClient.safeUrl(
-                                lastWorkingHost?.let { rewriteHost(next, it) } ?: next
-                            )
+                            currUrl = HttpClient.safeUrl(next)
                             ptHops++
                         }
                     }
@@ -892,7 +959,19 @@ object WildshareResolver : BaseResolver {
                 val pt = ptMatcher.group(0)
                 val parts = url.trimEnd('/').split('/')
                 val fileId = parts.lastOrNull { !it.endsWith(".mkv") && !it.endsWith(".mp4") } ?: parts.last()
-                return "https://wildshare.net/$fileId?$pt"
+                // The ?pt= URL answers with a 302 to the real file — follow it
+                // manually (allow_redirects=False parity) and return the
+                // Location header; without one the link is dead.
+                val noRedirectClient = HttpClient.shared.newBuilder().followRedirects(false).build()
+                val req = Request.Builder()
+                    .url(HttpClient.safeUrl("https://wildshare.net/$fileId?$pt"))
+                    .header("User-Agent", HttpClient.DEFAULT_UA)
+                    .build()
+                noRedirectClient.newCall(req).execute().use { res ->
+                    val loc = res.header("Location") ?: return null
+                    if (loc.isBlank()) return null
+                    return HttpClient.safeUrl(loc)
+                }
             }
         } catch (_: Exception) {}
         return null
@@ -908,26 +987,10 @@ object WaffiCloudResolver : BaseResolver {
     }
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
-        // The ?preview flag renders a viewer page; without it the URL serves the
-        // file directly. Only return the stripped URL when the server actually
-        // answers with a file (Content-Type gate), so an HTML decoy never leaks
-        // through as a "resolved" direct link.
-        val stripped = url.substringBefore("?preview")
-        if (stripped == url) return null
-        return try {
-            val req = okhttp3.Request.Builder().url(stripped).apply {
-                header("User-Agent", HttpClient.DEFAULT_UA)
-                header("Range", "bytes=0-0")
-            }.build()
-            HttpClient.downloadClient.newCall(req).execute().use { res ->
-                val ct = res.header("Content-Type")?.lowercase() ?: ""
-                if (res.isSuccessful && !ct.startsWith("text/html") && !ct.startsWith("application/xhtml")) {
-                    stripped
-                } else null
-            }
-        } catch (_: Exception) {
-            null
-        }
+        // Reference parity (resolvers.py:275): a pure string strip with zero
+        // network I/O. Stripping ?preview yields the direct file link; when the
+        // URL was already clean this is an identity success.
+        return url.substringBefore("?preview")
     }
 }
 
