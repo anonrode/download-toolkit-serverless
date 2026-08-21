@@ -11,6 +11,7 @@ import org.json.JSONArray
 import org.jsoup.Jsoup
 import java.net.URI
 import java.net.URLEncoder
+import java.util.regex.Pattern
 
 object NaijaVaultProvider : SiteProvider {
     override val name: String = "naijavault"
@@ -119,6 +120,31 @@ object NaijaVaultProvider : SiteProvider {
                             site = name
                         )
                     )
+                }
+            }
+
+            // Monolith parity (naijavault.py line 295): if the DOM yielded zero
+            // download links, regex the raw HTML — the filevault links sometimes
+            // live in script-rendered sections that Jsoup's DOM builder misses
+            // while the monolith's raw-text search finds them every time.
+            if (episodes.isEmpty()) {
+                val rawHrefs = Pattern.compile("""https?://[^\s"\'<>]*(?:filevault|downloadwella|wetafiles|loadedfiles|nkiserv|vikingfile|lulacloud|pixeldrain|waffi)[^\s"\'<>]*""", Pattern.CASE_INSENSITIVE).matcher(html)
+                val rawSeen = mutableSetOf<String>()
+                while (rawHrefs.find()) {
+                    val u = rawHrefs.group().replace("&amp;", "&").trimEnd('.', ',', ')', ']')
+                    if (u.isBlank() || u in rawSeen || u in seen) continue
+                    rawSeen.add(u)
+                    episodes.add(
+                        EpisodeItem(
+                            title = "Download ${episodes.size + 1}",
+                            url = u,
+                            episodeNum = count++,
+                            site = name
+                        )
+                    )
+                }
+                if (episodes.isNotEmpty()) {
+                    com.anonrode.downloader.util.DebugLog.resolve("naijavault raw-text fallback: found ${episodes.size} locker URLs")
                 }
             }
 
