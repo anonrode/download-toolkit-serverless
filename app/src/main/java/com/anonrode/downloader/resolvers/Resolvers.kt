@@ -217,7 +217,7 @@ object KisskhMegaplayResolver : BaseResolver {
             ) ?: return null
 
             // Inner iframe (tamilembed / blogger)
-            val doc = Jsoup.parse(html)
+            val doc = Jsoup.parse(html, url)
             val innerIframe = doc.selectFirst("iframe[src]")
             if (innerIframe != null) {
                 val rawSrc = innerIframe.attr("src")
@@ -385,7 +385,7 @@ object VidsrcResolver : BaseResolver {
                 // Watch pages hide the player in iframe#playerFrame (or a
                 // vidsrc-src iframe) — hop through it to the embed URL.
                 val html = HttpClient.getText(embedUrl, referer = "https://nepu.gd/") ?: return null
-                val doc = Jsoup.parse(html)
+                val doc = Jsoup.parse(html, embedUrl)
                 val iframe = doc.selectFirst("iframe#playerFrame")
                     ?: doc.selectFirst("iframe[src*=vidsrc]")
                     ?: return null
@@ -568,7 +568,7 @@ object NaijaVaultGatewayResolver : BaseResolver {
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
         try {
             val html = HttpClient.getText(url, referer = "https://www.naijavault.com/") ?: return null
-            val soup = Jsoup.parse(html)
+            val soup = Jsoup.parse(html, url)
             val btn = soup.selectFirst("a.download-btn, a[href*='vikingfile'], a[href*='lulacloud']")
             if (btn != null) {
                 return btn.attr("abs:href")
@@ -620,7 +620,7 @@ object PlutoMoviesResolver : BaseResolver {
                 if (dest.isNotBlank() && !dest.equals(url, ignoreCase = true) && !isRootLockerDomain(dest)) return dest
             }
 
-            val soup = Jsoup.parse(html)
+            val soup = Jsoup.parse(html, url)
             val btn = soup.selectFirst("a[href*='kissorgrab.com']")
             if (btn != null) {
                 val href = btn.attr("abs:href")

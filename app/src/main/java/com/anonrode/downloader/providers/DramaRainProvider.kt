@@ -60,7 +60,7 @@ object DramaRainProvider : SiteProvider {
 
                 for (url in candidateUrls) {
                     val directHtml = HttpClient.getText(url) ?: continue
-                    val doc = Jsoup.parse(directHtml)
+                    val doc = Jsoup.parse(directHtml, url)
                     val title = doc.selectFirst("h1.entry-title, h1")?.text()?.trim() ?: continue
                     val poster = doc.selectFirst(".entry-content img, .post-thumbnail img")?.attr("abs:src") ?: ""
 

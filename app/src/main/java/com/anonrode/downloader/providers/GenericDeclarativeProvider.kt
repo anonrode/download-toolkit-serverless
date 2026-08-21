@@ -82,7 +82,7 @@ class GenericDeclarativeProvider(
                 }
             } else {
                 // HTML scraping
-                val doc = Jsoup.parse(raw)
+                val doc = Jsoup.parse(raw, targetUrl)
                 val cards = doc.select(config.cardSelector)
                 for (card in cards) {
                     val linkEl = if (config.linkSelector == "self") card else card.selectFirst(config.linkSelector)
@@ -114,7 +114,7 @@ class GenericDeclarativeProvider(
         val show = ShowCard(title = config.displayName, url = showUrl, site = name)
         try {
             val html = HttpClient.getText(showUrl, referer = "$mainUrl/") ?: return ShowDetails(show = show)
-            val doc = Jsoup.parse(html)
+            val doc = Jsoup.parse(html, showUrl)
 
             val title = doc.selectFirst("h1.entry-title, h1")?.text()?.trim() ?: config.displayName
             val poster = doc.selectFirst(".entry-content img, .post-thumbnail img, img.cover")?.attr("abs:src") ?: ""

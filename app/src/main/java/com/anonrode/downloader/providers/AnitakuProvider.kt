@@ -171,7 +171,7 @@ object AnitakuProvider : SiteProvider {
                         val body = res.body?.string() ?: ""
                         val dlHtml = JSONObject(body).optJSONObject("data")?.optString("result") ?: ""
                         if (dlHtml.isNotBlank()) {
-                            val dlDoc = Jsoup.parse(dlHtml)
+                            val dlDoc = Jsoup.parse(dlHtml, episodeUrl)
                             for (a in dlDoc.select("a[href]")) {
                                 val dlLink = a.attr("href")
                                 val resolved = ResolverRegistry.resolve(dlLink, quality)
@@ -186,7 +186,7 @@ object AnitakuProvider : SiteProvider {
             }
 
             if (direct.isNullOrBlank()) {
-                val doc = Jsoup.parse(html)
+                val doc = Jsoup.parse(html, episodeUrl)
                 val candidates = mutableListOf<String>()
                 for (a in doc.select(".anime_muti_link a[data-video], .servers a[data-video], .anime_muti_link a[href]")) {
                     val dataVideo = a.attr("data-video").ifEmpty { a.attr("href") }
