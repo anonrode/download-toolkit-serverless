@@ -303,7 +303,9 @@ object YoutubeDlDownloader {
             com.anonrode.downloader.util.DebugLog.backend("task=$taskId yt-dlp attempt $attempts/$ytdlpMaxAttempts url=${inputUrl.take(110)}")
             produced = attemptOnce()
             if (produced != null) {
-                com.anonrode.downloader.util.DebugLog.backend("task=$taskId yt-dlp attempt $attempts produced ${produced.name} (${produced.length() / 1048576} MiB)")
+                val size = produced.length()
+                val sizeLabel = if (size >= 1048576) "${size / 1048576} MiB" else "${size / 1024} KiB"
+                com.anonrode.downloader.util.DebugLog.backend("task=$taskId yt-dlp attempt $attempts produced ${produced.name} ($sizeLabel)")
             }
             if (produced == null && attempts < ytdlpMaxAttempts) {
                 try {

@@ -299,7 +299,12 @@ class DownloadEngine(
         TurboDownloader.cancelTask(taskId)
         HttpClient.cancelInFlight()
         com.anonrode.downloader.util.DebugLog.user("pause $taskId")
-        repository.update(taskId) { it.copy(status = TaskStatus.PAUSED, speedBytesPerSec = 0.0) }
+        // Clear the errorMessage: a stale NETWORK_PAUSE_MESSAGE from an earlier
+        // network blip would otherwise make the network observer's reconnect
+        // handler re-queue this task, causing the user's pause to look like a
+        // restart (live-verified in app-2026-08-6.txt: pause at 13:08:35.604
+        // followed by ENGINE start at 13:08:36.017 — 413ms later).
+        repository.update(taskId) { it.copy(status = TaskStatus.PAUSED, speedBytesPerSec = 0.0, errorMessage = null) }
         updateServiceState(force = true)
         processQueue()
     }
@@ -926,6 +931,11 @@ class DownloadEngine(
                             // Fail with the real reason instead; retry re-runs the
                             // resolver, which recovers from transient site issues.
                             com.anonrode.downloader.util.DebugLog.resolve("task=${task.id} resolver chain EMPTY for ${streamUrl.take(120)} (site=${task.site}) — failing cleanly")
+                            // Also flag it as an ERROR-category line: a resolution
+                            // failure is the task's terminal outcome, and the log
+                            // audit showed these only as RESOLVE lines (audit
+                            // finding: "silent failures, no ERROR line").
+                            com.anonrode.downloader.util.DebugLog.error("task=${task.id} could not crack stream link (site=${task.site}) for ${streamUrl.take(120)}")
                             throw Exception("Could not crack the stream link (${task.site}) — the site may have changed or the link expired. Retry, or try another server/episode.")
                         }
                         // Social URLs: yt-dlp's generic extractor genuinely cracks
@@ -995,6 +1005,7 @@ class DownloadEngine(
                     // crawl floor can't see this — bytes DO move — but the drop
                     // from the task's own best window is unmistakable.
                     var bestWindowBps = 0.0
+                    var lastProgressLog = 0L
                     while (isActive) {
                         delay(2000)
                         if (!isActive) break
@@ -1009,6 +1020,17 @@ class DownloadEngine(
                         if (diskGrew) lastDisk = disk
                         if (parsedGrew) lastParsed = parsed
                         if (diskGrew || parsedGrew) lastActivity = now
+                        // Periodic progress beacon: the log recorded nothing
+                        // between start and kill, so a stalled task and a slow
+                        // one were indistinguishable (audit finding). Emit every
+                        // ~10s while bytes actually move.
+                        val beaconMoved = (disk - windowStartDisk) + (parsed - windowStartParsed)
+                        if (beaconMoved > 0 && now - lastProgressLog >= 10_000L) {
+                            lastProgressLog = now
+                            com.anonrode.downloader.util.DebugLog.engine(
+                                "task=${task.id} progress disk=${disk / 1024}KiB parsed=${parsed / 1024}KiB window=${(beaconMoved / 1024).toInt()}KiB"
+                            )
+                        }
                         // Feed the UI from the filesystem when the backend reports
                         // nothing (fragment downloads, hung output parsing).
                         if (disk > t.downloadedBytes) {
@@ -1116,6 +1138,9 @@ class DownloadEngine(
                         updateServiceState(force = false)
                     }
 
+                    com.anonrode.downloader.util.DebugLog.engine(
+                        "task=${task.id} turbo start sockets=$effectiveSockets url=${streamUrl.take(110)}"
+                    )
                     var turboResult: TurboDownloader.TurboResult = TurboDownloader.download(
                         url = streamUrl,
                         dest = dest,

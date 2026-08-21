@@ -18,9 +18,12 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.rounded.Audiotrack
+import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Link
+import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Videocam
+import androidx.compose.material.icons.rounded.YouTube
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -80,12 +83,12 @@ class QuickShareActivity : ComponentActivity() {
                         parsedUrl = parsed,
                         rawUrl = sharedText,
                         onDismiss = { finish() },
-                        onDownload = { quality, audioOnly, makeInstant ->
+                        onDownload = { quality, audioOnly, makeInstant, engineOverride ->
                             if (makeInstant) {
                                 prefs.edit().putBoolean("pref_instant_social", true).apply()
                                 (application as? AnonApp)?.engine?.instantSocialDownload = true
                             }
-                            dispatchDownload(parsed, sharedText, quality, audioOnly)
+                            dispatchDownload(parsed, sharedText, quality, audioOnly, engineOverride)
                             Toast.makeText(this@QuickShareActivity, "🚀 Download queued in background", Toast.LENGTH_SHORT).show()
                             finish()
                         }
@@ -126,9 +129,16 @@ class QuickShareActivity : ComponentActivity() {
         Toast.makeText(this, "🚀 $label download started in background", Toast.LENGTH_SHORT).show()
     }
 
-    private fun dispatchDownload(parsed: ParsedUrl, rawUrl: String, quality: String, audioOnly: Boolean) {
+    private fun dispatchDownload(parsed: ParsedUrl, rawUrl: String, quality: String, audioOnly: Boolean, engineOverride: String = "auto") {
         val app = application as? AnonApp ?: return
         val engine = app.engine
+        val backend = if (engineOverride != "auto") engineOverride else when (parsed) {
+            is ParsedUrl.SocialUrl -> "yt-dlp"
+            is ParsedUrl.MagnetUrl -> "aria2c"
+            is ParsedUrl.DirectMediaUrl -> "aria2c"
+            is ParsedUrl.DramaUrl -> "aria2c"
+            else -> "yt-dlp"
+        }
 
         when (parsed) {
             is ParsedUrl.SocialUrl -> {
@@ -138,7 +148,7 @@ class QuickShareActivity : ComponentActivity() {
                     episodeTitle = "${parsed.platform} Video",
                     sourceUrl = parsed.cleanUrl,
                     isDirect = false,
-                    backend = "yt-dlp",
+                    backend = backend,
                     parallelSockets = engine.parallelSocketsPerFile,
                     audioOnly = audioOnly,
                     quality = if (audioOnly) null else quality
@@ -151,7 +161,7 @@ class QuickShareActivity : ComponentActivity() {
                     episodeTitle = parsed.title,
                     sourceUrl = parsed.magnet,
                     isDirect = true,
-                    backend = "aria2c",
+                    backend = backend,
                     parallelSockets = engine.parallelSocketsPerFile
                 )
             }
@@ -162,7 +172,7 @@ class QuickShareActivity : ComponentActivity() {
                     episodeTitle = parsed.filename,
                     sourceUrl = parsed.url,
                     isDirect = true,
-                    backend = "aria2c",
+                    backend = backend,
                     parallelSockets = engine.parallelSocketsPerFile
                 )
             }
@@ -173,7 +183,7 @@ class QuickShareActivity : ComponentActivity() {
                     episodeTitle = parsed.showCard.title,
                     sourceUrl = parsed.showCard.url,
                     isDirect = false,
-                    backend = "aria2c",
+                    backend = backend,
                     parallelSockets = engine.parallelSocketsPerFile,
                     quality = if (audioOnly) null else quality
                 )
@@ -185,7 +195,7 @@ class QuickShareActivity : ComponentActivity() {
                     episodeTitle = "Shared Media",
                     sourceUrl = rawUrl,
                     isDirect = false,
-                    backend = "yt-dlp",
+                    backend = backend,
                     parallelSockets = engine.parallelSocketsPerFile,
                     audioOnly = audioOnly,
                     quality = if (audioOnly) null else quality
@@ -200,11 +210,12 @@ fun QuickShareCard(
     parsedUrl: ParsedUrl,
     rawUrl: String,
     onDismiss: () -> Unit,
-    onDownload: (quality: String, audioOnly: Boolean, makeInstant: Boolean) -> Unit
+    onDownload: (quality: String, audioOnly: Boolean, makeInstant: Boolean, engineOverride: String) -> Unit
 ) {
     var audioOnly by remember { mutableStateOf(false) }
     var selectedQuality by remember { mutableStateOf("720p") }
     var alwaysInstant by remember { mutableStateOf(false) }
+    var engineOverride by remember { mutableStateOf("auto") }
     // Guards against double-tap re-enqueue during the dismissal animation.
     var enqueued by remember { mutableStateOf(false) }
 
@@ -242,37 +253,49 @@ fun QuickShareCard(
                     .background(BorderHairline)
                     .align(Alignment.CenterHorizontally)
             )
-            // ---- Header: source label -> title -> close ----
+            // ---- Header: badge -> title -> close ----
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.Top
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(Spacing.sm)
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(Spacing.md)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(44.dp)
+                            .clip(RoundedCornerShape(Radius.md))
+                            .background(AccentViolet.copy(alpha = 0.16f)),
+                        contentAlignment = Alignment.Center
                     ) {
-                        Box(
-                            modifier = Modifier
-                                .size(6.dp)
-                                .background(AccentViolet, CircleShape)
+                        Icon(
+                            imageVector = when (parsedUrl) {
+                                is ParsedUrl.MagnetUrl -> Icons.Rounded.Bolt
+                                is ParsedUrl.DirectMediaUrl -> Icons.Rounded.Videocam
+                                is ParsedUrl.DramaUrl -> Icons.Rounded.Videocam
+                                else -> Icons.Rounded.Link
+                            },
+                            contentDescription = null,
+                            tint = AccentViolet,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+                    Column {
+                        Text(
+                            text = "Download with Anon",
+                            fontSize = 17.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = TextPrimary
                         )
                         Text(
                             text = platformName,
                             fontSize = 12.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            letterSpacing = 1.sp,
+                            fontWeight = FontWeight.Medium,
                             color = TextMuted
                         )
                     }
-                    Spacer(modifier = Modifier.height(Spacing.xs))
-                    Text(
-                        text = "Quick Download",
-                        fontSize = 20.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = TextPrimary
-                    )
                 }
 
                 Box(
@@ -355,6 +378,42 @@ fun QuickShareCard(
                     onClick = { audioOnly = true },
                     icon = Icons.Rounded.Audiotrack,
                     label = "Audio",
+                    modifier = Modifier.weight(1f)
+                )
+            }
+
+            // ---- Download engine ----
+            Spacer(modifier = Modifier.height(Spacing.lg))
+            SectionLabel(text = "Download engine")
+            Spacer(modifier = Modifier.height(Spacing.sm))
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(Radius.md))
+                    .background(SurfaceCard)
+                    .border(1.dp, BorderHairline, RoundedCornerShape(Radius.md))
+                    .padding(Spacing.xs),
+                horizontalArrangement = Arrangement.spacedBy(Spacing.xs)
+            ) {
+                EngineSegment(
+                    selected = engineOverride == "auto",
+                    onClick = { engineOverride = "auto" },
+                    icon = Icons.Rounded.Settings,
+                    label = "Auto",
+                    modifier = Modifier.weight(1f)
+                )
+                EngineSegment(
+                    selected = engineOverride == "aria2c",
+                    onClick = { engineOverride = "aria2c" },
+                    icon = Icons.Rounded.Bolt,
+                    label = "Fast",
+                    modifier = Modifier.weight(1f)
+                )
+                EngineSegment(
+                    selected = engineOverride == "yt-dlp",
+                    onClick = { engineOverride = "yt-dlp" },
+                    icon = Icons.Rounded.YouTube,
+                    label = "Extractor",
                     modifier = Modifier.weight(1f)
                 )
             }
@@ -461,7 +520,7 @@ fun QuickShareCard(
                     onClick = {
                         if (enqueued) return@Button
                         enqueued = true
-                        onDownload(selectedQuality, audioOnly, alwaysInstant)
+                        onDownload(selectedQuality, audioOnly, alwaysInstant, engineOverride)
                     },
                     modifier = Modifier
                         .weight(1.4f)
@@ -491,6 +550,41 @@ private fun SectionLabel(text: String) {
 
 @Composable
 private fun FormatSegment(
+    selected: Boolean,
+    onClick: () -> Unit,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    label: String,
+    // Weight must come from the caller's RowScope — a composable cannot apply
+    // it to itself.
+    modifier: Modifier = Modifier
+) {
+    Row(
+        modifier = modifier
+            .height(48.dp)
+            .clip(RoundedCornerShape(Radius.sm))
+            .background(if (selected) AccentViolet.copy(alpha = 0.16f) else Color.Transparent)
+            .clickable(onClick = onClick),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Center
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = if (selected) AccentViolet else TextSecondary,
+            modifier = Modifier.size(16.dp)
+        )
+        Spacer(modifier = Modifier.width(Spacing.sm))
+        Text(
+            text = label,
+            fontSize = 14.sp,
+            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+            color = if (selected) AccentViolet else TextSecondary
+        )
+    }
+}
+
+@Composable
+private fun EngineSegment(
     selected: Boolean,
     onClick: () -> Unit,
     icon: androidx.compose.ui.graphics.vector.ImageVector,
