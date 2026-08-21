@@ -49,8 +49,13 @@ object ProviderRegistry {
         val cached = searchCache[cacheKey]
 
         // If cached within the last 4 minutes, emit instantly (0ms response time!)
-        if (cached != null && (now - cached.first) < 240_000L && cached.second.isNotEmpty()) {
-            send(cached.second)
+        val cachedFresh = cached != null && (now - cached.first) < 240_000L && cached.second.isNotEmpty()
+        // Empty results are cached too, briefly — an immediate identical
+        // re-search (double keystroke) otherwise re-fires the whole crawl for
+        // a query that just returned nothing (log: duplicate searches 1s apart).
+        val cachedEmptyFresh = cached != null && (now - cached.first) < 30_000L && cached.second.isEmpty()
+        if (cachedFresh || cachedEmptyFresh) {
+            send(cached!!.second)
         }
 
         val currentProviders = allProviders
@@ -85,8 +90,9 @@ object ProviderRegistry {
             val finalRanked = RelevanceScorer.filterAndSort(query, accumulated.toList())
             searchCache[cacheKey] = Pair(now, finalRanked)
             send(finalRanked)
-        } else if (cached == null || cached.second.isEmpty()) {
-            send(emptyList())
+        } else {
+            searchCache[cacheKey] = Pair(now, emptyList())
+            if (!cachedEmptyFresh) send(emptyList())
         }
     }.flowOn(Dispatchers.IO)
 
@@ -94,13 +100,27 @@ object ProviderRegistry {
 
     suspend fun loadEpisodes(show: ShowCard): ShowDetails {
         val provider = getProvider(show.site) ?: return ShowDetails(show = show)
+        // Drawer cache: the activity log showed the same ~130KiB show page being
+        // re-fetched up to 5 times in one browsing session (every drawer open).
+        // A 5-minute TTL per show kills that waste; the drawer's per-open job
+        // still gets fresh data after the TTL or when the user pulls it again.
+        val cacheKey = "${show.site}::${show.url}"
+        val now = System.currentTimeMillis()
+        val cached = episodesCache[cacheKey]
+        if (cached != null && now - cached.first < 300_000L) {
+            return cached.second
+        }
         // Force IO here, not just at the call site: loadEpisodes does blocking
         // OkHttp, and a caller that forgets to switch off Main gets a
         // NetworkOnMainThreadException that HttpClient's blanket catch swallows
         // into an empty list ("No episodes found"). Guaranteeing it at the
         // source makes that whole failure class impossible regardless of caller.
-        return withContext(Dispatchers.IO) { provider.loadEpisodes(show.url) }
+        val details = withContext(Dispatchers.IO) { provider.loadEpisodes(show.url) }
+        episodesCache[cacheKey] = Pair(now, details)
+        return details
     }
+
+    private val episodesCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, ShowDetails>>()
 
     suspend fun resolveEpisode(site: String, episodeUrl: String, quality: String): DownloadRecipe {
         val provider = getProvider(site) ?: return DownloadRecipe(

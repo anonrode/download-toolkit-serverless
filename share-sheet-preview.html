@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Quick Share Sheet — After Fix</title>
+<style>
+  :root {
+    --violet: #7C5CFF;
+    --violet-soft: rgba(124, 92, 255, 0.16);
+    --card: #1C1C28;
+    --card-2: #14141E;
+    --bg: #0C0C14;
+    --text: #F2F2F7;
+    --text-2: #A8A8BC;
+    --text-3: #6E6E82;
+    --line: #2A2A3C;
+    --screen: 390px;
+    --screen-h: 844px;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0A0A12;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    color: var(--text);
+    min-height: 100vh;
+    padding: 32px 16px 60px;
+  }
+  h1 { font-size: 15px; font-weight: 700; letter-spacing: 1px; color: var(--text-2); text-align: center; margin-bottom: 4px; }
+  p.sub { font-size: 12px; color: var(--text-3); text-align: center; margin-bottom: 24px; }
+  .frames { display: flex; gap: 28px; justify-content: center; align-items: flex-start; flex-wrap: wrap; }
+  .frame-wrap { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+  .frame-wrap .label { font-size: 12px; font-weight: 600; color: var(--text-2); letter-spacing: 0.5px; }
+  .frame-wrap .label small { display: block; font-weight: 400; color: var(--text-3); margin-top: 2px; }
+
+  .phone {
+    width: var(--screen);
+    height: var(--screen-h);
+    background: var(--bg);
+    border-radius: 40px;
+    border: 1px solid #26263A;
+    box-shadow: 0 24px 80px rgba(0,0,0,0.6);
+    position: relative;
+    overflow: hidden;
+    transition: height 0.4s ease;
+  }
+  .phone.small { height: 640px; }
+  /* notch */
+  .phone::before {
+    content: "";
+    position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
+    width: 120px; height: 26px; background: #000; border-radius: 20px; z-index: 5;
+  }
+  .statusbar {
+    position: absolute; top: 0; left: 0; right: 0; height: 48px;
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 0 28px; font-size: 12px; font-weight: 600; color: var(--text-2); z-index: 4;
+  }
+  .screen { position: absolute; inset: 0; }
+
+  /* ===== AFTER: full-screen overlay + bottom sheet ===== */
+  .after .overlay {
+    position: absolute; inset: 0; background: rgba(0,0,0,0.5);
+    display: flex; align-items: flex-end; z-index: 3;
+  }
+  .after .sheet {
+    width: 100%; background: var(--card);
+    border-radius: 28px 28px 0 0;
+    border-top: 1px solid var(--line);
+    max-height: 100%;
+    display: flex; flex-direction: column;
+  }
+  .after .sheet .scroll {
+    overflow-y: auto; padding: 20px 22px 34px;
+    scrollbar-width: thin; scrollbar-color: var(--line) transparent;
+  }
+  .after .sheet .scroll::-webkit-scrollbar { width: 4px; }
+  .after .sheet .scroll::-webkit-scrollbar-thumb { background: var(--line); border-radius: 4px; }
+  .handle { width: 36px; height: 4px; background: var(--line); border-radius: 2px; margin: 10px auto 6px; flex-shrink: 0; }
+
+  .head { display: flex; justify-content: space-between; align-items: flex-start; }
+  .dot-row { display: flex; align-items: center; gap: 8px; }
+  .dot { width: 6px; height: 6px; background: var(--violet); border-radius: 50%; }
+  .platform { font-size: 11px; font-weight: 600; letter-spacing: 1px; color: var(--text-3); }
+  .title { font-size: 20px; font-weight: 800; color: var(--text); margin-top: 6px; }
+  .close {
+    width: 48px; height: 48px; display: flex; align-items: center; justify-content: center;
+    cursor: pointer;
+  }
+  .close .circle { width: 32px; height: 32px; background: var(--card-2); border-radius: 50%; display: flex; align-items: center; justify-content: center; }
+  .close svg { width: 16px; height: 16px; stroke: var(--text-2); }
+
+  .urlbox {
+    display: flex; align-items: center; gap: 8px; margin-top: 20px;
+    background: var(--card-2); border: 1px solid var(--line); border-radius: 12px;
+    padding: 12px 14px;
+  }
+  .urlbox svg { width: 14px; height: 14px; stroke: var(--text-3); flex-shrink: 0; }
+  .urlbox .url { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 12px; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  .section { font-size: 11px; font-weight: 600; letter-spacing: 1px; color: var(--text-3); margin-top: 18px; }
+  .engine-row { display: flex; gap: 8px; margin-top: 8px; }
+  .engine-chip {
+    flex: 1; height: 46px; border-radius: 10px; background: var(--card-2);
+    border: 1px solid var(--line); display: flex; align-items: center; justify-content: center;
+    gap: 6px; font-size: 13px; font-weight: 600; color: var(--text-2); cursor: pointer;
+    transition: all 0.15s;
+  }
+  .engine-chip svg { width: 16px; height: 16px; stroke: currentColor; }
+  .engine-chip.sel { background: var(--violet-soft); border-color: var(--violet); color: var(--violet); }
+
+  .seg { display: flex; gap: 6px; margin-top: 8px; background: var(--card-2); border: 1px solid var(--line); border-radius: 12px; padding: 5px; }
+  .seg-item { flex: 1; height: 46px; border-radius: 9px; display: flex; align-items: center; justify-content: center; gap: 7px; font-size: 14px; font-weight: 600; color: var(--text-3); cursor: pointer; }
+  .seg-item svg { width: 16px; height: 16px; stroke: currentColor; }
+  .seg-item.sel { background: var(--violet-soft); color: var(--violet); }
+
+  .quality-row { display: flex; gap: 8px; margin-top: 8px; }
+  .q { flex: 1; height: 48px; border-radius: 12px; display: flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 600; cursor: pointer; }
+  .q.off { background: var(--card-2); border: 1px solid var(--line); color: var(--text-2); }
+  .q.on { background: var(--violet); color: #fff; border: 1px solid var(--violet); }
+
+  .instant {
+    display: flex; align-items: center; gap: 10px; margin-top: 18px;
+    background: var(--card-2); border: 1px solid var(--line); border-radius: 12px;
+    padding: 10px 14px; cursor: pointer;
+  }
+  .cb { width: 20px; height: 20px; border-radius: 5px; background: var(--violet); display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+  .cb svg { width: 13px; height: 13px; stroke: #fff; }
+  .instant .t { font-size: 13px; font-weight: 600; color: var(--text-2); }
+  .instant .skip { margin-left: auto; font-size: 12px; color: var(--text-3); }
+
+  .actions { display: flex; gap: 12px; margin-top: 20px; }
+  .btn { flex: 1; height: 52px; border-radius: 12px; display: flex; align-items: center; justify-content: center; gap: 8px; font-size: 15px; font-weight: 700; cursor: pointer; }
+  .btn svg { width: 18px; height: 18px; }
+  .btn.cancel { background: transparent; border: 1px solid var(--line); color: var(--text-2); }
+  .btn.go { background: var(--violet); color: #fff; flex: 1.4; }
+  .btn.go svg { stroke: #fff; }
+
+  /* ===== BEFORE: dialog theme (wrap-content, floats centered) ===== */
+  .before .overlay {
+    position: absolute; inset: 0; background: rgba(0,0,0,0.5);
+    display: flex; align-items: center; justify-content: center; z-index: 3;
+  }
+  .before .sheet {
+    width: 88%; background: var(--card);
+    border-radius: 20px; border: 1px solid var(--line);
+    box-shadow: 0 16px 60px rgba(0,0,0,0.7);
+    padding: 18px 16px 22px;
+  }
+  .before .centered-note {
+    position: absolute; bottom: 14px; left: 0; right: 0; text-align: center;
+    font-size: 10px; color: #999; letter-spacing: 0.5px;
+  }
+  .before .mini-title { font-size: 15px; font-weight: 700; margin-top: 4px; }
+  .before .mini-url { font-family: ui-monospace, monospace; font-size: 10px; color: var(--text-3); margin-top: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .before .mini-btn { margin-top: 14px; height: 40px; background: var(--violet); border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 700; }
+
+  .controls { text-align: center; margin-top: 22px; }
+  .controls button {
+    background: var(--card-2); color: var(--text-2); border: 1px solid var(--line);
+    border-radius: 10px; padding: 10px 18px; font-size: 13px; font-weight: 600; cursor: pointer;
+  }
+  .controls button:hover { border-color: var(--violet); color: var(--text); }
+  .note { max-width: 820px; margin: 26px auto 0; font-size: 12px; line-height: 1.7; color: var(--text-3); text-align: center; }
+  .note code { background: var(--card-2); border: 1px solid var(--line); border-radius: 5px; padding: 1px 6px; font-size: 11px; color: var(--text-2); }
+</style>
+</head>
+<body>
+
+<h1>QUICK SHARE SHEET</h1>
+<p class="sub">Before (dialog theme — floats centered, wrap-content) &nbsp;vs&nbsp; After (full-screen overlay, bottom-docked, scrollable)</p>
+
+<div class="frames">
+
+  <!-- BEFORE -->
+  <div class="frame-wrap">
+    <div class="label">BEFORE <small>Theme.AnonDownloader.Dialog → wrap-content window</small></div>
+    <div class="phone">
+      <div class="screen before">
+        <div class="statusbar"><span>9:41</span><span>▮▮▮</span></div>
+        <div class="overlay">
+          <div class="sheet">
+            <div class="dot-row"><span class="dot"></span><span class="platform">INSTAGRAM</span></div>
+            <div class="mini-title">Quick Download</div>
+            <div class="mini-url">https://www.instagram.com/reel/DcSuxh9qd2v/</div>
+            <div class="mini-btn">Download</div>
+          </div>
+          <div class="centered-note">floats in the middle of the screen</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- AFTER -->
+  <div class="frame-wrap">
+    <div class="label">AFTER <small>Theme.Material.NoActionBar → full-screen + verticalScroll</small></div>
+    <div class="phone" id="afterPhone">
+      <div class="screen after">
+        <div class="statusbar"><span>9:41</span><span>▮▮▮</span></div>
+        <div class="overlay">
+          <div class="sheet">
+            <div class="handle"></div>
+            <div class="scroll" id="sheetScroll">
+              <div class="head">
+                <div>
+                  <div class="dot-row"><span class="dot"></span><span class="platform">INSTAGRAM</span></div>
+                  <div class="title">Quick Download</div>
+                </div>
+                <div class="close" title="Close">
+                  <div class="circle">
+                    <svg viewBox="0 0 24 24" fill="none" stroke-width="2.4" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+                  </div>
+                </div>
+              </div>
+
+              <div class="urlbox">
+                <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/></svg>
+                <span class="url">https://www.instagram.com/reel/DcSuxh9qd2v/?igsi=...</span>
+              </div>
+
+              <div class="section">ENGINE</div>
+              <div class="engine-row">
+                <div class="engine-chip sel">
+                  <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3h0a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5h0a1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9v0a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+                  Auto
+                </div>
+                <div class="engine-chip">
+                  <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+                  Turbo
+                </div>
+                <div class="engine-chip">
+                  <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 17a24.1 24.1 0 0 1 0-10 2 2 0 0 1 1.4-1.4 49.6 49.6 0 0 1 16.2 0A2 2 0 0 1 21.5 7a24.1 24.1 0 0 1 0 10 2 2 0 0 1-1.4 1.4 49.6 49.6 0 0 1-16.2 0A2 2 0 0 1 2.5 17"/><path d="m10 15 5-3-5-3z"/></svg>
+                  yt-dlp
+                </div>
+              </div>
+
+              <div class="section">FORMAT</div>
+              <div class="seg">
+                <div class="seg-item sel">
+                  <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m22 8-6 4 6 4V8Z"/><rect x="2" y="6" width="14" height="12" rx="2"/></svg>
+                  Video
+                </div>
+                <div class="seg-item">
+                  <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+                  Audio
+                </div>
+              </div>
+
+              <div class="section">QUALITY</div>
+              <div class="quality-row">
+                <div class="q off">480p</div>
+                <div class="q on">720p</div>
+                <div class="q off">1080p</div>
+                <div class="q off">Best</div>
+              </div>
+
+              <div class="instant">
+                <div class="cb"><svg viewBox="0 0 24 24" fill="none" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></div>
+                <span class="t">Always download instantly</span>
+                <span class="skip">Skip this dialog</span>
+              </div>
+
+              <div class="actions">
+                <div class="btn cancel">Cancel</div>
+                <div class="btn go">
+                  <svg viewBox="0 0 24 24" fill="none" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg>
+                  Download
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="controls">
+  <button onclick="document.getElementById('afterPhone').classList.toggle('small')">Toggle small screen / keyboard (tests the scroll)</button>
+</div>
+
+<p class="note">
+  <b>What changed:</b> the theme now fills the whole screen (<code>Theme.Material.NoActionBar</code> instead of the wrap-content <code>Dialog.NoActionBar</code>), so the dimmed overlay covers everything and the sheet docks to the true bottom edge. The card column is <code>verticalScroll</code>-able, so on a small screen (toggle above) the content scrolls and the <b>Download</b> button stays reachable. The engine selector row is the main agent's addition, included here.
+</p>
+
+<script>
+  // keep the small toggle anchored to the sheet so the scroll is visible
+  document.getElementById('afterPhone').addEventListener('transitionend', function () {
+    var s = document.getElementById('sheetScroll');
+    s.scrollTop = s.scrollHeight; // scroll to bottom to show Download button reachable
+  });
+</script>
+</body>
+</html>

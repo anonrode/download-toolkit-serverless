@@ -13,8 +13,10 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.rounded.Audiotrack
@@ -241,6 +243,11 @@ fun QuickShareCard(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                // Full-screen theme now sizes this card to the real screen
+                // height — with the engine selector added the content can
+                // exceed small screens, so the sheet must scroll internally
+                // (the drag handle stays pinned at the top edge).
+                .verticalScroll(rememberScrollState())
                 .padding(horizontal = Spacing.xl)
                 .padding(top = Spacing.lg, bottom = Spacing.xxl)
         ) {

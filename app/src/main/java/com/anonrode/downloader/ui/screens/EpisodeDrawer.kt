@@ -260,16 +260,20 @@ fun EpisodeDrawer(
                         onClick = {
                             if (enqueued) return@Button
                             enqueued = true
-                            val sorted = episodes.sortedBy { it.episodeNum }
+                            // Respect the range the user typed: the field feeds
+                            // selectedEpisodes, so queue exactly those (fall back
+                            // to everything when the selection was cleared).
+                            val targets = selectedEpisodes.ifEmpty { episodes.toSet() }
+                            val sorted = targets.sortedBy { it.episodeNum }
                             for (ep in sorted) {
                                 viewModel.engine.enqueue(
                                     showTitle = show.title,
                                     episodeNum = ep.episodeNum,
                                     episodeTitle = "${show.title} - ${ep.title}",
                                     sourceUrl = ep.url,
-                                    isDirect = true,
+                                    isDirect = false,
                                     backend = "aria2c",
-                                    site = show.site,
+                                    site = ep.site.ifBlank { show.site },
                                     parallelSockets = viewModel.engine.parallelSocketsPerFile
                                 )
                             }
@@ -282,7 +286,11 @@ fun EpisodeDrawer(
                         shape = RoundedCornerShape(Radius.md),
                         contentPadding = PaddingValues(horizontal = Spacing.md, vertical = Spacing.sm)
                     ) {
-                        Text("All", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        Text(
+                            if (selectedEpisodes.isNotEmpty()) "Download (${selectedEpisodes.size})" else "All",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
                     }
                 }
             }
@@ -357,9 +365,9 @@ fun EpisodeDrawer(
                                     episodeNum = ep.episodeNum,
                                     episodeTitle = "${show.title} - ${ep.title}",
                                     sourceUrl = ep.url,
-                                    isDirect = true,
+                                    isDirect = false,
                                     backend = "aria2c",
-                                    site = show.site,
+                                    site = ep.site.ifBlank { show.site },
                                     parallelSockets = viewModel.engine.parallelSocketsPerFile
                                 )
                                 onDismiss()
@@ -418,9 +426,9 @@ fun EpisodeDrawer(
                                         episodeNum = ep.episodeNum,
                                         episodeTitle = "${show.title} - ${ep.title}",
                                         sourceUrl = ep.url,
-                                        isDirect = true,
+                                        isDirect = false,
                                         backend = "aria2c",
-                                        site = show.site,
+                                        site = ep.site.ifBlank { show.site },
                                         parallelSockets = viewModel.engine.parallelSocketsPerFile
                                     )
                                 }

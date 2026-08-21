@@ -56,6 +56,11 @@
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 
+        <!-- Retry action on Download Failed notifications -->
+        <receiver
+            android:name=".service.RetryReceiver"
+            android:exported="false" />
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"
