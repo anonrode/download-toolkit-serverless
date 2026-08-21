@@ -608,7 +608,12 @@ object EmbedResolver : BaseResolver {
 object PlutoMoviesResolver : BaseResolver {
     override fun canResolve(url: String): Boolean {
         val lower = url.lowercase()
-        return lower.contains("dl.plutomovies.com") || lower.contains("plutomovies.com/movie/")
+        // /series/ episode pages carry the same download link as movies —
+        // without them the Vincenzo-style episode taps failed with
+        // "resolver chain EMPTY" (live-verified 2026-08-21).
+        return lower.contains("dl.plutomovies.com") ||
+            lower.contains("plutomovies.com/movie/") ||
+            lower.contains("plutomovies.com/series/")
     }
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
@@ -748,18 +753,23 @@ object LoadedfilesResolver : BaseResolver {
             val noRedirectClient = HttpClient.shared.newBuilder().followRedirects(false).build()
 
             // Find a host that actually answers, then run the token chain on it.
+            // The probe must record the host that ANSWERED, not the one
+            // requested: loadedfiles.org is a 301 shell for loadedfiles.net,
+            // and recording .org poisoned every later ?pt= referer and host
+            // rewrite — the server then rotates tokens forever and the whole
+            // 9jarocks path died for hours (live-verified 2026-08-21).
             var currUrl: String? = null
             for (host in candidateHosts(url)) {
                 val candidate = HttpClient.safeUrl(rewriteHost(url, host))
-                val probe = HttpClient.getText(candidate, referer = "https://my9jarocks.bz/")
-                if (probe != null) {
-                    lastWorkingHost = host
-                    currUrl = candidate
+                val effective = probeEffectiveUrl(noRedirectClient, candidate)
+                if (effective != null) {
+                    lastWorkingHost = effective.substringAfter("://").substringBefore('/').lowercase()
+                    currUrl = effective
                     break
                 }
             }
             if (currUrl == null) {
-                android.util.Log.w("AnonDownload", "Loadedfiles: no live host (${HttpClient.lastFailure})")
+                android.util.Log.w("AnonDownload", "Loadedfiles: no live host")
                 return null
             }
 
@@ -798,6 +808,19 @@ object LoadedfilesResolver : BaseResolver {
                     }
 
                     if (res.isSuccessful) {
+                        // The site changed its chain (2026-08-21): after ~2 token
+                        // rotations the ?pt= hop answers 200 and serves THE FILE
+                        // ITSELF (video/* body) — no Location, no downloadUrl.
+                        // Detect it from headers BEFORE reading any body, or a
+                        // 114MB response would be read as "no match".
+                        val ct = res.header("Content-Type")?.lowercase() ?: ""
+                        if (ct.startsWith("video/") || ct.contains("octet-stream") ||
+                            ct.contains("matroska") || ct.contains("mpegurl")
+                        ) {
+                            android.util.Log.d("AnonDownload", "Loadedfiles token hop served the media directly ($ct)")
+                            return currUrl
+                        }
+
                         val body = HttpClient.cappedText(res) ?: return@use
                         val direct = findDirectMediaUrl(body)
                         if (!direct.isNullOrBlank() && !isRootLockerDomain(direct)) {
@@ -821,6 +844,33 @@ object LoadedfilesResolver : BaseResolver {
             }
         } catch (e: Exception) {
             android.util.Log.e("AnonDownload", "LoadedfilesResolver error: ${e.message}", e)
+        }
+        return null
+    }
+
+    /**
+     * Follow up to 3 redirects manually and return the URL that actually
+     * served a page. loadedfiles.org is a 301 shell for loadedfiles.net —
+     * treating the shell as the working host poisoned the whole chain.
+     */
+    private fun probeEffectiveUrl(client: okhttp3.OkHttpClient, startUrl: String): String? {
+        var url = startUrl
+        repeat(3) {
+            val req = Request.Builder()
+                .url(HttpClient.safeUrl(url))
+                .header("User-Agent", HttpClient.DEFAULT_UA)
+                .header("Referer", "https://my9jarocks.bz/")
+                .build()
+            client.newCall(req).execute().use { res ->
+                val loc = res.header("Location")
+                if (res.code in 300..399 && !loc.isNullOrBlank()) {
+                    url = HttpClient.safeUrl(loc)
+                } else if (res.code in 200..299) {
+                    return url
+                } else {
+                    return null
+                }
+            }
         }
         return null
     }

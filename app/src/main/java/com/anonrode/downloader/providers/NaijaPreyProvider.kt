@@ -70,13 +70,15 @@ object NaijaPreyProvider : SiteProvider {
             val seen = mutableSetOf<String>()
             val links = doc.select("a[href*='download'], a.elementor-button, .entry-content a")
 
-            // "Download Movies"/"Download Series" nav links point at category
-            // pages (/download-movies-xxx/) — the log showed tasks created from
-            // those exact hrefs failing with "resolver chain EMPTY" (user
-            // reported "some stuff are not downloading"). Only real media/
-            // locker links pass.
-            val navHref = Regex("""/download-(?:movies|series|tv|film|episode)""", RegexOption.IGNORE_CASE)
-            val navText = Regex("""(?i)^\s*(download\s+(movies|series|tv|films?|episodes?)|all\s+downloads?)\s*$""")
+            // Nav garbage the a[href*='download'] selector keeps catching:
+            // "Download Movies" (/download-movies-xxx/), "Series Download"
+            // (/series-download/), "Downloader", and how-to posts. Each became
+            // a doomed task (live log: 8 failures in one browsing session).
+            val navHref = Regex(
+                """/download-(?:movies|series|tv|film|episode)|/series-download(?:-v\d+)?(?:$|[/?#])|/downloader(?:$|[/?#])|/how-to-download""",
+                RegexOption.IGNORE_CASE
+            )
+            val navText = Regex("""(?i)^\s*(download\s+(movies|series|tv|films?|episodes?)|all\s+downloads?|series\s+downloads?|how\s+to\s+download.*)\s*$""")
 
             var count = 1
             for (a in links) {
