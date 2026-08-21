@@ -53,10 +53,28 @@ fun SettingsSheet(
     var showPosters by remember { mutableStateOf(viewModel.engine.showPostersInResults) }
     var storageGuard by remember { mutableStateOf(viewModel.engine.storageGuardGb.toFloat()) }
 
+    // Tier-A settings state
+    var stallTimeout by remember { mutableStateOf(viewModel.engine.stallTimeoutSec) }
+    var magnetRetries by remember { mutableStateOf(viewModel.engine.magnetMaxAttempts) }
+    var ytdlpRetries by remember { mutableStateOf(viewModel.engine.ytdlpMaxAttempts) }
+    var hlsFragments by remember { mutableStateOf(viewModel.engine.hlsFragmentConcurrency) }
+    var speedLimit by remember { mutableStateOf(viewModel.engine.globalSpeedLimitKbs) }
+    var torrentPeers by remember { mutableStateOf(viewModel.engine.torrentPeers) }
+    var wifiOnlyAll by remember { mutableStateOf(viewModel.engine.wifiOnlyAll) }
+    var clipboardDetect by remember { mutableStateOf(viewModel.engine.clipboardDetect) }
+    var completionNotifications by remember { mutableStateOf(viewModel.engine.completionNotifications) }
+    var debugLogging by remember { mutableStateOf(viewModel.engine.debugLogging) }
+
     var isUpdatingYtDlp by remember { mutableStateOf(false) }
     var isSyncingRules by remember { mutableStateOf(false) }
 
     val rulesVersion by DynamicRulesManager.version.collectAsState()
+
+    // Live storage figures: the ViewModel only refreshes at app start, so
+    // re-read free/total storage each time the sheet opens.
+    LaunchedEffect(Unit) {
+        viewModel.refreshStorageInfo()
+    }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -431,6 +449,17 @@ fun SettingsSheet(
                     checked = wifiOnlyTorrents,
                     onCheckedChange = { wifiOnlyTorrents = it }
                 )
+
+                HorizontalDivider(color = BorderHairline, modifier = Modifier.padding(horizontal = Spacing.md))
+
+                // Wi-Fi Only for ALL Downloads
+                SettingsSwitchRow(
+                    icon = Icons.Rounded.WifiOff,
+                    title = "Download Only on Wi-Fi (All)",
+                    subtitle = "Gates every download to Wi-Fi, not just torrents",
+                    checked = wifiOnlyAll,
+                    onCheckedChange = { wifiOnlyAll = it }
+                )
             }
 
             Spacer(modifier = Modifier.height(Spacing.lg))
@@ -496,6 +525,228 @@ fun SettingsSheet(
 
             Spacer(modifier = Modifier.height(Spacing.xl))
 
+            // SECTION 6: Network & Privacy
+            SettingsCategoryHeader(title = "Network & Privacy")
+            SettingsCard {
+                SettingsSwitchRow(
+                    icon = Icons.Rounded.Clipboard,
+                    title = "Auto-Detect Clipboard Links",
+                    subtitle = "Shows a snippet when a URL or magnet is copied",
+                    checked = clipboardDetect,
+                    onCheckedChange = { clipboardDetect = it }
+                )
+
+                HorizontalDivider(color = BorderHairline, modifier = Modifier.padding(horizontal = Spacing.md))
+
+                SettingsSwitchRow(
+                    icon = Icons.Rounded.Notifications,
+                    title = "Completion Notifications",
+                    subtitle = "Post a notification when a download finishes",
+                    checked = completionNotifications,
+                    onCheckedChange = { completionNotifications = it }
+                )
+
+                HorizontalDivider(color = BorderHairline, modifier = Modifier.padding(horizontal = Spacing.md))
+
+                // Speed Limit Slider
+                Column(modifier = Modifier.padding(Spacing.md)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Rounded.Speed, contentDescription = null, tint = AccentPrimary, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(Spacing.sm))
+                            Column {
+                                Text("Global Speed Limit", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = TextPrimary)
+                                Text("Per-task transfer cap (0 = unlimited)", fontSize = 11.sp, color = TextMuted)
+                            }
+                        }
+                        Text(if (speedLimit > 0) "${speedLimit} KB/s" else "∞", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AccentPrimary)
+                    }
+                    Slider(
+                        value = speedLimit.toFloat(),
+                        onValueChange = { speedLimit = it.toInt() },
+                        valueRange = 0f..50000f,
+                        steps = 19,
+                        thumb = { SettingsSliderThumb() },
+                        colors = SliderDefaults.colors(
+                            thumbColor = AccentPrimary,
+                            activeTrackColor = AccentPrimary,
+                            inactiveTrackColor = SurfaceElevated
+                        )
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(Spacing.lg))
+
+            // SECTION 7: Torrents & Peer Limits
+            SettingsCategoryHeader(title = "Torrents & Peer Limits")
+            SettingsCard {
+                // Torrent Peer Slider
+                Column(modifier = Modifier.padding(Spacing.md)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Rounded.Hub, contentDescription = null, tint = AccentPrimary, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(Spacing.sm))
+                            Column {
+                                Text("Peer Connections", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = TextPrimary)
+                                Text(if (torrentPeers == -1) "Auto (RAM-detected) — more = faster, $ battery" else "Torrent file-sharing limit", fontSize = 11.sp, color = TextMuted)
+                            }
+                        }
+                        Text(if (torrentPeers == -1) "Auto" else "$torrentPeers", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AccentPrimary)
+                    }
+                    Slider(
+                        value = if (torrentPeers == -1) 0f else torrentPeers.toFloat(),
+                        onValueChange = { torrentPeers = if (it <= 0f) -1 else it.toInt() },
+                        valueRange = 0f..500f,
+                        steps = 9,
+                        thumb = { SettingsSliderThumb() },
+                        colors = SliderDefaults.colors(
+                            thumbColor = AccentPrimary,
+                            activeTrackColor = AccentPrimary,
+                            inactiveTrackColor = SurfaceElevated
+                        )
+                    )
+                }
+
+                HorizontalDivider(color = BorderHairline, modifier = Modifier.padding(horizontal = Spacing.md))
+
+                // Stall timeout
+                Column(modifier = Modifier.padding(Spacing.md)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Rounded.Timer, contentDescription = null, tint = AccentPrimary, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(Spacing.sm))
+                            Column {
+                                Text("Stall Timeout", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = TextPrimary)
+                                Text("Abandon stalled download after N seconds", fontSize = 11.sp, color = TextMuted)
+                            }
+                        }
+                        Text("${stallTimeout}s", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AccentPrimary)
+                    }
+                    Slider(
+                        value = stallTimeout.toFloat(),
+                        onValueChange = { stallTimeout = it.toInt() },
+                        valueRange = 15f..300f,
+                        steps = 18,
+                        thumb = { SettingsSliderThumb() },
+                        colors = SliderDefaults.colors(
+                            thumbColor = AccentPrimary,
+                            activeTrackColor = AccentPrimary,
+                            inactiveTrackColor = SurfaceElevated
+                        )
+                    )
+                }
+
+                HorizontalDivider(color = BorderHairline, modifier = Modifier.padding(horizontal = Spacing.md))
+
+                // Magnet & yt-dlp retry sliders
+                Column(modifier = Modifier.padding(Spacing.md)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Rounded.Replay, contentDescription = null, tint = AccentPrimary, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(Spacing.sm))
+                            Column {
+                                Text("Download Retry Count", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = TextPrimary)
+                                Text("Magnet / yt-dlp retries before giving up", fontSize = 11.sp, color = TextMuted)
+                            }
+                        }
+                        Text("$magnetRetries / $ytdlpRetries", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AccentPrimary)
+                    }
+                    Spacer(modifier = Modifier.height(Spacing.sm))
+                    Text("Magnet retries", fontSize = 10.sp, color = TextMuted)
+                    Slider(
+                        value = magnetRetries.toFloat(),
+                        onValueChange = { magnetRetries = it.toInt() },
+                        valueRange = 1f..10f,
+                        steps = 8,
+                        thumb = { SettingsSliderThumb() },
+                        colors = SliderDefaults.colors(
+                            thumbColor = AccentPrimary,
+                            activeTrackColor = AccentPrimary,
+                            inactiveTrackColor = SurfaceElevated
+                        )
+                    )
+                    Text("yt-dlp retries", fontSize = 10.sp, color = TextMuted)
+                    Slider(
+                        value = ytdlpRetries.toFloat(),
+                        onValueChange = { ytdlpRetries = it.toInt() },
+                        valueRange = 1f..10f,
+                        steps = 8,
+                        thumb = { SettingsSliderThumb() },
+                        colors = SliderDefaults.colors(
+                            thumbColor = AccentPrimary,
+                            activeTrackColor = AccentPrimary,
+                            inactiveTrackColor = SurfaceElevated
+                        )
+                    )
+                }
+
+                HorizontalDivider(color = BorderHairline, modifier = Modifier.padding(horizontal = Spacing.md))
+
+                // HLS fragments
+                Column(modifier = Modifier.padding(Spacing.md)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Rounded.FeaturedPlayList, contentDescription = null, tint = AccentPrimary, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(Spacing.sm))
+                            Column {
+                                Text("HLS Fragment Concurrency", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = TextPrimary)
+                                Text("Parallel HLS segments per stream", fontSize = 11.sp, color = TextMuted)
+                            }
+                        }
+                        Text("$hlsFragments", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AccentPrimary)
+                    }
+                    Slider(
+                        value = hlsFragments.toFloat(),
+                        onValueChange = { hlsFragments = it.toInt() },
+                        valueRange = 1f..16f,
+                        steps = 14,
+                        thumb = { SettingsSliderThumb() },
+                        colors = SliderDefaults.colors(
+                            thumbColor = AccentPrimary,
+                            activeTrackColor = AccentPrimary,
+                            inactiveTrackColor = SurfaceElevated
+                        )
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(Spacing.lg))
+
+            // SECTION 8: Diagnostics
+            SettingsCategoryHeader(title = "Diagnostics")
+            SettingsCard {
+                SettingsSwitchRow(
+                    icon = Icons.Rounded.BugReport,
+                    title = "Debug Logging",
+                    subtitle = "Writes engine events to cacheDir/debug_log.txt",
+                    checked = debugLogging,
+                    onCheckedChange = { debugLogging = it }
+                )
+            }
+
+            Spacer(modifier = Modifier.height(Spacing.xl))
+
             // Save Changes Button
             Button(
                 onClick = {
@@ -507,7 +758,17 @@ fun SettingsSheet(
                         storageGuard = storageGuard.toDouble(),
                         wifiOnlyTorrents = wifiOnlyTorrents,
                         instantSocial = instantSocial,
-                        showPosters = showPosters
+                        showPosters = showPosters,
+                        stallTimeout = stallTimeout,
+                        magnetRetries = magnetRetries,
+                        ytdlpRetries = ytdlpRetries,
+                        hlsFragments = hlsFragments,
+                        speedLimit = speedLimit,
+                        peers = torrentPeers,
+                        wifiAll = wifiOnlyAll,
+                        clipboard = clipboardDetect,
+                        notifications = completionNotifications,
+                        debugLog = debugLogging
                     )
                     Toast.makeText(context, "Settings saved successfully", Toast.LENGTH_SHORT).show()
                     onDismiss()

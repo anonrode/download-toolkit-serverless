@@ -33,12 +33,12 @@ class DownloadRepository {
             if (f.exists()) {
                 val raw = f.readText()
                 if (raw.isNotBlank()) {
-                    _tasks.value = json.decodeFromString<List<DownloadTask>>(raw)
-                        .map {
-                            if (it.status == TaskStatus.DOWNLOADING || it.status == TaskStatus.RESOLVING) {
-                                it.copy(status = TaskStatus.QUEUED, speedBytesPerSec = 0.0)
-                            } else it
-                        }
+                _tasks.value = json.decodeFromString<List<DownloadTask>>(raw)
+                    .map {
+                        if (it.status == TaskStatus.DOWNLOADING || it.status == TaskStatus.RESOLVING || it.status == TaskStatus.VALIDATING) {
+                            it.copy(status = TaskStatus.QUEUED, speedBytesPerSec = 0.0)
+                        } else it
+                    }
                 }
             }
         } catch (_: Throwable) {
@@ -88,19 +88,19 @@ class DownloadRepository {
         _tasks.update { list ->
             list.map {
                 if (it.id == taskId) {
-                    val finalDl = if (downloaded > 0 && it.status == TaskStatus.DOWNLOADING) {
-                        maxOf(it.downloadedBytes, downloaded)
-                    } else if (downloaded > 0) {
-                        downloaded
-                    } else {
-                        it.downloadedBytes
-                    }
+                    // Monotonic downloaded bytes: a late telemetry tick racing the
+                    // COMPLETED write (or a stale tick after pause) must never
+                    // regress the recorded size. Speed/ETA are only meaningful
+                    // while actually transferring — writing them on a PAUSED or
+                    // COMPLETED task would re-stamp a stale "0.5 MB/s".
+                    val finalDl = if (downloaded > 0) maxOf(it.downloadedBytes, downloaded) else it.downloadedBytes
                     val finalTot = if (total > 0) total else it.totalBytes
+                    val transferring = it.status == TaskStatus.DOWNLOADING
                     it.copy(
                         downloadedBytes = finalDl,
                         totalBytes = finalTot,
-                        speedBytesPerSec = speed,
-                        etaSeconds = eta
+                        speedBytesPerSec = if (transferring) speed else 0.0,
+                        etaSeconds = if (transferring) eta else 0L
                     )
                 } else it
             }

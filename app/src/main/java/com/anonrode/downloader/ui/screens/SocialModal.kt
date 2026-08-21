@@ -35,7 +35,11 @@ fun SocialModal(
 ) {
     var audioOnly by remember { mutableStateOf(false) }
     var selectedQuality by remember { mutableStateOf(viewModel.engine.defaultQuality) }
-    var alwaysInstant by remember { mutableStateOf(false) }
+    // Seed from the engine so an already-enabled instant setting is reflected;
+    // the engine field is the source of truth for both this modal and QuickShare.
+    var alwaysInstant by remember { mutableStateOf(viewModel.engine.instantSocialDownload) }
+    // Guards against double-tap re-enqueue during the dismissal animation.
+    var enqueued by remember { mutableStateOf(false) }
 
     val cleanPlatform = platform.replace(Regex("(?i)video"), "").trim().ifEmpty { "Social" }
 
@@ -259,8 +263,12 @@ fun SocialModal(
 
             Button(
                 onClick = {
+                    if (enqueued) return@Button
+                    enqueued = true
                     if (alwaysInstant) {
-                        viewModel.engine.instantSocialDownload = true
+                        // Persist like QuickShareActivity does — the engine field
+                        // alone is lost on restart (loadPreferences re-reads prefs).
+                        viewModel.engine.setInstantSocial(true)
                     }
                     viewModel.engine.enqueue(
                         showTitle = "Social/$cleanPlatform",
@@ -270,7 +278,8 @@ fun SocialModal(
                         isDirect = false,
                         backend = "yt-dlp",
                         parallelSockets = viewModel.engine.parallelSocketsPerFile,
-                        audioOnly = audioOnly
+                        audioOnly = audioOnly,
+                        quality = if (audioOnly) null else selectedQuality
                     )
                     onDismiss()
                 },

@@ -44,10 +44,14 @@ fun MediaPlayerModal(
 ) {
     val context = LocalContext.current
     val file = remember(filePath) { File(filePath) }
-    if (!file.exists()) {
-        onDismiss()
-        return
+    // Guard against missing-file playback: dismiss the modal when the file is
+    // gone (deleted after download cancellation). Do it in a LaunchedEffect
+    // rather than directly during composition, which would write state during
+    // snapshot-apply and risk a crash.
+    LaunchedEffect(file.exists()) {
+        if (!file.exists()) onDismiss()
     }
+    if (!file.exists()) return
 
     val ext = file.extension.lowercase()
     val isAudio = ext in listOf("mp3", "m4a", "aac", "wav", "flac", "opus", "ogg")

@@ -69,6 +69,13 @@ fun HomeScreen(
     var clipboardSnippet by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(Unit) {
+        // Privacy: clipboard auto-detect is off by default if the user disabled
+        // it in Settings (pref_clipboard_detect).
+        val detectEnabled = try {
+            context.getSharedPreferences("downloader_settings", android.content.Context.MODE_PRIVATE)
+                .getBoolean("pref_clipboard_detect", true)
+        } catch (_: Exception) { true }
+        if (!detectEnabled) return@LaunchedEffect
         try {
             val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
             val item = cm.primaryClip?.getItemAt(0)?.text?.toString()?.trim()
@@ -361,6 +368,27 @@ fun HomeScreen(
                         CircularProgressIndicator(color = AccentPrimary, strokeWidth = 2.dp)
                         Spacer(modifier = Modifier.height(Spacing.md))
                         Text("Streaming search across all providers...", color = TextSecondary, fontSize = 13.sp)
+                    }
+                }
+            } else if (uiState.searchError != null && uiState.searchResults.isEmpty()) {
+                // A failed search must be distinguishable from an empty one:
+                // "found nothing" and "couldn't search" are different situations.
+                Box(
+                    modifier = Modifier.fillMaxWidth().weight(1f),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(Icons.Rounded.Warning, contentDescription = null, tint = StatusError, modifier = Modifier.size(40.dp))
+                        Spacer(modifier = Modifier.height(Spacing.md))
+                        Text(
+                            text = uiState.searchError ?: "Search failed",
+                            color = StatusError,
+                            fontSize = 14.sp,
+                            maxLines = 3,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Spacer(modifier = Modifier.height(Spacing.sm))
+                        Text("Check your connection and try again", color = TextMuted, fontSize = 12.sp)
                     }
                 }
             } else if (uiState.searchResults.isEmpty() && uiState.query.trim().length >= 2 && !uiState.isSearching) {

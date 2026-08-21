@@ -2,6 +2,7 @@ package com.anonrode.downloader.engine
 
 import com.anonrode.downloader.data.net.HttpClient
 import kotlinx.coroutines.*
+import okhttp3.Call
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
@@ -13,6 +14,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.coroutines.coroutineContext
 
 /**
@@ -35,6 +38,33 @@ object TurboDownloader {
 
     /** Test hook: collapses exponential backoff so retry tests run fast. */
     internal var retryBaseDelayMs: Long = 1000L
+
+    /**
+     * In-flight OkHttp calls per task id. The engine's stall watchdog calls
+     * [cancelTask] so a trickling-but-alive transfer can be interrupted even
+     * though Turbo has no native process to kill.
+     */
+    private val activeCalls = ConcurrentHashMap<String, CopyOnWriteArrayList<Call>>()
+
+    /**
+     * Interrupt every in-flight transfer of a task. The affected pieces fail,
+     * are retried per the normal piece policy, and the task eventually FAILED
+     * instead of hanging in DOWNLOADING forever. Idempotent for unknown ids.
+     */
+    fun cancelTask(taskId: String) {
+        activeCalls.remove(taskId)?.forEach { it.cancel() }
+    }
+
+    /** Registers a call against [taskId] (empty = untracked, e.g. tests). */
+    private fun trackCall(taskId: String, call: Call) {
+        if (taskId.isEmpty()) return
+        activeCalls.getOrPut(taskId) { CopyOnWriteArrayList() }.add(call)
+    }
+
+    private fun untrackCall(taskId: String, call: Call) {
+        if (taskId.isEmpty()) return
+        activeCalls[taskId]?.remove(call)
+    }
 
     private fun backoffMillis(attempt: Int): Long {
         val factor = (1L shl (attempt - 1).coerceIn(0, 3)).coerceAtMost(RETRY_CAP)
@@ -99,7 +129,8 @@ object TurboDownloader {
         headers: Map<String, String> = emptyMap(),
         configuredSockets: Int = 8,
         onProgress: (Long, Long, Long) -> Unit = { _, _, _ -> },
-        client: OkHttpClient = HttpClient.downloadClient
+        client: OkHttpClient = HttpClient.downloadClient,
+        taskId: String = ""
     ): TurboResult = withContext(Dispatchers.IO) {
         dest.parentFile?.mkdirs()
         val safe = HttpClient.safeUrl(url)
@@ -133,21 +164,21 @@ object TurboDownloader {
         val failureMessage = AtomicReference<String?>(null)
 
         return@withContext if (useSegmented) {
-            val ok = segmented(safe, partFile, headers, total, sockets, state, failureStatus, failureMessage, onProgress, client)
+            val ok = segmented(safe, partFile, headers, total, sockets, state, failureStatus, failureMessage, onProgress, client, taskId)
             if (ok) {
                 state.delete()
                 atomicMove(partFile, dest)
                 TurboResult.Success(dest, dest.length(), true)
             } else if (!partFile.exists() || partFile.length() == 0L) {
                 state.delete()
-                if (single(safe, partFile, headers, total, failureStatus, failureMessage, onProgress, client)) {
+                if (single(safe, partFile, headers, total, failureStatus, failureMessage, onProgress, client, taskId)) {
                     atomicMove(partFile, dest)
                     TurboResult.Success(dest, dest.length(), false)
                 } else failure(failureStatus, failureMessage)
             } else failure(failureStatus, failureMessage)
         } else {
             state.delete()
-            if (single(safe, partFile, headers, total, failureStatus, failureMessage, onProgress, client)) {
+            if (single(safe, partFile, headers, total, failureStatus, failureMessage, onProgress, client, taskId)) {
                 state.delete()
                 atomicMove(partFile, dest)
                 TurboResult.Success(dest, dest.length(), false)
@@ -230,7 +261,8 @@ object TurboDownloader {
         failureStatus: AtomicInteger,
         failureMessage: AtomicReference<String?>,
         onProgress: (Long, Long, Long) -> Unit,
-        client: OkHttpClient
+        client: OkHttpClient,
+        taskId: String = ""
     ): Boolean = coroutineScope {
         val plan = state.loadOrCreate(total, sockets)
         val initialBytes = plan.sumOf { (it.current - it.start).coerceAtLeast(0L) }
@@ -288,7 +320,10 @@ object TurboDownloader {
                                 headers.forEach { (k, v) -> if (!k.equals("User-Agent", true)) header(k, v) }
                                 header("Range", "bytes=${chunk.current}-${chunk.end}")
                             }.build()
-                            client.newCall(req).execute().use { res ->
+                            val call = client.newCall(req)
+                            trackCall(taskId, call)
+                            try {
+                                call.execute().use { res ->
                                 if (res.code == 206) {
                                     val src = res.body?.source() ?: throw IOException("Empty response body from server")
                                     val buf = ByteArray(BUFFER)
@@ -322,7 +357,10 @@ object TurboDownloader {
                                 } else {
                                     failureStatus.compareAndSet(0, res.code)
                                 }
-                            }
+                                }
+                                } finally {
+                                    untrackCall(taskId, call)
+                                }
                             if (completed) return true
                             if (failed.get() || !coroutineContext.isActive) return false
                             failureMessage.compareAndSet(
@@ -378,7 +416,8 @@ object TurboDownloader {
         failureStatus: AtomicInteger,
         failureMessage: AtomicReference<String?>,
         onProgress: (Long, Long, Long) -> Unit,
-        client: OkHttpClient
+        client: OkHttpClient,
+        taskId: String = ""
     ): Boolean = coroutineScope {
         val speed = SpeedMeter(0L)
         onProgress(0L, if (total > 0) total else 0L, 0L)
@@ -405,31 +444,37 @@ object TurboDownloader {
                         if (resumeAt > 0) header("Range", "bytes=$resumeAt-")
                     }.build()
 
-                    client.newCall(req).execute().use { res ->
-                        if (!res.isSuccessful) {
-                            failureStatus.compareAndSet(0, res.code)
-                            return false
-                        }
-                        val resuming = res.code == 206
-                        val src = res.body?.source() ?: run {
-                            failureMessage.compareAndSet(null, "Empty response body from server")
-                            return false
-                        }
-                        val startAt = if (resuming) resumeAt else 0L
-                        RandomAccessFile(dest, "rw").use { raf ->
-                            if (raf.length() < startAt) raf.setLength(startAt)
-                            raf.seek(startAt)
-                            val buf = ByteArray(BUFFER)
-                            var written = startAt
-                            while (true) {
-                                if (!coroutineContext.isActive) return false
-                                val n = src.read(buf)
-                                if (n == -1) break
-                                raf.write(buf, 0, n)
-                                written += n
+                    val call = client.newCall(req)
+                    trackCall(taskId, call)
+                    try {
+                        call.execute().use { res ->
+                            if (!res.isSuccessful) {
+                                failureStatus.compareAndSet(0, res.code)
+                                return false
                             }
-                            if (total > 0 && written != total) return false
+                            val resuming = res.code == 206
+                            val src = res.body?.source() ?: run {
+                                failureMessage.compareAndSet(null, "Empty response body from server")
+                                return false
+                            }
+                            val startAt = if (resuming) resumeAt else 0L
+                            RandomAccessFile(dest, "rw").use { raf ->
+                                if (raf.length() < startAt) raf.setLength(startAt)
+                                raf.seek(startAt)
+                                val buf = ByteArray(BUFFER)
+                                var written = startAt
+                                while (true) {
+                                    if (!coroutineContext.isActive) return false
+                                    val n = src.read(buf)
+                                    if (n == -1) break
+                                    raf.write(buf, 0, n)
+                                    written += n
+                                }
+                                if (total > 0 && written != total) return false
+                            }
                         }
+                    } finally {
+                        untrackCall(taskId, call)
                     }
                     return true
                 } catch (e: CancellationException) {

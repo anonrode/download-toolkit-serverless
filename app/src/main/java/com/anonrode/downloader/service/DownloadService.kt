@@ -22,8 +22,15 @@ class DownloadService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        instance = this
         createNotificationChannels()
         acquireWakeLock()
+    }
+
+    override fun onDestroy() {
+        releaseWakeLock()
+        if (instance === this) instance = null
+        super.onDestroy()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -34,9 +41,19 @@ class DownloadService : Service() {
             return START_NOT_STICKY
         }
 
-        val activeTitle = intent?.getStringExtra(EXTRA_TITLE) ?: "Downloading..."
-        val progress = intent?.getIntExtra(EXTRA_PROGRESS, 0) ?: 0
-        val activeCount = intent?.getIntExtra(EXTRA_COUNT, 1) ?: 1
+        // START_STICKY restart with a null intent (process killed by the system):
+        // don't re-pin a phantom "Downloading…" notification — if the engine is
+        // still running it will re-issue a real update, otherwise this service
+        // instance has nothing to show and should go away.
+        if (intent == null) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+            return START_NOT_STICKY
+        }
+
+        val activeTitle = intent.getStringExtra(EXTRA_TITLE) ?: "Downloading..."
+        val progress = intent.getIntExtra(EXTRA_PROGRESS, 0)
+        val activeCount = intent.getIntExtra(EXTRA_COUNT, 1)
 
         val now = System.currentTimeMillis()
         if (now - lastUpdateTime >= 500L || progress >= 100 || progress == 0) {
@@ -130,11 +147,6 @@ class DownloadService : Service() {
             .build()
     }
 
-    override fun onDestroy() {
-        releaseWakeLock()
-        super.onDestroy()
-    }
-
     override fun onBind(intent: Intent?): IBinder? = null
 
     companion object {
@@ -148,6 +160,12 @@ class DownloadService : Service() {
         const val EXTRA_TITLE = "extra_title"
         const val EXTRA_PROGRESS = "extra_progress"
         const val EXTRA_COUNT = "extra_count"
+
+        /** The currently running service instance, if any. Used by [stop] to
+         *  avoid the background-startService crash on Android 8+. */
+        @Volatile
+        var instance: DownloadService? = null
+            private set
 
         fun updateProgress(context: Context, title: String, progress: Int, activeCount: Int) {
             try {
@@ -193,11 +211,22 @@ class DownloadService : Service() {
 
         fun stop(context: Context) {
             try {
-                val intent = Intent(context, DownloadService::class.java).apply {
-                    action = ACTION_STOP
-                }
-                context.startService(intent)
-            } catch (_: Exception) {}
+                // On Android 8+ a background app cannot start a service; use the
+                // live instance instead. The NotificationManager fallback ensures
+                // the notification is removed even when the service cannot be
+                // reached (e.g. after process death before the null-intent guard).
+                instance?.stopForeground(STOP_FOREGROUND_REMOVE)
+                instance?.stopSelf()
+                val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                manager.cancel(ONGOING_NOTIFICATION_ID)
+            } catch (_: Exception) {
+                // Last-resort: send the STOP intent anyway (works pre-O, or when
+                // the runtime allows it).
+                try {
+                    val intent = Intent(context, DownloadService::class.java).apply { action = ACTION_STOP }
+                    context.startService(intent)
+                } catch (_: Exception) {}
+            }
         }
     }
 }

@@ -41,10 +41,24 @@ class DownloadEngine(
     var showPostersInResults: Boolean = true
     var storageGuardGb: Double = 1.0
 
+    // Tier-A settings (AppSettings-backed): defaults equal the previous
+    // hardcoded behavior, so nothing changes until the user opts in.
+    var stallTimeoutSec: Int = 60
+    var magnetMaxAttempts: Int = 3
+    var ytdlpMaxAttempts: Int = 3
+    var hlsFragmentConcurrency: Int = 8
+    var globalSpeedLimitKbs: Int = 0          // 0 = unlimited
+    var torrentPeers: Int = -1                // -1 = auto (RAM tier)
+    var wifiOnlyAll: Boolean = false
+    var clipboardDetect: Boolean = true
+    var completionNotifications: Boolean = true
+    var debugLogging: Boolean = false
+
     // No byte movement (parsed progress or filesystem bytes) for this long while
     // DOWNLOADING means the backend is hung; the watchdog kills it so the retry
     // wrapper can relaunch, and the task eventually FAILED instead of hanging.
-    private val STALL_TIMEOUT_MS = 60_000L
+    private val STALL_TIMEOUT_MS: Long
+        get() = stallTimeoutSec * 1000L
 
     /**
      * Set by the UI: called when a torrent's swarm exposes more than one safe
@@ -60,10 +74,12 @@ class DownloadEngine(
     init {
         loadPreferences()
         engineScope.launch {
-            // Auto-rescue tasks interrupted by app kill/crash
+            // Auto-rescue tasks interrupted by app kill/crash. VALIDATING is
+            // included: a process death mid-check otherwise leaves the task
+            // stuck in VALIDATING forever (nothing ever transitions it).
             val currentTasks = repository.tasks.value
             currentTasks.forEach { t ->
-                if (t.status == TaskStatus.DOWNLOADING || t.status == TaskStatus.RESOLVING) {
+                if (t.status == TaskStatus.DOWNLOADING || t.status == TaskStatus.RESOLVING || t.status == TaskStatus.VALIDATING) {
                     repository.update(t.id) { it.copy(status = TaskStatus.QUEUED, speedBytesPerSec = 0.0) }
                 }
             }
@@ -92,6 +108,25 @@ class DownloadEngine(
                 }
             }
         }
+        // Storage-guard self-heal: tasks parked by the storage limit have no
+        // natural resume trigger (the network collector only matches network
+        // messages), so a separate loop re-checks periodically and re-queues
+        // them when space frees up instead of leaving the queue stuck until
+        // manual resume. Runs in its own coroutine — the collector above never
+        // returns, so this must not be sequenced after it.
+        engineScope.launch {
+            while (true) {
+                delay(10_000)
+                if (!checkStorageAvailable()) continue
+                val parked = repository.tasks.value.filter {
+                    it.status == TaskStatus.PAUSED && it.errorMessage?.startsWith("Storage limit reached") == true
+                }
+                if (parked.isNotEmpty()) {
+                    parked.forEach { repository.update(it.id) { t -> t.copy(status = TaskStatus.QUEUED, errorMessage = null) } }
+                    processQueue()
+                }
+            }
+        }
     }
 
     private fun loadPreferences() {
@@ -104,12 +139,31 @@ class DownloadEngine(
         wifiOnlyTorrents = prefs.getBoolean("pref_torrents_wifi_only", false)
         showPostersInResults = prefs.getBoolean("pref_show_posters", true)
         storageGuardGb = prefs.getFloat("pref_storage_guard", 1.0f).toDouble()
+
+        stallTimeoutSec = prefs.getInt("pref_stall_timeout", 60)
+        magnetMaxAttempts = prefs.getInt("pref_magnet_retries", 3)
+        ytdlpMaxAttempts = prefs.getInt("pref_ytdlp_retries", 3)
+        hlsFragmentConcurrency = prefs.getInt("pref_hls_fragments", 8)
+        globalSpeedLimitKbs = prefs.getInt("pref_speed_limit_kbs", 0)
+        torrentPeers = prefs.getInt("pref_torrent_peers", -1)
+        wifiOnlyAll = prefs.getBoolean("pref_wifi_only_all", false)
+        clipboardDetect = prefs.getBoolean("pref_clipboard_detect", true)
+        completionNotifications = prefs.getBoolean("pref_completion_notifications", true)
+        debugLogging = prefs.getBoolean("pref_debug_logging", false)
     }
 
     fun setShowPosters(show: Boolean) {
         this.showPostersInResults = show
         context.getSharedPreferences("downloader_settings", Context.MODE_PRIVATE).edit()
             .putBoolean("pref_show_posters", show)
+            .apply()
+    }
+
+    /** Persists the instant-social toggle so it survives restarts (SocialModal). */
+    fun setInstantSocial(enabled: Boolean) {
+        this.instantSocialDownload = enabled
+        context.getSharedPreferences("downloader_settings", Context.MODE_PRIVATE).edit()
+            .putBoolean("pref_instant_social", enabled)
             .apply()
     }
 
@@ -121,7 +175,18 @@ class DownloadEngine(
         storageGuard: Double,
         wifiOnlyTorrents: Boolean,
         instantSocial: Boolean = false,
-        showPosters: Boolean = true
+        showPosters: Boolean = true,
+        // Tier-A settings
+        stallTimeout: Int = 60,
+        magnetRetries: Int = 3,
+        ytdlpRetries: Int = 3,
+        hlsFragments: Int = 8,
+        speedLimit: Int = 0,
+        peers: Int = -1,
+        wifiAll: Boolean = false,
+        clipboard: Boolean = true,
+        notifications: Boolean = true,
+        debugLog: Boolean = false
     ) {
         this.maxConcurrentDownloads = maxConcurrent
         this.parallelSocketsPerFile = parallelSockets
@@ -131,6 +196,16 @@ class DownloadEngine(
         this.wifiOnlyTorrents = wifiOnlyTorrents
         this.instantSocialDownload = instantSocial
         this.showPostersInResults = showPosters
+        this.stallTimeoutSec = stallTimeout
+        this.magnetMaxAttempts = magnetRetries
+        this.ytdlpMaxAttempts = ytdlpRetries
+        this.hlsFragmentConcurrency = hlsFragments
+        this.globalSpeedLimitKbs = speedLimit
+        this.torrentPeers = peers
+        this.wifiOnlyAll = wifiAll
+        this.clipboardDetect = clipboard
+        this.completionNotifications = notifications
+        this.debugLogging = debugLog
 
         context.getSharedPreferences("downloader_settings", Context.MODE_PRIVATE).edit()
             .putInt("pref_max_downloads", maxConcurrent)
@@ -141,6 +216,16 @@ class DownloadEngine(
             .putBoolean("pref_torrents_wifi_only", wifiOnlyTorrents)
             .putBoolean("pref_instant_social", instantSocial)
             .putBoolean("pref_show_posters", showPosters)
+            .putInt("pref_stall_timeout", stallTimeout)
+            .putInt("pref_magnet_retries", magnetRetries)
+            .putInt("pref_ytdlp_retries", ytdlpRetries)
+            .putInt("pref_hls_fragments", hlsFragments)
+            .putInt("pref_speed_limit_kbs", speedLimit)
+            .putInt("pref_torrent_peers", peers)
+            .putBoolean("pref_wifi_only_all", wifiAll)
+            .putBoolean("pref_clipboard_detect", clipboard)
+            .putBoolean("pref_completion_notifications", notifications)
+            .putBoolean("pref_debug_logging", debugLog)
             .apply()
     }
 
@@ -153,14 +238,29 @@ class DownloadEngine(
         backend: String = "aria2c",
         parallelSockets: Int = 16,
         audioOnly: Boolean = false,
-        site: String = ""
+        site: String = "",
+        quality: String? = null
     ): String {
         val taskId = UUID.randomUUID().toString()
         val downloadFolder = getDownloadDirectory(showTitle, createDirs = false)
 
+        // Dedupe: never queue a second task for the same source URL while one
+        // is already active or paused. Two tasks sharing a filePath write the
+        // same .part concurrently and corrupt the output.
+        val active = setOf(TaskStatus.QUEUED, TaskStatus.RESOLVING, TaskStatus.DOWNLOADING, TaskStatus.VALIDATING, TaskStatus.PAUSED)
+        repository.snapshot().firstOrNull { it.sourceUrl == sourceUrl && it.status in active }?.let { return it.id }
+
         val cleanTitle = episodeTitle.replace(Regex("""[^a-zA-Z0-9._ -]"""), "_").trim()
         val ext = if (audioOnly) "mp3" else if (backend.contains("yt") || !isDirect) "mp4" else "mkv"
-        val targetFile = File(downloadFolder, "$cleanTitle.$ext")
+
+        // Uniquify the target filename so two different sources with the same
+        // title (e.g. same episode from two sites) never write one filePath.
+        var targetFile = File(downloadFolder, "$cleanTitle.$ext")
+        var counter = 2
+        while (repository.snapshot().any { it.filePath == targetFile.absolutePath }) {
+            targetFile = File(downloadFolder, "$cleanTitle-$counter.$ext")
+            counter++
+        }
 
         val task = DownloadTask(
             id = taskId,
@@ -178,7 +278,8 @@ class DownloadEngine(
             backend = backend,
             parallelSockets = parallelSockets,
             site = site,
-            audioOnly = audioOnly
+            audioOnly = audioOnly,
+            quality = quality
         )
 
         repository.addFirst(task)
@@ -236,9 +337,20 @@ class DownloadEngine(
             val head = file.inputStream().use { ins ->
                 val buf = ByteArray(512)
                 val n = ins.read(buf)
-                if (n <= 0) "" else String(buf, 0, n).trimStart().lowercase()
+                if (n <= 0) return false
+                // Strip UTF-8 BOM (U+FEFF) before prefix matching so BOM-prefixed
+                // HTML error pages are caught, then decode and normalize.
+                var start = 0
+                if (n >= 3 && buf[0] == 0xEF.toByte() && buf[1] == 0xBB.toByte() && buf[2] == 0xBF.toByte()) {
+                    start = 3
+                }
+                String(buf, start, n - start).trimStart().lowercase()
             }
-            head.startsWith("<!doctype html") || head.startsWith("<html") || head.startsWith("<head") || head.startsWith("<!--")
+            head.startsWith("<!doctype html") || head.startsWith("<html") || head.startsWith("<head") ||
+                head.startsWith("<body") || head.startsWith("<!--") || head.startsWith("<script") ||
+                head.startsWith("<svg") || head.startsWith("<?xml") || head.startsWith("<style") ||
+                head.startsWith("<iframe") || head.startsWith("<meta") || head.startsWith("<form") ||
+                head.startsWith("{")
         } catch (_: Exception) {
             false
         }
@@ -255,6 +367,20 @@ class DownloadEngine(
             val dir = File(task.filePath).parentFile ?: return 0L
             val files = dir.listFiles() ?: return 0L
             val base = File(task.filePath).name
+            // Segmented Turbo downloads pre-allocate the .part file to its full
+            // size before a single byte is written, so file.length() is not a
+            // progress signal there. When a .turbo sidecar exists, the piece map
+            // is the source of truth: sum committed offsets, ignore the zeros.
+            val sidecar = File(dir, base + ".turbo")
+            if (sidecar.exists()) {
+                val written = TurboState(sidecar).writtenBytes() ?: return 0L
+                return written + files.sumOf { f ->
+                    if (!f.isFile) 0L
+                    else if (f.name == base) f.length()
+                    else if (f.name.endsWith(".ytdl")) f.length()
+                    else 0L
+                }
+            }
             files.sumOf { f ->
                 if (!f.isFile) 0L
                 else if (f.name.startsWith(base) && !f.name.endsWith(".turbo")) f.length()
@@ -376,7 +502,9 @@ class DownloadEngine(
         if (!net.isConnected) return
 
         val currentTasks = tasks.value
-        val activeCount = currentTasks.count { it.status == TaskStatus.DOWNLOADING || it.status == TaskStatus.RESOLVING }
+        val activeCount = currentTasks.count {
+            it.status == TaskStatus.DOWNLOADING || it.status == TaskStatus.RESOLVING || it.status == TaskStatus.VALIDATING
+        }
 
         if (activeCount >= maxConcurrentDownloads) return
 
@@ -395,6 +523,11 @@ class DownloadEngine(
             repository.update(nextTask.id) { it.copy(status = TaskStatus.PAUSED, errorMessage = "Waiting for Wi-Fi (Torrents Wi-Fi Only enabled)") }
             return
         }
+        // Wi-Fi-only for ALL downloads (not just torrents)
+        if (wifiOnlyAll && !net.isWifi) {
+            repository.update(nextTask.id) { it.copy(status = TaskStatus.PAUSED, errorMessage = "Waiting for Wi-Fi (Wi-Fi Only enabled)") }
+            return
+        }
 
         val isDirect = isDirectMediaUrl(nextTask.directUrl) && !isKnownLockerHost(nextTask.directUrl)
         val initialStatus = if (isDirect) TaskStatus.DOWNLOADING else TaskStatus.RESOLVING
@@ -404,8 +537,25 @@ class DownloadEngine(
         startTask(nextTask)
     }
 
+    /**
+     * A URL that is provably a direct file rather than a page to crack, even
+     * when its host appears in [isKnownLockerHost]'s list: pixeldrain's API
+     * endpoint and token-carrying CDN links (?pt= / ?token= / ?download) are
+     * resolver *outputs* — the cracking already happened — so exempting them
+     * lets genuine direct links through instead of discarding them (the probe
+     * in TurboDownloader still rejects any server that lies and serves HTML).
+     */
+    private fun isProvablyDirectFile(url: String): Boolean {
+        val lower = url.lowercase()
+        val path = lower.substringAfter("://", "").substringBefore('?').substringBefore('#')
+        if (path.contains("/api/file/")) return true
+        val query = lower.substringAfter('?', "").substringBefore('#')
+        return query.contains("pt=") || query.contains("token=") || query.contains("download")
+    }
+
     private fun isKnownLockerHost(url: String): Boolean {
         if (url.isBlank()) return false
+        if (isProvablyDirectFile(url)) return false
         val lower = url.lowercase()
         // Host-based, not extension-based: locker pages carry the media filename
         // in their path (loadedfiles.net/.../Episode.mkv), so a .mkv/.mp4 suffix
@@ -494,6 +644,7 @@ class DownloadEngine(
         if (existingJob != null && existingJob.isActive) {
             return
         }
+        com.anonrode.downloader.util.DebugLog.write("start task=${task.id} url=${task.directUrl.take(80)} backend=${task.backend}")
 
         val job = engineScope.launch {
             try {
@@ -510,7 +661,7 @@ class DownloadEngine(
                     repository.update(task.id) { it.copy(status = TaskStatus.RESOLVING) }
                     updateServiceState(force = true)
 
-                    val resolved = resolveStreamUrl(permUrl, task.site, defaultQuality)
+                    val resolved = resolveStreamUrl(permUrl, task.site, task.quality ?: defaultQuality)
                     if (!resolved.isNullOrBlank()) {
                         streamUrl = resolved
                     } else if (isKnownLockerHost(streamUrl) || !isDirectMediaUrl(streamUrl)) {
@@ -525,8 +676,11 @@ class DownloadEngine(
                 val isHlsStream = isStreamingLink(streamUrl)
                 // A known locker host is never a direct file, even when its page
                 // URL ends in a media extension — route it through yt-dlp rather
-                // than downloading the page as a video.
-                val isEmbedOrPage = !isMagnet && (!isDirectMediaUrl(streamUrl) || isKnownLockerHost(streamUrl))
+                // than downloading the page as a video. Resolver outputs that are
+                // provably direct (pixeldrain API, ?pt= / ?token= CDN links) are
+                // exempt: they are the cracked file itself, so Turbo may grab them.
+                val isEmbedOrPage = !isMagnet && !isProvablyDirectFile(streamUrl) &&
+                    (!isDirectMediaUrl(streamUrl) || isKnownLockerHost(streamUrl))
                 val finalBackend = if (isSocial || isHlsStream || isEmbedOrPage || task.audioOnly) "yt-dlp" else "aria2c"
                 val isExtractor = isSocial || task.audioOnly || isEmbedOrPage
 
@@ -579,6 +733,11 @@ class DownloadEngine(
                         if (now - lastActivity > STALL_TIMEOUT_MS) {
                             android.util.Log.w("AnonDownload", "No download progress for ${t.episodeTitle}, killing backend")
                             YoutubeDlDownloader.killProcess(task.id)
+                            // Turbo runs in OkHttp, not a native process: interrupt
+                            // its in-flight calls so a stalled transfer cannot hang
+                            // in DOWNLOADING forever (the piece retry policy then
+                            // fails the task instead of re-arming the watchdog).
+                            TurboDownloader.cancelTask(task.id)
                             lastActivity = now
                         }
                     }
@@ -612,7 +771,8 @@ class DownloadEngine(
                         dest = dest,
                         headers = hdrs,
                         configuredSockets = effectiveSockets,
-                        onProgress = progressCb
+                        onProgress = progressCb,
+                        taskId = task.id
                     )
 
                     if (turboResult is TurboDownloader.TurboResult.Success) {
@@ -633,7 +793,7 @@ class DownloadEngine(
                             repository.update(task.id) { it.copy(status = TaskStatus.RESOLVING) }
                             updateServiceState(force = true)
 
-                            val freshUrl = resolveStreamUrl(permUrl, task.site, defaultQuality)
+                            val freshUrl = resolveStreamUrl(permUrl, task.site, task.quality ?: defaultQuality)
                             if (!freshUrl.isNullOrBlank() && freshUrl != streamUrl) {
                                 streamUrl = freshUrl
                                 repository.update(task.id) { it.copy(status = TaskStatus.DOWNLOADING, directUrl = streamUrl) }
@@ -648,7 +808,8 @@ class DownloadEngine(
                                     dest = dest,
                                     headers = freshHdrs,
                                     configuredSockets = effectiveSockets,
-                                    onProgress = progressCb
+                                    onProgress = progressCb,
+                                    taskId = task.id
                                 )
                                 when (turboResult) {
                                     is TurboDownloader.TurboResult.Success -> producedFile = turboResult.file
@@ -690,7 +851,7 @@ class DownloadEngine(
                             referer = refererToPass,
                             ua = HttpClient.DEFAULT_UA,
                             parallelSockets = effectiveSockets,
-                            quality = defaultQuality,
+                            quality = task.quality ?: defaultQuality,
                             isExtractorTask = false,
                             audioOnly = task.audioOnly,
                             onProgress = { dl, tot, spd, eta ->
@@ -702,7 +863,12 @@ class DownloadEngine(
                                     eta = eta
                                 )
                                 updateServiceState(force = false)
-                            }
+                            },
+                            magnetMaxAttempts = magnetMaxAttempts,
+                            ytdlpMaxAttempts = ytdlpMaxAttempts,
+                            hlsFragments = hlsFragmentConcurrency,
+                            speedLimitKbs = globalSpeedLimitKbs,
+                            torrentPeers = torrentPeers
                         )
                     }
 
@@ -743,7 +909,8 @@ class DownloadEngine(
                                     dest = dest,
                                     headers = rescueHdrs,
                                     configuredSockets = effectiveSockets,
-                                    onProgress = progressCb
+                                    onProgress = progressCb,
+                                    taskId = task.id
                                 )
                                 when (turboResult) {
                                     is TurboDownloader.TurboResult.Success -> producedFile = turboResult.file
@@ -763,7 +930,7 @@ class DownloadEngine(
                         referer = getRefererForUrl(url),
                         ua = HttpClient.DEFAULT_UA,
                         parallelSockets = effectiveSockets.coerceIn(4, 16),
-                        quality = defaultQuality,
+                        quality = task.quality ?: defaultQuality,
                         isExtractorTask = isExtractor,
                         audioOnly = task.audioOnly,
                         onProgress = { dl, tot, spd, eta ->
@@ -776,7 +943,12 @@ class DownloadEngine(
                             )
                             updateServiceState(force = false)
                         },
-                        onTorrentFiles = onTorrentFileSelection
+                        onTorrentFiles = onTorrentFileSelection,
+                        magnetMaxAttempts = magnetMaxAttempts,
+                        ytdlpMaxAttempts = ytdlpMaxAttempts,
+                        hlsFragments = hlsFragmentConcurrency,
+                        speedLimitKbs = globalSpeedLimitKbs,
+                        torrentPeers = torrentPeers
                     )
 
                     producedFile = runYtdlp(streamUrl)
@@ -784,7 +956,7 @@ class DownloadEngine(
                     // mid-flight: on failure, re-resolve for a fresh URL and try
                     // once more, mirroring the token refresh on the direct path.
                     if (producedFile == null && coroutineContext.isActive) {
-                        val freshUrl = resolveStreamUrl(permUrl, task.site, defaultQuality)
+                        val freshUrl = resolveStreamUrl(permUrl, task.site, task.quality ?: defaultQuality)
                         if (!freshUrl.isNullOrBlank() && freshUrl != streamUrl) {
                             android.util.Log.w("AnonDownload", "yt-dlp failed, re-resolving for a fresh URL")
                             streamUrl = freshUrl
@@ -814,6 +986,11 @@ class DownloadEngine(
                 val minSize = if (isAudio) 10 * 1024L else 50 * 1024L
                 if (producedFile != null && producedFile.exists() && producedFile.length() >= minSize
                     && !looksLikeHtml(producedFile) && validation.first) {
+                    // The block above ran without suspension points, so a pause
+                    // landing mid-validation could not interrupt it. Re-check
+                    // here: a cancelled job must never flip to COMPLETED after
+                    // the user pressed pause.
+                    coroutineContext.ensureActive()
                     val finalTitle = producedFile.nameWithoutExtension
                     val finalBytes = producedFile.length()
                     repository.update(task.id) {
@@ -843,7 +1020,10 @@ class DownloadEngine(
                         )
                     } catch (_: Throwable) {}
 
-                    DownloadService.notifyCompleted(context, finalTitle)
+                    if (completionNotifications) {
+                        DownloadService.notifyCompleted(context, finalTitle)
+                    }
+                    com.anonrode.downloader.util.DebugLog.write("completed task=${task.id} file=${producedFile.absolutePath} bytes=$finalBytes")
                 } else {
                     val errReason = when {
                         producedFile != null && looksLikeHtml(producedFile) -> "Server returned an HTML page instead of the file"
@@ -854,9 +1034,18 @@ class DownloadEngine(
                         else -> "Output file was too small or corrupted"
                     }
                     repository.update(task.id) { it.copy(status = TaskStatus.FAILED, errorMessage = errReason) }
+                    com.anonrode.downloader.util.DebugLog.write("failed task=${task.id} reason=$errReason")
                 }
             } catch (e: CancellationException) {
-                // Cancelled
+                // Cancelled. A pause landing during VALIDATING (after the first
+                // ensureActive passed but before the terminal write) leaves the
+                // status at VALIDATING — rescue it to PAUSED so the card is not
+                // stuck mid-check.
+                repository.update(task.id) { t ->
+                    if (t.status == TaskStatus.DOWNLOADING || t.status == TaskStatus.RESOLVING || t.status == TaskStatus.VALIDATING) {
+                        t.copy(status = TaskStatus.PAUSED, speedBytesPerSec = 0.0)
+                    } else t
+                }
             } catch (e: Exception) {
                 if (coroutineContext.isActive) {
                     repository.update(task.id) { it.copy(status = TaskStatus.FAILED, errorMessage = e.message ?: "Download error") }

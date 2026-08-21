@@ -69,7 +69,10 @@ object PlutoProvider : SiteProvider {
                     val href = a.attr("abs:href").ifBlank {
                         HttpClient.safeResolveUri(showUrl, rawHref)
                     }
-                    if (href.isBlank() || href in seen) continue
+                    // The page's own /series/ links (nav, related shows, the page
+                    // URL itself) match the selector — drop them so bogus
+                    // "episodes" that resolve to the show page never appear.
+                    if (href.isBlank() || href in seen || href == showUrl || !href.contains("/episodes/")) continue
                     seen.add(href)
                     val epName = a.text().trim().ifEmpty { "Episode $count" }
                     episodes.add(

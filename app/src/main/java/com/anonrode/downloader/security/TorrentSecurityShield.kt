@@ -334,11 +334,14 @@ object TorrentSecurityShield {
     // LAYER 7: Post-Download Magic-Byte & Path Traversal Inspector
     // -------------------------------------------------------------
     fun validateDownloadedFile(file: File, baseDir: File): Pair<Boolean, String> {
-        // Path traversal guard
+        // Path traversal guard (directory boundary, not string prefix)
         try {
             val canonicalFile = file.canonicalPath
             val canonicalBase = baseDir.canonicalPath
-            if (!canonicalFile.startsWith(canonicalBase)) {
+            // Require the separator: "/Download/Anon2/x" starts with "/Download/Anon"
+            // but is not inside "/Download/Anon".
+            val inside = canonicalFile.startsWith(canonicalBase + File.separator) || canonicalFile == canonicalBase
+            if (!inside) {
                 return Pair(false, "Path escapes base directory: $canonicalFile is outside $canonicalBase")
             }
         } catch (e: Exception) {
@@ -365,16 +368,42 @@ object TorrentSecurityShield {
                     return Pair(false, "BLOCKED: Linux ELF binary disguised as media")
                 }
 
+                // HTML / script / XML / SVG / JSON decoy sniff: strip UTF-8 BOM
+                // and check whether the file starts with a text-like prefix.
+                var textStart = 0
+                if (bytesRead >= 3 && header[0] == 0xEF.toByte() && header[1] == 0xBB.toByte() && header[2] == 0xBF.toByte()) {
+                    textStart = 3
+                }
+                val textHead = String(header, textStart, bytesRead - textStart, Charsets.US_ASCII).trimStart().lowercase()
+                if (textHead.startsWith("<!doctype html") || textHead.startsWith("<html") ||
+                    textHead.startsWith("<head") || textHead.startsWith("<body") ||
+                    textHead.startsWith("<script") || textHead.startsWith("<svg") ||
+                    textHead.startsWith("<?xml") || textHead.startsWith("<style") ||
+                    textHead.startsWith("<!--") || textHead.startsWith("<iframe") ||
+                    textHead.startsWith("<meta") || textHead.startsWith("<form") ||
+                    textHead.startsWith("{")) {
+                    file.delete()
+                    return Pair(false, "BLOCKED: File is an HTML/script/error page, not media")
+                }
+
                 // Known safe media containers
                 if (header.copyOfRange(0, 4).contentEquals(MAGIC_MKV)) {
                     return Pair(true, "MKV")
                 }
-                val headerStr = String(header, 0, bytesRead, Charsets.US_ASCII)
-                if (headerStr.contains("ftyp")) {
-                    return Pair(true, "MP4")
+                // ISO BMFF: "ftyp" must be at offset 4 (standard box header layout)
+                if (bytesRead >= 8 && header[4] == 0x66.toByte() && header[5] == 0x74.toByte() &&
+                    header[6] == 0x79.toByte() && header[7] == 0x70.toByte()) {
+                    return Pair(true, "MP4/M4A/MOV")
                 }
-                if (headerStr.startsWith("RIFF") && headerStr.contains("AVI ")) {
+                if (textHead.startsWith("riff") && textHead.contains("avi ")) {
                     return Pair(true, "AVI")
+                }
+
+                val ext = file.extension.lowercase()
+                // Extensions that carry a mandatory magic signature
+                val strongMagicExts = setOf("mkv", "mp4", "avi", "webm", "ogg", "opus", "flac", "wav", "zip", "rar", "7z")
+                if (ext in strongMagicExts) {
+                    return Pair(false, "Unrecognized file signature for .$ext — expected container header not found")
                 }
             }
         } catch (e: Exception) {

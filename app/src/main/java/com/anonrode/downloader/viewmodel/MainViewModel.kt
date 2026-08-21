@@ -44,6 +44,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private var searchJob: Job? = null
     private var debounceJob: Job? = null
+    private var episodesJob: Job? = null
+    private var searchSequence = 0L
 
     init {
         refreshStorageInfo()
@@ -65,7 +67,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun onFilterSelected(filter: String) {
-        _uiState.update { it.copy(selectedFilter = filter) }
+        _uiState.update {
+            it.copy(
+                selectedFilter = filter,
+                // Clear stale results from the previous filter so the user never
+                // sees (or taps) all-sites results under an Anitaku filter while
+                // the new search is in flight.
+                searchResults = emptyList()
+            )
+        }
         val currentQuery = _uiState.value.query
         if (currentQuery.isNotBlank()) {
             search(currentQuery)
@@ -100,7 +110,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     sourceUrl = parsed.magnet,
                     isDirect = true,
                     backend = "aria2c",
-                    parallelSockets = 16
+                    parallelSockets = engine.parallelSocketsPerFile
                 )
             }
             is ParsedUrl.DirectMediaUrl -> {
@@ -128,6 +138,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         debounceJob?.cancel()
         searchJob?.cancel()
         searchJob = viewModelScope.launch {
+            val seq = ++searchSequence
             _uiState.update { it.copy(isSearching = true, searchError = null) }
 
             val filter = _uiState.value.selectedFilter
@@ -136,10 +147,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 ProviderRegistry.searchFlow(q, filter).collect { incomingRanked ->
                     _uiState.update { it.copy(searchResults = incomingRanked) }
                 }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                // A cancelled search (new query, filter change, clear) must not
+                // run the failure path or clear isSearching for the *new* job.
+                // Rethrow so the finally below only runs for this job's state.
+                throw e
             } catch (e: Exception) {
-                _uiState.update { it.copy(searchError = e.message) }
+                _uiState.update { it.copy(searchError = e.message ?: "Search failed") }
             } finally {
-                _uiState.update { it.copy(isSearching = false) }
+                // Only clear isSearching when this job is still the newest one:
+                // a superseded job's finally runs *after* the replacement job
+                // started (both on Main.immediate), and clearing the flag then
+                // would render "No results found" for the entire new search.
+                if (seq == searchSequence) {
+                    _uiState.update { it.copy(isSearching = false) }
+                }
             }
         }
     }
@@ -154,7 +176,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             )
         }
 
-        viewModelScope.launch {
+        // Track the load job so closing the drawer cancels it: otherwise
+        // reopening the same show launches a second concurrent load and both
+        // race to write shared drawer state.
+        episodesJob?.cancel()
+        episodesJob = viewModelScope.launch {
             try {
                 val details = withContext(Dispatchers.IO) {
                     ProviderRegistry.loadEpisodes(show)
@@ -166,6 +192,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         episodesError = if (details.episodes.isEmpty()) "No episodes found on this page" else null
                     )
                 }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
             } catch (e: Exception) {
                 _uiState.update {
                     it.copy(
@@ -178,6 +206,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun closeEpisodeDrawer() {
+        episodesJob?.cancel()
         _uiState.update { it.copy(activeShowForDrawer = null, drawerEpisodes = emptyList()) }
     }
 
@@ -219,7 +248,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         storageGuard: Double,
         wifiOnlyTorrents: Boolean,
         instantSocial: Boolean,
-        showPosters: Boolean
+        showPosters: Boolean,
+        stallTimeout: Int = 60,
+        magnetRetries: Int = 3,
+        ytdlpRetries: Int = 3,
+        hlsFragments: Int = 8,
+        speedLimit: Int = 0,
+        peers: Int = -1,
+        wifiAll: Boolean = false,
+        clipboard: Boolean = true,
+        notifications: Boolean = true,
+        debugLog: Boolean = false
     ) {
         engine.saveAllSettings(
             maxConcurrent = maxConcurrent,
@@ -229,11 +268,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             storageGuard = storageGuard,
             wifiOnlyTorrents = wifiOnlyTorrents,
             instantSocial = instantSocial,
-            showPosters = showPosters
+            showPosters = showPosters,
+            stallTimeout = stallTimeout,
+            magnetRetries = magnetRetries,
+            ytdlpRetries = ytdlpRetries,
+            hlsFragments = hlsFragments,
+            speedLimit = speedLimit,
+            peers = peers,
+            wifiAll = wifiAll,
+            clipboard = clipboard,
+            notifications = notifications,
+            debugLog = debugLog
         )
+        com.anonrode.downloader.util.DebugLog.setEnabled(debugLog)
     }
 
-    private fun refreshStorageInfo() {
+    /** Re-reads free/total storage so the Settings sheet shows live values
+     *  instead of the app-start snapshot. */
+    fun refreshStorageInfo() {
         try {
             val path = Environment.getExternalStorageDirectory()
             val stat = StatFs(path.path)
