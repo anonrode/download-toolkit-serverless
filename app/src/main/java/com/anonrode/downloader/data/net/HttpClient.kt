@@ -7,6 +7,7 @@ import okhttp3.HttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
+import okhttp3.Call.timeout
 import java.util.Collections
 import java.util.concurrent.TimeUnit
 
@@ -185,7 +186,7 @@ object HttpClient {
         return if (parts.size > 1) "$base?${parts[1]}" else base
     }
 
-    fun get(url: String, referer: String? = null, headers: Map<String, String> = emptyMap()): Response {
+    fun get(url: String, referer: String? = null, headers: Map<String, String> = emptyMap(), tag: String? = null): Response {
         val reqBuilder = Request.Builder()
             .url(safeUrl(url))
             .header("User-Agent", DEFAULT_UA)
@@ -199,6 +200,9 @@ object HttpClient {
 
         val call = shared.newCall(reqBuilder.build())
         inFlightCalls.add(call)
+        if (tag != null) {
+            taggedCalls.computeIfAbsent(tag) { java.util.concurrent.CopyOnWriteArrayList() }.add(call)
+        }
         val started = System.currentTimeMillis()
         return try {
             val res = call.execute()
@@ -213,6 +217,9 @@ object HttpClient {
             throw e
         } finally {
             inFlightCalls.remove(call)
+            if (tag != null) {
+                taggedCalls[tag]?.remove(call)
+            }
         }
     }
 
@@ -225,12 +232,32 @@ object HttpClient {
      */
     private val inFlightCalls = java.util.concurrent.CopyOnWriteArrayList<okhttp3.Call>()
 
+    /**
+     * Calls registered under a tag (e.g. "search") can be cancelled as a group
+     * when a newer call of the same kind supersedes them. A cancelled search's
+     * coroutine dies instantly, but its blocking OkHttp calls keep running
+     * until they finish — on mobile that meant every keystroke left ~10 stale
+     * requests draining data for seconds after the next search started.
+     */
+    private val taggedCalls = java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.CopyOnWriteArrayList<okhttp3.Call>>()
+
     /** Cancel every in-flight resolver/probe HTTP call (user paused/cancelled). */
     fun cancelInFlight() {
         for (c in inFlightCalls) {
             try { c.cancel() } catch (_: Exception) {}
         }
         inFlightCalls.clear()
+        taggedCalls.clear()
+    }
+
+    /** Cancel only the calls tagged [tag] (a superseded search, etc.). */
+    fun cancelTagged(tag: String) {
+        taggedCalls[tag]?.let { calls ->
+            for (c in calls) {
+                try { c.cancel() } catch (_: Exception) {}
+            }
+        }
+        taggedCalls.remove(tag)
     }
 
     /**
@@ -273,9 +300,9 @@ object HttpClient {
         return bytes
     }
 
-    fun getText(url: String, referer: String? = null, headers: Map<String, String> = emptyMap(), acceptStatus: Set<Int> = emptySet()): String? {
+    fun getText(url: String, referer: String? = null, headers: Map<String, String> = emptyMap(), acceptStatus: Set<Int> = emptySet(), tag: String? = null): String? {
         return try {
-            get(url, referer, headers).use { res ->
+            get(url, referer, headers, tag).use { res ->
                 if (res.isSuccessful || res.code in acceptStatus) {
                     cappedText(res)
                 } else {
@@ -288,6 +315,46 @@ object HttpClient {
             lastFailure = "${e.javaClass.simpleName}: ${e.message} for ${url.take(120)}"
             Log.w("HttpClient", lastFailure!!)
             null
+        }
+    }
+
+    /**
+     * Reachability probe: request headers only (no body read) with a hard call
+     * timeout, and report whether the server answered. Used by the HLS
+     * pre-flight so a dead segment CDN fails a task in seconds instead of
+     * pinning it in DOWNLOADING at 0 bytes for minutes.
+     */
+    fun probe(url: String, referer: String? = null, timeoutMs: Long = 10_000L, tag: String? = null): Boolean {
+        val reqBuilder = Request.Builder()
+            .url(safeUrl(url))
+            .header("User-Agent", DEFAULT_UA)
+            .header("Accept", "*/*")
+            .header("Range", "bytes=0-0")
+        if (!referer.isNullOrBlank()) reqBuilder.header("Referer", referer)
+        val call = shared.newCall(reqBuilder.build())
+        call.timeout().timeout(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+        inFlightCalls.add(call)
+        if (tag != null) {
+            taggedCalls.computeIfAbsent(tag) { java.util.concurrent.CopyOnWriteArrayList() }.add(call)
+        }
+        return try {
+            val res = call.execute()
+            // 2xx proves the host serves; 416 (range not satisfiable for a
+            // bytes=0-0 probe) still proves it is reachable and alive.
+            val ok = res.code in 200..299 || res.code == 416
+            // Headers-only check: close the body without reading it, so a
+            // server that ignores Range cannot stream data past us.
+            try { res.body?.close() } catch (_: Exception) {}
+            com.anonrode.downloader.util.DebugLog.net("PROBE ${safeUrl(url)} -> ${res.code} (timeout=${timeoutMs}ms)")
+            ok
+        } catch (e: Exception) {
+            com.anonrode.downloader.util.DebugLog.net("PROBE ${safeUrl(url)} FAILED ${e.javaClass.simpleName}: ${e.message}")
+            false
+        } finally {
+            inFlightCalls.remove(call)
+            if (tag != null) {
+                taggedCalls[tag]?.remove(call)
+            }
         }
     }
 }

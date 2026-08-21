@@ -8,6 +8,8 @@ interface SiteProvider {
     val name: String
     val mainUrl: String
     val requiresSingleSocket: Boolean get() = false
+    /** False for sites with no working search (dead/parked domains). */
+    val searchEnabled: Boolean get() = true
 
     suspend fun search(query: String): List<ShowCard>
     suspend fun loadEpisodes(showUrl: String): ShowDetails

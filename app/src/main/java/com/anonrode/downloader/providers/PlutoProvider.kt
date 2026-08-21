@@ -21,7 +21,7 @@ object PlutoProvider : SiteProvider {
             val clean = query.replace("'", "").replace("’", "").trim()
             val encoded = URLEncoder.encode(clean, "UTF-8")
             val url = "$mainUrl/search/$encoded/page/1"
-            val html = HttpClient.getText(url, referer = "$mainUrl/") ?: return emptyList()
+            val html = HttpClient.getText(url, referer = "$mainUrl/", tag = "search") ?: return emptyList()
             // Charter rule 3: parse with the page URL as baseUri, or abs:href
             // resolves empty and every card URL is stored relative — loadEpisodes
             // then fails with "no scheme" (user-reported, confirmed via log).
@@ -29,7 +29,9 @@ object PlutoProvider : SiteProvider {
 
             val seen = mutableSetOf<String>()
             for (a in doc.select("a[href*='/movie/'], a[href*='/series/']")) {
-                val href = a.attr("abs:href").ifEmpty { a.attr("href") }
+                // Strip #fragment (e.g. #disqus_thread) so one show does not
+                // surface as two cards differing only by fragment.
+                val href = (a.attr("abs:href").ifEmpty { a.attr("href") }).substringBefore('#')
                 val title = a.attr("title").ifEmpty { a.text() }.trim()
                 if (href.isBlank() || title.isBlank() || href in seen) continue
                 seen.add(href)

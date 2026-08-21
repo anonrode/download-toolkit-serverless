@@ -22,7 +22,7 @@ object NaijaVaultProvider : SiteProvider {
         try {
             val encoded = URLEncoder.encode(query, "UTF-8")
             val url = "$mainUrl/wp-json/wp/v2/posts?search=$encoded&_embed=1"
-            val jsonStr = HttpClient.getText(url) ?: return emptyList()
+            val jsonStr = HttpClient.getText(url, tag = "search") ?: return emptyList()
 
             val array = JSONArray(jsonStr)
             for (i in 0 until array.length()) {

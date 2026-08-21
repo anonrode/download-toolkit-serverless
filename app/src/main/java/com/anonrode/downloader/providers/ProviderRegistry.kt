@@ -58,7 +58,7 @@ object ProviderRegistry {
             currentProviders.filter { it.name.equals(siteFilter, ignoreCase = true) || it.name.contains(siteFilter, ignoreCase = true) || siteFilter.contains(it.name, ignoreCase = true) }
         } else {
             currentProviders
-        }
+        }.filter { it.searchEnabled }
 
         val timeoutMs = if (targets.size == 1) 15000L else 7000L
         val accumulated = java.util.Collections.synchronizedList(mutableListOf<ShowCard>())

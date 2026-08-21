@@ -68,7 +68,7 @@ object ResolverRegistry {
                     return direct
                 }
                 com.anonrode.downloader.util.DebugLog.resolve(
-                    "miss ${resolver::class.simpleName} (${HttpClient.lastFailure ?: "no match on page"})"
+                    "miss ${resolver::class.simpleName} on ${trimmed.take(110)}"
                 )
             }
         }

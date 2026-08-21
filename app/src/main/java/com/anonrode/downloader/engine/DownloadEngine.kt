@@ -653,8 +653,7 @@ class DownloadEngine(
         ).any { host.contains(it) }
     }
 
-    private suspend fun resolveStreamUrl(permUrl: String, site: String, defaultQual: String): String? {
-        // Resolver output is TRUSTED: a URL that differs from the input page was
+    private suspend fun resolveStreamUrl(permUrl: String, site: String, defaultQual: String): String? {        // Resolver output is TRUSTED: a URL that differs from the input page was
         // cracked. Locker CDN subdomains legitimately embed the locker's name
         // (fsmc02.downloadwella.com served nkiri's real .mkv — live-verified), so
         // isKnownLockerHost must not reject them; it only exists to stop an
@@ -709,6 +708,75 @@ class DownloadEngine(
         }
 
         return if (accept(resolved)) resolved else null
+    }
+
+    /**
+     * HLS pre-flight: fetch the master playlist and probe the first segment
+     * host BEFORE handing the URL to yt-dlp. A dead segment CDN used to pin
+     * the task in DOWNLOADING at 0 bytes for minutes — yt-dlp retries for ~45s
+     * per fragment, the watchdog kills it, and 3 attempts replay the whole
+     * zombie (user-reported "stuck on starting" for asianc/vidbasic streams,
+     * reproduced live: cdn.jiminido.top accepts connections but never sends
+     * data). Probing first turns that into a clean failure in seconds.
+     *
+     * Returns an error message, or null when the stream looks reachable.
+     */
+    private suspend fun preflightHls(masterUrl: String, referer: String?): String? {
+        try {
+            var currentUrl = masterUrl
+            var playlist = HttpClient.getText(currentUrl, referer = referer, tag = "preflight")
+                ?: return "Stream server unreachable — the playlist did not load. Try again later."
+            var hops = 0
+            while (hops < 2) {
+                val firstUri = playlist.lineSequence().map { it.trim() }
+                    .firstOrNull { it.isNotBlank() && !it.startsWith("#") } ?: return null
+                val segment = resolveSegmentUrl(currentUrl, firstUri) ?: return null
+                // A variant playlist (EXT-X-STREAM-INF) references another .m3u8
+                // — hop once to its first real segment.
+                if (segment.contains(".m3u8") && hops < 1) {
+                    val variant = HttpClient.getText(segment, referer = referer, tag = "preflight")
+                    if (variant == null) {
+                        return "Stream server unreachable — the playlist did not load. Try again later."
+                    }
+                    currentUrl = segment
+                    playlist = variant
+                    hops++
+                    continue
+                }
+                // Probe the segment host exactly as yt-dlp will reach it. The
+                // scheme-relative URLs these CDNs emit (//cdn.example/...) are
+                // joined to http:// by yt-dlp while browsers use https:// — so
+                // probe https first, and only accept when at least one answers.
+                if (HttpClient.probe(segment, referer, timeoutMs = 10_000L, tag = "preflight")) return null
+                if (segment.startsWith("https:")) {
+                    val httpVariant = "http:" + segment.substringAfter("https:")
+                    if (HttpClient.probe(httpVariant, referer, timeoutMs = 8_000L, tag = "preflight")) return null
+                }
+                val host = segment.substringAfter("://").substringBefore('/')
+                return "Stream CDN not responding ($host) — the source server is down or blocking this network. Try again later."
+            }
+            return null
+        } catch (_: Exception) {
+            return null
+        }
+    }
+
+    /** Resolve a playlist-relative or protocol-relative URI against [base]. */
+    private fun resolveSegmentUrl(base: String, uri: String): String? {
+        if (uri.startsWith("http://") || uri.startsWith("https://")) return uri
+        if (uri.startsWith("//")) return "https:$uri"
+        return try {
+            val b = java.net.URI(base)
+            val qIdx = uri.indexOf('?')
+            val pathPart = if (qIdx >= 0) uri.substring(0, qIdx) else uri
+            val queryPart = if (qIdx >= 0) uri.substring(qIdx + 1) else null
+            java.net.URI(
+                b.scheme, null, b.host, b.port,
+                b.path.substringBeforeLast('/') + "/" + pathPart, queryPart, null
+            ).toString()
+        } catch (_: Exception) {
+            null
+        }
     }
 
     private fun startTask(task: DownloadTask) {
@@ -914,6 +982,17 @@ class DownloadEngine(
 
                 val targetFolder = getDownloadDirectory(task.showTitle, createDirs = true)
                 val refererToPass = getRefererForUrl(streamUrl)
+
+                // HLS pre-flight: probe the segment CDN before yt-dlp so a dead
+                // stream host fails cleanly in seconds instead of pinning the
+                // task at 0 bytes for minutes (watchdog kills + 3 attempts).
+                if (finalBackend == "yt-dlp" && isHlsStream) {
+                    val preflightError = preflightHls(streamUrl, refererToPass)
+                    if (preflightError != null) {
+                        com.anonrode.downloader.util.DebugLog.error("task=${task.id} HLS preflight: $preflightError")
+                        throw Exception(preflightError)
+                    }
+                }
 
                 var producedFile: File? = null
                 var turboFailure: TurboDownloader.TurboResult.Failure? = null
