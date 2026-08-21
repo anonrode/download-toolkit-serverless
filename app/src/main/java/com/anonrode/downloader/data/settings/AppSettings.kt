@@ -45,7 +45,7 @@ data class AppSettings(
                 stallTimeoutSec = prefs.getInt("pref_stall_timeout", 60),
                 magnetMaxAttempts = prefs.getInt("pref_magnet_retries", 3),
                 ytdlpMaxAttempts = prefs.getInt("pref_ytdlp_retries", 3),
-                hlsFragmentConcurrency = prefs.getInt("pref_hls_fragments", 8),
+                hlsFragmentConcurrency = prefs.getInt("pref_hls_fragments", 16),
                 globalSpeedLimitKbs = prefs.getInt("pref_speed_limit_kbs", 0),
                 torrentPeers = prefs.getInt("pref_torrent_peers", PEERS_AUTO),
                 wifiOnlyTorrents = prefs.getBoolean("pref_torrents_wifi_only", false),

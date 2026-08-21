@@ -46,7 +46,7 @@ class DownloadEngine(
     var stallTimeoutSec: Int = 60
     var magnetMaxAttempts: Int = 3
     var ytdlpMaxAttempts: Int = 3
-    var hlsFragmentConcurrency: Int = 8
+    var hlsFragmentConcurrency: Int = 16
     var globalSpeedLimitKbs: Int = 0          // 0 = unlimited
     var torrentPeers: Int = -1                // -1 = auto (RAM tier)
     var wifiOnlyAll: Boolean = false
@@ -143,7 +143,7 @@ class DownloadEngine(
         stallTimeoutSec = prefs.getInt("pref_stall_timeout", 60)
         magnetMaxAttempts = prefs.getInt("pref_magnet_retries", 3)
         ytdlpMaxAttempts = prefs.getInt("pref_ytdlp_retries", 3)
-        hlsFragmentConcurrency = prefs.getInt("pref_hls_fragments", 8)
+        hlsFragmentConcurrency = prefs.getInt("pref_hls_fragments", 16)
         globalSpeedLimitKbs = prefs.getInt("pref_speed_limit_kbs", 0)
         torrentPeers = prefs.getInt("pref_torrent_peers", -1)
         wifiOnlyAll = prefs.getBoolean("pref_wifi_only_all", false)
@@ -180,7 +180,7 @@ class DownloadEngine(
         stallTimeout: Int = 60,
         magnetRetries: Int = 3,
         ytdlpRetries: Int = 3,
-        hlsFragments: Int = 8,
+        hlsFragments: Int = 16,
         speedLimit: Int = 0,
         peers: Int = -1,
         wifiAll: Boolean = false,
@@ -475,7 +475,7 @@ class DownloadEngine(
         // Kill the backend this many times before giving up. The yt-dlp wrapper
         // retries 3x, then the engine re-resolves a fresh URL (rotating token
         // and edge node) for another 3 attempts — the recovery chain needs room.
-        private const val MAX_STALL_KILLS = 6
+        private const val MAX_STALL_KILLS = 8
     }
 
     private var lastNotificationTime: Long = 0L
@@ -721,6 +721,12 @@ class DownloadEngine(
                     var windowStartDisk = 0L
                     var windowStartParsed = 0L
                     var windowStartTime = System.currentTimeMillis()
+                    // Rate-drop detection: some CDNs (vidsrc edge nodes) grant a
+                    // fast burst (~40 MB at full speed) then collapse to a
+                    // token-bucket trickle (~0.1-1.8 MiB/s, oscillating). The
+                    // crawl floor can't see this — bytes DO move — but the drop
+                    // from the task's own best window is unmistakable.
+                    var bestWindowBps = 0.0
                     while (isActive) {
                         delay(2000)
                         if (!isActive) break
@@ -751,18 +757,34 @@ class DownloadEngine(
                         // Window progress: healthy downloads blow through the floor
                         // in seconds; a crawl never reaches it.
                         val moved = (disk - windowStartDisk) + (parsed - windowStartParsed)
+                        val windowSecs = ((now - windowStartTime).coerceAtLeast(500L)) / 1000.0
+                        val windowBps = if (windowSecs > 0.0) moved / windowSecs else 0.0
+                        if (windowBps > bestWindowBps) bestWindowBps = windowBps
                         if (moved >= CRAWL_WINDOW_BYTES) {
                             windowStartDisk = disk
                             windowStartParsed = parsed
                             windowStartTime = now
-                            stallKills = 0 // real progress — recovery worked
+                            // Reset the kill counter only when the window speed
+                            // shows genuine recovery — a throttled relaunch still
+                            // moves bytes, just slowly. A task that never had a
+                            // fast burst (naturally slow stream) resets on any
+                            // progress.
+                            if (windowBps >= bestWindowBps * 0.5 || bestWindowBps < 1.0 * 1024 * 1024) {
+                                stallKills = 0 // real progress — recovery worked
+                            }
                         }
                         val crawlStalled = now - windowStartTime > STALL_TIMEOUT_MS
+                        // Rate-drop: after a full 30s at under 40% of the task's
+                        // best window speed (when that best was a real burst) the
+                        // CDN is throttling, not the network being slow — kill so
+                        // the wrapper relaunches (fresh token/edge on re-resolve).
+                        val throttled = bestWindowBps >= 1.0 * 1024 * 1024 &&
+                            windowBps < bestWindowBps * 0.4 && windowSecs >= 30
                         // A task with no meaningful byte movement (parsed or on
                         // disk) for a full minute is stalled: kill the backend so
                         // the retry wrapper relaunches it (fresh token/edge on
                         // re-resolve), and eventually FAILED instead of hanging.
-                        if (now - lastActivity > STALL_TIMEOUT_MS || crawlStalled) {
+                        if (now - lastActivity > STALL_TIMEOUT_MS || crawlStalled || throttled) {
                             stallKills++
                             android.util.Log.w("AnonDownload", "No download progress for ${t.episodeTitle}, (stall kill $stallKills)")
                             YoutubeDlDownloader.killProcess(task.id)
@@ -998,18 +1020,41 @@ class DownloadEngine(
                         torrentPeers = torrentPeers
                     )
 
-                    producedFile = runYtdlp(streamUrl)
+                    // YoutubeDlDownloader.download throws on final failure (after
+                    // ytdlpMaxAttempts), so the re-resolve below must catch it —
+                    // otherwise a failed chain skips the fresh-token recovery and
+                    // the task dies with the first URL's errors.
+                    var firstError: Exception? = null
+                    producedFile = try {
+                        runYtdlp(streamUrl)
+                    } catch (e: kotlinx.coroutines.CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        firstError = e
+                        null
+                    }
                     // HLS/embed tokenized URLs (master.m3u8?token=...) expire
                     // mid-flight: on failure, re-resolve for a fresh URL and try
                     // once more, mirroring the token refresh on the direct path.
+                    // A fresh resolve also lands a fresh edge node/session, which
+                    // resets a CDN byte-quota throttle (the observed recovery).
                     if (producedFile == null && coroutineContext.isActive) {
                         val freshUrl = resolveStreamUrl(permUrl, task.site, task.quality ?: defaultQuality)
                         if (!freshUrl.isNullOrBlank() && freshUrl != streamUrl) {
                             android.util.Log.w("AnonDownload", "yt-dlp failed, re-resolving for a fresh URL")
                             streamUrl = freshUrl
-                            producedFile = runYtdlp(freshUrl)
+                            try {
+                                producedFile = runYtdlp(freshUrl)
+                            } catch (e: kotlinx.coroutines.CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                // Both attempt chains failed; report the first
+                                // chain's error (it carries the attempt detail).
+                                throw firstError ?: e
+                            }
                         }
                     }
+                    if (producedFile == null && firstError != null) throw firstError
                 }
 
                 // A paused or cancelled job must never flip to a final state: the
