@@ -233,16 +233,14 @@ object HttpClient {
         inFlightCalls.clear()
     }
 
-    companion object {
-        /**
-         * Hard cap on any body read through [cappedText]/[cappedBytes]. Resolver
-         * responses are HTML/JSON/wasm — kilobytes. A response larger than this
-         * is by definition not a page (a misdirected file fetch), and reading it
-         * would burn the user's mobile data for nothing.
-         */
-        const val MAX_TEXT_BYTES = 3L * 1024 * 1024
-        const val MAX_BIN_BYTES = 5L * 1024 * 1024
-    }
+    /**
+     * Hard cap on any body read through [cappedText]/[cappedBytes]. Resolver
+     * responses are HTML/JSON/wasm — kilobytes. A response larger than this
+     * is by definition not a page (a misdirected file fetch), and reading it
+     * would burn the user's mobile data for nothing.
+     */
+    const val MAX_TEXT_BYTES = 3L * 1024 * 1024
+    const val MAX_BIN_BYTES = 5L * 1024 * 1024
 
     /** Read at most [maxBytes] of the response body as UTF-8 text. */
     fun cappedText(res: Response, maxBytes: Long = MAX_TEXT_BYTES): String? {
