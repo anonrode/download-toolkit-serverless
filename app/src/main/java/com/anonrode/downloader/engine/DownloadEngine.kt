@@ -722,6 +722,14 @@ class DownloadEngine(
     }
 
     /**
+     * Thrown by [preflightHls] when the CDN rejects the playlist with 401/403:
+     * the token stamped into the persisted URL has expired or been invalidated.
+     * The engine answers by re-resolving from the source page (fresh token)
+     * instead of failing — a persisted HLS URL must never be trusted twice.
+     */
+    private class StaleStreamLinkException(message: String) : Exception(message)
+
+    /**
      * HLS pre-flight: fetch the master playlist, probe the first segment host,
      * and — when the playlist carries scheme-relative (//cdn/...) or relative
      * segment URIs — rewrite them to absolute https into a local file that
@@ -743,14 +751,32 @@ class DownloadEngine(
         val cacheDir = File(context.cacheDir, "hls").apply { mkdirs() }
         val created = mutableListOf<File>()
         var currentUrl = masterUrl
-        var playlist = try {
-            HttpClient.getText(currentUrl, referer = referer, tag = "preflight")
-        } catch (_: Exception) { null }
-        if (playlist == null) {
-            throw Exception("Stream server unreachable — the playlist did not load. Try again later.")
+        var playlist: String? = null
+        var staleToken = false
+        try {
+            HttpClient.get(currentUrl, referer = referer, tag = "preflight").use { res ->
+                when {
+                    // 401/403 on the master means the token stamped into the
+                    // persisted URL is dead — a stale link, not a dead server.
+                    // The engine re-resolves from the source page for a fresh one.
+                    res.code == 401 || res.code == 403 -> staleToken = true
+                    res.isSuccessful -> playlist = HttpClient.cappedText(res)
+                }
+            }
+        } catch (_: Exception) {}
+        when {
+            staleToken -> throw StaleStreamLinkException("Stream link expired — fetching a fresh one")
+            playlist == null -> throw Exception("Stream server unreachable — the playlist did not load. Try again later.")
         }
         var masterFile = rewriteHlsMaster(playlist, currentUrl, "hls-$taskId.m3u8", cacheDir)
-        if (masterFile != null) created.add(masterFile)
+        if (masterFile != null) {
+            created.add(masterFile)
+            // What yt-dlp is actually fed — the 0-byte HLS stall was
+            // undiagnosable without seeing the rewritten playlist.
+            com.anonrode.downloader.util.DebugLog.resolve(
+                "task=$taskId rewritten master: ${masterFile.readText().take(300).replace("\n", " | ")}"
+            )
+        }
 
         // Walk one variant level: rewrite referenced variant playlists to
         // local files too and repoint the master at them (relative name),
@@ -766,9 +792,17 @@ class DownloadEngine(
                 for ((idx, line) in mediaLines.withIndex()) {
                     val vUrl = resolveSegmentUrl(currentUrl, line) ?: continue
                     if (!vUrl.contains(".m3u8")) continue
-                    val variant = try {
-                        HttpClient.getText(vUrl, referer = referer, tag = "preflight")
-                    } catch (_: Exception) { null }
+                    var variant: String? = null
+                    var variantStale = false
+                    try {
+                        HttpClient.get(vUrl, referer = referer, tag = "preflight").use { res ->
+                            when {
+                                res.code == 401 || res.code == 403 -> variantStale = true
+                                res.isSuccessful -> variant = HttpClient.cappedText(res)
+                            }
+                        }
+                    } catch (_: Exception) {}
+                    if (variantStale) throw StaleStreamLinkException("Stream link expired — fetching a fresh one")
                     if (variant == null) continue
                     val vFile = rewriteHlsMaster(variant, vUrl, "hls-$taskId-v$idx.m3u8", cacheDir)
                     if (vFile != null) created.add(vFile)
@@ -1147,7 +1181,27 @@ class DownloadEngine(
                 // segment URLs fixed to absolute https) for yt-dlp to consume.
                 var hlsMasterFile: File? = null
                 if (finalBackend == "yt-dlp" && isHlsStream) {
-                    hlsMasterFile = preflightHls(context, task.id, streamUrl, refererToPass)
+                    try {
+                        hlsMasterFile = preflightHls(context, task.id, streamUrl, refererToPass)
+                    } catch (e: StaleStreamLinkException) {
+                        // A persisted HLS URL carries a token that dies within
+                        // hours — and the router trusts .m3u8 as "already
+                        // direct", so a resumed/retried task NEVER re-resolved
+                        // and looped 403s forever (live log 18:39: five starts,
+                        // all 403). Go back to the source page for a fresh one.
+                        com.anonrode.downloader.util.DebugLog.resolve("task=${task.id} ${e.message}")
+                        val fresh = resolveStreamUrl(permUrl, task.site, task.quality ?: defaultQuality)
+                        if (fresh.isNullOrBlank() || fresh == streamUrl) {
+                            throw Exception("Stream link expired and no fresh link could be fetched — try again later.")
+                        }
+                        streamUrl = fresh
+                        repository.update(task.id) { t ->
+                            t.copy(
+                                directUrl = if (isDirectMediaUrl(streamUrl) || isProvablyDirectFile(streamUrl)) streamUrl else t.directUrl
+                            )
+                        }
+                        hlsMasterFile = preflightHls(context, task.id, streamUrl, getRefererForUrl(streamUrl))
+                    }
                 }
 
                 var producedFile: File? = null

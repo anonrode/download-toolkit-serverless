@@ -279,6 +279,12 @@ object YoutubeDlDownloader {
                 }
             } catch (e: Exception) {
                 errors.append("run ").append(attempts).append(": ").append(e.message ?: e.javaClass.simpleName).append('\n')
+                // Per-attempt visibility: the aggregate error only lands after
+                // ALL attempts, and an HLS stall gave the log nothing to work
+                // with (audit finding).
+                com.anonrode.downloader.util.DebugLog.backend(
+                    "task=$taskId yt-dlp attempt $attempts failed: ${(e.message ?: e.javaClass.simpleName).take(280)}"
+                )
                 return null
             }
 
