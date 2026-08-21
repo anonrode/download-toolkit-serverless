@@ -665,7 +665,7 @@ class DownloadEngine(
         // lockers are embed/watch pages (e.g. vidsrc.mov): the registry can't crack
         // their token-gated chains, so don't waste fetches — startTask routes them
         // straight to yt-dlp.
-        if (!accept(resolved) && isKnownLockerHost(resolved)) {
+        if (!accept(resolved) && !resolved.isNullOrBlank() && isKnownLockerHost(resolved)) {
             try {
                 val inner = ResolverRegistry.resolve(resolved, defaultQual)
                 if (accept(inner)) {
