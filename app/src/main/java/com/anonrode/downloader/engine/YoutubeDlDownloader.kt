@@ -511,7 +511,8 @@ object YoutubeDlDownloader {
             "--console-log-level=error",
             "--bt-tracker=$TIER1_TRACKERS",
             "-d", targetDir.absolutePath,
-        ]
+            magnetUrl
+        )
         // Selective download (season packs): --select-file takes only numeric
         // indexes, never names -- the swarm's file paths never reach the command
         // line, so there is no injection surface from untrusted torrent names.
