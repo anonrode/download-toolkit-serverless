@@ -1,6 +1,7 @@
 package com.anonrode.downloader.util
 
 import android.content.Context
+import com.anonrode.downloader.BuildConfig
 import java.io.File
 import java.io.FileWriter
 import java.text.SimpleDateFormat
@@ -45,7 +46,7 @@ object DebugLog {
     fun init(context: Context) {
         logDir = File(context.filesDir, "logs").apply { mkdirs() }
         purgeOldDays()
-        engine("=== app started ===")
+        engine("=== app started (v${BuildConfig.VERSION_NAME} build ${BuildConfig.VERSION_CODE}) ===")
     }
 
     fun setEnabled(on: Boolean) {

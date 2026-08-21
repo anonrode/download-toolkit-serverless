@@ -32,6 +32,13 @@ object NaijaPreyProvider : SiteProvider {
                     .find(desc)?.groupValues?.get(1) ?: ""
 
                 if (title.isNotBlank() && link.isNotBlank()) {
+                    // Category-page posts (/download-movies-xxx/) have no
+                    // extractable media links — the RSS feed returns them as
+                    // search results, but loadEpisodes filters them out and a
+                    // task would fail with "resolver chain EMPTY" (user-
+                    // reported in app-2026-08-6.txt: f3e46101, 2ef70fcd,
+                    // 4dce7e87 all failed on /download-movies-vxi/).
+                    if (Regex("""/download-(?:movies|series|tv|film|episode)""", RegexOption.IGNORE_CASE).containsMatchIn(link)) continue
                     results.add(
                         ShowCard(
                             title = title,
@@ -63,6 +70,14 @@ object NaijaPreyProvider : SiteProvider {
             val seen = mutableSetOf<String>()
             val links = doc.select("a[href*='download'], a.elementor-button, .entry-content a")
 
+            // "Download Movies"/"Download Series" nav links point at category
+            // pages (/download-movies-xxx/) — the log showed tasks created from
+            // those exact hrefs failing with "resolver chain EMPTY" (user
+            // reported "some stuff are not downloading"). Only real media/
+            // locker links pass.
+            val navHref = Regex("""/download-(?:movies|series|tv|film|episode)""", RegexOption.IGNORE_CASE)
+            val navText = Regex("""(?i)^\s*(download\s+(movies|series|tv|films?|episodes?)|all\s+downloads?)\s*$""")
+
             var count = 1
             for (a in links) {
                 val rawHref = a.attr("href")
@@ -70,7 +85,11 @@ object NaijaPreyProvider : SiteProvider {
                     HttpClient.safeResolveUri(showUrl, rawHref)
                 }
                 val text = a.text().trim()
-                if (href.isNotBlank() && href !in seen && !href.contains("/category/") && !href.contains("/tag/")) {
+                if (href.isNotBlank() && href !in seen &&
+                    !href.contains("/category/") && !href.contains("/tag/") &&
+                    !navHref.containsMatchIn(href) && !navText.matches(text) &&
+                    !href.equals(showUrl, ignoreCase = true)
+                ) {
                     seen.add(href)
                     episodes.add(
                         EpisodeItem(
