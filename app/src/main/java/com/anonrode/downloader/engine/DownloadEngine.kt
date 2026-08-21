@@ -620,9 +620,20 @@ class DownloadEngine(
     }
 
     private suspend fun resolveStreamUrl(permUrl: String, site: String, defaultQual: String): String? {
+        // Resolver output is TRUSTED: a URL that differs from the input page was
+        // cracked. Locker CDN subdomains legitimately embed the locker's name
+        // (fsmc02.downloadwella.com served nkiri's real .mkv — live-verified), so
+        // isKnownLockerHost must not reject them; it only exists to stop an
+        // UNRESOLVED locker page from being treated as a direct file.
+        fun accept(out: String?): Boolean {
+            if (out.isNullOrBlank()) return false
+            if (out != permUrl) return true
+            return !isKnownLockerHost(out)
+        }
+
         // 1. Try direct resolution via ResolverRegistry
         var resolved = ResolverRegistry.resolve(permUrl, defaultQual)
-        if (!resolved.isNullOrBlank() && !isKnownLockerHost(resolved)) {
+        if (accept(resolved)) {
             return resolved
         }
 
@@ -636,7 +647,7 @@ class DownloadEngine(
             } catch (_: Exception) {}
         }
 
-        if (resolved.isNullOrBlank() || isKnownLockerHost(resolved)) {
+        if (!accept(resolved)) {
             for (provider in ProviderRegistry.allProviders) {
                 if (provider.canHandle(permUrl)) {
                     try {
@@ -654,16 +665,16 @@ class DownloadEngine(
         // lockers are embed/watch pages (e.g. vidsrc.mov): the registry can't crack
         // their token-gated chains, so don't waste fetches — startTask routes them
         // straight to yt-dlp.
-        if (!resolved.isNullOrBlank() && isKnownLockerHost(resolved)) {
+        if (!accept(resolved) && isKnownLockerHost(resolved)) {
             try {
                 val inner = ResolverRegistry.resolve(resolved, defaultQual)
-                if (!inner.isNullOrBlank() && !isKnownLockerHost(inner)) {
+                if (accept(inner)) {
                     resolved = inner
                 }
             } catch (_: Exception) {}
         }
 
-        return if (!resolved.isNullOrBlank() && !isKnownLockerHost(resolved)) resolved else null
+        return if (accept(resolved)) resolved else null
     }
 
     private fun startTask(task: DownloadTask) {
