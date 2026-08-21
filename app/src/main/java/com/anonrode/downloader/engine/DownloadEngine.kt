@@ -784,7 +784,19 @@ class DownloadEngine(
                 val effectiveSockets = if (streamUrl.lowercase().contains("kissorgrab.com")) 1 else task.parallelSockets
 
                 coroutineContext.ensureActive()
-                repository.update(task.id) { it.copy(status = TaskStatus.DOWNLOADING, directUrl = streamUrl) }
+                // Persist the resolved URL only when it's genuinely downloadable.
+                // A failed crack must not persist a source embed page as
+                // directUrl — restarting on a page URL made the task loop
+                // forever on yt-dlp "Unsupported URL" (user-reported nepu movie
+                // stuck on "starting"). Keeping the original directUrl makes a
+                // retry re-resolve from the source; real HLS/MP4 outputs are
+                // still persisted for zero-latency resume.
+                repository.update(task.id) { t ->
+                    t.copy(
+                        status = TaskStatus.DOWNLOADING,
+                        directUrl = if (isDirectMediaUrl(streamUrl) || isProvablyDirectFile(streamUrl)) streamUrl else t.directUrl
+                    )
+                }
                 updateServiceState(force = true)
 
                 // Progress watchdog: keeps the UI honest with filesystem truth and
@@ -951,7 +963,7 @@ class DownloadEngine(
                             updateServiceState(force = true)
 
                             val freshUrl = resolveStreamUrl(permUrl, task.site, task.quality ?: defaultQuality)
-                            if (!freshUrl.isNullOrBlank() && freshUrl != streamUrl) {
+                            if (!freshUrl.isNullOrBlank() && freshUrl != streamUrl && (isDirectMediaUrl(freshUrl) || isProvablyDirectFile(freshUrl))) {
                                 streamUrl = freshUrl
                                 repository.update(task.id) { it.copy(status = TaskStatus.DOWNLOADING, directUrl = streamUrl) }
                                 updateServiceState(force = true)

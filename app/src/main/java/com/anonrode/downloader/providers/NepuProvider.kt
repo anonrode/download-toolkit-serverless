@@ -113,21 +113,16 @@ object NepuProvider : SiteProvider {
         // Watch pages embed a vidsrc player whose chain (embed -> data.vidsrcme.ru
         // API -> wasm ChaCha20 decrypt -> CDN playlist) VidsrcResolver now cracks,
         // so directUrl is the token-stamped master playlist the engine feeds
-        // straight to yt-dlp. Fall back to handing the raw watch page to the
-        // engine's yt-dlp generic extractor if resolution ever comes up empty.
+        // straight to yt-dlp.
         var direct = ResolverRegistry.resolve(episodeUrl, quality)
-        if (direct.isNullOrBlank()) {
-            try {
-                val html = HttpClient.getText(episodeUrl, referer = "$mainUrl/") ?: ""
-                val doc = Jsoup.parse(html, episodeUrl)
-                val iframe = doc.selectFirst("iframe[src]")
-                if (iframe != null) {
-                    val embed = HttpClient.safeResolveUri(episodeUrl, iframe.attr("src"))
-                    if (embed.isNotBlank()) direct = embed
-                }
-            } catch (_: Exception) {}
-        }
-        if (direct.isNullOrBlank()) direct = episodeUrl
+        // No iframe fallback here: the watch page's iframe is only a pointer
+        // into the vidsrc chain, not a stream. Returning the embed URL as
+        // directUrl made the engine persist an un-downloadable page and loop
+        // yt-dlp on "Unsupported URL" forever (user-reported nepu movie stuck
+        // on "starting" — the movie API returns null stream_urls, so there is
+        // genuinely nothing to download). Coming up empty lets the engine fail
+        // cleanly with a retryable message instead.
+        if (direct.isNullOrBlank()) direct = ""
         var filename = direct.substringAfterLast('/').substringBefore('?').ifEmpty { "movie.mp4" }
         if (filename.lowercase().endsWith(".m3u8")) filename = filename.dropLast(5) + ".mp4"
         return DownloadRecipe(
