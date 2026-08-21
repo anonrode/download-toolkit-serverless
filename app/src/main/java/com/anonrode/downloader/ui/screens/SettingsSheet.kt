@@ -529,7 +529,7 @@ fun SettingsSheet(
             SettingsCategoryHeader(title = "Network & Privacy")
             SettingsCard {
                 SettingsSwitchRow(
-                    icon = Icons.Rounded.Clipboard,
+                    icon = Icons.Rounded.ContentPaste,
                     title = "Auto-Detect Clipboard Links",
                     subtitle = "Shows a snippet when a URL or magnet is copied",
                     checked = clipboardDetect,

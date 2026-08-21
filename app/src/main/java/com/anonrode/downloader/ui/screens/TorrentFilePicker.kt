@@ -167,13 +167,13 @@ fun TorrentFilePickerDialog(
                             }
                         }
                     }
-                    if (safeFiles.isEmpty()) {
-                        Text(
-                            "No safe files found — the whole torrent is blocked.",
-                            color = StatusError,
-                            fontSize = 13.sp
-                        )
-                    }
+                }
+                if (safeFiles.isEmpty()) {
+                    Text(
+                        "No safe files found — the whole torrent is blocked.",
+                        color = StatusError,
+                        fontSize = 13.sp
+                    )
                 }
             }
         },

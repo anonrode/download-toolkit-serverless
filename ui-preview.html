@@ -1,0 +1,672 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Anonrode — UI Preview</title>
+<style>
+  :root {
+    --bg: #000000;
+    --card: #101216;
+    --elevated: #181B22;
+    --border: #1F232D;
+    --primary: #FFFFFF;
+    --violet: #8B5CF6;
+    --pink: #EC4899;
+    --muted: #94A3B8;
+    --dim: #64748B;
+    --success: #10B981;
+    --error: #EF4444;
+    --warning: #F59E0B;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #05060a;
+    color: var(--primary);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 32px 16px 80px;
+    min-height: 100vh;
+  }
+  h1 { font-size: 20px; font-weight: 900; letter-spacing: 2px; margin-bottom: 4px; }
+  .subtitle { color: var(--muted); font-size: 12px; margin-bottom: 24px; }
+
+  /* Screen switcher */
+  .tabs {
+    display: flex; gap: 6px; flex-wrap: wrap; justify-content: center;
+    margin-bottom: 28px; max-width: 700px;
+  }
+  .tab {
+    background: var(--card); border: 1px solid var(--border); color: var(--muted);
+    padding: 8px 14px; border-radius: 999px; font-size: 12px; font-weight: 600;
+    cursor: pointer; transition: all .15s;
+  }
+  .tab:hover { color: var(--primary); border-color: #2c3340; }
+  .tab.active { background: var(--primary); color: #000; border-color: var(--primary); }
+
+  /* Phone frame */
+  .phone {
+    width: 400px; max-width: 96vw; min-height: 780px;
+    background: var(--bg);
+    border: 1px solid #262b36; border-radius: 44px;
+    padding: 20px 14px 30px;
+    box-shadow: 0 30px 80px rgba(0,0,0,.7), inset 0 0 0 2px #0a0c10;
+    position: relative;
+  }
+  .notch {
+    width: 120px; height: 26px; background: #000; border-radius: 0 0 16px 16px;
+    position: absolute; top: 0; left: 50%; transform: translateX(-50%);
+  }
+  .screen { border-radius: 30px; overflow: hidden; background: var(--bg); min-height: 700px; max-height: 720px; overflow-y: auto; }
+
+  /* Shared atoms */
+  .pad { padding: 0 16px; }
+  .row { display: flex; align-items: center; }
+  .sp-between { justify-content: space-between; }
+  .sp-8 { gap: 8px; }
+  .muted { color: var(--muted); }
+  .dim { color: var(--dim); }
+  .violet { color: var(--violet); }
+  .ok { color: var(--success); }
+  .err { color: var(--error); }
+  .warn { color: var(--warning); }
+  .mono { font-family: 'SF Mono', Consolas, monospace; font-size: 11px; }
+
+  .circle {
+    width: 48px; height: 48px; border-radius: 50%;
+    background: var(--card); display: flex; align-items: center; justify-content: center;
+    position: relative; flex-shrink: 0;
+  }
+  .circle-badge {
+    position: absolute; top: 4px; right: 4px;
+    min-width: 20px; height: 20px; border-radius: 10px;
+    background: var(--primary); color: #000; font-size: 10px; font-weight: 800;
+    display: flex; align-items: center; justify-content: center; padding: 0 5px;
+  }
+  .pill { border-radius: 999px; padding: 2px 8px; font-size: 10px; font-weight: 800; letter-spacing: .5px; }
+  .badge-ok { background: rgba(16,185,129,.15); color: var(--success); }
+  .badge-paused { background: var(--elevated); color: var(--muted); }
+  .badge-fail { background: rgba(239,68,68,.15); color: var(--error); }
+  .badge-queued { background: var(--elevated); color: var(--dim); }
+  .badge-check { background: rgba(245,158,11,.15); color: var(--warning); }
+
+  /* Search bar */
+  .searchbar {
+    height: 56px; border-radius: 28px; background: var(--card);
+    border: 1px solid var(--primary);
+    display: flex; align-items: center; padding: 0 4px 0 14px; gap: 8px;
+  }
+  .searchbar input {
+    flex: 1; background: none; border: none; outline: none;
+    color: var(--primary); font-size: 14px;
+  }
+  .search-go {
+    width: 36px; height: 36px; border-radius: 50%; background: var(--primary);
+    display: flex; align-items: center; justify-content: center; color: #000; flex-shrink: 0;
+  }
+
+  /* Result card */
+  .result {
+    display: flex; gap: 12px; background: var(--card);
+    border: 1px solid var(--border); border-radius: 16px; padding: 12px;
+    margin-top: 12px;
+  }
+  .poster {
+    width: 74px; height: 106px; border-radius: 12px; flex-shrink: 0;
+    background: linear-gradient(135deg, #3a1c1c, #241a33);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 30px; font-weight: 900; color: rgba(255,255,255,.18);
+  }
+  .chip { border-radius: 8px; background: var(--elevated); border: 1px solid var(--border); padding: 3px 8px; font-size: 10px; font-weight: 800; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--success); }
+
+  /* Download card */
+  .dlcard {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 16px; padding: 16px; margin-top: 12px;
+  }
+  .dlcard.failed { background: rgba(239,68,68,.06); border-color: rgba(239,68,68,.45); }
+  .progressbar { height: 6px; border-radius: 4px; background: var(--elevated); overflow: hidden; }
+  .progressbar > div { height: 100%; border-radius: 4px; }
+  .grad { background: linear-gradient(90deg, var(--violet), var(--pink), var(--primary)); }
+  .grad-red { background: var(--error); }
+  .size { font-size: 11px; }
+
+  .act-circle {
+    width: 36px; height: 36px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+  }
+  .act-fill { background: var(--primary); color: #000; }
+  .act-ghost { background: var(--elevated); border: 1px solid var(--border); color: var(--muted); }
+
+  /* Quick share */
+  .scrim {
+    position: absolute; inset: 0; background: rgba(0,0,0,.5);
+    display: flex; align-items: center; justify-content: center; padding: 0 24px;
+  }
+  .qscard {
+    background: var(--elevated); border: 1px solid var(--border);
+    border-radius: 20px; padding: 24px; width: 100%;
+  }
+  .seg {
+    display: flex; background: var(--card); border: 1px solid var(--border);
+    border-radius: 12px; padding: 4px; gap: 4px;
+  }
+  .seg > div {
+    flex: 1; height: 48px; border-radius: 8px; display: flex; align-items: center; justify-content: center;
+    font-size: 14px; font-weight: 700; gap: 6px;
+  }
+  .seg .on { background: rgba(139,92,246,.16); color: var(--violet); }
+  .qchip {
+    flex: 1; height: 48px; border-radius: 12px; background: var(--card);
+    border: 1px solid var(--border); display: flex; align-items: center; justify-content: center;
+    font-size: 14px; font-weight: 600; color: var(--muted);
+  }
+  .qchip.on { background: var(--violet); border-color: var(--violet); color: #fff; font-weight: 800; }
+  .urlbox {
+    background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+    padding: 12px; display: flex; gap: 8px; align-items: center;
+  }
+  .btn { border-radius: 12px; height: 52px; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 15px; }
+  .btn-out { border: 1px solid var(--border); color: var(--muted); }
+  .btn-fill { background: var(--violet); color: #fff; }
+
+  /* Episode drawer */
+  .sheet {
+    background: var(--elevated); border-radius: 24px 24px 0 0;
+    padding: 12px 16px 20px; margin-top: 40px;
+  }
+  .handle { width: 36px; height: 4px; border-radius: 2px; background: var(--border); margin: 0 auto 12px; }
+  .eprow {
+    display: flex; align-items: center; gap: 8px;
+    border: 1px solid rgba(148,163,184,.25); border-radius: 12px;
+    padding: 10px 12px; margin-top: 8px; background: transparent;
+  }
+  .eprow.sel { background: var(--card); border-color: rgba(255,255,255,.5); }
+
+  /* Settings */
+  .section-title { font-size: 11px; font-weight: 800; letter-spacing: 1px; color: var(--dim); margin: 18px 0 8px; text-transform: uppercase; }
+  .scard { background: var(--card); border: 1px solid var(--border); border-radius: 16px; padding: 0 12px; }
+  .srow { display: flex; align-items: center; gap: 12px; padding: 12px 0; }
+  .srow + .srow { border-top: 1px solid var(--border); }
+  .sicon { width: 36px; height: 36px; border-radius: 8px; background: var(--elevated); display: flex; align-items: center; justify-content: center; color: var(--violet); font-size: 16px; flex-shrink: 0; }
+  .switch { width: 44px; height: 26px; border-radius: 13px; background: var(--elevated); border: 1px solid var(--border); position: relative; flex-shrink: 0; }
+  .switch::after { content:''; position:absolute; top:3px; right:3px; width:18px; height:18px; border-radius:50%; background:#fff; }
+  .switch.on { background: var(--primary); }
+  .switch.on::after { background:#000; left:3px; right:auto; }
+  .slider { height: 4px; border-radius: 2px; background: var(--elevated); margin: 8px 0 4px; position: relative; }
+  .slider::after { content:''; position:absolute; top:-6px; right:0; width:16px; height:16px; border-radius:50%; background: var(--primary); }
+  .savebtn { background: var(--primary); color: #000; border-radius: 12px; height: 48px; display: flex; align-items: center; justify-content: center; font-weight: 800; margin-top: 20px; }
+  .filterchip { border-radius: 999px; padding: 6px 12px; font-size: 12px; background: var(--card); border: 1px solid var(--border); color: var(--muted); white-space: nowrap; }
+  .filterchip.on { background: var(--primary); color: #000; font-weight: 800; border-color: var(--primary); }
+  .hscroll { display: flex; gap: 6px; overflow-x: auto; padding: 10px 0; }
+  .ic { font-size: 16px; line-height: 1; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+
+<h1>ANONRODE</h1>
+<div class="subtitle">UI Preview — post-redesign, built from the actual Compose code</div>
+
+<div class="tabs">
+  <div class="tab active" data-screen="home">Home</div>
+  <div class="tab" data-screen="downloads">Downloads</div>
+  <div class="tab" data-screen="quickshare">Quick Share</div>
+  <div class="tab" data-screen="drawer">Episode Drawer</div>
+  <div class="tab" data-screen="settings">Settings</div>
+</div>
+
+<div class="phone">
+  <div class="notch"></div>
+  <div class="screen">
+
+    <!-- ============ HOME ============ -->
+    <div id="screen-home">
+      <div class="pad" style="padding-top:16px">
+        <div class="row sp-between" style="padding:12px 0">
+          <div>
+            <div style="font-size:22px;font-weight:900;letter-spacing:1px">ANONRODE</div>
+            <div class="muted" style="font-size:11px;margin-top:2px">100% Serverless • Native Multi-Provider Engine</div>
+          </div>
+          <div class="row sp-8">
+            <div class="circle">⬇<div class="circle-badge">2</div></div>
+            <div class="circle">⚙</div>
+          </div>
+        </div>
+
+        <div class="searchbar">
+          <span class="muted">🔍</span>
+          <input value="the strain" readonly>
+          <div class="search-go">→</div>
+        </div>
+
+        <div class="row sp-between" style="margin-top:8px;background:var(--elevated);border:1px solid var(--border);border-radius:12px;padding:10px 12px">
+          <div class="row sp-8" style="flex:1;min-width:0">
+            <span class="violet">📋</span>
+            <span class="size muted" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Paste link: https://www.instagram.com/reel/Cx…</span>
+          </div>
+          <span style="font-size:12px;font-weight:800;color:var(--primary)">Download</span>
+        </div>
+
+        <div class="hscroll">
+          <span class="filterchip on">All Sites</span>
+          <span class="filterchip">🧲 Torrents (TPB)</span>
+          <span class="filterchip">NKiri</span>
+          <span class="filterchip">9jaRocks</span>
+          <span class="filterchip">AsianC</span>
+          <span class="filterchip">DramaKey</span>
+          <span class="filterchip">Anitaku Anime</span>
+        </div>
+
+        <div class="result">
+          <div class="poster">T</div>
+          <div style="flex:1;min-width:0">
+            <div style="font-size:15px;font-weight:600;line-height:1.35">The Strain - Season 1-4 Complete</div>
+            <div class="muted" style="font-size:13px;margin-top:4px">TV Series • 2014</div>
+            <div class="row sp-8" style="margin-top:8px">
+              <span class="chip">9JAROCKS</span>
+              <span class="chip">✓ 1080p</span>
+            </div>
+            <div class="row sp-between" style="margin-top:10px">
+              <span class="muted" style="font-size:13px">47 Episodes</span>
+              <span class="row sp-8"><span class="dot"></span><span class="ok" style="font-size:13px;font-weight:600">Very Fast</span></span>
+            </div>
+          </div>
+        </div>
+
+        <div class="result">
+          <div class="poster" style="background:linear-gradient(135deg,#20303a,#14301f)">H</div>
+          <div style="flex:1;min-width:0">
+            <div style="font-size:15px;font-weight:600;line-height:1.35">Horimiya (2021) - Season 2</div>
+            <div class="muted" style="font-size:13px;margin-top:4px">Anime • 2023</div>
+            <div class="row sp-8" style="margin-top:8px">
+              <span class="chip">ANITAKU</span>
+              <span class="chip">SUB · DUB</span>
+            </div>
+            <div class="row sp-between" style="margin-top:10px">
+              <span class="muted" style="font-size:13px">13 Episodes</span>
+              <span class="row sp-8"><span class="dot"></span><span class="ok" style="font-size:13px;font-weight:600">Available</span></span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ DOWNLOADS ============ -->
+    <div id="screen-downloads" class="hidden">
+      <div class="pad" style="padding-top:16px">
+        <div class="row sp-8">
+          <div class="circle" style="background:var(--elevated);border:1px solid var(--border)">←</div>
+          <div>
+            <div style="font-size:18px;font-weight:900;letter-spacing:1px">DOWNLOADS & MEDIA</div>
+            <div class="muted" style="font-size:11px">4 Total Items</div>
+          </div>
+        </div>
+
+        <!-- DOWNLOADING -->
+        <div class="dlcard">
+          <div class="row sp-between">
+            <div style="flex:1;min-width:0">
+              <div style="font-size:14px;font-weight:600">The Strain - S01E01 - Night Zero</div>
+              <div class="muted" style="font-size:11px;margin-top:2px">The Strain</div>
+            </div>
+            <span class="pill badge-ok">DOWNLOADING</span>
+          </div>
+          <div class="progressbar" style="margin-top:12px"><div class="grad" style="width:46%"></div></div>
+          <div class="row sp-between" style="margin-top:8px">
+            <span class="size muted" style="flex:1">46% • 120.5 MB / 268.1 MB • 2.3 MB/s • 0:01:05 left</span>
+            <span class="row sp-8">
+              <div class="circle" style="background:none;width:40px;height:40px"><span style="font-size:20px">⏸</span></div>
+              <div class="circle" style="background:none;width:40px;height:40px;color:var(--muted)">✕</div>
+            </span>
+          </div>
+        </div>
+
+        <!-- PAUSED -->
+        <div class="dlcard">
+          <div class="row sp-between">
+            <div style="flex:1;min-width:0">
+              <div style="font-size:14px;font-weight:600">Horimiya - S02E05 - It's Fine</div>
+              <div class="muted" style="font-size:11px;margin-top:2px">Anitaku Anime</div>
+            </div>
+            <span class="pill badge-paused">PAUSED</span>
+          </div>
+          <div class="progressbar" style="margin-top:12px"><div class="grad" style="width:45%"></div></div>
+          <div class="row sp-between" style="margin-top:8px">
+            <span class="size muted" style="flex:1">Paused at 45% • 120.5 MB / 268.1 MB</span>
+            <span class="row sp-8">
+              <div class="act-circle act-fill">▶</div>
+              <div class="circle" style="background:none;width:40px;height:40px;color:var(--muted)">✕</div>
+            </span>
+          </div>
+        </div>
+
+        <!-- FAILED -->
+        <div class="dlcard failed">
+          <div class="row sp-between">
+            <div style="flex:1;min-width:0">
+              <div style="font-size:14px;font-weight:600">9jaRocks - S01E02 - The Box</div>
+              <div class="muted" style="font-size:11px;margin-top:2px">9jaRocks</div>
+            </div>
+            <span class="pill badge-fail">FAILED</span>
+          </div>
+          <div class="progressbar" style="margin-top:12px"><div class="grad-red" style="width:62%"></div></div>
+          <div class="row sp-between" style="margin-top:8px">
+            <span class="size err" style="flex:1">Server returned an HTML page instead of the file</span>
+            <span class="row sp-8">
+              <div class="act-circle act-fill">⟳</div>
+              <div class="circle" style="background:none;width:40px;height:40px;color:var(--muted)">✕</div>
+            </span>
+          </div>
+        </div>
+
+        <!-- QUEUED -->
+        <div class="dlcard">
+          <div class="row sp-between">
+            <div style="flex:1;min-width:0">
+              <div style="font-size:14px;font-weight:600">DramaKey - S01E03 - Origin</div>
+              <div class="muted" style="font-size:11px;margin-top:2px">DramaKey</div>
+            </div>
+            <span class="pill badge-queued">QUEUED</span>
+          </div>
+          <div class="progressbar" style="margin-top:12px"><div style="width:0%"></div></div>
+          <div class="row sp-between" style="margin-top:8px">
+            <span class="size muted" style="flex:1">Queued • Waiting to start</span>
+            <div class="circle" style="background:none;width:40px;height:40px;color:var(--muted)">✕</div>
+          </div>
+        </div>
+
+        <!-- COMPLETED -->
+        <div class="dlcard">
+          <div class="row sp-between">
+            <div style="flex:1;min-width:0">
+              <div style="font-size:14px;font-weight:600">The Strain - S01E04 - The Architect</div>
+              <div class="muted" style="font-size:11px;margin-top:2px">The Strain</div>
+            </div>
+            <span class="pill badge-ok">DONE</span>
+          </div>
+          <div class="row sp-between" style="margin-top:12px">
+            <div class="row sp-8" style="flex:1;min-width:0">
+              <span class="chip" style="font-size:9px">MKV</span>
+              <span class="size dim" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">268.1 MB • Tap to Play In-App</span>
+            </div>
+            <div class="row sp-8">
+              <div class="act-circle act-fill">▶</div>
+              <div class="act-circle act-ghost">⤴</div>
+              <div class="act-circle act-ghost">🗑</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ QUICK SHARE ============ -->
+    <div id="screen-quickshare" class="hidden">
+      <div class="scrim">
+        <div class="qscard">
+          <div class="row sp-between" style="align-items:flex-start">
+            <div style="flex:1">
+              <div class="row sp-8">
+                <span style="width:6px;height:6px;border-radius:50%;background:var(--violet)"></span>
+                <span class="muted" style="font-size:12px;font-weight:600;letter-spacing:1px">INSTAGRAM</span>
+              </div>
+              <div style="font-size:20px;font-weight:800;margin-top:6px">Quick Download</div>
+            </div>
+            <div class="circle" style="width:48px;height:48px;background:var(--card)">✕</div>
+          </div>
+
+          <div class="urlbox" style="margin-top:24px">
+            <span class="dim">🔗</span>
+            <span class="mono muted" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">https://www.instagram.com/reel/Cx2…</span>
+          </div>
+
+          <div class="muted" style="font-size:11px;font-weight:700;letter-spacing:1px;margin-top:16px">FORMAT</div>
+          <div class="seg" style="margin-top:8px">
+            <div class="on">🎬 Video</div>
+            <div>🎵 Audio</div>
+          </div>
+
+          <div class="muted" style="font-size:11px;font-weight:700;letter-spacing:1px;margin-top:16px">QUALITY</div>
+          <div class="row sp-8" style="margin-top:8px">
+            <div class="qchip">480p</div>
+            <div class="qchip on">720p</div>
+            <div class="qchip">1080p</div>
+            <div class="qchip">Best</div>
+          </div>
+
+          <div class="row sp-8" style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:10px;margin-top:16px">
+            <span style="color:var(--violet);font-weight:800">☑</span>
+            <span class="muted" style="font-size:13px;flex:1">Always download instantly</span>
+            <span class="dim" style="font-size:12px">Skip this dialog</span>
+          </div>
+
+          <div class="row sp-8" style="margin-top:24px">
+            <div class="btn btn-out" style="flex:1">Cancel</div>
+            <div class="btn btn-fill" style="flex:1.4">⬇&nbsp; Download</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ EPISODE DRAWER ============ -->
+    <div id="screen-drawer" class="hidden">
+      <div class="sheet">
+        <div class="handle"></div>
+        <div class="row sp-between">
+          <div style="flex:1;min-width:0">
+            <div style="font-size:17px;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">The Strain - Season 1-4 Complete</div>
+            <div class="muted" style="font-size:12px;margin-top:2px">9JAROCKS • 47 Total Episodes</div>
+          </div>
+          <div class="circle" style="width:48px;height:48px;background:var(--card)">✕</div>
+        </div>
+
+        <div class="hscroll">
+          <span class="filterchip on">All (47)</span>
+          <span class="filterchip" style="background:var(--violet);border-color:var(--violet);color:#fff;font-weight:800">Season 1 (10)</span>
+          <span class="filterchip">Season 2 (10)</span>
+          <span class="filterchip">Season 3 (10)</span>
+        </div>
+
+        <div class="row sp-8">
+          <div style="flex:1;border:1px solid var(--border);border-radius:12px;padding:12px;color:var(--dim);font-size:11px">Range (e.g. 1-5, 8, 10)</div>
+          <div class="act-circle act-fill" style="border-radius:12px;padding:0 18px">All</div>
+        </div>
+
+        <div class="eprow sel">
+          <span style="color:var(--primary);font-weight:800">☑</span>
+          <span style="font-size:13px;flex:1;color:var(--primary);font-weight:600">S01E01 - Night Zero</span>
+          <span class="muted" style="font-size:18px">⬇</span>
+        </div>
+        <div class="eprow">
+          <span class="muted">☐</span>
+          <span style="font-size:13px;flex:1;color:var(--muted)">S01E02 - The Box</span>
+          <span class="muted" style="font-size:18px">⬇</span>
+        </div>
+        <div class="eprow">
+          <span class="muted">☐</span>
+          <span style="font-size:13px;flex:1;color:var(--muted)">S01E03 - Lumen</span>
+          <span class="muted" style="font-size:18px">⬇</span>
+        </div>
+        <div class="eprow">
+          <span class="muted">☐</span>
+          <span style="font-size:13px;flex:1;color:var(--muted)">S01E04 - The Architect</span>
+          <span class="muted" style="font-size:18px">⬇</span>
+        </div>
+
+        <div class="row sp-between" style="background:var(--card);border:1px solid var(--border);border-radius:16px;padding:12px;margin-top:12px">
+          <div>
+            <div style="font-size:13px;font-weight:800">1 Selected</div>
+            <div class="muted" style="font-size:11px">Ready to queue</div>
+          </div>
+          <div class="act-circle act-fill" style="border-radius:12px;padding:0 18px">⬇ Download (1)</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ SETTINGS ============ -->
+    <div id="screen-settings" class="hidden">
+      <div class="sheet" style="margin-top:0">
+        <div class="handle"></div>
+        <div class="row sp-between">
+          <div class="row sp-8">
+            <span class="violet" style="font-size:20px">⚙</span>
+            <span style="font-size:20px;font-weight:900">Settings</span>
+          </div>
+          <div class="circle" style="width:48px;height:48px;background:var(--card)">✕</div>
+        </div>
+
+        <div class="section-title">Self-Healing & Core Updates</div>
+        <div class="scard">
+          <div class="srow">
+            <div class="sicon">↻</div>
+            <div style="flex:1">
+              <div style="font-size:13px;font-weight:700">Sync Scraper & Site Logic</div>
+              <div class="dim" style="font-size:11px">Version: 2026.08.16.1 (Bundled)</div>
+            </div>
+            <div class="act-circle act-ghost" style="border-radius:10px;padding:0 12px;font-size:11px;font-weight:800;color:var(--primary)">Sync Now</div>
+          </div>
+          <div class="srow">
+            <div class="sicon">⟳</div>
+            <div style="flex:1">
+              <div style="font-size:13px;font-weight:700">yt-dlp Core Engine</div>
+              <div class="dim" style="font-size:11px">OTA extractor fixes for IG/TikTok/FB</div>
+            </div>
+            <div class="act-circle act-ghost" style="border-radius:10px;padding:0 12px;font-size:11px;font-weight:800;color:var(--primary)">Update Core</div>
+          </div>
+        </div>
+
+        <div class="section-title">Appearance & Theme</div>
+        <div class="scard">
+          <div class="srow">
+            <div class="sicon">☾</div>
+            <div style="flex:1">
+              <div style="font-size:13px;font-weight:700">App Theme</div>
+              <div class="dim" style="font-size:11px">Dark Mode (OLED)</div>
+            </div>
+            <div class="row sp-8">
+              <span class="filterchip" style="padding:5px 10px">Dark</span>
+              <span class="filterchip on" style="padding:5px 10px">Light</span>
+              <span class="filterchip" style="padding:5px 10px">Auto</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="section-title">General & Automation</div>
+        <div class="scard">
+          <div class="srow">
+            <div class="sicon">📁</div>
+            <div style="flex:1">
+              <div style="font-size:13px;font-weight:700">Auto-Organize Folders</div>
+              <div class="dim" style="font-size:11px">Creates /Download/Anon/&lt;ShowName&gt;/ structure</div>
+            </div>
+            <div class="switch on"></div>
+          </div>
+          <div class="srow">
+            <div class="sicon">⚡</div>
+            <div style="flex:1">
+              <div style="font-size:13px;font-weight:700">Instant Social Download</div>
+              <div class="dim" style="font-size:11px">1-tap download when shared from Instagram/TikTok</div>
+            </div>
+            <div class="switch"></div>
+          </div>
+        </div>
+
+        <div class="section-title">Engine & Performance</div>
+        <div class="scard">
+          <div class="srow">
+            <div class="sicon">⏩</div>
+            <div style="flex:1">
+              <div style="font-size:13px;font-weight:700">Aria2c Parallel Sockets</div>
+              <div class="dim" style="font-size:11px">High-speed segmented CDN connections</div>
+              <div class="slider"></div>
+            </div>
+            <span class="violet" style="font-size:12px;font-weight:800">16 conns</span>
+          </div>
+          <div class="srow">
+            <div class="sicon">🛡</div>
+            <div style="flex:1">
+              <div style="font-size:13px;font-weight:700">Storage Protection Guard</div>
+              <div class="dim" style="font-size:11px">Auto-pause if disk free space is low</div>
+              <div class="slider"></div>
+            </div>
+            <span class="violet" style="font-size:12px;font-weight:800">1.0 GB</span>
+          </div>
+        </div>
+
+        <div class="section-title">Network & Privacy</div>
+        <div class="scard">
+          <div class="srow">
+            <div class="sicon">📋</div>
+            <div style="flex:1">
+              <div style="font-size:13px;font-weight:700">Clipboard auto-detect</div>
+              <div class="dim" style="font-size:11px">Detect links copied to clipboard</div>
+            </div>
+            <div class="switch on"></div>
+          </div>
+          <div class="srow">
+            <div class="sicon">🔔</div>
+            <div style="flex:1">
+              <div style="font-size:13px;font-weight:700">Completion notifications</div>
+              <div class="dim" style="font-size:11px">Alert when a download finishes</div>
+            </div>
+            <div class="switch on"></div>
+          </div>
+        </div>
+
+        <div class="section-title">Torrents & Peer Limits</div>
+        <div class="scard">
+          <div class="srow">
+            <div class="sicon">🧲</div>
+            <div style="flex:1">
+              <div style="font-size:13px;font-weight:700">Torrent peer count</div>
+              <div class="dim" style="font-size:11px">RAM-tier: 128 peers</div>
+              <div class="slider"></div>
+            </div>
+            <span class="violet" style="font-size:12px;font-weight:800">128</span>
+          </div>
+          <div class="srow">
+            <div class="sicon">⏱</div>
+            <div style="flex:1">
+              <div style="font-size:13px;font-weight:700">Stall timeout</div>
+              <div class="dim" style="font-size:11px">Kill backend after no progress</div>
+              <div class="slider"></div>
+            </div>
+            <span class="violet" style="font-size:12px;font-weight:800">60 s</span>
+          </div>
+        </div>
+
+        <div class="section-title">Diagnostics</div>
+        <div class="scard">
+          <div class="srow">
+            <div class="sicon">🐞</div>
+            <div style="flex:1">
+              <div style="font-size:13px;font-weight:700">Debug logging</div>
+              <div class="dim" style="font-size:11px">Engine events to cacheDir/debug_log.txt</div>
+            </div>
+            <div class="switch"></div>
+          </div>
+        </div>
+
+        <div class="savebtn">Save Preferences</div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+  const tabs = document.querySelectorAll('.tab');
+  tabs.forEach(tab => {
+    tab.addEventListener('click', () => {
+      tabs.forEach(t => t.classList.remove('active'));
+      tab.classList.add('active');
+      document.querySelectorAll('.screen > div').forEach(s => s.classList.add('hidden'));
+      document.getElementById('screen-' + tab.dataset.screen).classList.remove('hidden');
+    });
+  });
+</script>
+</body>
+</html>

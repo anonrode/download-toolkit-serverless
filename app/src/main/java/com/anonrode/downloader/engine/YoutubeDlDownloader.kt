@@ -1,6 +1,7 @@
 package com.anonrode.downloader.engine
 
 import android.content.Context
+import com.anonrode.downloader.data.settings.AppSettings
 import com.anonrode.downloader.security.TorrentSecurityShield
 import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.youtubedl_android.YoutubeDLRequest
@@ -110,14 +111,17 @@ object YoutubeDlDownloader {
                 }
             }
             // isActiveCheck keeps the task-level retry loop from relaunching
-            // aria2c after the user paused or cancelled the job.
+            // aria2c after the user paused or cancelled the job. Named arg:
+            // speedLimitKbs is now the last parameter, so a trailing lambda
+            // would no longer bind to isActiveCheck.
             return downloadMagnetAria2c(
                 context, taskId, sourceUrl, targetDir, preferredFilename, parallelSockets, onProgress,
                 selectIndexes = selectIndexes,
                 maxAttempts = magnetMaxAttempts,
                 peersOverride = torrentPeers,
-                speedLimitKbs = speedLimitKbs
-            ) { coroutineContext.isActive }
+                speedLimitKbs = speedLimitKbs,
+                isActiveCheck = { coroutineContext.isActive }
+            )
         }
 
         val request = YoutubeDLRequest(sourceUrl).apply {
@@ -466,7 +470,6 @@ object YoutubeDlDownloader {
 
         val aria2Exec = findAria2Executable(context)
             ?: throw IllegalStateException("aria2c binary missing: libaria2c.so not found in native libs")
-        val conns = parallelSockets
         val cmd = mutableListOf(
             aria2Exec.absolutePath,
             "--enable-dht=true",
@@ -485,8 +488,10 @@ object YoutubeDlDownloader {
             "--seed-time=0",
             "--seed-ratio=0.0",
             "--summary-interval=1",
-            // RAM-tier override when the user set one; otherwise auto formula.
-            "--bt-max-peers=${if (peersOverride > 0) peersOverride else (conns * 8).coerceIn(60, 500)}",
+            // Concrete user override wins; Auto (-1) resolves to the live RAM
+            // tier so the Settings label "Auto (RAM-detected)" is truthful
+            // (it used to fall back to a connections-based formula instead).
+            "--bt-max-peers=${if (peersOverride > 0) peersOverride else AppSettings.detectRamTier(context)}",
             "--bt-request-peer-speed-limit=50M",
             "--bt-stop-timeout=300",
             // Fail fast on dead trackers: 30s connect + 60s default announce
