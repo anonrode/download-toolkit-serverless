@@ -291,6 +291,13 @@ class DownloadEngine(
         activeJobs[taskId]?.cancel()
         activeJobs.remove(taskId)
         YoutubeDlDownloader.killProcess(taskId)
+        // Turbo runs on blocking OkHttp calls that coroutine cancellation does
+        // not interrupt, and resolver HTTP calls are plain blocking executes:
+        // without these, a paused task kept draining mobile data until the app
+        // was killed (user-reported).
+        TurboDownloader.cancelTask(taskId)
+        HttpClient.cancelInFlight()
+        com.anonrode.downloader.util.DebugLog.user("pause $taskId")
         repository.update(taskId) { it.copy(status = TaskStatus.PAUSED, speedBytesPerSec = 0.0) }
         updateServiceState(force = true)
         processQueue()
@@ -302,6 +309,8 @@ class DownloadEngine(
         activeJobs[taskId]?.cancel()
         activeJobs.remove(taskId)
         YoutubeDlDownloader.killProcess(taskId)
+        TurboDownloader.cancelTask(taskId)
+        HttpClient.cancelInFlight()
         repository.update(taskId) { it.copy(status = TaskStatus.PAUSED, speedBytesPerSec = 0.0, errorMessage = NETWORK_PAUSE_MESSAGE) }
         updateServiceState(force = true)
     }
@@ -311,6 +320,9 @@ class DownloadEngine(
         activeJobs[taskId]?.cancel()
         activeJobs.remove(taskId)
         YoutubeDlDownloader.killProcess(taskId)
+        TurboDownloader.cancelTask(taskId)
+        HttpClient.cancelInFlight()
+        com.anonrode.downloader.util.DebugLog.user("cancel $taskId")
         if (task != null) {
             // Remove every partial artifact so cancelled downloads cannot leave orphaned files
             try {
@@ -476,6 +488,11 @@ class DownloadEngine(
         // retries 3x, then the engine re-resolves a fresh URL (rotating token
         // and edge node) for another 3 attempts — the recovery chain needs room.
         private const val MAX_STALL_KILLS = 8
+
+        // Hard ceiling on the link-cracking phase. Without it a slow site kept
+        // a task in RESOLVING forever while the user's mobile data trickled
+        // away on retries.
+        private const val RESOLVE_TIMEOUT_MS = 90_000L
     }
 
     private var lastNotificationTime: Long = 0L
@@ -671,28 +688,51 @@ class DownloadEngine(
                     repository.update(task.id) { it.copy(status = TaskStatus.RESOLVING) }
                     updateServiceState(force = true)
 
-                    val resolved = resolveStreamUrl(permUrl, task.site, task.quality ?: defaultQuality)
+                    // Hard ceiling on link cracking: the resolver chain walks many
+                    // hosts with retries, and without a timeout a slow site pinned
+                    // the task in RESOLVING forever (user-reported).
+                    val resolved = try {
+                        kotlinx.coroutines.withTimeout(RESOLVE_TIMEOUT_MS) {
+                            resolveStreamUrl(permUrl, task.site, task.quality ?: defaultQuality)
+                        }
+                    } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
+                        com.anonrode.downloader.util.DebugLog.error("task=${task.id} resolution timed out after ${RESOLVE_TIMEOUT_MS / 1000}s")
+                        throw Exception("Link resolution timed out — the site took too long to answer. Retry, or try another server/episode.")
+                    }
                     if (!resolved.isNullOrBlank()) {
+                        com.anonrode.downloader.util.DebugLog.resolve("task=${task.id} resolved -> ${resolved.take(120)}")
                         streamUrl = resolved
                     } else if (isKnownLockerHost(streamUrl) || !isDirectMediaUrl(streamUrl)) {
-                        // Our resolver chain came up empty (e.g. a JS-driven watch page
-                        // whose embed network is token-gated). Hand the raw URL to
-                        // yt-dlp's generic extractor instead of failing outright — it
-                        // cracks many embed chains our registry doesn't know.
+                        if (task.site.isNotBlank()) {
+                            // A provider page whose cracking failed. yt-dlp cannot
+                            // parse these sites — handing it the page URL produced
+                            // the guaranteed "Unsupported URL" failure (user-reported).
+                            // Fail with the real reason instead; retry re-runs the
+                            // resolver, which recovers from transient site issues.
+                            com.anonrode.downloader.util.DebugLog.resolve("task=${task.id} resolver chain EMPTY for ${streamUrl.take(120)} (site=${task.site}) — failing cleanly")
+                            throw Exception("Could not crack the stream link (${task.site}) — the site may have changed or the link expired. Retry, or try another server/episode.")
+                        }
+                        // Social URLs: yt-dlp's generic extractor genuinely cracks
+                        // these, so keep the fallback there.
+                        com.anonrode.downloader.util.DebugLog.resolve("task=${task.id} resolver chain EMPTY for ${streamUrl.take(120)} — falling back to yt-dlp extractor")
                         android.util.Log.w("AnonDownload", "Resolver chain empty for $streamUrl, handing to yt-dlp")
                     }
                 }
 
                 val isHlsStream = isStreamingLink(streamUrl)
-                // A known locker host is never a direct file, even when its page
-                // URL ends in a media extension — route it through yt-dlp rather
-                // than downloading the page as a video. Resolver outputs that are
-                // provably direct (pixeldrain API, ?pt= / ?token= CDN links) are
-                // exempt: they are the cracked file itself, so Turbo may grab them.
-                val isEmbedOrPage = !isMagnet && !isProvablyDirectFile(streamUrl) &&
-                    (!isDirectMediaUrl(streamUrl) || isKnownLockerHost(streamUrl))
+                // A URL with a real media extension goes to the DIRECT path even
+                // when its host is a known locker: resolver OUTPUT is the cracked
+                // file itself, and Turbo's probe rejects any server that lies and
+                // serves HTML — a clean failure, never an HTML-as-video download.
+                // Routing those through yt-dlp's generic extractor (the old
+                // behavior) was slower and could misfire. Only non-media URLs
+                // (pages/embeds) are extractor tasks for yt-dlp to crack.
+                val isEmbedOrPage = !isMagnet && !isProvablyDirectFile(streamUrl) && !isDirectMediaUrl(streamUrl)
                 val finalBackend = if (isSocial || isHlsStream || isEmbedOrPage || task.audioOnly) "yt-dlp" else "aria2c"
                 val isExtractor = isSocial || task.audioOnly || isEmbedOrPage
+                com.anonrode.downloader.util.DebugLog.engine(
+                    "task=${task.id} route: social=$isSocial hls=$isHlsStream embedOrPage=$isEmbedOrPage provablyDirect=${isProvablyDirectFile(streamUrl)} mediaExt=${isDirectMediaUrl(streamUrl)} -> backend=$finalBackend url=${streamUrl.take(110)}"
+                )
 
                 // kissorgrab.com rejects multi-connection downloads; force a single
                 // socket there (monolith parity, downloader.py aria2c forced 1/1).
@@ -786,6 +826,9 @@ class DownloadEngine(
                         // re-resolve), and eventually FAILED instead of hanging.
                         if (now - lastActivity > STALL_TIMEOUT_MS || crawlStalled || throttled) {
                             stallKills++
+                            com.anonrode.downloader.util.DebugLog.engine(
+                                "task=${task.id} watchdog kill #$stallKills (idle=${(now - lastActivity) / 1000}s crawl=$crawlStalled throttled=$throttled window=${(moved / 1024).toInt()}KiB best=${(bestWindowBps / 1024).toInt()}KiB/s)"
+                            )
                             android.util.Log.w("AnonDownload", "No download progress for ${t.episodeTitle}, (stall kill $stallKills)")
                             YoutubeDlDownloader.killProcess(task.id)
                             // Turbo runs in OkHttp, not a native process: interrupt
@@ -1129,7 +1172,15 @@ class DownloadEngine(
                     com.anonrode.downloader.util.DebugLog.write("failed task=${task.id} reason=$errReason")
                 }
             } catch (e: CancellationException) {
-                // Cancelled. A pause landing during VALIDATING (after the first
+                // Cancelled. Nothing may outlive its job: kill the native
+                // backend and any in-flight Turbo/resolver HTTP so a cancelled
+                // task cannot keep draining data (defense in depth — pause()
+                // and cancel() already do this; job cancellation can also come
+                // from the queue processor or scope shutdown).
+                YoutubeDlDownloader.killProcess(task.id)
+                TurboDownloader.cancelTask(task.id)
+                HttpClient.cancelInFlight()
+                // A pause landing during VALIDATING (after the first
                 // ensureActive passed but before the terminal write) leaves the
                 // status at VALIDATING — rescue it to PAUSED so the card is not
                 // stuck mid-check.

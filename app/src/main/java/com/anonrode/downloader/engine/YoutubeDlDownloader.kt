@@ -290,7 +290,11 @@ object YoutubeDlDownloader {
         while (attempts < ytdlpMaxAttempts && produced == null) {
             attempts++
             if (!coroutineContext.isActive) throw CancellationException("Task was cancelled before yt-dlp retry")
+            com.anonrode.downloader.util.DebugLog.backend("task=$taskId yt-dlp attempt $attempts/$ytdlpMaxAttempts url=${sourceUrl.take(110)}")
             produced = attemptOnce()
+            if (produced != null) {
+                com.anonrode.downloader.util.DebugLog.backend("task=$taskId yt-dlp attempt $attempts produced ${produced.name} (${produced.length() / 1048576} MiB)")
+            }
             if (produced == null && attempts < ytdlpMaxAttempts) {
                 try {
                     Thread.sleep(2_000L * attempts)
@@ -303,6 +307,7 @@ object YoutubeDlDownloader {
             }
         }
         if (produced == null && errors.isNotBlank()) {
+            com.anonrode.downloader.util.DebugLog.error("task=$taskId yt-dlp failed after $attempts attempt(s): ${errors.toString().take(300)}")
             throw Exception("yt-dlp failed after $attempts attempt(s): ${errors.toString().trim()}")
         }
         return produced
@@ -311,6 +316,7 @@ object YoutubeDlDownloader {
     private val activeNativeProcesses = java.util.concurrent.ConcurrentHashMap<String, Process>()
 
     fun killProcess(taskId: String) {
+        com.anonrode.downloader.util.DebugLog.backend("task=$taskId killProcess (native teardown)")
         try {
             YoutubeDL.getInstance().destroyProcessById(taskId)
         } catch (_: Exception) {}

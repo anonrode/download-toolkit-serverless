@@ -57,8 +57,19 @@ object ResolverRegistry {
         val trimmed = url.trim()
         for (resolver in RESOLVERS) {
             if (resolver.canResolve(trimmed)) {
+                com.anonrode.downloader.util.DebugLog.resolve(
+                    "try ${resolver::class.simpleName} depth=$depth url=${trimmed.take(110)}"
+                )
                 val direct = resolveWithRetry(resolver, trimmed, quality, depth)
-                if (!direct.isNullOrBlank()) return direct
+                if (!direct.isNullOrBlank()) {
+                    com.anonrode.downloader.util.DebugLog.resolve(
+                        "HIT ${resolver::class.simpleName} -> ${direct.take(110)}"
+                    )
+                    return direct
+                }
+                com.anonrode.downloader.util.DebugLog.resolve(
+                    "miss ${resolver::class.simpleName} (${HttpClient.lastFailure ?: "no match on page"})"
+                )
             }
         }
         return null
@@ -75,8 +86,9 @@ object ResolverRegistry {
             val result = resolver.resolve(url, quality, depth)
             if (!result.isNullOrBlank()) return result
             if (attempt >= 2 || !isNetworkClassFailure(HttpClient.lastFailure, before)) return result
-            delay(NETWORK_RETRY_DELAY_MS)
             attempt++
+            com.anonrode.downloader.util.DebugLog.resolve("network-class failure, retry #$attempt ${resolver::class.simpleName}")
+            delay(NETWORK_RETRY_DELAY_MS)
         }
     }
 
@@ -326,7 +338,7 @@ object BloggerResolver : BaseResolver {
 
             HttpClient.shared.newCall(req).execute().use { res ->
                 if (!res.isSuccessful) return null
-                val body = res.body?.string() ?: return null
+                val body = HttpClient.cappedText(res) ?: return null
 
                 val urlMatches = Pattern.compile("""(https://[^"]+googlevideo\.com[^"]+)""").matcher(body)
                 val urls = mutableListOf<String>()
@@ -403,7 +415,7 @@ object VidsrcResolver : BaseResolver {
                     // the key from its own instruction stream.
                     val wasmUrl = root.optJSONObject("vs")?.optString("wasm_url") ?: return null
                     val wasm = HttpClient.get(wasmUrl, referer = "https://cloudorchestranova.com/").use { res ->
-                        if (res.isSuccessful) res.body?.bytes() else null
+                        if (res.isSuccessful) HttpClient.cappedBytes(res) else null
                     } ?: return null
                     val key = VidsrcWasmCrypto.extractKey(wasm) ?: return null
                     VidsrcWasmCrypto.decrypt(su, key).firstOrNull()
@@ -451,7 +463,7 @@ object LightDLResolver : BaseResolver {
 
             HttpClient.shared.newCall(req).execute().use { res ->
                 if (!res.isSuccessful) return null
-                val body = res.body?.string() ?: return null
+                val body = HttpClient.cappedText(res) ?: return null
                 val obj = JSONObject(body)
                 return obj.optString("downloadUrl")
             }
@@ -659,7 +671,7 @@ object DownloadwellaResolver : BaseResolver {
 
             HttpClient.shared.newCall(req).execute().use { res ->
                 if (!res.isSuccessful) return null
-                val body = res.body?.string() ?: return null
+                val body = HttpClient.cappedText(res) ?: return null
 
                 val directMedia = findDirectMediaUrl(body)
                 if (!directMedia.isNullOrBlank() && !directMedia.equals(url, ignoreCase = true) && !isRootLockerDomain(directMedia)) {
@@ -689,7 +701,7 @@ object DownloadwellaResolver : BaseResolver {
                         .build()
                     HttpClient.shared.newCall(step2Req).execute().use { res2 ->
                         if (res2.isSuccessful) {
-                            val body2 = res2.body?.string() ?: ""
+                            val body2 = HttpClient.cappedText(res2) ?: ""
                             val direct2 = findDirectMediaUrl(body2)
                             if (!direct2.isNullOrBlank() && !isRootLockerDomain(direct2)) return direct2
                         }
@@ -786,7 +798,7 @@ object LoadedfilesResolver : BaseResolver {
                     }
 
                     if (res.isSuccessful) {
-                        val body = res.body?.string() ?: return@use
+                        val body = HttpClient.cappedText(res) ?: return@use
                         val direct = findDirectMediaUrl(body)
                         if (!direct.isNullOrBlank() && !isRootLockerDomain(direct)) {
                             val safeDirect = HttpClient.safeUrl(direct)

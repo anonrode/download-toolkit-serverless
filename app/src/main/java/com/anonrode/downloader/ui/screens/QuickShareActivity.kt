@@ -71,7 +71,10 @@ class QuickShareActivity : ComponentActivity() {
                             interactionSource = remember { MutableInteractionSource() },
                             indication = null
                         ) { finish() },
-                    contentAlignment = Alignment.Center
+                    // Seal-style: the share sheet docks to the bottom edge at full
+                    // width — a centered floating card crammed every control into
+                    // a phone-width dialog and felt tight (user-reported).
+                    contentAlignment = Alignment.BottomCenter
                 ) {
                     QuickShareCard(
                         parsedUrl = parsed,
@@ -216,20 +219,29 @@ fun QuickShareCard(
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = Spacing.xl)
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null
             ) {},
-        shape = RoundedCornerShape(Radius.xl),
+        shape = RoundedCornerShape(topStart = Radius.xl, topEnd = Radius.xl),
         colors = CardDefaults.cardColors(containerColor = SurfaceElevated),
         border = androidx.compose.foundation.BorderStroke(1.dp, BorderHairline)
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(Spacing.xl)
+                .padding(horizontal = Spacing.xl)
+                .padding(top = Spacing.lg, bottom = Spacing.xxl)
         ) {
+            // Drag handle — signals a bottom sheet, matches Seal's share UI.
+            Box(
+                modifier = Modifier
+                    .padding(bottom = Spacing.md)
+                    .size(width = 36.dp, height = 4.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(BorderHairline)
+                    .align(Alignment.CenterHorizontally)
+            )
             // ---- Header: source label -> title -> close ----
             Row(
                 modifier = Modifier.fillMaxWidth(),

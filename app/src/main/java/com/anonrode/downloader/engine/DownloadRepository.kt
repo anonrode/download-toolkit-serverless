@@ -35,9 +35,18 @@ class DownloadRepository {
                 if (raw.isNotBlank()) {
                 _tasks.value = json.decodeFromString<List<DownloadTask>>(raw)
                     .map {
-                        if (it.status == TaskStatus.DOWNLOADING || it.status == TaskStatus.RESOLVING || it.status == TaskStatus.VALIDATING) {
-                            it.copy(status = TaskStatus.QUEUED, speedBytesPerSec = 0.0)
-                        } else it
+                        // A task that was mid-flight when the app died resumes as
+                        // PAUSED, never auto-QUEUED: silently re-consuming mobile
+                        // data on reopen (user-reported) is the wrong surprise.
+                        // VALIDATING is the one safe auto-resume — the file is
+                        // already on disk and only needs the integrity check.
+                        when (it.status) {
+                            TaskStatus.DOWNLOADING, TaskStatus.RESOLVING ->
+                                it.copy(status = TaskStatus.PAUSED, speedBytesPerSec = 0.0)
+                            TaskStatus.VALIDATING ->
+                                it.copy(status = TaskStatus.QUEUED, speedBytesPerSec = 0.0)
+                            else -> it
+                        }
                     }
                 }
             }
