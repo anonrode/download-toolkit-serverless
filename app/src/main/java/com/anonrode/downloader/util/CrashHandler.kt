@@ -37,6 +37,11 @@ object CrashHandler : Thread.UncaughtExceptionHandler {
 
             Log.e("CrashHandler", logMessage)
 
+            // The activity journal (shared via Settings -> Share Activity Log)
+            // must carry the crash too — a log that just ends mid-line was
+            // undiagnosable (user-reported log ended abruptly with no trace).
+            DebugLog.crashLog(throwable)
+
             // Save to Downloads folder if accessible
             try {
                 val dlDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)

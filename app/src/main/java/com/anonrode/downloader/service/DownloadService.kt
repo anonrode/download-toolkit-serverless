@@ -118,8 +118,20 @@ class DownloadService : Service() {
                 enableVibration(true)
             }
 
+            // Channel 3: Task failures with a Retry action
+            val failChannel = NotificationChannel(
+                CHANNEL_FAIL_ID,
+                "Download Failed",
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description = "Notification when a download fails, with a Retry action"
+                setShowBadge(true)
+                enableVibration(true)
+            }
+
             manager.createNotificationChannel(ongoingChannel)
             manager.createNotificationChannel(completeChannel)
+            manager.createNotificationChannel(failChannel)
         }
     }
 
@@ -152,6 +164,7 @@ class DownloadService : Service() {
     companion object {
         const val CHANNEL_ONGOING_ID = "anon_downloads_channel"
         const val CHANNEL_COMPLETE_ID = "anon_completed_channel"
+        const val CHANNEL_FAIL_ID = "anon_failed_channel"
         const val ONGOING_NOTIFICATION_ID = 8801
 
         const val ACTION_START_OR_UPDATE = "com.anonrode.downloader.START_OR_UPDATE"
@@ -206,6 +219,49 @@ class DownloadService : Service() {
                 val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
                 val notifId = (System.currentTimeMillis() % 100000).toInt() + 9000
                 manager.notify(notifId, notification)
+            } catch (_: Exception) {}
+        }
+
+        fun notifyFailed(context: Context, taskId: String, title: String, error: String) {
+            try {
+                val appIntent = Intent(context, MainActivity::class.java).apply {
+                    flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
+                }
+                val contentIntent = PendingIntent.getActivity(
+                    context,
+                    taskId.hashCode(),
+                    appIntent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                )
+                val retryIntent = Intent(context, RetryReceiver::class.java).apply {
+                    action = RetryReceiver.ACTION_RETRY
+                    putExtra(RetryReceiver.EXTRA_TASK_ID, taskId)
+                }
+                val retryPending = PendingIntent.getBroadcast(
+                    context,
+                    taskId.hashCode(),
+                    retryIntent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                )
+
+                val notification = NotificationCompat.Builder(context, CHANNEL_FAIL_ID)
+                    .setContentTitle("Download failed — $title")
+                    .setContentText(error.take(140))
+                    .setStyle(NotificationCompat.BigTextStyle().bigText(error.take(300)))
+                    .setSmallIcon(android.R.drawable.stat_notify_error)
+                    .setContentIntent(contentIntent)
+                    .setAutoCancel(true)
+                    .addAction(
+                        NotificationCompat.Action.Builder(
+                            android.R.drawable.stat_sys_download_done,
+                            "Retry",
+                            retryPending
+                        ).build()
+                    )
+                    .build()
+
+                val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                manager.notify(9000 + (taskId.hashCode() % 9000).toInt(), notification)
             } catch (_: Exception) {}
         }
 

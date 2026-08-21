@@ -242,11 +242,18 @@ object HttpClient {
 
     /** Cancel every in-flight resolver/probe HTTP call (user paused/cancelled). */
     fun cancelInFlight() {
+        // A user pause/cancel must not kill their live search: search calls are
+        // tagged separately and get cancelled only when a newer search supersedes
+        // them (cancelTagged). The log showed pausing one download aborting
+        // unrelated in-flight searches mid-keystroke.
+        val searchCalls = taggedCalls["search"]
         for (c in inFlightCalls) {
+            if (searchCalls?.contains(c) == true) continue
             try { c.cancel() } catch (_: Exception) {}
         }
         inFlightCalls.clear()
-        taggedCalls.clear()
+        // Leave taggedCalls intact: surviving search calls still need their tag
+        // so a newer search can supersede them; completed calls self-remove.
     }
 
     /** Cancel only the calls tagged [tag] (a superseded search, etc.). */

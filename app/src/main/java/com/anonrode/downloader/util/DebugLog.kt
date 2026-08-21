@@ -88,6 +88,22 @@ object DebugLog {
     /** Legacy entry point kept for existing callers. */
     fun write(msg: String) = engine(msg)
 
+    /**
+     * Synchronous crash flush: the background executor may not deliver before
+     * the process dies, so this writes directly to today's file and returns.
+     * Call this only from an uncaught-exception handler — never from the main
+     * log path, which is async for a reason.
+     */
+    fun crashLog(throwable: Throwable) {
+        val dir = logDir ?: return
+        val line = "${timeFormat.format(Date())} [ERROR] CRASH ${throwable.javaClass.name}: ${throwable.message}\n" +
+            throwable.stackTraceToString().take(2000) + "\n"
+        try {
+            val f = targetFile(dir)
+            FileWriter(f, true).use { it.write(line) }
+        } catch (_: Exception) {}
+    }
+
     // ---- core -------------------------------------------------------------
 
     private fun log(category: String, msg: String) {

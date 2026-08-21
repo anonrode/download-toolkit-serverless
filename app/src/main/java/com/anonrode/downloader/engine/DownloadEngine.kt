@@ -1006,6 +1006,13 @@ class DownloadEngine(
                     // from the task's own best window is unmistakable.
                     var bestWindowBps = 0.0
                     var lastProgressLog = 0L
+                    // Zombie cap: the crawl floor (64KiB/60s ≈ 1KiB/s) lets a
+                    // task trickling just above it escape forever — the rate-drop
+                    // detector needs a ≥1MiB/s burst it never had. After 4x the
+                    // stall timeout with under 1MiB moved total, the stream is
+                    // effectively dead; fail it outright instead of relaunching.
+                    val watchdogStart = System.currentTimeMillis()
+                    var startBytes: Long? = null
                     while (isActive) {
                         delay(2000)
                         if (!isActive) break
@@ -1064,12 +1071,35 @@ class DownloadEngine(
                             }
                         }
                         val crawlStalled = now - windowStartTime > STALL_TIMEOUT_MS
+                        // Zombie cap: far past the stall timeout with almost
+                        // nothing moved, the stream is dead — do not relaunch.
+                        val totalBytesNow = disk + parsed
+                        if (startBytes == null) startBytes = totalBytesNow
+                        val zombie = now - watchdogStart > STALL_TIMEOUT_MS * 4 &&
+                            (totalBytesNow - (startBytes ?: totalBytesNow)) < 1L * 1024 * 1024
                         // Rate-drop: after a full 30s at under 40% of the task's
                         // best window speed (when that best was a real burst) the
                         // CDN is throttling, not the network being slow — kill so
                         // the wrapper relaunches (fresh token/edge on re-resolve).
                         val throttled = bestWindowBps >= 1.0 * 1024 * 1024 &&
                             windowBps < bestWindowBps * 0.4 && windowSecs >= 30
+                        if (zombie) {
+                            val zombieMsg = "Download made no meaningful progress (${(now - watchdogStart) / 1000}s, under 1 MiB) — the source server is throttling or unreachable. Try again later."
+                            com.anonrode.downloader.util.DebugLog.engine(
+                                "task=${task.id} zombie cap after ${(now - watchdogStart) / 1000}s with ${((totalBytesNow - (startBytes ?: totalBytesNow)) / 1024)}KiB total — failing"
+                            )
+                            YoutubeDlDownloader.killProcess(task.id)
+                            TurboDownloader.cancelTask(task.id)
+                            repository.update(task.id) {
+                                it.copy(
+                                    status = TaskStatus.FAILED,
+                                    errorMessage = zombieMsg
+                                )
+                            }
+                            com.anonrode.downloader.service.DownloadService.notifyFailed(context, task.id, t.episodeTitle, zombieMsg)
+                            activeJobs[task.id]?.cancel()
+                            break
+                        }
                         // A task with no meaningful byte movement (parsed or on
                         // disk) for a full minute is stalled: kill the backend so
                         // the retry wrapper relaunches it (fresh token/edge on
@@ -1091,9 +1121,11 @@ class DownloadEngine(
                             // another 3 attempts. Allow that recovery chain to
                             // play out; only then give up and fail the task.
                             if (stallKills >= MAX_STALL_KILLS) {
+                                val stallMsg = "Download stalled — no progress for ${stallTimeoutSec}s across $stallKills attempts"
                                 repository.update(task.id) {
-                                    it.copy(status = TaskStatus.FAILED, errorMessage = "Download stalled — no progress for ${stallTimeoutSec}s across $stallKills attempts")
+                                    it.copy(status = TaskStatus.FAILED, errorMessage = stallMsg)
                                 }
+                                com.anonrode.downloader.service.DownloadService.notifyFailed(context, task.id, t.episodeTitle, stallMsg)
                                 activeJobs[task.id]?.cancel()
                                 break
                             }
@@ -1458,6 +1490,7 @@ class DownloadEngine(
                     }
                     repository.update(task.id) { it.copy(status = TaskStatus.FAILED, errorMessage = errReason) }
                     com.anonrode.downloader.util.DebugLog.write("failed task=${task.id} reason=$errReason")
+                    com.anonrode.downloader.service.DownloadService.notifyFailed(context, task.id, task.episodeTitle, errReason)
                 }
             } catch (e: CancellationException) {
                 // Cancelled. Nothing may outlive its job: kill the native
@@ -1479,7 +1512,9 @@ class DownloadEngine(
                 }
             } catch (e: Exception) {
                 if (coroutineContext.isActive) {
-                    repository.update(task.id) { it.copy(status = TaskStatus.FAILED, errorMessage = e.message ?: "Download error") }
+                    val errMsg = e.message ?: "Download error"
+                    repository.update(task.id) { it.copy(status = TaskStatus.FAILED, errorMessage = errMsg) }
+                    com.anonrode.downloader.service.DownloadService.notifyFailed(context, task.id, task.episodeTitle, errMsg)
                 } else {
                     // Cancelled (pause/cancel/network park): native-process teardown can surface
                     // as a plain exception, so never report that as FAILED. Also unwedge a task

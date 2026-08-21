@@ -46,6 +46,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var debounceJob: Job? = null
     private var episodesJob: Job? = null
     private var searchSequence = 0L
+    // Last query+filter actually launched; an identical search while it is
+    // still running is a duplicate keystroke, not a new request.
+    private var lastSearchKey: String? = null
 
     init {
         refreshStorageInfo()
@@ -137,6 +140,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun search(query: String = _uiState.value.query) {
         val q = query.trim()
         if (q.isBlank()) return
+        // Dedupe: the log showed the same query+filter re-fired seconds apart
+        // (double keystroke), doubling the whole crawl. Skip when an identical
+        // search is already running — its results will land.
+        val key = "${q.lowercase()}::${_uiState.value.selectedFilter}"
+        if (searchJob?.isActive == true && lastSearchKey == key) return
+        lastSearchKey = key
         com.anonrode.downloader.util.DebugLog.user("search \"$q\" filter=${_uiState.value.selectedFilter}")
 
         debounceJob?.cancel()
