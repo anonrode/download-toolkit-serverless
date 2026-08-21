@@ -700,6 +700,7 @@ class DownloadEngine(
                     var lastDisk = 0L
                     var lastParsed = 0L
                     var lastActivity = System.currentTimeMillis()
+                    var stallKills = 0
                     while (isActive) {
                         delay(2000)
                         if (!isActive) break
@@ -731,13 +732,22 @@ class DownloadEngine(
                         // minute is stalled: kill the backend so the retry wrapper
                         // relaunches it, and eventually FAILED instead of hanging.
                         if (now - lastActivity > STALL_TIMEOUT_MS) {
-                            android.util.Log.w("AnonDownload", "No download progress for ${t.episodeTitle}, killing backend")
+                            stallKills++
+                            android.util.Log.w("AnonDownload", "No download progress for ${t.episodeTitle}, (stall kill $stallKills)")
                             YoutubeDlDownloader.killProcess(task.id)
-                            // Turbo runs in OkHttp, not a native process: interrupt
-                            // its in-flight calls so a stalled transfer cannot hang
-                            // in DOWNLOADING forever (the piece retry policy then
-                            // fails the task instead of re-arming the watchdog).
                             TurboDownloader.cancelTask(task.id)
+                            // After two consecutive stall-kills the backend is
+                            // fundamentally stuck (dead CDN, geo-blocked, expired
+                            // token that re-resolve can't fix). Fail the task
+                            // directly rather than letting the retry wrapper
+                            // grind through 3+ more attempts.
+                            if (stallKills >= 2) {
+                                repository.update(task.id) {
+                                    it.copy(status = TaskStatus.FAILED, errorMessage = "Download stalled — no progress for ${stallTimeoutSec}s across $stallKills attempts")
+                                }
+                                activeJobs[task.id]?.cancel()
+                                break
+                            }
                             lastActivity = now
                         }
                     }
