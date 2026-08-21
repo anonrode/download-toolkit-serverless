@@ -22,7 +22,10 @@ object PlutoProvider : SiteProvider {
             val encoded = URLEncoder.encode(clean, "UTF-8")
             val url = "$mainUrl/search/$encoded/page/1"
             val html = HttpClient.getText(url, referer = "$mainUrl/") ?: return emptyList()
-            val doc = Jsoup.parse(html)
+            // Charter rule 3: parse with the page URL as baseUri, or abs:href
+            // resolves empty and every card URL is stored relative — loadEpisodes
+            // then fails with "no scheme" (user-reported, confirmed via log).
+            val doc = Jsoup.parse(html, url)
 
             val seen = mutableSetOf<String>()
             for (a in doc.select("a[href*='/movie/'], a[href*='/series/']")) {
@@ -130,6 +133,7 @@ object PlutoProvider : SiteProvider {
                 )
             }
 
+            com.anonrode.downloader.util.DebugLog.resolve("pluto loadEpisodes: found ${episodes.size} episodes")
             return ShowDetails(show = show.copy(title = title, posterUrl = poster), episodes = episodes)
         } catch (e: Exception) {
             com.anonrode.downloader.util.DebugLog.error("pluto loadEpisodes exception: ${e.javaClass.simpleName}: ${e.message}")

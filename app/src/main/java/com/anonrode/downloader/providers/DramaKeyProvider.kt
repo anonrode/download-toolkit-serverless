@@ -41,7 +41,7 @@ object DramaKeyProvider : SiteProvider {
 
             for (url in candidateUrls) {
                 val html = HttpClient.getText(url) ?: continue
-                val doc = Jsoup.parse(html)
+                val doc = Jsoup.parse(html, url)
                 val rawTitle = doc.selectFirst("h1.entry-title, h1")?.text()?.trim() ?: continue
 
                 // Soft-404 Guard: Reject the generic homepage/catalog title

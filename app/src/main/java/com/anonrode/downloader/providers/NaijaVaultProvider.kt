@@ -123,12 +123,12 @@ object NaijaVaultProvider : SiteProvider {
             }
 
             val card = ShowCard(title = title, url = showUrl, posterUrl = poster, site = name)
+            com.anonrode.downloader.util.DebugLog.resolve("naijavault loadEpisodes: found ${episodes.size} episodes")
             return ShowDetails(show = card, synopsis = synopsis, episodes = episodes)
         } catch (_: Exception) {
             return ShowDetails(show = show)
         }
     }
-
     override suspend fun resolveEpisode(episodeUrl: String, quality: String): DownloadRecipe {
         var direct = ResolverRegistry.resolve(episodeUrl, quality)
         if (direct == null && episodeUrl.contains("/dl-")) {
