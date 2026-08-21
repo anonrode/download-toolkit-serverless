@@ -95,7 +95,13 @@ object NaijaVaultProvider : SiteProvider {
                         lowerHref.contains("wetafiles") ||
                         lowerHref.contains("waffi") ||
                         lowerHref.contains("vikingfile") ||
-                        lowerHref.contains("nkiserv")
+                        lowerHref.contains("nkiserv") ||
+                        // Current NaijaVault host (monolith parity, 2026-08):
+                        // episode files are direct .mkv links served from
+                        // filevault.com.ng / cdn.filevault.com.ng. Without this
+                        // the drawer showed "No episodes found on this page"
+                        // (user-reported).
+                        lowerHref.contains("filevault")
 
                 if (isDownloadLink) {
                     seen.add(href)
