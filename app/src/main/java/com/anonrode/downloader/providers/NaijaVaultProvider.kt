@@ -93,6 +93,12 @@ object NaijaVaultProvider : SiteProvider {
                 // Skip social/navigation links
                 if (lowerHref.contains("telegram") || lowerHref.contains("facebook") || lowerHref.contains("twitter") || lowerHref.contains("whatsapp")) continue
 
+                // Direct-media detection: the site rotates download hosts
+                // (filevault.com.ng, harurei.gtoddl.site, dl6.wapkizfile.info,
+                // downloadwella, ...). The stable signal is the FILE ITSELF: any
+                // href ending in a media/archive extension or carrying a CDN
+                // marker (gtoddl, wapkizfile, /cdn/) is a download link.
+                val ext = lowerHref.substringBefore('?').substringBefore('#')
                 val isDownloadLink = lowerHref.contains("/dl-") ||
                         lowerHref.contains("lulacloud.com") ||
                         lowerHref.contains("pixeldrain.com") ||
@@ -102,12 +108,13 @@ object NaijaVaultProvider : SiteProvider {
                         lowerHref.contains("waffi") ||
                         lowerHref.contains("vikingfile") ||
                         lowerHref.contains("nkiserv") ||
-                        // Current NaijaVault host (monolith parity, 2026-08):
-                        // episode files are direct .mkv links served from
-                        // filevault.com.ng / cdn.filevault.com.ng. Without this
-                        // the drawer showed "No episodes found on this page"
-                        // (user-reported).
-                        lowerHref.contains("filevault")
+                        lowerHref.contains("filevault") ||
+                        lowerHref.contains("gtoddl") ||
+                        lowerHref.contains("wapkizfile") ||
+                        lowerHref.contains("/cdn/") ||
+                        ext.endsWith(".mkv") || ext.endsWith(".mp4") ||
+                        ext.endsWith(".webm") || ext.endsWith(".avi") ||
+                        ext.endsWith(".zip") || ext.endsWith(".rar")
 
                 if (isDownloadLink) {
                     seen.add(href)
@@ -128,7 +135,18 @@ object NaijaVaultProvider : SiteProvider {
             // live in script-rendered sections that Jsoup's DOM builder misses
             // while the monolith's raw-text search finds them every time.
             if (episodes.isEmpty()) {
-                val rawHrefs = Pattern.compile("""https?://[^\s"\'<>]*(?:filevault|downloadwella|wetafiles|loadedfiles|nkiserv|vikingfile|lulacloud|pixeldrain|waffi)[^\s"\'<>]*""", Pattern.CASE_INSENSITIVE).matcher(html)
+                // Diagnose WHICH page variant the server served on this visit —
+                // user reported episodes on first open but empty on re-check,
+                // which points at the server serving different HTML to an
+                // established session. The snippet shows the truth in the log.
+                val stripped = html.replace(Regex("""<script[\s\S]*?</script>"""), "").replace(Regex("""<style[\s\S]*?</style>"""), "")
+                com.anonrode.downloader.util.DebugLog.error(
+                    "naijavault: 0 links from DOM, page starts: ${stripped.take(200).replace("\n", " ")}"
+                )
+                val rawHrefs = Pattern.compile(
+                    """https?://[^\s"\'<>]*(?:filevault|downloadwella|wetafiles|loadedfiles|nkiserv|vikingfile|lulacloud|pixeldrain|waffi|gtoddl|wapkizfile|/cdn/)[^\s"\'<>]*|https?://[^\s"\'<>]+\.(?:mkv|mp4|webm|avi|zip|rar)[^\s"\'<>]*""",
+                    Pattern.CASE_INSENSITIVE
+                ).matcher(html)
                 val rawSeen = mutableSetOf<String>()
                 while (rawHrefs.find()) {
                     val u = rawHrefs.group().replace("&amp;", "&").trimEnd('.', ',', ')', ']')
