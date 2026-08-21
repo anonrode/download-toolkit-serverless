@@ -252,7 +252,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         stallTimeout: Int = 60,
         magnetRetries: Int = 3,
         ytdlpRetries: Int = 3,
-        hlsFragments: Int = 8,
+        hlsFragments: Int = 16,
         speedLimit: Int = 0,
         peers: Int = -1,
         wifiAll: Boolean = false,
