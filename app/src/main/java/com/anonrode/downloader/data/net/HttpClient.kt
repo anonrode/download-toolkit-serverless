@@ -197,14 +197,89 @@ object HttpClient {
         }
         headers.forEach { (k, v) -> reqBuilder.header(k, v) }
 
-        return shared.newCall(reqBuilder.build()).execute()
+        val call = shared.newCall(reqBuilder.build())
+        inFlightCalls.add(call)
+        val started = System.currentTimeMillis()
+        return try {
+            val res = call.execute()
+            com.anonrode.downloader.util.DebugLog.net(
+                "GET ${safeUrl(url)} -> ${res.code} in ${System.currentTimeMillis() - started}ms"
+            )
+            res
+        } catch (e: Exception) {
+            com.anonrode.downloader.util.DebugLog.net(
+                "GET ${safeUrl(url)} FAILED ${e.javaClass.simpleName}: ${e.message} after ${System.currentTimeMillis() - started}ms"
+            )
+            throw e
+        } finally {
+            inFlightCalls.remove(call)
+        }
+    }
+
+    /**
+     * In-flight resolver/probe calls. pause()/cancel() cancel these so a hung
+     * connect or a slow header phase cannot outlive the task that started it.
+     * Body reads are separately bounded by [MAX_TEXT_BYTES] — the actual data
+     * drain guard: a resolver misdirected onto a direct file URL can no longer
+     * stream the whole video into memory.
+     */
+    private val inFlightCalls = java.util.concurrent.CopyOnWriteArrayList<okhttp3.Call>()
+
+    /** Cancel every in-flight resolver/probe HTTP call (user paused/cancelled). */
+    fun cancelInFlight() {
+        for (c in inFlightCalls) {
+            try { c.cancel() } catch (_: Exception) {}
+        }
+        inFlightCalls.clear()
+    }
+
+    companion object {
+        /**
+         * Hard cap on any body read through [cappedText]/[cappedBytes]. Resolver
+         * responses are HTML/JSON/wasm — kilobytes. A response larger than this
+         * is by definition not a page (a misdirected file fetch), and reading it
+         * would burn the user's mobile data for nothing.
+         */
+        const val MAX_TEXT_BYTES = 3L * 1024 * 1024
+        const val MAX_BIN_BYTES = 5L * 1024 * 1024
+    }
+
+    /** Read at most [maxBytes] of the response body as UTF-8 text. */
+    fun cappedText(res: Response, maxBytes: Long = MAX_TEXT_BYTES): String? {
+        val body = res.body ?: return null
+        val source = body.source()
+        source.request(java.lang.Long.min(maxBytes + 1, Int.MAX_VALUE.toLong()))
+        val bytes = source.buffer.readByteArray()
+        val truncated = bytes.size > maxBytes
+        val text = String(if (truncated) bytes.copyOf(maxBytes.toInt()) else bytes, Charsets.UTF_8)
+        if (truncated) {
+            com.anonrode.downloader.util.DebugLog.net(
+                "body from ${res.request.url.host} truncated at $maxBytes bytes (not a page — likely a misdirected file fetch)"
+            )
+        }
+        return text
+    }
+
+    /** Read at most [maxBytes] of the response body as bytes. */
+    fun cappedBytes(res: Response, maxBytes: Long = MAX_BIN_BYTES): ByteArray? {
+        val body = res.body ?: return null
+        val source = body.source()
+        source.request(java.lang.Long.min(maxBytes + 1, Int.MAX_VALUE.toLong()))
+        val bytes = source.buffer.readByteArray()
+        if (bytes.size > maxBytes) {
+            com.anonrode.downloader.util.DebugLog.net(
+                "binary body from ${res.request.url.host} truncated at $maxBytes bytes"
+            )
+            return bytes.copyOf(maxBytes.toInt())
+        }
+        return bytes
     }
 
     fun getText(url: String, referer: String? = null, headers: Map<String, String> = emptyMap(), acceptStatus: Set<Int> = emptySet()): String? {
         return try {
             get(url, referer, headers).use { res ->
                 if (res.isSuccessful || res.code in acceptStatus) {
-                    res.body?.string()
+                    cappedText(res)
                 } else {
                     lastFailure = "HTTP ${res.code} for ${url.take(120)}"
                     Log.w("HttpClient", lastFailure!!)

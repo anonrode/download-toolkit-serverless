@@ -736,13 +736,50 @@ fun SettingsSheet(
             // SECTION 8: Diagnostics
             SettingsCategoryHeader(title = "Diagnostics")
             SettingsCard {
-                SettingsSwitchRow(
-                    icon = Icons.Rounded.BugReport,
-                    title = "Debug Logging",
-                    subtitle = "Writes engine events to cacheDir/debug_log.txt",
-                    checked = debugLogging,
-                    onCheckedChange = { debugLogging = it }
-                )
+                // The activity journal is always on (daily rotating files under
+                // filesDir/logs); this row hands the current day's file to any
+                // share target so misbehavior can be diagnosed from it alone.
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            val file = com.anonrode.downloader.util.DebugLog.currentLogFile()
+                            if (file == null || !file.exists()) {
+                                Toast.makeText(context, "No activity log yet", Toast.LENGTH_SHORT).show()
+                            } else {
+                                try {
+                                    val uri = androidx.core.content.FileProvider.getUriForFile(
+                                        context, "${context.packageName}.fileprovider", file
+                                    )
+                                    val send = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                                        type = "text/plain"
+                                        putExtra(android.content.Intent.EXTRA_STREAM, uri)
+                                        addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                    }
+                                    context.startActivity(
+                                        android.content.Intent.createChooser(send, "Share activity log")
+                                    )
+                                } catch (e: Exception) {
+                                    Toast.makeText(context, "Share failed: ${e.message}", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        }
+                        .padding(horizontal = Spacing.md, vertical = Spacing.sm),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        Icons.Rounded.BugReport,
+                        contentDescription = null,
+                        tint = AccentPrimary,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(Spacing.sm))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Share Activity Log", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = TextPrimary)
+                        Text("Everything the app did — send it for diagnosis", fontSize = 11.sp, color = TextMuted)
+                    }
+                    Text("SHARE", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AccentPrimary)
+                }
             }
 
             Spacer(modifier = Modifier.height(Spacing.xl))

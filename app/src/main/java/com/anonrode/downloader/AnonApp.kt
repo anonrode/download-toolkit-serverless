@@ -36,10 +36,8 @@ class AnonApp : Application(), ImageLoaderFactory {
         engine.onTorrentFileSelection = { files ->
             com.anonrode.downloader.ui.screens.TorrentFilePicker.pick(files)
         }
-        com.anonrode.downloader.util.DebugLog.setEnabled(
-            getSharedPreferences("downloader_settings", Context.MODE_PRIVATE)
-                .getBoolean("pref_debug_logging", false)
-        )
+        // The activity journal is always on (rotating daily files under
+        // filesDir/logs) — it is the black box used to diagnose any misbehavior.
         // First launch: detect device RAM and set the torrent peer default once.
         // The user can override it in Settings afterwards.
         try {

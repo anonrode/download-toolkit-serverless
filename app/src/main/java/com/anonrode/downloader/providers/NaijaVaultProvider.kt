@@ -70,7 +70,10 @@ object NaijaVaultProvider : SiteProvider {
 
             val episodes = mutableListOf<EpisodeItem>()
             val seen = mutableSetOf<String>()
-            val allLinks = doc.select(".entry-content a[href]")
+            // Full-document scan (charter rule 3): the monolith walks every <a>
+            // because the site's theme drops .entry-content on some layouts —
+            // constraining to that container found zero episodes (user-reported).
+            val allLinks = doc.select("a[href]")
 
             var count = 1
             for (a in allLinks) {

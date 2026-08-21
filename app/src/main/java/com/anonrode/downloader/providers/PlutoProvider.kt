@@ -60,29 +60,51 @@ object PlutoProvider : SiteProvider {
                 ?: doc.selectFirst(".poster img, .cover img")?.attr("abs:src") ?: ""
             val title = doc.selectFirst("h1")?.text()?.trim() ?: "Pluto Video"
 
-            if (showUrl.contains("/series/")) {
-                val epLinks = doc.select("a[href*='/episodes/'], a[href*='/series/']")
+            if (showUrl.contains("/series/") || showUrl.contains("/season")) {
+                // Monolith parity (plutomovies.py): episode pages live under
+                // /series/<show>/<episode-slug> — there is no /episodes/ path,
+                // so the old /episodes/-only selector found ZERO episodes
+                // (user-reported). Season hubs are discovered first, then each
+                // season page is scanned for episode links.
+                val seasonRegex = Regex("""/(series|season)/[^/]+/[^/]*season-\d+""", RegexOption.IGNORE_CASE)
+                val seasonLinks = doc.select("a[href]").mapNotNull { a ->
+                    val href = a.attr("abs:href").ifBlank { HttpClient.safeResolveUri(showUrl, a.attr("href")) }
+                    if (href.isNotBlank() && href != showUrl && seasonRegex.containsMatchIn(href)) href else null
+                }.distinct()
+
+                val pagesToScan = if (seasonLinks.isEmpty()) listOf(showUrl) else seasonLinks
                 var count = 1
                 val seen = mutableSetOf<String>()
-                for (a in epLinks) {
-                    val rawHref = a.attr("href")
-                    val href = a.attr("abs:href").ifBlank {
-                        HttpClient.safeResolveUri(showUrl, rawHref)
+                for (pageUrl in pagesToScan) {
+                    val pageDoc = if (pageUrl == showUrl) doc else {
+                        val pageHtml = HttpClient.getText(pageUrl, referer = "$mainUrl/") ?: continue
+                        Jsoup.parse(pageHtml, pageUrl)
                     }
-                    // The page's own /series/ links (nav, related shows, the page
-                    // URL itself) match the selector — drop them so bogus
-                    // "episodes" that resolve to the show page never appear.
-                    if (href.isBlank() || href in seen || href == showUrl || !href.contains("/episodes/")) continue
-                    seen.add(href)
-                    val epName = a.text().trim().ifEmpty { "Episode $count" }
-                    episodes.add(
-                        EpisodeItem(
-                            title = epName,
-                            url = href,
-                            episodeNum = count++,
-                            site = name
+                    for (a in pageDoc.select("a[href]")) {
+                        val href = a.attr("abs:href").ifBlank {
+                            HttpClient.safeResolveUri(pageUrl, a.attr("href"))
+                        }
+                        if (href.isBlank() || href in seen || href == showUrl) continue
+                        // Episode links: /series/ or /episodes/ paths that are NOT
+                        // season hubs themselves and not the page we're scanning.
+                        val isEpisodeLink = (href.contains("/series/") || href.contains("/episodes/")) &&
+                            !seasonRegex.containsMatchIn(href) &&
+                            href != pageUrl
+                        if (!isEpisodeLink) continue
+                        seen.add(href)
+                        // Monolith strips "Previous Episode"/"Next Episode" nav text.
+                        val epName = a.text().trim()
+                            .replace(Regex("""(?i)^(previous|next)\s+episode\b\s*"""), "")
+                            .trim().ifEmpty { "Episode $count" }
+                        episodes.add(
+                            EpisodeItem(
+                                title = epName,
+                                url = href,
+                                episodeNum = count++,
+                                site = name
+                            )
                         )
-                    )
+                    }
                 }
             } else {
                 // Movie download link from detail page

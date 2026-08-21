@@ -83,11 +83,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun handlePastedInput(input: String, onOpenSocial: (String, String) -> Unit) {
+        com.anonrode.downloader.util.DebugLog.user("paste: ${input.take(120)}")
         when (val parsed = UrlRouter.parse(input)) {
             is ParsedUrl.DramaUrl -> {
+                com.anonrode.downloader.util.DebugLog.user("routed DramaUrl -> open drawer ${parsed.showCard.title}")
                 openEpisodeDrawer(parsed.showCard)
             }
             is ParsedUrl.SocialUrl -> {
+                com.anonrode.downloader.util.DebugLog.user("routed SocialUrl platform=${parsed.platform} instant=${engine.instantSocialDownload}")
                 if (engine.instantSocialDownload) {
                     engine.enqueue(
                         showTitle = "Social/${parsed.platform}",
@@ -134,6 +137,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun search(query: String = _uiState.value.query) {
         val q = query.trim()
         if (q.isBlank()) return
+        com.anonrode.downloader.util.DebugLog.user("search \"$q\" filter=${_uiState.value.selectedFilter}")
 
         debounceJob?.cancel()
         searchJob?.cancel()
@@ -212,6 +216,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun downloadEpisode(episode: EpisodeItem) {
         val show = _uiState.value.activeShowForDrawer ?: return
+        com.anonrode.downloader.util.DebugLog.user("enqueue episode: ${show.title} - ${episode.title} url=${episode.url.take(100)}")
         engine.enqueue(
             showTitle = show.title,
             episodeNum = episode.episodeNum,
@@ -226,6 +231,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun downloadAllEpisodes(episodes: List<EpisodeItem>) {
         val show = _uiState.value.activeShowForDrawer ?: return
+        com.anonrode.downloader.util.DebugLog.user("enqueue batch: ${episodes.size} episodes of ${show.title}")
         for (ep in episodes) {
             engine.enqueue(
                 showTitle = show.title,
@@ -280,7 +286,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             notifications = notifications,
             debugLog = debugLog
         )
-        com.anonrode.downloader.util.DebugLog.setEnabled(debugLog)
+        com.anonrode.downloader.util.DebugLog.user(
+            "settings saved (sockets=$parallelSockets quality=$quality stall=${stallTimeout}s hls=$hlsFragments peers=$peers speedLimit=$speedLimit)"
+        )
     }
 
     /** Re-reads free/total storage so the Settings sheet shows live values
