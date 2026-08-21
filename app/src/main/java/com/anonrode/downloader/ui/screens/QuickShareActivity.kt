@@ -335,13 +335,15 @@ fun QuickShareCard(
                     selected = !audioOnly,
                     onClick = { audioOnly = false },
                     icon = Icons.Rounded.Videocam,
-                    label = "Video"
+                    label = "Video",
+                    modifier = Modifier.weight(1f)
                 )
                 FormatSegment(
                     selected = audioOnly,
                     onClick = { audioOnly = true },
                     icon = Icons.Rounded.Audiotrack,
-                    label = "Audio"
+                    label = "Audio",
+                    modifier = Modifier.weight(1f)
                 )
             }
 
@@ -480,11 +482,13 @@ private fun FormatSegment(
     selected: Boolean,
     onClick: () -> Unit,
     icon: androidx.compose.ui.graphics.vector.ImageVector,
-    label: String
+    label: String,
+    // Weight must come from the caller's RowScope — a composable cannot apply
+    // it to itself.
+    modifier: Modifier = Modifier
 ) {
     Row(
-        modifier = Modifier
-            .weight(1f)
+        modifier = modifier
             .height(48.dp)
             .clip(RoundedCornerShape(Radius.sm))
             .background(if (selected) AccentViolet.copy(alpha = 0.16f) else Color.Transparent)

@@ -143,7 +143,12 @@ fun HomeScreen(
                                 modifier = Modifier.size(22.dp)
                             )
                             if (activeTasks.isNotEmpty()) {
-                                ActiveTaskBadge(count = activeTasks.size)
+                                ActiveTaskBadge(
+                                    count = activeTasks.size,
+                                    // align() is a BoxScope member: it must be
+                                    // applied from the parent Box's scope.
+                                    modifier = Modifier.align(Alignment.TopEnd)
+                                )
                             }
                         }
                     }
@@ -604,10 +609,9 @@ private fun CardBadge(text: String, accent: Boolean) {
  *  Inset by the spacing rhythm so the badge stays fully inside the 48dp circle:
  *  it never extends past the button border and never collides with neighbours. */
 @Composable
-private fun ActiveTaskBadge(count: Int) {
+private fun ActiveTaskBadge(count: Int, modifier: Modifier = Modifier) {
     Box(
-        modifier = Modifier
-            .align(Alignment.TopEnd)
+        modifier = modifier
             .padding(Spacing.sm)
             .defaultMinSize(minWidth = 20.dp, minHeight = 20.dp)
             .clip(CircleShape)
