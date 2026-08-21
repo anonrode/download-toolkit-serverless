@@ -648,7 +648,10 @@ class DownloadEngine(
             "sfastwish.",
             "vidhide.",
             "kissorgrab.com",
-            "nkiserv.com",
+            // nkiserv.com REMOVED: naijavault drawers hand out direct
+            // ds2.nkiserv.com/TV/*.mkv files (nkiri's own CDN). Listing it as
+            // a locker made the engine try to 'crack' a finished direct file
+            // and fail cleanly every time (live log 23:23:03).
             "wildshare.net",
             "vidmoly.",
             "mixdrop.",

@@ -687,6 +687,13 @@ object PlutoMoviesResolver : BaseResolver {
             }
 
             val soup = Jsoup.parse(html, url)
+            // /series/ episode pages embed the download as a plain
+            // dl.plutomovies.com anchor (live-verified: Vincenzo S01E05..E20)
+            val dlAnchor = soup.selectFirst("a[href*='dl.plutomovies.com']")
+            if (dlAnchor != null) {
+                val href = dlAnchor.attr("abs:href")
+                if (href.isNotBlank() && !href.equals(url, ignoreCase = true)) return href
+            }
             val btn = soup.selectFirst("a[href*='kissorgrab.com']")
             if (btn != null) {
                 val href = btn.attr("abs:href")
