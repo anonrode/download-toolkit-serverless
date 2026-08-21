@@ -49,13 +49,8 @@ object ProviderRegistry {
         val cached = searchCache[cacheKey]
 
         // If cached within the last 4 minutes, emit instantly (0ms response time!)
-        val cachedFresh = cached != null && (now - cached.first) < 240_000L && cached.second.isNotEmpty()
-        // Empty results are cached too, briefly — an immediate identical
-        // re-search (double keystroke) otherwise re-fires the whole crawl for
-        // a query that just returned nothing (log: duplicate searches 1s apart).
-        val cachedEmptyFresh = cached != null && (now - cached.first) < 30_000L && cached.second.isEmpty()
-        if (cachedFresh || cachedEmptyFresh) {
-            send(cached!!.second)
+        if (cached != null && (now - cached.first) < 240_000L && cached.second.isNotEmpty()) {
+            send(cached.second)
         }
 
         val currentProviders = allProviders
@@ -90,9 +85,8 @@ object ProviderRegistry {
             val finalRanked = RelevanceScorer.filterAndSort(query, accumulated.toList())
             searchCache[cacheKey] = Pair(now, finalRanked)
             send(finalRanked)
-        } else {
-            searchCache[cacheKey] = Pair(now, emptyList())
-            if (!cachedEmptyFresh) send(emptyList())
+        } else if (cached == null || cached.second.isEmpty()) {
+            send(emptyList())
         }
     }.flowOn(Dispatchers.IO)
 
