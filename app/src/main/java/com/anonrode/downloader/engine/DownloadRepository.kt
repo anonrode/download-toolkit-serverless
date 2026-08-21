@@ -40,11 +40,20 @@ class DownloadRepository {
                         // data on reopen (user-reported) is the wrong surprise.
                         // VALIDATING is the one safe auto-resume — the file is
                         // already on disk and only needs the integrity check.
+                        // errorMessage is cleared for every parked task: the
+                        // network observer auto-resumes tasks carrying
+                        // NETWORK_PAUSE_MESSAGE / "Waiting for Wi-Fi" markers,
+                        // and those markers survived a restart — so a download
+                        // parked right before the app died silently resumed on
+                        // reopen (user-reported). Reopen never auto-resumes;
+                        // in-session network recovery still works.
                         when (it.status) {
                             TaskStatus.DOWNLOADING, TaskStatus.RESOLVING ->
-                                it.copy(status = TaskStatus.PAUSED, speedBytesPerSec = 0.0)
+                                it.copy(status = TaskStatus.PAUSED, speedBytesPerSec = 0.0, errorMessage = null)
                             TaskStatus.VALIDATING ->
                                 it.copy(status = TaskStatus.QUEUED, speedBytesPerSec = 0.0)
+                            TaskStatus.PAUSED ->
+                                it.copy(errorMessage = null)
                             else -> it
                         }
                     }
