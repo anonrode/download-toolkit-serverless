@@ -88,6 +88,11 @@ object YoutubeDlDownloader {
         // (file:// + --enable-file-urls) — the m3u8 branch still applies.
         val inputUrl = if (hlsMasterFile != null) "file://$hlsMasterFile" else sourceUrl
         val isM3u8 = inputUrl.lowercase().contains(".m3u8")
+        // Token-locked HLS CDNs (vidsrc family, live-verified) reject segment
+        // requests that carry ANY Referer with 403 while serving them fine
+        // without one — and the rewritten playlist was validated exactly that
+        // way. A rewritten master therefore runs referer-free.
+        val effReferer = if (hlsMasterFile != null) "" else referer
 
         val height = when (quality.lowercase()) {
             "480p", "480" -> 480
@@ -215,13 +220,13 @@ object YoutubeDlDownloader {
             // -o/-f and silently break the output path (monolith parity).
             addOption("--ignore-config")
 
-            if (referer.isNotBlank()) addOption("--referer", referer)
+            if (effReferer.isNotBlank()) addOption("--referer", effReferer)
             if (ua.isNotBlank()) addOption("--user-agent", ua)
 
             // Origin header from the referer's base domain, like the monolith's
             // HLS path always sends it.
             val originToPass = origin.ifBlank {
-                referer.takeIf { it.isNotBlank() }?.let { r ->
+                effReferer.takeIf { it.isNotBlank() }?.let { r ->
                     Regex("""https?://[^/]+""").find(r)?.value ?: ""
                 } ?: ""
             }

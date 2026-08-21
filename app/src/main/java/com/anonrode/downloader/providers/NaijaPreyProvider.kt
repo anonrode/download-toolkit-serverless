@@ -112,12 +112,55 @@ object NaijaPreyProvider : SiteProvider {
     }
 
     override suspend fun resolveEpisode(episodeUrl: String, quality: String): DownloadRecipe {
-        val direct = ResolverRegistry.resolve(episodeUrl, quality) ?: episodeUrl
+        var direct = ResolverRegistry.resolve(episodeUrl, quality)
+
+        // ResolverRegistry has no handler for the vdl.np-downloader.com/
+        // sdm_downloads gateway (a bare WordPress Simple Download Monitor
+        // post), so a miss — or a non-media answer — would leave us handing
+        // back a raw HTML page as the "direct" URL. Chase the embedded chain
+        // ourselves instead: page -> a.sdm_download/wildshare hop -> media.
+        if (direct.isNullOrBlank() ||
+            (!direct.endsWith(".mkv") && !direct.endsWith(".mp4") &&
+                !direct.contains("/d/") && !direct.contains("token="))
+        ) {
+            direct = extractFileLink(episodeUrl, 0)
+        }
+
+        // Empty = resolution failure: the engine treats blank as a failed
+        // resolve and fails cleanly. NEVER return the raw page URL as
+        // directUrl — that "downloads" the HTML page itself.
+        val finalUrl = direct ?: ""
+
         return DownloadRecipe(
-            directUrl = direct,
-            filename = direct.substringAfterLast('/').substringBefore('?').ifEmpty { "media.mp4" },
+            directUrl = finalUrl,
+            filename = finalUrl.substringAfterLast('/').substringBefore('?').ifEmpty { "media.mp4" },
             backend = "aria2c",
             parallelSockets = 16
         )
+    }
+
+    // Follows the naijaprey download chain when the resolver registry comes up
+    // empty: the page embeds a vdl.np-downloader.com/sdm_downloads link (its
+    // post body holds a single a.sdm_download anchor pointing at wildshare.net,
+    // which serves the direct media file). Depth-capped at 2 => at most
+    // 2 page fetches (data discipline).
+    private fun extractFileLink(url: String, depth: Int): String? {
+        if (depth >= 2) return null
+        val html = HttpClient.getText(url) ?: return null
+
+        // 1) A ready direct media URL anywhere in the markup wins immediately.
+        Regex("""https?://[^\s"'<>]+\.(?:mp4|mkv|avi|webm)[^\s"'<>]*""")
+            .find(html)?.value?.let { return it }
+
+        // 2) Otherwise hop to the next stage: the sdm_download anchor's href,
+        //    or any vdl/wildshare URL embedded in the page.
+        val doc = Jsoup.parse(html, url)
+        val next = doc.selectFirst("a.sdm_download")?.attr("abs:href")?.takeIf { it.isNotBlank() }
+            ?: Regex("""https://(?:vdl\.np-downloader\.com/sdm_downloads/|wildshare\.net/)[^\s"'<>]*""")
+                .find(html)?.value
+            ?: return null
+
+        if (next == url) return null
+        return extractFileLink(next, depth + 1)
     }
 }
