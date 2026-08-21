@@ -26,7 +26,29 @@ class AnonApp : Application(), ImageLoaderFactory {
         super.onCreate()
         instance = this
         repository.initPersistence(filesDir)
+        com.anonrode.downloader.util.DebugLog.init(this)
+        // Load cached scraper rules (domain fixes / dynamic providers) so a
+        // manual sync in Settings survives app restarts.
+        com.anonrode.downloader.data.rules.DynamicRulesManager.init(this)
         engine = DownloadEngine(this, repository, com.anonrode.downloader.util.NetworkObserver(this))
+        // Torrent selective-file picker: the engine suspends on this callback
+        // while the Compose dialog (HomeScreen) shows the swarm's file list.
+        engine.onTorrentFileSelection = { files ->
+            com.anonrode.downloader.ui.screens.TorrentFilePicker.pick(files)
+        }
+        com.anonrode.downloader.util.DebugLog.setEnabled(
+            getSharedPreferences("downloader_settings", Context.MODE_PRIVATE)
+                .getBoolean("pref_debug_logging", false)
+        )
+        // First launch: detect device RAM and set the torrent peer default once.
+        // The user can override it in Settings afterwards.
+        try {
+            val prefs = getSharedPreferences("downloader_settings", Context.MODE_PRIVATE)
+            if (!prefs.contains("pref_torrent_peers")) {
+                val tier = com.anonrode.downloader.data.settings.AppSettings.detectRamTier(this)
+                prefs.edit().putInt("pref_torrent_peers", tier).apply()
+            }
+        } catch (_: Throwable) {}
         com.anonrode.downloader.util.CrashHandler.install(this)
         appScope.launch {
             try {

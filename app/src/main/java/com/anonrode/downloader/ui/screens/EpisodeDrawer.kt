@@ -42,6 +42,7 @@ fun EpisodeDrawer(
 
     var selectedEpisodes by remember(episodes) { mutableStateOf(setOf<EpisodeItem>()) }
     var rangeText by remember { mutableStateOf("") }
+    var enqueued by remember { mutableStateOf(false) }
 
     // Parse range string (e.g. "1-5, 8, 10-12", "all", "none")
     fun applyRange(input: String) {
@@ -257,6 +258,8 @@ fun EpisodeDrawer(
 
                     Button(
                         onClick = {
+                            if (enqueued) return@Button
+                            enqueued = true
                             val sorted = episodes.sortedBy { it.episodeNum }
                             for (ep in sorted) {
                                 viewModel.engine.enqueue(
@@ -266,7 +269,8 @@ fun EpisodeDrawer(
                                     sourceUrl = ep.url,
                                     isDirect = true,
                                     backend = "aria2c",
-                                    site = show.site
+                                    site = show.site,
+                                    parallelSockets = viewModel.engine.parallelSocketsPerFile
                                 )
                             }
                             onDismiss()
@@ -310,7 +314,21 @@ fun EpisodeDrawer(
                         .height(150.dp),
                     contentAlignment = Alignment.Center
                 ) {
-                    Text("No stream links found for this title.", color = TextMuted, fontSize = 13.sp)
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        if (uiState.episodesError != null) {
+                            Text(
+                                text = uiState.episodesError ?: "No stream links found",
+                                color = StatusError,
+                                fontSize = 13.sp,
+                                maxLines = 3,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Spacer(modifier = Modifier.height(Spacing.xs))
+                            Text("Close and try again", color = TextMuted, fontSize = 11.sp)
+                        } else {
+                            Text("No stream links found for this title.", color = TextMuted, fontSize = 13.sp)
+                        }
+                    }
                 }
             } else {
                 LazyColumn(
@@ -341,7 +359,8 @@ fun EpisodeDrawer(
                                     sourceUrl = ep.url,
                                     isDirect = true,
                                     backend = "aria2c",
-                                    site = show.site
+                                    site = show.site,
+                                    parallelSockets = viewModel.engine.parallelSocketsPerFile
                                 )
                                 onDismiss()
                             }
@@ -387,6 +406,11 @@ fun EpisodeDrawer(
 
                         Button(
                             onClick = {
+                                // Double-tap guard: the dismiss animation takes
+                                // ~300ms and a second tap would re-enqueue every
+                                // selected episode (duplicate tasks, same filePath).
+                                if (enqueued) return@Button
+                                enqueued = true
                                 val sorted = selectedEpisodes.sortedBy { it.episodeNum }
                                 for (ep in sorted) {
                                     viewModel.engine.enqueue(
@@ -396,7 +420,8 @@ fun EpisodeDrawer(
                                         sourceUrl = ep.url,
                                         isDirect = true,
                                         backend = "aria2c",
-                                        site = show.site
+                                        site = show.site,
+                                        parallelSockets = viewModel.engine.parallelSocketsPerFile
                                     )
                                 }
                                 onDismiss()

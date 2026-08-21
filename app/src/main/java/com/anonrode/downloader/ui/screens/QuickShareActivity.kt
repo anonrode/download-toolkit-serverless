@@ -92,6 +92,15 @@ class QuickShareActivity : ComponentActivity() {
         }
     }
 
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        // singleInstance: a second share arrives here with the fresh intent.
+        // Re-run the whole flow so the sheet shows the new link instead of
+        // silently displaying the stale first-share content.
+        setIntent(intent)
+        recreate()
+    }
+
     private fun extractSharedUrl(intent: Intent?): String {
         if (intent == null) return ""
         val text = intent.getStringExtra(Intent.EXTRA_TEXT)
@@ -128,7 +137,8 @@ class QuickShareActivity : ComponentActivity() {
                     isDirect = false,
                     backend = "yt-dlp",
                     parallelSockets = engine.parallelSocketsPerFile,
-                    audioOnly = audioOnly
+                    audioOnly = audioOnly,
+                    quality = if (audioOnly) null else quality
                 )
             }
             is ParsedUrl.MagnetUrl -> {
@@ -139,7 +149,7 @@ class QuickShareActivity : ComponentActivity() {
                     sourceUrl = parsed.magnet,
                     isDirect = true,
                     backend = "aria2c",
-                    parallelSockets = 16
+                    parallelSockets = engine.parallelSocketsPerFile
                 )
             }
             is ParsedUrl.DirectMediaUrl -> {
@@ -161,7 +171,8 @@ class QuickShareActivity : ComponentActivity() {
                     sourceUrl = parsed.showCard.url,
                     isDirect = false,
                     backend = "aria2c",
-                    parallelSockets = engine.parallelSocketsPerFile
+                    parallelSockets = engine.parallelSocketsPerFile,
+                    quality = if (audioOnly) null else quality
                 )
             }
             else -> {
@@ -173,7 +184,8 @@ class QuickShareActivity : ComponentActivity() {
                     isDirect = false,
                     backend = "yt-dlp",
                     parallelSockets = engine.parallelSocketsPerFile,
-                    audioOnly = audioOnly
+                    audioOnly = audioOnly,
+                    quality = if (audioOnly) null else quality
                 )
             }
         }
@@ -190,6 +202,8 @@ fun QuickShareCard(
     var audioOnly by remember { mutableStateOf(false) }
     var selectedQuality by remember { mutableStateOf("720p") }
     var alwaysInstant by remember { mutableStateOf(false) }
+    // Guards against double-tap re-enqueue during the dismissal animation.
+    var enqueued by remember { mutableStateOf(false) }
 
     val platformName = when (parsedUrl) {
         is ParsedUrl.SocialUrl -> parsedUrl.platform
@@ -430,7 +444,11 @@ fun QuickShareCard(
                 }
 
                 Button(
-                    onClick = { onDownload(selectedQuality, audioOnly, alwaysInstant) },
+                    onClick = {
+                        if (enqueued) return@Button
+                        enqueued = true
+                        onDownload(selectedQuality, audioOnly, alwaysInstant)
+                    },
                     modifier = Modifier
                         .weight(1.4f)
                         .height(52.dp),

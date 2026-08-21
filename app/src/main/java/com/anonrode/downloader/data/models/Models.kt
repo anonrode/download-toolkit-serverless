@@ -69,5 +69,6 @@ data class DownloadTask(
     val site: String = "",
     val headers: Map<String, String> = emptyMap(),
     val audioOnly: Boolean = false,
-    val errorMessage: String? = null
+    val errorMessage: String? = null,
+    val quality: String? = null
 )

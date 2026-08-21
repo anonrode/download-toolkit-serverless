@@ -61,7 +61,12 @@ object DynamicRulesManager {
                 return@withContext Pair(false, "Could not reach GitHub rules repository")
             }
 
-            parseRulesJson(jsonStr)
+            // Only report success (and only persist the cache) when the payload
+            // actually parses — a malformed payload must never be cached, and
+            // the toast must not claim "Synced fresh logic" for a no-op.
+            if (!parseRulesJson(jsonStr)) {
+                return@withContext Pair(false, "Rules payload failed to parse — keeping bundled defaults")
+            }
 
             val file = File(context.filesDir, CACHE_FILE)
             file.writeText(jsonStr)
@@ -72,8 +77,9 @@ object DynamicRulesManager {
         }
     }
 
-    private fun parseRulesJson(jsonStr: String) {
-        try {
+    /** Returns false when the payload is malformed; bundled defaults stay active. */
+    private fun parseRulesJson(jsonStr: String): Boolean {
+        return try {
             val obj = JSONObject(jsonStr)
             val ver = obj.optString("version", "2026.08.16.1")
             _version.value = ver
@@ -112,6 +118,9 @@ object DynamicRulesManager {
                     dynamicProviders.add(GenericDeclarativeProvider(cfg))
                 }
             }
-        } catch (_: Exception) {}
+            true
+        } catch (_: Exception) {
+            false
+        }
     }
 }

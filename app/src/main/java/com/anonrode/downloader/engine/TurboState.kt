@@ -119,6 +119,21 @@ class TurboState(private val file: File) {
         return prefix
     }
 
+    /**
+     * Total bytes actually committed to disk across all pieces, or null when the
+     * sidecar is missing or unreadable. Used by the progress watchdog to compute
+     * honest filesystem-truth progress without counting pre-allocated zeros.
+     */
+    fun writtenBytes(): Long? {
+        val total = try {
+            file.readLines().firstOrNull()?.removePrefix("total=")?.toLongOrNull()
+        } catch (_: Exception) {
+            null
+        } ?: return null
+        val plan = read(total) ?: return null
+        return plan.sumOf { (it.current - it.start).coerceAtLeast(0L) }
+    }
+
     fun delete() {
         try {
             if (file.exists()) file.delete()

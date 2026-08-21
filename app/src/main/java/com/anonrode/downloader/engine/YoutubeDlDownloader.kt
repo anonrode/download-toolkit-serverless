@@ -12,13 +12,8 @@ import java.io.File
 
 object YoutubeDlDownloader {
 
-    // Task-level retries for magnet downloads: aria2c resumes via its .aria2
-    // control file, so each retry continues instead of restarting.
-    private const val MAGNET_MAX_ATTEMPTS = 3
-
-    // Task-level retries for yt-dlp downloads: .part (native) and .aria2
-    // (external aria2c) keep progress across runs, so retries continue.
-    private const val YTDLP_MAX_ATTEMPTS = 3
+    // Task-level retry counts are now AppSettings-backed (pref_magnet_retries /
+    // pref_ytdlp_retries), threaded in via download()'s maxAttempts params.
 
     // Trackers probed live (2026-08): the 3 dropped entries below were dead
     // (no reply / DNS fail); explodie.org and anirena.com verified alive.
@@ -74,7 +69,13 @@ object YoutubeDlDownloader {
         isExtractorTask: Boolean = false,
         audioOnly: Boolean = false,
         onProgress: (downloaded: Long, total: Long, speed: Double, eta: Long) -> Unit,
-        onTorrentFiles: (suspend (List<TorrentSecurityShield.TorrentFileEntry>) -> List<Int>?)? = null
+        onTorrentFiles: (suspend (List<TorrentSecurityShield.TorrentFileEntry>) -> List<Int>?)? = null,
+        // Tier-A settings (defaults = previous hardcoded behavior)
+        magnetMaxAttempts: Int = 3,
+        ytdlpMaxAttempts: Int = 3,
+        hlsFragments: Int = -1,
+        speedLimitKbs: Int = 0,
+        torrentPeers: Int = -1
     ): File? {
         if (!targetDir.exists()) targetDir.mkdirs()
 
@@ -112,7 +113,10 @@ object YoutubeDlDownloader {
             // aria2c after the user paused or cancelled the job.
             return downloadMagnetAria2c(
                 context, taskId, sourceUrl, targetDir, preferredFilename, parallelSockets, onProgress,
-                selectIndexes = selectIndexes
+                selectIndexes = selectIndexes,
+                maxAttempts = magnetMaxAttempts,
+                peersOverride = torrentPeers,
+                speedLimitKbs = speedLimitKbs
             ) { coroutineContext.isActive }
         }
 
@@ -134,7 +138,7 @@ object YoutubeDlDownloader {
                 // Embed/watch-page cracks (nepu, social, etc.) often resolve to HLS.
                 // Parallel fragments keep multi-socket speed instead of a single
                 // rate-capped connection.
-                val frags = parallelSockets.coerceIn(4, 16)
+                val frags = if (hlsFragments > 0) hlsFragments.coerceIn(1, 16) else parallelSockets.coerceIn(4, 16)
                 addOption("-N", "$frags")
                 addOption("--concurrent-fragments", "$frags")
                 addOption("--buffer-size", "1M")
@@ -147,6 +151,7 @@ object YoutubeDlDownloader {
                 // Fail loudly instead of letting yt-dlp skip missing fragments
                 // and silently produce a video with gaps in it.
                 addOption("--abort-on-unavailable-fragments")
+                if (speedLimitKbs > 0) addOption("--limit-rate", "${speedLimitKbs}K")
             } else if (isM3u8) {
                 // HLS m3u8 stream variant selection with multi-fragment parallel downloading
                 val stem = File(targetDir, preferredFilename.substringBeforeLast('.')).absolutePath
@@ -155,7 +160,7 @@ object YoutubeDlDownloader {
                 addOption("-S", "height~$height,+size,+br")
                 addOption("--merge-output-format", "mp4")
                 addOption("--no-playlist")
-                val frags = parallelSockets.coerceIn(4, 16)
+                val frags = if (hlsFragments > 0) hlsFragments.coerceIn(1, 16) else parallelSockets.coerceIn(4, 16)
                 addOption("-N", "$frags")
                 addOption("--concurrent-fragments", "$frags")
                 addOption("--buffer-size", "1M")
@@ -166,6 +171,7 @@ object YoutubeDlDownloader {
                 addOption("--retry-sleep", "10")
                 addOption("--retry-sleep", "fragment:exp=1:20")
                 addOption("--abort-on-unavailable-fragments")
+                if (speedLimitKbs > 0) addOption("--limit-rate", "${speedLimitKbs}K")
             } else {
                 // Direct CDN HTTP multi-socket via aria2c
                 val stem = File(targetDir, preferredFilename.substringBeforeLast('.')).absolutePath
@@ -277,11 +283,11 @@ object YoutubeDlDownloader {
         // .aria2 control file (external downloader) keep progress across runs,
         // so a retry continues instead of restarting. Never relaunch after the
         // job was paused or cancelled.
-        while (attempts < YTDLP_MAX_ATTEMPTS && produced == null) {
+        while (attempts < ytdlpMaxAttempts && produced == null) {
             attempts++
             if (!coroutineContext.isActive) throw CancellationException("Task was cancelled before yt-dlp retry")
             produced = attemptOnce()
-            if (produced == null && attempts < YTDLP_MAX_ATTEMPTS) {
+            if (produced == null && attempts < ytdlpMaxAttempts) {
                 try {
                     Thread.sleep(2_000L * attempts)
                 } catch (_: InterruptedException) {
@@ -451,7 +457,10 @@ object YoutubeDlDownloader {
         parallelSockets: Int = 16,
         onProgress: (downloaded: Long, total: Long, speed: Double, eta: Long) -> Unit,
         isActiveCheck: suspend () -> Boolean = { true },
-        selectIndexes: List<Int>? = null
+        selectIndexes: List<Int>? = null,
+        maxAttempts: Int = 3,
+        peersOverride: Int = -1,
+        speedLimitKbs: Int = 0
     ): File? {
         val before = targetDir.listFiles()?.map { it.absolutePath }?.toSet() ?: emptySet()
 
@@ -476,7 +485,8 @@ object YoutubeDlDownloader {
             "--seed-time=0",
             "--seed-ratio=0.0",
             "--summary-interval=1",
-            "--bt-max-peers=${(conns * 8).coerceIn(60, 500)}",
+            // RAM-tier override when the user set one; otherwise auto formula.
+            "--bt-max-peers=${if (peersOverride > 0) peersOverride else (conns * 8).coerceIn(60, 500)}",
             "--bt-request-peer-speed-limit=50M",
             "--bt-stop-timeout=300",
             // Fail fast on dead trackers: 30s connect + 60s default announce
@@ -502,6 +512,9 @@ object YoutubeDlDownloader {
         // line, so there is no injection surface from untrusted torrent names.
         if (!selectIndexes.isNullOrEmpty()) {
             cmd += "--select-file=" + selectIndexes.joinToString(",")
+        }
+        if (speedLimitKbs > 0) {
+            cmd += "--max-download-limit=${speedLimitKbs}K"
         }
         cmd += magnetUrl
 
@@ -595,11 +608,11 @@ object YoutubeDlDownloader {
         // per-piece progress across runs, so a retry continues instead of
         // restarting (BitTorrent piece-queue parity). Never relaunch after the
         // job was paused or cancelled.
-        while (attempts < MAGNET_MAX_ATTEMPTS && produced == null) {
+        while (attempts < maxAttempts && produced == null) {
             attempts++
             if (!isActiveCheck()) throw CancellationException("Task was cancelled before magnet retry")
             produced = runOnce()
-            if (produced == null && attempts < MAGNET_MAX_ATTEMPTS) {
+            if (produced == null && attempts < maxAttempts) {
                 try {
                     Thread.sleep(2_000L * attempts)
                 } catch (_: InterruptedException) {

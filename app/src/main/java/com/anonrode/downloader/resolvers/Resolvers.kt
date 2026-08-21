@@ -846,7 +846,26 @@ object WaffiCloudResolver : BaseResolver {
     }
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
-        return if (url.contains("?preview")) url.substringBefore("?preview") else url
+        // The ?preview flag renders a viewer page; without it the URL serves the
+        // file directly. Only return the stripped URL when the server actually
+        // answers with a file (Content-Type gate), so an HTML decoy never leaks
+        // through as a "resolved" direct link.
+        val stripped = url.substringBefore("?preview")
+        if (stripped == url) return null
+        return try {
+            val req = okhttp3.Request.Builder().url(stripped).apply {
+                header("User-Agent", HttpClient.DEFAULT_UA)
+                header("Range", "bytes=0-0")
+            }.build()
+            HttpClient.downloadClient.newCall(req).execute().use { res ->
+                val ct = res.header("Content-Type")?.lowercase() ?: ""
+                if (res.isSuccessful && !ct.startsWith("text/html") && !ct.startsWith("application/xhtml")) {
+                    stripped
+                } else null
+            }
+        } catch (_: Exception) {
+            null
+        }
     }
 }
 
@@ -1007,7 +1026,11 @@ object DoodstreamResolver : BaseResolver {
                     val tokenSlug = passPath.trimEnd('/').substringAfterLast('/')
                     val randomStr = (1..10).map { ('a'..'z').random() }.joinToString("")
                     val expiry = System.currentTimeMillis()
-                    return "${token.trim()}$randomStr?token=$tokenSlug&expiry=$expiry"
+                    // /pass_md5/ returns a bare md5 token; the playable URL is
+                    // https://<host>/e/<md5><random>?token=<md5>&expiry=<ts>.
+                    // The scheme+host prefix is mandatory — a hostless string is
+                    // not a URL and every downloader rejects it.
+                    return "https://$host/e/${token.trim()}$randomStr?token=$tokenSlug&expiry=$expiry"
                 }
             }
         } catch (_: Exception) {}
