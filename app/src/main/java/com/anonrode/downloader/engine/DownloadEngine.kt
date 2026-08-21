@@ -466,6 +466,16 @@ class DownloadEngine(
 
     companion object {
         private val STREAMING_QUERY_PATTERN = Regex("""[?&][^=&]*=(?:mpd|dash|hls)(?:&|$)""")
+
+        // Stall handling: a window must move at least this many bytes to count
+        // as live progress (HLS CDNs throttle to ~1 KB/s instead of dying; the
+        // crawl is a stall in disguise). 64 KiB per 60s window ≈ 1 KiB/s floor.
+        private const val CRAWL_WINDOW_BYTES = 64L * 1024
+
+        // Kill the backend this many times before giving up. The yt-dlp wrapper
+        // retries 3x, then the engine re-resolves a fresh URL (rotating token
+        // and edge node) for another 3 attempts — the recovery chain needs room.
+        private const val MAX_STALL_KILLS = 6
     }
 
     private var lastNotificationTime: Long = 0L
@@ -701,6 +711,16 @@ class DownloadEngine(
                     var lastParsed = 0L
                     var lastActivity = System.currentTimeMillis()
                     var stallKills = 0
+                    // Crawl detection: some HLS CDNs (vidsrc edge nodes) throttle a
+                    // connection to ~1 KB/s instead of dying. Bytes still move, so
+                    // lastActivity stays fresh and the download would otherwise
+                    // crawl for days. Track movement per window; below the floor
+                    // it counts as stalled and the backend is relaunched (fresh
+                    // token/edge on re-resolve), exactly like the monolith's
+                    // idle-timeout handling.
+                    var windowStartDisk = 0L
+                    var windowStartParsed = 0L
+                    var windowStartTime = System.currentTimeMillis()
                     while (isActive) {
                         delay(2000)
                         if (!isActive) break
@@ -728,20 +748,34 @@ class DownloadEngine(
                                 eta = 0L
                             )
                         }
-                        // A task with no byte movement (parsed or on disk) for a full
-                        // minute is stalled: kill the backend so the retry wrapper
-                        // relaunches it, and eventually FAILED instead of hanging.
-                        if (now - lastActivity > STALL_TIMEOUT_MS) {
+                        // Window progress: healthy downloads blow through the floor
+                        // in seconds; a crawl never reaches it.
+                        val moved = (disk - windowStartDisk) + (parsed - windowStartParsed)
+                        if (moved >= CRAWL_WINDOW_BYTES) {
+                            windowStartDisk = disk
+                            windowStartParsed = parsed
+                            windowStartTime = now
+                            stallKills = 0 // real progress — recovery worked
+                        }
+                        val crawlStalled = now - windowStartTime > STALL_TIMEOUT_MS
+                        // A task with no meaningful byte movement (parsed or on
+                        // disk) for a full minute is stalled: kill the backend so
+                        // the retry wrapper relaunches it (fresh token/edge on
+                        // re-resolve), and eventually FAILED instead of hanging.
+                        if (now - lastActivity > STALL_TIMEOUT_MS || crawlStalled) {
                             stallKills++
                             android.util.Log.w("AnonDownload", "No download progress for ${t.episodeTitle}, (stall kill $stallKills)")
                             YoutubeDlDownloader.killProcess(task.id)
+                            // Turbo runs in OkHttp, not a native process: interrupt
+                            // its in-flight calls so a stalled transfer cannot hang
+                            // in DOWNLOADING forever (the piece retry policy then
+                            // fails the task instead of re-arming the watchdog).
                             TurboDownloader.cancelTask(task.id)
-                            // After two consecutive stall-kills the backend is
-                            // fundamentally stuck (dead CDN, geo-blocked, expired
-                            // token that re-resolve can't fix). Fail the task
-                            // directly rather than letting the retry wrapper
-                            // grind through 3+ more attempts.
-                            if (stallKills >= 2) {
+                            // The yt-dlp wrapper retries 3x, then the engine
+                            // re-resolves a fresh URL (rotating token/edge) for
+                            // another 3 attempts. Allow that recovery chain to
+                            // play out; only then give up and fail the task.
+                            if (stallKills >= MAX_STALL_KILLS) {
                                 repository.update(task.id) {
                                     it.copy(status = TaskStatus.FAILED, errorMessage = "Download stalled — no progress for ${stallTimeoutSec}s across $stallKills attempts")
                                 }
@@ -749,6 +783,9 @@ class DownloadEngine(
                                 break
                             }
                             lastActivity = now
+                            windowStartDisk = disk
+                            windowStartParsed = parsed
+                            windowStartTime = now
                         }
                     }
                 }
