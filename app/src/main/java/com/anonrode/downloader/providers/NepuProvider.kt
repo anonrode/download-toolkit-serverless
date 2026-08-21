@@ -21,7 +21,7 @@ object NepuProvider : SiteProvider {
         try {
             val encoded = URLEncoder.encode(query, "UTF-8")
             val url = "$mainUrl/api/search?q=$encoded"
-            val jsonStr = HttpClient.getText(url) ?: return emptyList()
+            val jsonStr = HttpClient.getText(url, tag = "search") ?: return emptyList()
 
             val obj = JSONObject(jsonStr)
             val array = obj.optJSONArray("results") ?: return emptyList()

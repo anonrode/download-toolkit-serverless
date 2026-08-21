@@ -20,7 +20,7 @@ object NkiriProvider : SiteProvider {
         try {
             val encoded = URLEncoder.encode(query, "UTF-8")
             val searchUrl = "$mainUrl/?s=$encoded"
-            val html = HttpClient.getText(searchUrl, referer = "$mainUrl/")
+            val html = HttpClient.getText(searchUrl, referer = "$mainUrl/", tag = "search")
             if (!html.isNullOrBlank()) {
                 val doc = Jsoup.parse(html, searchUrl)
                 val articles = doc.select("article, .post-item, .elementor-post, h2.entry-title a")

@@ -20,7 +20,7 @@ object RocksProvider : SiteProvider {
         try {
             val encoded = URLEncoder.encode(query, "UTF-8")
             val rssUrl = "$mainUrl/search/$encoded/feed/rss2/"
-            val xml = HttpClient.getText(rssUrl) ?: return emptyList()
+            val xml = HttpClient.getText(rssUrl, tag = "search") ?: return emptyList()
 
             val doc = Jsoup.parse(xml, "", org.jsoup.parser.Parser.xmlParser())
             for (item in doc.select("item")) {

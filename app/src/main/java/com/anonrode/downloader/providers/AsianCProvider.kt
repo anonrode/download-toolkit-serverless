@@ -20,7 +20,7 @@ object AsianCProvider : SiteProvider {
         try {
             val encoded = URLEncoder.encode(query, "UTF-8")
             val url = "$mainUrl/api?a=search&keyword=$encoded"
-            val jsonStr = HttpClient.getText(url, referer = "$mainUrl/") ?: return emptyList()
+            val jsonStr = HttpClient.getText(url, referer = "$mainUrl/", tag = "search") ?: return emptyList()
 
             val array = JSONArray(jsonStr)
             for (i in 0 until array.length()) {

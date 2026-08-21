@@ -20,7 +20,7 @@ object DramaRainProvider : SiteProvider {
         try {
             val encoded = URLEncoder.encode(query, "UTF-8")
             val searchUrl = "$mainUrl/?s=$encoded"
-            val html = HttpClient.getText(searchUrl)
+            val html = HttpClient.getText(searchUrl, tag = "search")
             if (!html.isNullOrBlank()) {
                 val doc = Jsoup.parse(html, searchUrl)
                 val articles = doc.select("article, .post-item, .entry-title a, h2.entry-title a")
@@ -59,7 +59,7 @@ object DramaRainProvider : SiteProvider {
                 )
 
                 for (url in candidateUrls) {
-                    val directHtml = HttpClient.getText(url) ?: continue
+                    val directHtml = HttpClient.getText(url, tag = "search") ?: continue
                     val doc = Jsoup.parse(directHtml, url)
                     val title = doc.selectFirst("h1.entry-title, h1")?.text()?.trim() ?: continue
                     val poster = doc.selectFirst(".entry-content img, .post-thumbnail img")?.attr("abs:src") ?: ""

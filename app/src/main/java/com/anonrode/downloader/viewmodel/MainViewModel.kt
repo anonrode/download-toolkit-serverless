@@ -141,6 +141,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         debounceJob?.cancel()
         searchJob?.cancel()
+        // The old search's coroutine dies instantly, but its blocking HTTP
+        // calls would keep running — on mobile, keystroke-spam searches left
+        // stale requests draining data for seconds (activity log: ~40 requests
+        // per keystroke, overlapping searches). Kill just the search-tagged
+        // calls; download/resolver calls are untouched.
+        com.anonrode.downloader.data.net.HttpClient.cancelTagged("search")
         searchJob = viewModelScope.launch {
             val seq = ++searchSequence
             _uiState.update { it.copy(isSearching = true, searchError = null) }

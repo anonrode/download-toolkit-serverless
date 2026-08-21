@@ -13,6 +13,13 @@ object DramaKeyProvider : SiteProvider {
     override val name: String = "dramakey"
     override val mainUrl: String = "https://dramakey.com"
 
+    // Live-verified 2026-08-21: dramakey.cc serves the same 67KiB homepage for
+    // EVERY slug (soft-404) and dramakey.com 404s every drama path — the domain
+    // has no show content at all. The old 35-request slug-guessing search
+    // burned ~2MiB per query for zero results (user's activity log). Search is
+    // disabled; pasted dramakey links still resolve through the registry.
+    override val searchEnabled: Boolean get() = false
+
     override suspend fun search(query: String): List<ShowCard> {
         val results = mutableListOf<ShowCard>()
         try {
