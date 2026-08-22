@@ -137,22 +137,24 @@ object DynamicRulesManager {
         }
     }
 
-    /** Decrypts base64(AES-128-CBC-PKCS5) -> JSON text; null on any failure. */
-    private fun decryptRules(b64: String): String? {
+    /** Decrypts base64(AES-128-CBC-PKCS5) -> JSON text; null on any failure.
+     *  java.util.Base64 (minSdk 26) keeps this JVM-unit-testable. */
+    internal fun decryptRules(b64: String): String? {
         return try {
             val key = SecretKeySpec(hexToBytes(RULES_KEY_HEX), "AES")
             val iv = IvParameterSpec(hexToBytes(RULES_IV_HEX))
             val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
             cipher.init(Cipher.DECRYPT_MODE, key, iv)
-            val data = Base64.decode(b64.trim(), Base64.DEFAULT)
+            val data = java.util.Base64.getDecoder().decode(b64.trim())
             String(cipher.doFinal(data), Charsets.UTF_8)
         } catch (_: Exception) {
             null
         }
     }
 
-    /** Returns false when the payload is malformed; bundled defaults stay active. */
-    private fun parseRulesJson(jsonStr: String): Boolean {
+    /** Returns false when the payload is malformed; bundled defaults stay active.
+     *  internal so JVM unit tests can exercise the full parse path. */
+    internal fun parseRulesJson(jsonStr: String): Boolean {
         return try {
             val obj = JSONObject(jsonStr)
             val ver = obj.optString("version", "2026.08.22.1")
