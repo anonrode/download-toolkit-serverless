@@ -45,7 +45,7 @@ object DynamicRulesManager {
     )
 
     private val defaultMediaExtensions = listOf(
-        ".mp4", ".mkv", ".webm", ".avi", ".ts", ".m4v", ".mp3", ".zip", ".rar", "-mp4", "-mkv"
+        ".mp4", ".mkv", ".webm", ".avi", ".ts", ".m3u8", ".m4v", ".mp3", ".zip", ".rar", "-mp4", "-mkv"
     )
 
     private val activeDomains = mutableMapOf<String, String>().apply { putAll(defaultDomains) }

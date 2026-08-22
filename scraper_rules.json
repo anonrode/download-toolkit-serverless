@@ -1,5 +1,5 @@
 {
-  "version": "2026.08.22.1",
+  "version": "2026.08.22.2",
   "domains": {
     "nkiri": "https://thenkiri.com",
     "dramakey": "https://dramakey.com",
@@ -46,6 +46,7 @@
       "searchPattern": "/?s={query}",
       "searchType": "html",
       "cardSelector": "article, .film-item, a[href*='-drama']",
+      "episodeSelector": "a[href*='/download?link='], a[href*='wetafiles.com'], a[href*='downloadwella.com'], a[href*='loadedfiles.']",
       "slugSuffixes": [
         "",
         "-chinese-drama",
@@ -79,6 +80,7 @@
     ".webm",
     ".avi",
     ".ts",
+    ".m3u8",
     ".m4v",
     ".mp3",
     ".zip",
