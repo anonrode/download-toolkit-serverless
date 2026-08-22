@@ -178,14 +178,23 @@ fun TorrentFilePickerDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = {
-                onDismiss(if (selected.isEmpty()) null else selected.toList())
-            }, enabled = safeFiles.isNotEmpty()) {
-                Text("Download (${selected.size})", color = AccentPrimary)
+            if (safeFiles.isEmpty()) {
+                // Nothing selectable: the only action is acknowledging the
+                // warning. The engine refuses the whole-torrent fallback when
+                // every file was flagged, so offering it here would lie.
+                TextButton(onClick = { onDismiss(null) }) {
+                    Text("Close", color = AccentPrimary)
+                }
+            } else {
+                TextButton(onClick = {
+                    onDismiss(if (selected.isEmpty()) null else selected.toList())
+                }) {
+                    Text("Download (${selected.size})", color = AccentPrimary)
+                }
             }
         },
-        dismissButton = {
+        dismissButton = if (safeFiles.isNotEmpty()) {
             TextButton(onClick = { onDismiss(null) }) { Text("Whole torrent", color = AccentPrimary) }
-        }
+        } else null
     )
 }

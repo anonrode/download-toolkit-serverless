@@ -38,7 +38,10 @@ object TorrentSecurityShield {
         ".js", ".jse", ".wsf", ".wsh", ".ps1", ".ps2", ".msc",
         ".msi", ".msp", ".scr", ".iso", ".img", ".inf", ".reg",
         ".hta", ".cpl", ".jar", ".com", ".pif", ".application",
-        ".gadget", ".appref-ms", ".sct", ".ws", ".mst", ".chm"
+        ".gadget", ".appref-ms", ".sct", ".ws", ".mst", ".chm",
+        // Android-native executable formats — the single most relevant
+        // malware vector for this platform (fake "codec"/"player" APKs).
+        ".apk", ".aab", ".so", ".dex"
     )
 
     // --- Layer 3: InfoHash Regex ---
@@ -108,6 +111,12 @@ object TorrentSecurityShield {
     private val MAGIC_AVI_RIFF = "RIFF".toByteArray(Charsets.US_ASCII)
     private val MAGIC_AVI_TAG = "AVI ".toByteArray(Charsets.US_ASCII)
     private val MAGIC_EXE_MZ = byteArrayOf(0x4d.toByte(), 0x5a.toByte()) // "MZ"
+    // "PK" — zip/apk/jar/ooxml container. A torrent "movie" that is really a
+    // zip archive is the classic password-scam payload; reject outright.
+    private val MAGIC_ZIP_PK = byteArrayOf(0x50.toByte(), 0x4b.toByte())
+    private val MAGIC_OGG = "OggS".toByteArray(Charsets.US_ASCII)
+    private val MAGIC_FLAC = "fLaC".toByteArray(Charsets.US_ASCII)
+    private val MAGIC_ID3 = "ID3".toByteArray(Charsets.US_ASCII)
     private val MAGIC_ELF = byteArrayOf(0x7f.toByte(), 0x45.toByte(), 0x4c.toByte(), 0x46.toByte()) // "ELF"
 
     // -------------------------------------------------------------
@@ -367,6 +376,10 @@ object TorrentSecurityShield {
                     file.delete()
                     return Pair(false, "BLOCKED: Linux ELF binary disguised as media")
                 }
+                if (header[0] == MAGIC_ZIP_PK[0] && header[1] == MAGIC_ZIP_PK[1]) {
+                    file.delete()
+                    return Pair(false, "BLOCKED: Archive/APK container (PK header) disguised as media")
+                }
 
                 // HTML / script / XML / SVG / JSON decoy sniff: strip UTF-8 BOM
                 // and check whether the file starts with a text-like prefix.
@@ -397,6 +410,22 @@ object TorrentSecurityShield {
                 }
                 if (textHead.startsWith("riff") && textHead.contains("avi ")) {
                     return Pair(true, "AVI")
+                }
+                // RIFF/WAVE: "WAVE" form tag sits at offset 8 (same layout as AVI's)
+                if (textHead.startsWith("riff") && textHead.length >= 12 && textHead.substring(8, 12) == "wave") {
+                    return Pair(true, "WAV")
+                }
+                // Audio containers the size guard legitimately lets through —
+                // without these branches a valid .flac/.ogg/.mp3 fell to the
+                // strongMagicExts rejection below (audit finding).
+                if (header.copyOfRange(0, 4).contentEquals(MAGIC_OGG)) {
+                    return Pair(true, "OGG/Opus")
+                }
+                if (header.copyOfRange(0, 4).contentEquals(MAGIC_FLAC)) {
+                    return Pair(true, "FLAC")
+                }
+                if (header.copyOfRange(0, 3).contentEquals(MAGIC_ID3)) {
+                    return Pair(true, "MP3")
                 }
 
                 val ext = file.extension.lowercase()

@@ -60,6 +60,7 @@ fun SettingsSheet(
     var hlsFragments by remember { mutableStateOf(viewModel.engine.hlsFragmentConcurrency) }
     var speedLimit by remember { mutableStateOf(viewModel.engine.globalSpeedLimitKbs) }
     var torrentPeers by remember { mutableStateOf(viewModel.engine.torrentPeers) }
+    var torrentPrivacy by remember { mutableStateOf(viewModel.engine.torrentPrivacyMode) }
     var wifiOnlyAll by remember { mutableStateOf(viewModel.engine.wifiOnlyAll) }
     var clipboardDetect by remember { mutableStateOf(viewModel.engine.clipboardDetect) }
     var completionNotifications by remember { mutableStateOf(viewModel.engine.completionNotifications) }
@@ -618,6 +619,18 @@ fun SettingsSheet(
 
                 HorizontalDivider(color = BorderHairline, modifier = Modifier.padding(horizontal = Spacing.md))
 
+                // Torrent Privacy Mode (qBittorrent anonymous-mode lessons):
+                // no DHT/LPD/PEX, encrypted peers, near-zero upload, random port.
+                SettingsSwitchRow(
+                    icon = Icons.Rounded.VisibilityOff,
+                    title = "Torrent Privacy Mode",
+                    subtitle = "Hides you from peer discovery (DHT/PEX/LPD off), encrypts peer links, upload ~0. Trackers only — some dead swarms won't start",
+                    checked = torrentPrivacy,
+                    onCheckedChange = { torrentPrivacy = it }
+                )
+
+                HorizontalDivider(color = BorderHairline, modifier = Modifier.padding(horizontal = Spacing.md))
+
                 // Stall timeout
                 Column(modifier = Modifier.padding(Spacing.md)) {
                     Row(
@@ -802,6 +815,7 @@ fun SettingsSheet(
                         hlsFragments = hlsFragments,
                         speedLimit = speedLimit,
                         peers = torrentPeers,
+                        privacyMode = torrentPrivacy,
                         wifiAll = wifiOnlyAll,
                         clipboard = clipboardDetect,
                         notifications = completionNotifications,
