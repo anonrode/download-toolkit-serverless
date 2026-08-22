@@ -21,7 +21,10 @@ class DynamicRulesManagerTest {
     fun decryptRules_recoversKnownPayload() {
         val plain = DynamicRulesManager.decryptRules(fixtureB64)
         assertNotNull(plain)
-        assertTrue(plain!!.contains("\"version\":\"test.1\""))
+        // json.dumps emits 'version": "test.1"' (space after colon) — assert
+        // on the values, not the exact serializer formatting.
+        assertTrue(plain!!.contains("\"version\""))
+        assertTrue(plain.contains("test.1"))
         assertTrue(plain.contains("https://thenkiri.com"))
     }
 
