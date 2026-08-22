@@ -50,6 +50,7 @@ class DownloadEngine(
     var hlsFragmentConcurrency: Int = 16
     var globalSpeedLimitKbs: Int = 0          // 0 = unlimited
     var torrentPeers: Int = -1                // -1 = auto (RAM tier)
+    var torrentPrivacyMode: Boolean = false   // qBittorrent anonymous-mode lessons
     var wifiOnlyAll: Boolean = false
     var clipboardDetect: Boolean = true
     var completionNotifications: Boolean = true
@@ -147,6 +148,7 @@ class DownloadEngine(
         hlsFragmentConcurrency = prefs.getInt("pref_hls_fragments", 16)
         globalSpeedLimitKbs = prefs.getInt("pref_speed_limit_kbs", 0)
         torrentPeers = prefs.getInt("pref_torrent_peers", -1)
+        torrentPrivacyMode = prefs.getBoolean("pref_torrent_privacy_mode", false)
         wifiOnlyAll = prefs.getBoolean("pref_wifi_only_all", false)
         clipboardDetect = prefs.getBoolean("pref_clipboard_detect", true)
         completionNotifications = prefs.getBoolean("pref_completion_notifications", true)
@@ -184,6 +186,7 @@ class DownloadEngine(
         hlsFragments: Int = 16,
         speedLimit: Int = 0,
         peers: Int = -1,
+        privacyMode: Boolean = false,
         wifiAll: Boolean = false,
         clipboard: Boolean = true,
         notifications: Boolean = true,
@@ -203,6 +206,7 @@ class DownloadEngine(
         this.hlsFragmentConcurrency = hlsFragments
         this.globalSpeedLimitKbs = speedLimit
         this.torrentPeers = peers
+        this.torrentPrivacyMode = privacyMode
         this.wifiOnlyAll = wifiAll
         this.clipboardDetect = clipboard
         this.completionNotifications = notifications
@@ -223,6 +227,7 @@ class DownloadEngine(
             .putInt("pref_hls_fragments", hlsFragments)
             .putInt("pref_speed_limit_kbs", speedLimit)
             .putInt("pref_torrent_peers", peers)
+            .putBoolean("pref_torrent_privacy_mode", privacyMode)
             .putBoolean("pref_wifi_only_all", wifiAll)
             .putBoolean("pref_clipboard_detect", clipboard)
             .putBoolean("pref_completion_notifications", notifications)
@@ -1350,7 +1355,8 @@ class DownloadEngine(
                             ytdlpMaxAttempts = ytdlpMaxAttempts,
                             hlsFragments = hlsFragmentConcurrency,
                             speedLimitKbs = globalSpeedLimitKbs,
-                            torrentPeers = torrentPeers
+                            torrentPeers = torrentPeers,
+                            privacyMode = torrentPrivacyMode
                         )
                     }
 
@@ -1431,6 +1437,7 @@ class DownloadEngine(
                         hlsFragments = hlsFragmentConcurrency,
                         speedLimitKbs = globalSpeedLimitKbs,
                         torrentPeers = torrentPeers,
+                        privacyMode = torrentPrivacyMode,
                         hlsMasterFile = masterFile?.absolutePath
                     )
 

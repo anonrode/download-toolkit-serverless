@@ -77,6 +77,10 @@ object YoutubeDlDownloader {
         hlsFragments: Int = -1,
         speedLimitKbs: Int = 0,
         torrentPeers: Int = -1,
+        // Torrent Privacy Mode: disables DHT/LPD/PEX peer discovery, requires
+        // encrypted peer links, caps upload near zero and randomizes the listen
+        // port. Trackers alone find peers, so dead-swarm discovery is weaker.
+        privacyMode: Boolean = false,
         // Locally rewritten HLS master (scheme-relative segment URLs fixed to
         // absolute https) — yt-dlp is fed the file instead of the original URL.
         hlsMasterFile: String? = null
@@ -107,16 +111,30 @@ object YoutubeDlDownloader {
         if (isMagnet) {
             // Selective-file pass: probe the swarm for its file list; when more
             // than one safe file exists, ask the UI which to download. A single
-            // safe file is auto-selected (no picker). Null/empty selection or a
-            // failed probe falls back to the full download.
+            // safe file is auto-selected (no picker). A failed probe (null)
+            // falls back to the full download; a probe where EVERY file fails
+            // the shield refuses the download entirely.
             var selectIndexes: List<Int>? = null
             if (onTorrentFiles != null) {
-                val files = listTorrentFiles(context, sourceUrl, File(preferredFilename).nameWithoutExtension)
+                val files = listTorrentFiles(context, sourceUrl, File(preferredFilename).nameWithoutExtension, privacyMode)
                 if (files != null) {
                     val safe = files.filter { it.isSafe }
                     when {
                         safe.size > 1 -> selectIndexes = onTorrentFiles(files)
                         safe.size == 1 -> selectIndexes = listOf(safe.first().index)
+                        // Probe succeeded but EVERY file failed the shield:
+                        // surface the picker's warning state and refuse the
+                        // legacy fallback — a silent full download here would
+                        // fetch exactly the flagged payload.
+                        else -> {
+                            val picked = onTorrentFiles(files)
+                            if (picked.isNullOrEmpty()) {
+                                throw SecurityException(
+                                    "All ${files.size} file(s) blocked by security shield — download refused"
+                                )
+                            }
+                            selectIndexes = picked
+                        }
                     }
                     if (safe.size != files.size) {
                         android.util.Log.w("AnonDownload",
@@ -134,6 +152,7 @@ object YoutubeDlDownloader {
                 maxAttempts = magnetMaxAttempts,
                 peersOverride = torrentPeers,
                 speedLimitKbs = speedLimitKbs,
+                privacyMode = privacyMode,
                 isActiveCheck = { coroutineContext.isActive }
             )
         }
@@ -372,7 +391,8 @@ object YoutubeDlDownloader {
     suspend fun listTorrentFiles(
         context: Context,
         magnetUrl: String,
-        parentTitle: String = ""
+        parentTitle: String = "",
+        privacyMode: Boolean = false
     ): List<TorrentSecurityShield.TorrentFileEntry>? {
         val aria2Exec = findAria2Executable(context)
             ?: throw IllegalStateException("aria2c binary missing: libaria2c.so not found in native libs")
@@ -385,16 +405,25 @@ object YoutubeDlDownloader {
 
         // Reuse an already-cached .torrent when present (instant list, no swarm contact).
         if (!torrentFile.exists()) {
-            val fetchCmd = mutableListOf(
-                aria2Exec.absolutePath,
-                "--enable-dht=true",
-                "--bt-enable-lpd=true",
-                "--enable-peer-exchange=true",
-                "--dht-entry-point=router.bittorrent.com:6881",
-                "--dht-entry-point=dht.transmissionbt.com:6881",
-                "--dht-entry-point=dht.libtorrent.org:25401",
-                "--dht-entry-point6=[2400:cb00:2049:1::a29f:9877]:6881",
-                "--dht-file-path=${context.cacheDir.absolutePath}/dht.dat",
+            val fetchCmd = mutableListOf(aria2Exec.absolutePath)
+            if (privacyMode) {
+                // Metadata via trackers only: no DHT announce that would put
+                // this IP into the swarm's peer-discovery tables.
+                fetchCmd += "--enable-dht=false"
+                fetchCmd += "--bt-enable-lpd=false"
+                fetchCmd += "--enable-peer-exchange=false"
+                fetchCmd += "--bt-require-crypto=true"
+            } else {
+                fetchCmd += "--enable-dht=true"
+                fetchCmd += "--bt-enable-lpd=true"
+                fetchCmd += "--enable-peer-exchange=true"
+                fetchCmd += "--dht-entry-point=router.bittorrent.com:6881"
+                fetchCmd += "--dht-entry-point=dht.transmissionbt.com:6881"
+                fetchCmd += "--dht-entry-point=dht.libtorrent.org:25401"
+                fetchCmd += "--dht-entry-point6=[2400:cb00:2049:1::a29f:9877]:6881"
+                fetchCmd += "--dht-file-path=${context.cacheDir.absolutePath}/dht.dat"
+            }
+            fetchCmd += listOf(
                 "--seed-time=0",
                 "--seed-ratio=0.0",
                 "--summary-interval=0",
@@ -496,27 +525,47 @@ object YoutubeDlDownloader {
         selectIndexes: List<Int>? = null,
         maxAttempts: Int = 3,
         peersOverride: Int = -1,
-        speedLimitKbs: Int = 0
+        speedLimitKbs: Int = 0,
+        privacyMode: Boolean = false
     ): File? {
         val before = targetDir.listFiles()?.map { it.absolutePath }?.toSet() ?: emptySet()
 
         val aria2Exec = findAria2Executable(context)
             ?: throw IllegalStateException("aria2c binary missing: libaria2c.so not found in native libs")
-        val cmd = mutableListOf(
-            aria2Exec.absolutePath,
-            "--enable-dht=true",
-            "--bt-enable-lpd=true",
-            "--enable-peer-exchange=true",
-            // Live-verified 2026-08: router.bittorrent.com does not answer DHT
-            // pings from some networks; transmissionbt + libtorrent.org do.
-            "--dht-entry-point=router.bittorrent.com:6881",
-            "--dht-entry-point=dht.transmissionbt.com:6881",
-            "--dht-entry-point=dht.libtorrent.org:25401",
-            "--dht-entry-point6=[2400:cb00:2049:1::a29f:9877]:6881",
-            // Android has no $HOME, so aria2c's default ~/.aria2/dht.dat never
-            // persists: every launch cold-starts an empty DHT table. Pin it into
-            // cacheDir so the routing table survives across downloads AND runs.
-            "--dht-file-path=${context.cacheDir.absolutePath}/dht.dat",
+        val cmd = mutableListOf(aria2Exec.absolutePath)
+        if (privacyMode) {
+            // qBittorrent anonymous-mode lessons: your IP stops propagating
+            // through peer-discovery gossip (DHT/LPD/PEX off), peer links must
+            // be encrypted, and the listen port leaves the fingerprintable
+            // 6881 band. Trackers alone still find peers.
+            cmd += "--enable-dht=false"
+            cmd += "--bt-enable-lpd=false"
+            cmd += "--enable-peer-exchange=false"
+            cmd += "--bt-require-crypto=true"
+            // aria2c reads 0 as UNLIMITED here, so cap at 1K instead — near-zero
+            // upload without breaking swarm etiquette mid-download.
+            cmd += "--max-overall-upload-limit=1K"
+            // Per-task ephemeral port range; hash spreads concurrent tasks.
+            val base = 49152 + (taskId.hashCode() and 0x7FFFFFFF) % 8000
+            cmd += "--listen-port=$base-${base + 31}"
+        } else {
+            cmd += listOf(
+                "--enable-dht=true",
+                "--bt-enable-lpd=true",
+                "--enable-peer-exchange=true",
+                // Live-verified 2026-08: router.bittorrent.com does not answer DHT
+                // pings from some networks; transmissionbt + libtorrent.org do.
+                "--dht-entry-point=router.bittorrent.com:6881",
+                "--dht-entry-point=dht.transmissionbt.com:6881",
+                "--dht-entry-point=dht.libtorrent.org:25401",
+                "--dht-entry-point6=[2400:cb00:2049:1::a29f:9877]:6881",
+                // Android has no $HOME, so aria2c's default ~/.aria2/dht.dat never
+                // persists: every launch cold-starts an empty DHT table. Pin it into
+                // cacheDir so the routing table survives across downloads AND runs.
+                "--dht-file-path=${context.cacheDir.absolutePath}/dht.dat"
+            )
+        }
+        cmd += listOf(
             "--seed-time=0",
             "--seed-ratio=0.0",
             "--summary-interval=1",
@@ -546,8 +595,7 @@ object YoutubeDlDownloader {
             "--allow-overwrite=false",
             "--console-log-level=error",
             "--bt-tracker=$TIER1_TRACKERS",
-            "-d", targetDir.absolutePath,
-            magnetUrl
+            "-d", targetDir.absolutePath
         )
         // Selective download (season packs): --select-file takes only numeric
         // indexes, never names -- the swarm's file paths never reach the command
@@ -558,6 +606,9 @@ object YoutubeDlDownloader {
         if (speedLimitKbs > 0) {
             cmd += "--max-download-limit=${speedLimitKbs}K"
         }
+        // Single magnet URI, always last: aria2c binds options to the downloads
+        // that follow them, so the URI must come after --select-file etc. (it
+        // was previously passed twice, which orphaned those flags on a second job).
         cmd += magnetUrl
 
         val errors = StringBuilder()

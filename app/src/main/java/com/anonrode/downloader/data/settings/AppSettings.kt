@@ -20,6 +20,7 @@ data class AppSettings(
     val hlsFragmentConcurrency: Int = 8,
     val globalSpeedLimitKbs: Int = 0,       // 0 = unlimited
     val torrentPeers: Int = -1,             // -1 = auto (RAM tier)
+    val torrentPrivacyMode: Boolean = false, // qBittorrent anonymous-mode lessons
     // --- Network ---
     val wifiOnlyTorrents: Boolean = false,
     val wifiOnlyAll: Boolean = false,
@@ -48,6 +49,7 @@ data class AppSettings(
                 hlsFragmentConcurrency = prefs.getInt("pref_hls_fragments", 16),
                 globalSpeedLimitKbs = prefs.getInt("pref_speed_limit_kbs", 0),
                 torrentPeers = prefs.getInt("pref_torrent_peers", PEERS_AUTO),
+                torrentPrivacyMode = prefs.getBoolean("pref_torrent_privacy_mode", false),
                 wifiOnlyTorrents = prefs.getBoolean("pref_torrents_wifi_only", false),
                 wifiOnlyAll = prefs.getBoolean("pref_wifi_only_all", false),
                 autoOrganizeByShow = prefs.getBoolean("pref_auto_organize", true),
@@ -71,6 +73,7 @@ data class AppSettings(
                 .putInt("pref_hls_fragments", s.hlsFragmentConcurrency)
                 .putInt("pref_speed_limit_kbs", s.globalSpeedLimitKbs)
                 .putInt("pref_torrent_peers", s.torrentPeers)
+                .putBoolean("pref_torrent_privacy_mode", s.torrentPrivacyMode)
                 .putBoolean("pref_torrents_wifi_only", s.wifiOnlyTorrents)
                 .putBoolean("pref_wifi_only_all", s.wifiOnlyAll)
                 .putBoolean("pref_auto_organize", s.autoOrganizeByShow)
