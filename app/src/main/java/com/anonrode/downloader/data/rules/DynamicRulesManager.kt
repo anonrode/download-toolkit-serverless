@@ -4,7 +4,6 @@ import android.content.Context
 import com.anonrode.downloader.data.net.HttpClient
 import com.anonrode.downloader.providers.DynamicSiteConfig
 import com.anonrode.downloader.providers.GenericDeclarativeProvider
-import com.anonrode.downloader.providers.ProviderRegistry
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -12,6 +11,19 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
+
+data class SiteRuleConfig(
+    val searchPattern: String = "",
+    val searchType: String = "html",
+    val cardSelector: String = "",
+    val titleSelector: String = "",
+    val linkSelector: String = "",
+    val posterSelector: String = "",
+    val episodeSelector: String = "",
+    val seriesDescentSelectors: List<String> = emptyList(),
+    val downloadAnchorSelector: String = "",
+    val slugSuffixes: List<String> = emptyList()
+)
 
 object DynamicRulesManager {
 
@@ -32,10 +44,17 @@ object DynamicRulesManager {
         "torrents" to "https://apibay.org"
     )
 
+    private val defaultMediaExtensions = listOf(
+        ".mp4", ".mkv", ".webm", ".avi", ".ts", ".m4v", ".mp3", ".zip", ".rar", "-mp4", "-mkv"
+    )
+
     private val activeDomains = mutableMapOf<String, String>().apply { putAll(defaultDomains) }
+    private val activeSiteConfigs = mutableMapOf<String, SiteRuleConfig>()
+    private val activeResolverConfigs = mutableMapOf<String, JSONObject>()
+    private val activeMediaExtensions = mutableListOf<String>().apply { addAll(defaultMediaExtensions) }
     private val dynamicProviders = mutableListOf<GenericDeclarativeProvider>()
 
-    private val _version = MutableStateFlow("2026.08.16.1 (Bundled)")
+    private val _version = MutableStateFlow("2026.08.22.1 (Bundled)")
     val version: StateFlow<String> = _version.asStateFlow()
 
     fun init(context: Context) {
@@ -52,18 +71,29 @@ object DynamicRulesManager {
         return activeDomains[site.lowercase()] ?: defaultDomains[site.lowercase()] ?: ""
     }
 
+    fun getSiteConfig(site: String): SiteRuleConfig? {
+        return activeSiteConfigs[site.lowercase()]
+    }
+
+    fun getResolverConfig(resolverName: String): JSONObject? {
+        return activeResolverConfigs[resolverName.lowercase()]
+    }
+
+    fun getDirectMediaExtensions(): List<String> {
+        return if (activeMediaExtensions.isNotEmpty()) activeMediaExtensions else defaultMediaExtensions
+    }
+
     fun getDynamicProviders(): List<GenericDeclarativeProvider> = dynamicProviders
 
     suspend fun syncFromGitHub(context: Context): Pair<Boolean, String> = withContext(Dispatchers.IO) {
         try {
-            val jsonStr = HttpClient.getText(RULES_URL)
+            // Append cache-buster timestamp to bypass GitHub CDN's 5-minute cache
+            val cacheBustedUrl = "$RULES_URL?t=${System.currentTimeMillis()}"
+            val jsonStr = HttpClient.getText(cacheBustedUrl, tag = "ota_rules")
             if (jsonStr.isNullOrBlank()) {
                 return@withContext Pair(false, "Could not reach GitHub rules repository")
             }
 
-            // Only report success (and only persist the cache) when the payload
-            // actually parses — a malformed payload must never be cached, and
-            // the toast must not claim "Synced fresh logic" for a no-op.
             if (!parseRulesJson(jsonStr)) {
                 return@withContext Pair(false, "Rules payload failed to parse — keeping bundled defaults")
             }
@@ -81,7 +111,7 @@ object DynamicRulesManager {
     private fun parseRulesJson(jsonStr: String): Boolean {
         return try {
             val obj = JSONObject(jsonStr)
-            val ver = obj.optString("version", "2026.08.16.1")
+            val ver = obj.optString("version", "2026.08.22.1")
             _version.value = ver
 
             val domainsObj = obj.optJSONObject("domains")
@@ -93,6 +123,66 @@ object DynamicRulesManager {
                     if (url.isNotBlank()) {
                         activeDomains[k.lowercase()] = url
                     }
+                }
+            }
+
+            val sitesObj = obj.optJSONObject("sites")
+            if (sitesObj != null) {
+                val keys = sitesObj.keys()
+                while (keys.hasNext()) {
+                    val k = keys.next()
+                    val sObj = sitesObj.optJSONObject(k)
+                    if (sObj != null) {
+                        val descentList = mutableListOf<String>()
+                        val descentArr = sObj.optJSONArray("seriesDescentSelectors")
+                        if (descentArr != null) {
+                            for (idx in 0 until descentArr.length()) {
+                                val item = descentArr.optString(idx)
+                                if (item.isNotBlank()) descentList.add(item)
+                            }
+                        }
+                        val slugList = mutableListOf<String>()
+                        val slugArr = sObj.optJSONArray("slugSuffixes")
+                        if (slugArr != null) {
+                            for (idx in 0 until slugArr.length()) {
+                                slugList.add(slugArr.optString(idx))
+                            }
+                        }
+
+                        activeSiteConfigs[k.lowercase()] = SiteRuleConfig(
+                            searchPattern = sObj.optString("searchPattern"),
+                            searchType = sObj.optString("searchType", "html"),
+                            cardSelector = sObj.optString("cardSelector"),
+                            titleSelector = sObj.optString("titleSelector"),
+                            linkSelector = sObj.optString("linkSelector"),
+                            posterSelector = sObj.optString("posterSelector"),
+                            episodeSelector = sObj.optString("episodeSelector"),
+                            seriesDescentSelectors = descentList,
+                            downloadAnchorSelector = sObj.optString("downloadAnchorSelector"),
+                            slugSuffixes = slugList
+                        )
+                    }
+                }
+            }
+
+            val resolversObj = obj.optJSONObject("resolvers")
+            if (resolversObj != null) {
+                val keys = resolversObj.keys()
+                while (keys.hasNext()) {
+                    val k = keys.next()
+                    val rObj = resolversObj.optJSONObject(k)
+                    if (rObj != null) {
+                        activeResolverConfigs[k.lowercase()] = rObj
+                    }
+                }
+            }
+
+            val mediaExtArr = obj.optJSONArray("directMediaExtensions")
+            if (mediaExtArr != null && mediaExtArr.length() > 0) {
+                activeMediaExtensions.clear()
+                for (idx in 0 until mediaExtArr.length()) {
+                    val ext = mediaExtArr.optString(idx)
+                    if (ext.isNotBlank()) activeMediaExtensions.add(ext)
                 }
             }
 

@@ -20,17 +20,19 @@ object PlutoProvider : SiteProvider {
         try {
             val clean = query.replace("'", "").replace("’", "").trim()
             val encoded = URLEncoder.encode(clean, "UTF-8")
-            val url = "$mainUrl/search/$encoded/page/1"
+            val cfg = DynamicRulesManager.getSiteConfig(name)
+            val searchPattern = cfg?.searchPattern?.ifBlank { null } ?: "/search/{query}/page/1"
+            val cardSelector = cfg?.cardSelector?.ifBlank { null } ?: "a[href*='/movie/'], a[href*='/series/']"
+            val url = if (searchPattern.startsWith("http")) {
+                searchPattern.replace("{base}", mainUrl.trimEnd('/')).replace("{query}", encoded)
+            } else {
+                "$mainUrl" + searchPattern.replace("{query}", encoded)
+            }
             val html = HttpClient.getText(url, referer = "$mainUrl/", tag = "search") ?: return emptyList()
-            // Charter rule 3: parse with the page URL as baseUri, or abs:href
-            // resolves empty and every card URL is stored relative — loadEpisodes
-            // then fails with "no scheme" (user-reported, confirmed via log).
             val doc = Jsoup.parse(html, url)
 
             val seen = mutableSetOf<String>()
-            for (a in doc.select("a[href*='/movie/'], a[href*='/series/']")) {
-                // Strip #fragment (e.g. #disqus_thread) so one show does not
-                // surface as two cards differing only by fragment.
+            for (a in doc.select(cardSelector)) {
                 val href = (a.attr("abs:href").ifEmpty { a.attr("href") }).substringBefore('#')
                 val title = a.attr("title").ifEmpty { a.text() }.trim()
                 if (href.isBlank() || title.isBlank() || href in seen) continue
@@ -73,13 +75,9 @@ object PlutoProvider : SiteProvider {
             val poster = doc.selectFirst("meta[property='og:image']")?.attr("content")
                 ?: doc.selectFirst(".poster img, .cover img")?.attr("abs:src") ?: ""
             val title = doc.selectFirst("h1")?.text()?.trim() ?: "Pluto Video"
+            val cfg = DynamicRulesManager.getSiteConfig(name)
 
             if (showUrl.contains("/series/") || showUrl.contains("/season")) {
-                // Monolith parity (plutomovies.py): episode pages live under
-                // /series/<show>/<episode-slug> — there is no /episodes/ path,
-                // so the old /episodes/-only selector found ZERO episodes
-                // (user-reported). Season hubs are discovered first, then each
-                // season page is scanned for episode links.
                 val seasonRegex = Regex("""/(series|season)/[^/]+/[^/]*season-\d+""", RegexOption.IGNORE_CASE)
                 val seasonLinks = doc.select("a[href]").mapNotNull { a ->
                     val href = a.attr("abs:href").ifBlank { HttpClient.safeResolveUri(showUrl, a.attr("href")) }
@@ -99,14 +97,11 @@ object PlutoProvider : SiteProvider {
                             HttpClient.safeResolveUri(pageUrl, a.attr("href"))
                         }
                         if (href.isBlank() || href in seen || href == showUrl) continue
-                        // Episode links: /series/ or /episodes/ paths that are NOT
-                        // season hubs themselves and not the page we're scanning.
                         val isEpisodeLink = (href.contains("/series/") || href.contains("/episodes/")) &&
                             !seasonRegex.containsMatchIn(href) &&
                             href != pageUrl
                         if (!isEpisodeLink) continue
                         seen.add(href)
-                        // Monolith strips "Previous Episode"/"Next Episode" nav text.
                         val epName = a.text().trim()
                             .replace(Regex("""(?i)^(previous|next)\s+episode\b\s*"""), "")
                             .trim().ifEmpty { "Episode $count" }
@@ -122,7 +117,8 @@ object PlutoProvider : SiteProvider {
                 }
             } else {
                 // Movie download link from detail page
-                val dlLink = doc.selectFirst("a[href*='dl.plutomovies.com']")?.let {
+                val dlSelector = cfg?.downloadAnchorSelector?.ifBlank { null } ?: "a[href*='dl.plutomovies.com']"
+                val dlLink = doc.selectFirst(dlSelector)?.let {
                     it.attr("abs:href").ifBlank { it.attr("href") }
                 } ?: showUrl
                 episodes.add(

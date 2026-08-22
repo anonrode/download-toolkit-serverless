@@ -1327,12 +1327,8 @@ private fun extractMp4FromHtml(html: String): String? {
 fun isDirectMediaUrl(url: String): Boolean {
     if (url.isBlank()) return false
     val clean = url.substringBefore('?').substringBefore('#').lowercase()
-    if (listOf(".mp4", ".mkv", ".m3u8", ".webm", ".avi", ".ts").any { clean.endsWith(it) }) return true
-    // dl.plutomovies.com names files with the extension as the final hyphen
-    // token, no dot (...vincenzo-s01e19-mp4, ...all-american-s07e01-mkv —
-    // live-verified 2026-08-22). Without this the engine misroutes finished
-    // pluto downloads as embed pages and the registry re-fetches the file.
-    return listOf("-mp4", "-mkv", "-webm", "-avi").any { clean.endsWith(it) }
+    val exts = com.anonrode.downloader.data.rules.DynamicRulesManager.getDirectMediaExtensions()
+    return exts.any { clean.endsWith(it) }
 }
 
 fun isRootLockerDomain(url: String): Boolean {
