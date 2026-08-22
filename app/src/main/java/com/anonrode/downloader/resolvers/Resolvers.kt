@@ -73,7 +73,7 @@ object ResolverRegistry {
                     // re-claims a clean media path (its final answer).
                     if (direct != trimmed && depth < RESOLVE_DEPTH_LIMIT) {
                         val path = direct.substringBefore('?').substringBefore('#').lowercase()
-                        val mediaPath = listOf(".mkv", ".mp4", ".webm", ".avi", ".m3u8", ".ts").any { path.endsWith(it) }
+                        val mediaPath = isDirectMediaUrl(path)
                         val sameResolverReclaims = resolver.canResolve(direct)
                         if (!(sameResolverReclaims && mediaPath)) {
                             val deeper = resolve(direct, quality, depth + 1)
@@ -700,7 +700,27 @@ object PlutoMoviesResolver : BaseResolver {
                 if (href.isNotBlank() && !href.equals(url, ignoreCase = true) && !isRootLockerDomain(href)) return href
             }
 
-            return findDirectMediaUrl(html)
+            findDirectMediaUrl(html)?.let { return it }
+
+            // Directory pages expose no download link at all — only links to
+            // child /series/ pages. Descend into the most specific child and
+            // let the registry recursion walk hub → season → episode page →
+            // dl anchor instead of failing cleanly (live-verified 2026-08-22:
+            // /series/324767/all-american-2018-tv-series → season-7 listing →
+            // s07-e01 → dl.plutomovies.com/...-mkv).
+            val children = soup.select("a[href*='/series/']")
+                .map { it.attr("abs:href").substringBefore('#') }
+                .filter { href -> href.isNotBlank() && !href.equals(url, ignoreCase = true) }
+                .distinct()
+            if (children.isNotEmpty()) {
+                val episodeish = children.firstOrNull { child ->
+                    child.contains(Regex("""s\d{1,2}[-_]?e\d{1,2}|episode-\d{1,3}""", RegexOption.IGNORE_CASE))
+                }
+                val seasonish = children.firstOrNull { child ->
+                    child.contains(Regex("""season-\d{1,2}""", RegexOption.IGNORE_CASE))
+                }
+                return episodeish ?: seasonish ?: children.first()
+            }
         } catch (_: Exception) {}
         return null
     }
@@ -1307,7 +1327,12 @@ private fun extractMp4FromHtml(html: String): String? {
 fun isDirectMediaUrl(url: String): Boolean {
     if (url.isBlank()) return false
     val clean = url.substringBefore('?').substringBefore('#').lowercase()
-    return listOf(".mp4", ".mkv", ".m3u8", ".webm", ".avi", ".ts").any { clean.endsWith(it) }
+    if (listOf(".mp4", ".mkv", ".m3u8", ".webm", ".avi", ".ts").any { clean.endsWith(it) }) return true
+    // dl.plutomovies.com names files with the extension as the final hyphen
+    // token, no dot (...vincenzo-s01e19-mp4, ...all-american-s07e01-mkv —
+    // live-verified 2026-08-22). Without this the engine misroutes finished
+    // pluto downloads as embed pages and the registry re-fetches the file.
+    return listOf("-mp4", "-mkv", "-webm", "-avi").any { clean.endsWith(it) }
 }
 
 fun isRootLockerDomain(url: String): Boolean {
