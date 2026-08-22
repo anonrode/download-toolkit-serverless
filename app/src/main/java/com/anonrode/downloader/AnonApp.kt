@@ -50,6 +50,7 @@ class AnonApp : Application(), ImageLoaderFactory {
         com.anonrode.downloader.util.CrashHandler.install(this)
         appScope.launch {
             try {
+                maybeSyncRules()
                 initMutex.withLock {
                     if (ytdlpReady) return@withLock
                     try {
@@ -64,6 +65,22 @@ class AnonApp : Application(), ImageLoaderFactory {
             } catch (t: Throwable) {
                 Log.e("AnonApp", "Background initialization error", t)
             }
+        }
+    }
+
+    private suspend fun maybeSyncRules() {
+        try {
+            val prefs = getSharedPreferences("anon_serverless_prefs", Context.MODE_PRIVATE)
+            val last = prefs.getLong(KEY_LAST_RULES_SYNC, 0L)
+            val now = System.currentTimeMillis()
+            if (now - last < UPDATE_INTERVAL_MS) return
+            val (ok, ver) = com.anonrode.downloader.data.rules.DynamicRulesManager.syncFromGitHub(this)
+            if (ok) {
+                prefs.edit().putLong(KEY_LAST_RULES_SYNC, now).apply()
+                Log.i("AnonApp", "Auto-synced scraper rules: $ver")
+            }
+        } catch (t: Throwable) {
+            Log.w("AnonApp", "Auto-sync scraper rules failed, keeping cached/bundled rules", t)
         }
     }
 
@@ -110,6 +127,7 @@ class AnonApp : Application(), ImageLoaderFactory {
         private val appScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
         private val initMutex = Mutex()
 
+        private const val KEY_LAST_RULES_SYNC = "last_rules_sync"
         private const val KEY_LAST_YTDLP_UPDATE = "last_ytdlp_update"
         private const val UPDATE_INTERVAL_MS = 24L * 60 * 60 * 1000
 

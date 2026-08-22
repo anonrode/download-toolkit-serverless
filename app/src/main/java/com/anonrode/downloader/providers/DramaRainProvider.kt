@@ -51,22 +51,17 @@ object DramaRainProvider : SiteProvider {
 
             if (results.isEmpty()) {
                 val slug = query.trim().lowercase().replace(Regex("[^a-z0-9]+"), "-")
-                // The site's own ?s= search is broken server-side ("Nothing
-                // Found" even for titles its sidebar links to), so slug
-                // guessing IS the search. Show slugs carry a category suffix
-                // (hidden-love-chinese-drama, love-destiny-thai-drama — both
-                // live-verified 200 on 2026-08-22); without these candidates
-                // every C-drama/Thai title fell through to zero results.
-                val candidateUrls = listOf(
-                    "$mainUrl/$slug/",
-                    "$mainUrl/$slug-chinese-drama/",
-                    "$mainUrl/$slug-thai-drama/",
-                    "$mainUrl/$slug-japanese-drama/",
-                    "$mainUrl/$slug-philippines-drama/",
-                    "$mainUrl/drama/$slug/",
-                    "$mainUrl/$slug-korean-drama/",
-                    "$mainUrl/$slug-season-1/"
+                val cfg = DynamicRulesManager.getSiteConfig(name)
+                val suffixes = if (!cfg?.slugSuffixes.isNullOrEmpty()) cfg!!.slugSuffixes else listOf(
+                    "",
+                    "-chinese-drama",
+                    "-thai-drama",
+                    "-japanese-drama",
+                    "-philippines-drama",
+                    "-korean-drama",
+                    "-season-1"
                 )
+                val candidateUrls = suffixes.map { "$mainUrl/$slug$it/".replace("//", "/") } + listOf("$mainUrl/drama/$slug/")
 
                 for (url in candidateUrls) {
                     val directHtml = HttpClient.getText(url, tag = "search") ?: continue
