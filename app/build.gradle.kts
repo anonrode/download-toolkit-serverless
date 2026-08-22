@@ -121,4 +121,10 @@ dependencies {
     testImplementation("org.json:json:20240303")
     // MockWebServer for engine tests: flaky-connection, retry, and resume scenarios.
     testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
+
+    // Instrumented smoke tests (emulator in CI): Compose UI testing
+    androidTestImplementation(composeBom)
+    androidTestImplementation("androidx.compose.ui:ui-test-junit4")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test:runner:1.6.2")
 }
