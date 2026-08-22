@@ -530,7 +530,10 @@ object YoutubeDlDownloader {
             // timeout burned a minute per dead tracker before.
             "--bt-tracker-connect-timeout=10",
             "--bt-tracker-timeout=10",
-            "--file-allocation=falloc",
+            // Torrents allocate lazily: falloc reserves the FULL torrent size
+            // the instant a magnet starts (8GB+ season = instant storage shock,
+            // and a big hole if the swarm is dead). Sparse growth costs nothing.
+            "--file-allocation=${if (isMagnet) "none" else "falloc"}",
             "--check-certificate=false",
             "--continue=true",
             "--max-tries=10",

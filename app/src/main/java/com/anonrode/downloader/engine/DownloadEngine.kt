@@ -330,10 +330,14 @@ class DownloadEngine(
         HttpClient.cancelInFlight()
         com.anonrode.downloader.util.DebugLog.user("cancel $taskId")
         if (task != null) {
-            // Remove every partial artifact so cancelled downloads cannot leave orphaned files
+            // Remove every partial artifact so cancelled downloads cannot leave orphaned files.
+            // deleteRecursively: multi-file torrents write a DIRECTORY, and File.delete()
+            // silently refuses non-empty dirs — canceled season torrents left their
+            // preallocated gigabytes behind (user-reported 2026-08-22: 8GB+ stuck after
+            // cancel of a magnet with a dead swarm).
             try {
                 val target = File(task.filePath)
-                target.delete()
+                target.deleteRecursively()
                 File(task.filePath + ".part").delete()
                 File(task.filePath + ".ytdl").delete()
                 File(task.filePath + ".aria2").delete()
@@ -1119,7 +1123,13 @@ class DownloadEngine(
                         // nothing moved, the stream is dead — do not relaunch.
                         val totalBytesNow = disk + parsed
                         if (startBytes == null) startBytes = totalBytesNow
-                        val zombie = now - watchdogStart > STALL_TIMEOUT_MS * 4 &&
+                        // Torrents bootstrap slowly: DHT/tracker discovery and
+                        // metadata fetch routinely take 1-3 minutes with <64KiB
+                        // moved (live log 2026-08-22: magnet killed at 93s with
+                        // crawl=true before the swarm ever flowed). Give magnet
+                        // tasks a much longer leash and skip the crawl/stall kill.
+                        val magnetTask = streamUrl.startsWith("magnet:", ignoreCase = true)
+                        val zombie = now - watchdogStart > STALL_TIMEOUT_MS * (if (magnetTask) 20 else 4) &&
                             (totalBytesNow - (startBytes ?: totalBytesNow)) < 1L * 1024 * 1024
                         // Rate-drop: after a full 30s at under 40% of the task's
                         // best window speed (when that best was a real burst) the
@@ -1148,7 +1158,8 @@ class DownloadEngine(
                         // disk) for a full minute is stalled: kill the backend so
                         // the retry wrapper relaunches it (fresh token/edge on
                         // re-resolve), and eventually FAILED instead of hanging.
-                        if (now - lastActivity > STALL_TIMEOUT_MS || crawlStalled || throttled) {
+                        // Magnets are exempt — peer discovery is legitimately quiet.
+                        if (!magnetTask && (now - lastActivity > STALL_TIMEOUT_MS || crawlStalled || throttled)) {
                             stallKills++
                             com.anonrode.downloader.util.DebugLog.engine(
                                 "task=${task.id} watchdog kill #$stallKills (idle=${(now - lastActivity) / 1000}s crawl=$crawlStalled throttled=$throttled window=${(moved / 1024).toInt()}KiB best=${(bestWindowBps / 1024).toInt()}KiB/s)"
