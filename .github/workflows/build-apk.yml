@@ -64,6 +64,11 @@ jobs:
         with:
           gradle-version: '8.8'
 
+      - name: Grant KVM access (emulator acceleration)
+        run: |
+          sudo chmod 666 /dev/kvm || true
+          ls -l /dev/kvm
+
       - name: Run Instrumented Smoke Tests (emulator)
         uses: reactivecircus/android-emulator-runner@v2
         with:
@@ -71,6 +76,7 @@ jobs:
           arch: x86_64
           target: google_apis
           force-avd-creation: false
+          disable-linux-hw-accel: false
           script: gradle :app:connectedDebugAndroidTest --no-daemon
 
       - name: Upload Instrumented Test Results
