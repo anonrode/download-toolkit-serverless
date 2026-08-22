@@ -61,7 +61,11 @@ object DramaRainProvider : SiteProvider {
                     "-korean-drama",
                     "-season-1"
                 )
-                val candidateUrls = suffixes.map { "$mainUrl/$slug$it/".replace("//", "/") } + listOf("$mainUrl/drama/$slug/")
+                // trimEnd('/') avoids the double-slash collision without
+                // touching the scheme — the old .replace("//","/") mangled
+                // https:// -> https:/ (seen in the 2026-08-22 activity log).
+                val base = mainUrl.trimEnd('/')
+                val candidateUrls = suffixes.map { "$base/$slug$it/" } + listOf("$base/drama/$slug/")
 
                 for (url in candidateUrls) {
                     val directHtml = HttpClient.getText(url, tag = "search") ?: continue
