@@ -17,49 +17,61 @@ object NkiriProvider : SiteProvider {
 
     override suspend fun search(query: String): List<ShowCard> {
         val results = mutableListOf<ShowCard>()
-        try {
-            val encoded = URLEncoder.encode(query, "UTF-8")
-            val searchUrl = "$mainUrl/?s=$encoded"
-            val html = HttpClient.getText(searchUrl, referer = "$mainUrl/", tag = "search")
-            if (!html.isNullOrBlank()) {
-                val doc = Jsoup.parse(html, searchUrl)
-                val articles = doc.select("article, .post-item, .elementor-post, h2.entry-title a")
+        val encoded = URLEncoder.encode(query, "UTF-8")
+        // Failover: the original IP (80.82.65.46) is ISP-blocked on some
+        // networks while the Cloudflare mirror works — try each host in order
+        // (live-verified 2026-08-22: thenkiri.com full catalog, nkiri.top
+        // partial but reachable everywhere).
+        for (base in DynamicRulesManager.getBaseUrls(name)) {
+            if (base.isBlank()) continue
+            try {
+                val searchUrl = "$base/?s=$encoded"
+                val html = HttpClient.getText(searchUrl, referer = "$base/", tag = "search")
+                if (!html.isNullOrBlank()) {
+                    val doc = Jsoup.parse(html, searchUrl)
+                    val articles = doc.select("article, .post-item, .elementor-post, h2.entry-title a")
 
-                for (art in articles) {
-                    val linkElem = if (art.tagName() == "a") art else art.selectFirst("h2 a, .entry-title a, a")
-                    if (linkElem == null) continue
-                    val title = linkElem.text().trim()
-                    val rawLink = linkElem.attr("abs:href").ifBlank { linkElem.attr("href") }
-                    val link = rawLink.substringBefore("?")
+                    for (art in articles) {
+                        val linkElem = if (art.tagName() == "a") art else art.selectFirst("h2 a, .entry-title a, a")
+                        if (linkElem == null) continue
+                        val title = linkElem.text().trim()
+                        val rawLink = linkElem.attr("abs:href").ifBlank { linkElem.attr("href") }
+                        val link = rawLink.substringBefore("?")
 
-                    if (link.isBlank() || title.isBlank() || link.contains("/category/") || link.contains("/how-to-") || link.contains("/page/")) {
-                        continue
-                    }
+                        if (link.isBlank() || title.isBlank() || link.contains("/category/") || link.contains("/how-to-") || link.contains("/page/")) {
+                            continue
+                        }
 
-                    val posterElem = art.selectFirst("img")
-                    val poster = posterElem?.attr("abs:src")?.ifBlank { posterElem.attr("src") } ?: ""
+                        val posterElem = art.selectFirst("img")
+                        val poster = posterElem?.attr("abs:src")?.ifBlank { posterElem.attr("src") } ?: ""
 
-                    val lowerTitle = title.lowercase()
-                    val cat = when {
-                        lowerTitle.contains("korean") || lowerTitle.contains("kdrama") || lowerTitle.contains("c-drama") || lowerTitle.contains("drama") || lowerTitle.contains("series") || lowerTitle.contains("season") -> "Asian Drama"
-                        lowerTitle.contains("nollywood") || lowerTitle.contains("yoruba") -> "Nollywood"
-                        else -> "Asian Drama & Movies"
-                    }
+                        val lowerTitle = title.lowercase()
+                        val cat = when {
+                            lowerTitle.contains("korean") || lowerTitle.contains("kdrama") || lowerTitle.contains("c-drama") || lowerTitle.contains("drama") || lowerTitle.contains("series") || lowerTitle.contains("season") -> "Asian Drama"
+                            lowerTitle.contains("nollywood") || lowerTitle.contains("yoruba") -> "Nollywood"
+                            else -> "Asian Drama & Movies"
+                        }
 
-                    if (results.none { it.url == link }) {
-                        results.add(
-                            ShowCard(
-                                title = title,
-                                url = link,
-                                posterUrl = poster,
-                                site = name,
-                                category = cat
+                        if (results.none { it.url == link }) {
+                            results.add(
+                                ShowCard(
+                                    title = title,
+                                    url = link,
+                                    posterUrl = poster,
+                                    site = name,
+                                    category = cat
+                                )
                             )
-                        )
+                        }
                     }
                 }
+            } catch (_: Exception) {}
+            // A host that answered with content is authoritative — the mirror
+            // only kicks in when the primary is unreachable or empty.
+            if (results.isNotEmpty() || base == DynamicRulesManager.getBaseUrls(name).last()) {
+                break
             }
-        } catch (_: Exception) {}
+        }
         return results
     }
 
