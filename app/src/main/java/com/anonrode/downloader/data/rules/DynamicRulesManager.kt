@@ -49,6 +49,7 @@ object DynamicRulesManager {
     )
 
     private val activeDomains = mutableMapOf<String, String>().apply { putAll(defaultDomains) }
+    private val activeMirrors = mutableMapOf<String, List<String>>()
     private val activeSiteConfigs = mutableMapOf<String, SiteRuleConfig>()
     private val activeResolverConfigs = mutableMapOf<String, JSONObject>()
     private val activeMediaExtensions = mutableListOf<String>().apply { addAll(defaultMediaExtensions) }
@@ -69,6 +70,16 @@ object DynamicRulesManager {
 
     fun getBaseUrl(site: String): String {
         return activeDomains[site.lowercase()] ?: defaultDomains[site.lowercase()] ?: ""
+    }
+
+    /** Primary + mirror hosts for a site, in failover order. Providers that
+     *  can retry (e.g. nkiri's original IP is ISP-blocked on some networks
+     *  while its Cloudflare mirror works) iterate this list. */
+    fun getBaseUrls(site: String): List<String> {
+        val key = site.lowercase()
+        val primary = getBaseUrl(key)
+        val mirrors = activeMirrors[key] ?: emptyList()
+        return listOf(primary) + mirrors.filter { it.isNotBlank() && it != primary }
     }
 
     fun getSiteConfig(site: String): SiteRuleConfig? {
@@ -122,6 +133,23 @@ object DynamicRulesManager {
                     val url = domainsObj.optString(k)
                     if (url.isNotBlank()) {
                         activeDomains[k.lowercase()] = url
+                    }
+                }
+            }
+
+            val mirrorsObj = obj.optJSONObject("mirrors")
+            if (mirrorsObj != null) {
+                val keys = mirrorsObj.keys()
+                while (keys.hasNext()) {
+                    val k = keys.next()
+                    val arr = mirrorsObj.optJSONArray(k)
+                    if (arr != null) {
+                        val list = mutableListOf<String>()
+                        for (i in 0 until arr.length()) {
+                            val m = arr.optString(i)
+                            if (m.isNotBlank()) list.add(m)
+                        }
+                        activeMirrors[k.lowercase()] = list
                     }
                 }
             }

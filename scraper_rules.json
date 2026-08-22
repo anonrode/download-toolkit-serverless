@@ -1,7 +1,7 @@
 {
-  "version": "2026.08.22.3",
+  "version": "2026.08.22.4",
   "domains": {
-    "nkiri": "https://nkiri.top",
+    "nkiri": "https://thenkiri.com",
     "dramakey": "https://dramakey.com",
     "asianc": "https://asianc.id",
     "anitaku": "https://anitaku.com.ro",
@@ -12,6 +12,11 @@
     "naijaprey": "https://www.naijaprey.tv",
     "nepu": "https://nepu.gd",
     "torrents": "https://apibay.org"
+  },
+  "mirrors": {
+    "nkiri": [
+      "https://nkiri.top"
+    ]
   },
   "sites": {
     "pluto": {

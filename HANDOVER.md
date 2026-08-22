@@ -3,8 +3,8 @@
 **Target Codebase:** `C:\Users\Anon\download-toolkit-serverless` (Android / Kotlin / Jetpack Compose / OkHttp / libaria2c / youtubedl-android)
 **Reference Python Monolith:** `C:\Users\Anon\download-toolkit` (`src/downloader.py`, `src/resolvers.py`, `src/extractors/`) — **the battle-tested reference; the Kotlin app is a port of it, and porting infidelities are the #1 bug source.**
 **Operating Charter:** `.agents/AGENTS.md` (Permanent source of truth — never delete)
-**Status:** Latest push `689ffee` — CI ✅ green. Local commits `33b0c73` (OTA rules), `a53c513` (m3u8 fix), + nkiri/anitaku fixes — **NOT pushed** (user: commit only).
-**This file replaces the previous handover (which stopped at `de0a67e`). Last updated: 2026-08-22 ~13:30 UTC+1.**
+**Status:** Latest push `689ffee` — CI ✅ green. Local commits `33b0c73` (OTA rules), `a53c513` (m3u8 fix), `5c6468b` (nkiri/anitaku/asianc), `c37c2d8` (yt-dlp referer split), plus nkiri host failover (pending commit) — **NOT pushed** (user: commit only).
+**This file replaces the previous handover (which stopped at `de0a67e`). Last updated: 2026-08-22 ~14:30 UTC+1.**
 
 ## 📊 Verification suite (2026-08-22, 50-title × 11 sites)
 
