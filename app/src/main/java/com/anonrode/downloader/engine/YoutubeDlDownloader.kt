@@ -91,8 +91,11 @@ object YoutubeDlDownloader {
         // Token-locked HLS CDNs (vidsrc family, live-verified) reject segment
         // requests that carry ANY Referer with 403 while serving them fine
         // without one — and the rewritten playlist was validated exactly that
-        // way. A rewritten master therefore runs referer-free.
-        val effReferer = if (hlsMasterFile != null) "" else referer
+        // way. A rewritten master therefore runs referer-free, EXCEPT for the
+        // anitaku CDNs (cdn.watching.onl / fntb0.anivideo.sbs) which are the
+        // inverse: they 403 every request that does NOT carry exactly
+        // https://megaplay.buzz/ (live-verified 2026-08-22).
+        val effReferer = if (hlsMasterFile != null && !requiresExplicitReferer(referer)) "" else referer
 
         val height = when (quality.lowercase()) {
             "480p", "480" -> 480
@@ -671,5 +674,11 @@ object YoutubeDlDownloader {
             return libFile
         }
         return null
+    }
+
+    /** CDN families that 403 WITHOUT an exact referer (inverse of the
+     *  referer-suppression family) — rewritten-master runs must keep it. */
+    private fun requiresExplicitReferer(referer: String): Boolean {
+        return referer.equals("https://megaplay.buzz/", ignoreCase = true)
     }
 }
