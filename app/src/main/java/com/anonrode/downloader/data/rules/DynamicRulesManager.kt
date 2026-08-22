@@ -31,7 +31,7 @@ object DynamicRulesManager {
     private const val CACHE_FILE = "dynamic_scraper_rules.json"
 
     private val defaultDomains = mapOf(
-        "nkiri" to "https://thenkiri.com",
+        "nkiri" to "https://nkiri.top",
         "dramakey" to "https://dramakey.com",
         "asianc" to "https://asianc.id",
         "anitaku" to "https://anitaku.com.ro",

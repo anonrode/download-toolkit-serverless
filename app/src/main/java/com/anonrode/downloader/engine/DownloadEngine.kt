@@ -482,11 +482,13 @@ class DownloadEngine(
             // unplayable file (monolith parity, downloader.py get_referer_for_url).
             low.contains("vidbasic") || low.contains("vidb") || low.contains("jisooido") -> "https://vidb.top/"
             low.contains("tamilembed") || low.contains("animesama") || low.contains("kickassanime") -> "https://anitaku.com.ro/"
-            low.contains("megap.") -> "https://megaplay.buzz/"
+            low.contains("megap.") || low.contains("watching.onl") || low.contains("anivideo.sbs") -> "https://megaplay.buzz/"
             low.contains("blogger.com") -> "https://anitaku.com.ro/"
             low.contains("googlevideo") -> "https://www.blogger.com/"
             low.contains("pluto") || low.contains("kissorgrab.com") -> "https://plutomovies.com/"
-            low.contains("thenkiri") || low.contains("nkiri") -> "https://thenkiri.com/"
+            // nkiri moved to the Cloudflare-fronted mirror nkiri.top (the
+            // original IP 80.82.65.46 is network-blocked on some ISPs)
+            low.contains("thenkiri") || low.contains("nkiri") -> "https://nkiri.top/"
             low.contains("9jarocks") || low.contains("loadedfiles") -> "https://my9jarocks.bz/"
             low.contains("naijavault") || low.contains("vikingfile") || low.contains("lulacloud") -> "https://www.naijavault.com/"
             low.contains("naijaprey") -> "https://www.naijaprey.tv/"
