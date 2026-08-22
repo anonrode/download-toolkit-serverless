@@ -1001,7 +1001,12 @@ class DownloadEngine(
 
                 // kissorgrab.com rejects multi-connection downloads; force a single
                 // socket there (monolith parity, downloader.py aria2c forced 1/1).
-                val effectiveSockets = if (streamUrl.lowercase().contains("kissorgrab.com")) 1 else task.parallelSockets
+                // dl.plutomovies.com redirects to kissorgrab (live-verified 2026-08-22
+                // activity log: turbo 16-socket → redirect → kissorgrab kills multi → fail
+                // → yt-dlp rescue → "Unsupported URL" on -mkv → loop).
+                val effectiveSockets = if (streamUrl.lowercase().let { u ->
+                        u.contains("kissorgrab.com") || u.contains("dl.plutomovies.com")
+                    }) 1 else task.parallelSockets
 
                 coroutineContext.ensureActive()
                 // Persist the resolved URL only when it's genuinely downloadable.
