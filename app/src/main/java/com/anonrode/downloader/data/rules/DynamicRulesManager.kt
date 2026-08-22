@@ -27,8 +27,15 @@ data class SiteRuleConfig(
 
 object DynamicRulesManager {
 
-    private const val RULES_URL = "https://raw.githubusercontent.com/anonrode/download-toolkit-serverless/master/scraper_rules.json"
-    private const val CACHE_FILE = "dynamic_scraper_rules.json"
+    // OTA rules are AES-128-CBC encrypted so the scraping logic is not
+    // readable from the GitHub repo (site owners watching the repo see
+    // ciphertext). Key/IV ship in the APK — this is obfuscation-grade
+    // protection, NOT strong security: a determined reverse engineer can
+    // extract them. Keep the key/IV in sync with probe/encrypt_rules.py.
+    private const val RULES_KEY_HEX = "8f3a9c21d4e65b0789a2c4f6d1e3b5a7"
+    private const val RULES_IV_HEX = "5b7e9d2f4a6c8e10f3a5c7d9b1e2f4a6"
+    private const val RULES_URL = "https://raw.githubusercontent.com/anonrode/download-toolkit-serverless/master/scraper_rules.json.enc"
+    private const val CACHE_FILE = "dynamic_scraper_rules.enc"
 
     private val defaultDomains = mapOf(
         "nkiri" to "https://nkiri.top",
@@ -63,7 +70,8 @@ object DynamicRulesManager {
             val file = File(context.filesDir, CACHE_FILE)
             if (file.exists()) {
                 val raw = file.readText()
-                parseRulesJson(raw)
+                val plain = decryptRules(raw) ?: raw  // old plaintext cache still parses
+                parseRulesJson(plain)
             }
         } catch (_: Exception) {}
     }
@@ -105,16 +113,41 @@ object DynamicRulesManager {
                 return@withContext Pair(false, "Could not reach GitHub rules repository")
             }
 
-            if (!parseRulesJson(jsonStr)) {
+            // Payload is base64(AES-CBC) — decrypt before parsing.
+            val plain = decryptRules(jsonStr)
+            if (plain == null) {
+                return@withContext Pair(false, "Rules payload failed to decrypt — keeping bundled defaults")
+            }
+            if (!parseRulesJson(plain)) {
                 return@withContext Pair(false, "Rules payload failed to parse — keeping bundled defaults")
             }
 
             val file = File(context.filesDir, CACHE_FILE)
-            file.writeText(jsonStr)
+            file.writeText(jsonStr)  // cache stays encrypted
 
             Pair(true, _version.value)
         } catch (t: Throwable) {
             Pair(false, t.message ?: "Failed to sync rules")
+        }
+    }
+
+    private fun hexToBytes(hex: String): ByteArray {
+        return ByteArray(hex.length / 2) { i ->
+            hex.substring(i * 2, i * 2 + 2).toInt(16).toByte()
+        }
+    }
+
+    /** Decrypts base64(AES-128-CBC-PKCS5) -> JSON text; null on any failure. */
+    private fun decryptRules(b64: String): String? {
+        return try {
+            val key = SecretKeySpec(hexToBytes(RULES_KEY_HEX), "AES")
+            val iv = IvParameterSpec(hexToBytes(RULES_IV_HEX))
+            val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
+            cipher.init(Cipher.DECRYPT_MODE, key, iv)
+            val data = Base64.decode(b64.trim(), Base64.DEFAULT)
+            String(cipher.doFinal(data), Charsets.UTF_8)
+        } catch (_: Exception) {
+            null
         }
     }
 

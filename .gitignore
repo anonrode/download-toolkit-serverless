@@ -1,0 +1,2 @@
+# OTA rules plaintext stays local — only the encrypted payload is committed
+scraper_rules.json
