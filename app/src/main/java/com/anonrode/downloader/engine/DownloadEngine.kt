@@ -756,8 +756,21 @@ class DownloadEngine(
      *
      * Returns the rewritten master file (null = original URL is fine), and
      * throws a user-facing message when the stream is unreachable.
+     *
+     * Also runs the Segment-Sampling Estimator (measured segment sizes, not
+     * BANDWIDTH tags) and exposes the predicted total through
+     * [estimatedTotalBytes] — a one-element out-holder (0 = no estimate) —
+     * for future progress plumbing. The estimate is diagnostic-only: its
+     * every failure logs hls-size-estimate=null and never disturbs the
+     * preflight outcome.
      */
-    private suspend fun preflightHls(context: Context, taskId: String, masterUrl: String, referer: String?): File? {
+    private suspend fun preflightHls(
+        context: Context,
+        taskId: String,
+        masterUrl: String,
+        referer: String?,
+        estimatedTotalBytes: LongArray = LongArray(1)
+    ): File? {
         val cacheDir = File(context.cacheDir, "hls").apply { mkdirs() }
         val created = mutableListOf<File>()
         var currentUrl = masterUrl
@@ -829,10 +842,18 @@ class DownloadEngine(
                         val vSeg = variant.lineSequence().map { it.trim() }
                             .firstOrNull { it.isNotBlank() && !it.startsWith("#") }
                         if (vSeg != null) probeUrl = resolveSegmentUrl(vUrl, vSeg)
+                        // Segment-Sampling Estimator: measure real segment
+                        // sizes instead of trusting BANDWIDTH tags.
+                        // Runs on the first variant only (the one yt-dlp
+                        // will consume by default).
+                        runSizeEstimate(taskId, playlist, currentUrl, vUrl, referer, estimatedTotalBytes)
                     }
                 }
             } else {
                 probeUrl = firstResolved
+                // The URL is a media playlist itself (single-variant stream):
+                // estimate directly on it.
+                runSizeEstimate(taskId, playlist, currentUrl, currentUrl, referer, estimatedTotalBytes)
             }
         }
 
@@ -853,6 +874,36 @@ class DownloadEngine(
             }
         }
         return masterFile
+    }
+
+    /**
+     * Segment-Sampling Estimator hook: probe a few real segments and log the
+     * HLS size estimate (hls-size-estimate=...). Purely diagnostic — every
+     * failure yields null and never disturbs preflightHls' outcome.
+     */
+    private suspend fun runSizeEstimate(
+        taskId: String,
+        masterText: String,
+        masterUrl: String,
+        variantUrl: String,
+        referer: String?,
+        estimatedTotalBytes: LongArray
+    ) {
+        val estimate = try {
+            HlsSizeEstimator.estimate(masterText, masterUrl, variantUrl, referer)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            null
+        }
+        estimatedTotalBytes[0] = estimate ?: 0L
+        com.anonrode.downloader.util.DebugLog.resolve(
+            if (estimate != null) {
+                "task=$taskId hls-size-estimate=$estimate (${estimate / (1024 * 1024)} MiB)"
+            } else {
+                "task=$taskId hls-size-estimate=null (no estimate)"
+            }
+        )
     }
 
     /**
@@ -1204,9 +1255,13 @@ class DownloadEngine(
                 // Also returns a locally rewritten master (scheme-relative
                 // segment URLs fixed to absolute https) for yt-dlp to consume.
                 var hlsMasterFile: File? = null
+                // Out-holder for the preflight's HLS size estimate (bytes,
+                // 0 = none). Kept current across every preflight invocation
+                // so a future consumer always sees the latest estimate.
+                val hlsSizeEstimate = LongArray(1)
                 if (finalBackend == "yt-dlp" && isHlsStream) {
                     try {
-                        hlsMasterFile = preflightHls(context, task.id, streamUrl, refererToPass)
+                        hlsMasterFile = preflightHls(context, task.id, streamUrl, refererToPass, hlsSizeEstimate)
                     } catch (e: StaleStreamLinkException) {
                         // A persisted HLS URL carries a token that dies within
                         // hours — and the router trusts .m3u8 as "already
@@ -1225,7 +1280,7 @@ class DownloadEngine(
                                 directUrl = if (isDirectMediaUrl(streamUrl) || isProvablyDirectFile(streamUrl)) streamUrl else t.directUrl
                             )
                         }
-                        hlsMasterFile = preflightHls(context, task.id, streamUrl, getRefererForUrl(streamUrl))
+                        hlsMasterFile = preflightHls(context, task.id, streamUrl, getRefererForUrl(streamUrl), hlsSizeEstimate)
                     }
                 }
 
@@ -1479,7 +1534,7 @@ class DownloadEngine(
                             var freshMaster: File? = null
                             if (isHlsStream) {
                                 try {
-                                    freshMaster = preflightHls(context, task.id, freshUrl, getRefererForUrl(freshUrl))
+                                    freshMaster = preflightHls(context, task.id, freshUrl, getRefererForUrl(freshUrl), hlsSizeEstimate)
                                 } catch (e: kotlinx.coroutines.CancellationException) {
                                     throw e
                                 } catch (e: Exception) {
