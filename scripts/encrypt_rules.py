@@ -50,11 +50,42 @@ SERVERLESS = REPO_ROOT
 KEY_PATH = os.environ.get("OTA_SIGNING_KEY_FILE") or os.path.join(
     os.path.dirname(REPO_ROOT), "download-toolkit", "ota_keys", "ota_signing_private_key.pem")
 
+# PUBLIC half of the OTA signing keypair (safe to commit — it can only
+# VERIFY, never sign). Matches the constant embedded in the app's
+# DynamicRulesManager; used by CI to validate the committed .enc.
+OTA_PUB_B64 = (
+    "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAELW5uNxiti768q9f1YPvjaMyd0b60W7tEn6hCCQBtu6YyguDIMtKvefov9uwD"
+    "0uN9JP0HKkYUJB1wSL3Q928+lQ=="
+)
+
 # --- strict schema guards (a bad payload must be rejected BEFORE commit) ---
 MAX_PLAINTEXT_BYTES = 512 * 1024
 MAX_SELECTOR_LEN = 600
 MAX_RULES_ARRAY = 64
 REQUIRED_TOP_KEYS_VERSIONED = ("version",)
+
+
+def verify_envelope(text: str, pub_b64: str = OTA_PUB_B64) -> bool:
+    """Authenticity check for CI/app parity: ECDSA-P256-SHA256 over the
+    payload string. False for unsigned envelopes, tampered payloads or
+    unknown keys. Raises SystemExit with a reason on invalid JSON."""
+    import base64 as b64
+    from cryptography.exceptions import InvalidSignature
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.primitives.serialization import load_der_public_key
+
+    env = json.loads(text.strip())
+    sig = env.get("sig")
+    if not sig:
+        raise SystemExit("UNSIGNED envelope — refused")
+    pub = load_der_public_key(b64.b64decode(pub_b64))
+    try:
+        pub.verify(b64.b64decode(env["sig"]), env["payload"].encode("ascii"),
+                   ec.ECDSA(hashes.SHA256()))
+        return True
+    except InvalidSignature:
+        raise SystemExit("SIGNATURE INVALID — payload tampered or wrong key")
 
 
 def validate_schema(plain: bytes) -> list:
