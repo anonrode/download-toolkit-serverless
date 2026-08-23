@@ -3,6 +3,7 @@ name: Build Native Android Release APK
 on:
   push:
     branches: [ master, main ]
+    tags: [ 'v*' ]
   workflow_dispatch:
 
 permissions:
@@ -126,19 +127,24 @@ jobs:
           path: app/build/outputs/apk/release/*.apk
 
       - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
+        # Only on version tags (v*): publish the APK under THAT tag name.
+        # Branch pushes keep building the APK as a CI artifact without
+        # clobbering releases (the old step hardcoded v3.0.0 and overwrote
+        # it on every push — why only v3.0.0 ever showed in Releases).
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v3.0.0
-          name: "Anon Downloader v3.0.0 (Serverless 100% On-Device Edition)"
+          tag_name: ${{ github.ref_name }}
+          name: "Anon Downloader ${{ github.ref_name }} (Serverless 100% On-Device Edition)"
           body: |
-            ## Anon Downloader — Serverless v3.0.0
-            
+            ## Anon Downloader — Serverless ${{ github.ref_name }}
+
             100% on-device drama scraping, episode search, stream resolution, and 16-socket parallel downloads directly on Android.
-            
+
             - **No VPS, No API Keys**: Scrapes and resolves NKiri, DramaKey, Pluto, 9jaRocks, Anitaku, and DramaRain locally with Jsoup.
             - **Fast Resumable Downloads**: Direct CDN downloads run on aria2c with 16 parallel sockets; file lockers use 1-socket protection.
-            - **Pure OLED Pitch-Black UI**: AMOLED seal aesthetic with zero electric blue.
+            - **Signed OTA Rules**: The scraping playbook ships encrypted + ECDSA-signed; tampered payloads are refused on-device.
+            - **Torrent Security Shield**: 7 layers incl. Android-executable blocking, PK/archive magic rejection, pre-enqueue validation.
           files: app/build/outputs/apk/release/*.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
