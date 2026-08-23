@@ -110,19 +110,25 @@ val a = if (item.tagName() == "a") item
     ): List<ShowCard> = withContext(Dispatchers.IO) {
         val slug = query.trim().lowercase().replace(Regex("[^a-z0-9]+"), "-").trim('-')
         val pattern = st.optString("pattern", "/{slug}{suffix}/")
+        val countries = st.optJSONArray("countries")?.let { arr ->
+            (0 until arr.length()).map { arr.optString(it) }
+        } ?: listOf("")
         val suffixes = st.optJSONArray("suffixes")?.let { arr ->
             (0 until arr.length()).map { arr.optString(it) }
         } ?: listOf("")
-        for (suffix in suffixes) {
-            val url = mainUrl.trimEnd('/') + pattern
-                .replace("{slug}", slug).replace("{suffix}", suffix)
-            val code = HttpClient.probe(url, timeoutMs = 8_000L, tag = "search-strategy")
-            if (code) {
-                // Slug exists: return it as a single strong candidate.
-                return@withContext listOf(ShowCard(
-                    title = query.trim().replaceFirstChar { it.uppercase() },
-                    url = url, posterUrl = "", site = siteName, category = ""
-                ))
+        for (country in countries) {
+            for (suffix in suffixes) {
+                val url = mainUrl.trimEnd('/') + pattern
+                    .replace("{country}", country)
+                    .replace("{slug}", slug).replace("{suffix}", suffix)
+                val code = HttpClient.probe(url, timeoutMs = 8_000L, tag = "search-strategy")
+                if (code) {
+                    // Slug exists: return it as a single strong candidate.
+                    return@withContext listOf(ShowCard(
+                        title = query.trim().replaceFirstChar { it.uppercase() },
+                        url = url, posterUrl = "", site = siteName, category = ""
+                    ))
+                }
             }
         }
         emptyList()
