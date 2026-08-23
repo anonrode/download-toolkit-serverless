@@ -128,6 +128,7 @@ object DynamicRulesManager {
     private val activeHostPolicies = mutableListOf<HostPolicyRule>()
     private val activeUrlTemplates = mutableMapOf<String, String>()
     private val activeKnownDead = mutableListOf<String>()
+    private val activeSearchStrategies = mutableMapOf<String, List<JSONObject>>()
     var tokenTtlMinutes: Long = 10
         private set
 
@@ -200,6 +201,11 @@ object DynamicRulesManager {
         activeUrlTemplates[site.lowercase()] ?: ""
 
     fun getTokenTtlMs(): Long = tokenTtlMinutes * 60_000L
+
+    /** Ordered OTA search strategies for a site (urlTemplate / rss / json /
+     *  slugGuess), empty when the playbook declares none. */
+    fun getSearchStrategies(site: String): List<JSONObject> =
+        activeSearchStrategies[site.lowercase()] ?: emptyList()
 
     suspend fun syncFromGitHub(context: Context): Pair<Boolean, String> = withContext(Dispatchers.IO) {
         try {
@@ -425,6 +431,24 @@ object DynamicRulesManager {
             }
 
             tokenTtlMinutes = obj.optLong("tokenTtlMinutes", 10L).coerceIn(1L, 240L)
+
+            // Ordered search strategy chains: when a site's primary search
+            // breaks (dramarain ?s= lesson), OTA adds fallback strategies as
+            // data — no APK rebuild.
+            val ssObj = obj.optJSONObject("searchStrategies")
+            if (ssObj != null) {
+                activeSearchStrategies.clear()
+                val keys = ssObj.keys()
+                while (keys.hasNext()) {
+                    val k = keys.next()
+                    val arr = ssObj.optJSONArray(k) ?: continue
+                    val list = mutableListOf<JSONObject>()
+                    for (i in 0 until arr.length()) {
+                        arr.optJSONObject(i)?.let { list.add(it) }
+                    }
+                    if (list.isNotEmpty()) activeSearchStrategies[k.lowercase()] = list
+                }
+            }
 
             // Parse any dynamic new providers added remotely
             val dynamicList = obj.optJSONArray("dynamic_providers")

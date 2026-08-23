@@ -1,0 +1,59 @@
+name: OTA Rules Conformance (manual)
+
+# Catches playbook decay (dead domains, changed selectors) BEFORE app users
+# hit it. MANUAL ONLY by design: it sends real requests to all configured
+# sites from GitHub's IPs, so it never runs on a schedule.
+# Non-blocking reporting job: results are artifacts + job log, failures do
+# not gate anything unless you pass --strict via run args.
+
+on:
+  workflow_dispatch:
+    inputs:
+      sites:
+        description: 'Comma-separated site keys (empty = all in playbook)'
+        required: false
+        default: ''
+      strict:
+        description: 'Fail the job when any stage fails'
+        type: boolean
+        required: false
+        default: false
+
+jobs:
+  conformance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install deps
+        run: pip install cryptography curl_cffi beautifulsoup4
+
+      - name: Run conformance against live sites
+        env:
+          CONFORMANCE_PUB_B64: ${{ secrets.CONFORMANCE_PUB_B64 }}
+        run: |
+          ARGS="--titles 1 --shows 3"
+          if [ -n "${{ github.event.inputs.sites }}" ]; then
+            for s in $(echo "${{ github.event.inputs.sites }}" | tr ',' ' '); do
+              ARGS="$ARGS --site $s"
+            done
+          fi
+          if [ "${{ github.event.inputs.strict }}" = "true" ]; then
+            ARGS="$ARGS --strict"
+          fi
+          python probe/conformance.py $ARGS
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: conformance-results
+          path: probe/results-conformance-*.jsonl
+          retention-days: 14
