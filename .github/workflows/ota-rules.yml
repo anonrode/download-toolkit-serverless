@@ -5,7 +5,8 @@ name: OTA Rules Pipeline
 # Design: the plaintext scraper_rules.json is deliberately NEVER committed
 # (secrecy — site owners watching the repo must not read the selectors), so
 # CI cannot regenerate the payload. Signing happens on the maintainer's
-# machine (probe/encrypt_rules.py + the local ota_keys keypair); this
+# machine (scripts/encrypt_rules.py + the local keypair in
+# ~/anon-serverless-app-maintenance-build/, outside both repos); this
 # workflow is the safety gate that proves the committed .enc is authentic
 # (ECDSA) and schema-valid BEFORE any app can sync it.
 #
