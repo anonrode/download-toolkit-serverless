@@ -35,10 +35,10 @@ object NaijaPreyProvider : SiteProvider {
                     // Category-page posts (/download-movies-xxx/) have no
                     // extractable media links — the RSS feed returns them as
                     // search results, but loadEpisodes filters them out and a
-                    // task would fail with "resolver chain EMPTY" (user-
-                    // reported in app-2026-08-6.txt: f3e46101, 2ef70fcd,
-                    // 4dce7e87 all failed on /download-movies-vxi/).
-                    if (Regex("""/download-(?:movies|series|tv|film|episode)""", RegexOption.IGNORE_CASE).containsMatchIn(link)) continue
+                    // task would fail with "resolver chain EMPTY". Anchor with
+                    // /?$ so real episode posts like /download-episode-1-of-.../ are not dropped.
+                    val isNavGarbage = Regex("""/(?:download-(?:movies|series|tv|film|episode)(?:-[a-z0-9]{1,4})?|series-download(?:-v\d+)?|downloader|how-to-download.*)/?$""", RegexOption.IGNORE_CASE)
+                    if (isNavGarbage.containsMatchIn(link)) continue
                     results.add(
                         ShowCard(
                             title = title,
