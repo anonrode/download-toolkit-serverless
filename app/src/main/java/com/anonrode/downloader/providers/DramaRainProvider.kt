@@ -16,6 +16,10 @@ object DramaRainProvider : SiteProvider {
     override val mainUrl: String get() = DynamicRulesManager.getBaseUrl(name)
 
     override suspend fun search(query: String): List<ShowCard> {
+        // OTA search-strategy chain runs first when the playbook declares
+        // one (dramarain's ?s= endpoint broke server-side; fallbacks are now
+        // OTA data, not code). Legacy path below stays as final fallback.
+        SearchStrategyRunner.run(name, query, mainUrl)?.let { return it }
         val results = mutableListOf<ShowCard>()
         try {
             val encoded = URLEncoder.encode(query, "UTF-8")
