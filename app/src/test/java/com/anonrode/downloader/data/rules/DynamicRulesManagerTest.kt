@@ -91,4 +91,127 @@ class DynamicRulesManagerTest {
         assertTrue(exts.contains(".m3u8"))
         assertTrue(exts.contains("-mkv"))
     }
+
+    // ---------------- v2 envelope: signature verification ----------------
+
+    /** Generates an ephemeral ECDSA P-256 pair, points the manager's verifier
+     *  at the new public key, returns the private key for signing. */
+    private fun withEphemeralSigningKey(block: (sign: (String) -> String) -> Unit) {
+        val kpg = java.security.KeyPairGenerator.getInstance("EC")
+        kpg.initialize(java.security.spec.ECGenParameterSpec("secp256r1"))
+        val pair = kpg.generateKeyPair()
+        val pubB64 = java.util.Base64.getEncoder().encodeString(pair.public.encoded)
+        val original = DynamicRulesManager.rulesSigningPubB64
+        DynamicRulesManager.rulesSigningPubB64 = pubB64
+        try {
+            block { payloadB64 ->
+                val s = java.security.Signature.getInstance("SHA256withECDSA")
+                s.initSign(pair.private)
+                s.update(payloadB64.toByteArray(Charsets.US_ASCII))
+                java.util.Base64.getEncoder().encodeToString(s.sign())
+            }
+        } finally {
+            DynamicRulesManager.rulesSigningPubB64 = original
+        }
+    }
+
+    private fun envelopeJson(payloadB64: String, sig: String?): String {
+        val sigPart = if (sig != null) ",\"sig\":\"$sig\"" else ""
+        return "{\"v\":2,\"alg\":\"aes-128-cbc\",\"iv\":\"5b7e9d2f4a6c8e10f3a5c7d9b1e2f4a6\"," +
+            "\"payload\":\"$payloadB64\"$sigPart}"
+    }
+
+    @Test
+    fun signedEnvelope_roundTrips() {
+        withEphemeralSigningKey { sign ->
+            // Encrypt a tiny plaintext with the fixed test IV so the payload
+            // is deterministic; the point is the signature flow, not crypto.
+            val plain = """{"version":"sigtest"}"""
+            val key = javax.crypto.spec.SecretKeySpec(
+                hexToBytesTest("8f3a9c21d4e65b0789a2c4f6d1e3b5a7"), "AES")
+            val cipher = javax.crypto.Cipher.getInstance("AES/CBC/PKCS5Padding")
+            cipher.init(javax.crypto.Cipher.ENCRYPT_MODE, key,
+                javax.crypto.spec.IvParameterSpec(hexToBytesTest("5b7e9d2f4a6c8e10f3a5c7d9b1e2f4a6")))
+            val payloadB64 = java.util.Base64.getEncoder().encodeToString(
+                cipher.doFinal(plain.toByteArray(Charsets.UTF_8)))
+
+            val env = envelopeJson(payloadB64, sign(payloadB64))
+            val decrypted = DynamicRulesManager.decryptRules(env)
+            assertNotNull(decrypted)
+            assertTrue(decrypted!!.contains("sigtest"))
+        }
+    }
+
+    @Test
+    fun signedEnvelope_badSignatureRejected() {
+        withEphemeralSigningKey { _ ->
+            assertNull(DynamicRulesManager.decryptRules(
+                envelopeJson("AAAA", java.util.Base64.getEncoder().encodeToString(ByteArray(64))))
+            )
+        }
+    }
+
+    @Test
+    fun v2Envelope_withoutSignatureRejected() {
+        assertNull(DynamicRulesManager.decryptRules(envelopeJson("AAAA", null)))
+    }
+
+    @Test
+    fun tamperedPayloadFailsSignatureEvenWithStructurallyValidEnvelope() {
+        withEphemeralSigningKey { sign ->
+            val env = envelopeJson("AAAA", sign("DIFFERENT_PAYLOAD"))
+            assertNull(DynamicRulesManager.decryptRules(env))
+        }
+    }
+
+    // ---------------- playbook v2 fields ----------------
+
+    @Test
+    fun hostPolicies_otaRulesOverrideDefaults() {
+        DynamicRulesManager.parseRulesJson(
+            """
+            {
+              "version": "test.policies",
+              "hostPolicies": [
+                {"match": "anivideo.sbs", "referer": "none"},
+                {"match": "mycdn.example", "referer": "exact:https://origin.example/"}
+              ]
+            }
+            """.trimIndent()
+        )
+        // OTA rule overrides the built-in megaplay referer for anivideo.sbs.
+        assertEquals("", DynamicRulesManager.resolveReferer("https://fntb0.anivideo.sbs/hls/x.m3u8"))
+        // OTA exact rule resolves to its URL.
+        assertEquals("https://origin.example/",
+            DynamicRulesManager.resolveReferer("https://mycdn.example/file.mkv"))
+        // Built-in defaults still apply where no OTA rule matches.
+        assertEquals("https://my9jarocks.bz/",
+            DynamicRulesManager.resolveReferer("https://loadedfiles.xyz/d/f.mkv"))
+        assertEquals("https://megaplay.buzz/",
+            DynamicRulesManager.resolveReferer("https://megap.abc/stream"))
+        // Unknown host -> no referer.
+        assertEquals("", DynamicRulesManager.resolveReferer("https://unmatched.host/v.mp4"))
+    }
+
+    @Test
+    fun knownDeadAndUrlTemplatesParse() {
+        DynamicRulesManager.parseRulesJson(
+            """
+            {
+              "version": "test.dead",
+              "urlTemplates": {"nepu": "/watch/{media_type}/{id}"},
+              "knownDead": ["jisooido.top", "jiminido"],
+              "tokenTtlMinutes": 15
+            }
+            """.trimIndent()
+        )
+        assertTrue(DynamicRulesManager.isKnownDead("https://jisooido.top/hls/3rdplayer.m3u8"))
+        assertFalse(DynamicRulesManager.isKnownDead("https://lisaido.top/x.m3u8"))
+        assertEquals("/watch/{media_type}/{id}", DynamicRulesManager.getUrlTemplate("nepu"))
+        assertEquals("", DynamicRulesManager.getUrlTemplate("nkiri"))
+        assertEquals(15L * 60_000L, DynamicRulesManager.getTokenTtlMs())
+    }
 }
+
+private fun hexToBytesTest(hex: String): ByteArray =
+    ByteArray(hex.length / 2) { i -> hex.substring(i * 2, i * 2 + 2).toInt(16).toByte() }

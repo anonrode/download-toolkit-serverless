@@ -1,0 +1,62 @@
+name: OTA Rules Pipeline
+
+# Rebuilds the encrypted+signed rules payload whenever the plaintext playbook
+# changes. Validation failure fails the job and NO payload is emitted; signing
+# requires the OTA_SIGNING_PRIVATE_KEY Actions secret (ECDSA P-256 PEM).
+# The commit this workflow makes touches only scraper_rules.json.enc, which is
+# outside the path filter, so it cannot re-trigger itself.
+
+on:
+  push:
+    branches: [master, main]
+    paths:
+      - 'scraper_rules.json'
+      - 'scripts/encrypt_rules.py'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-sign-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install cryptography
+        run: pip install cryptography
+
+      - name: Validate, encrypt and sign rules payload
+        env:
+          OTA_SIGNING_PRIVATE_KEY: ${{ secrets.OTA_SIGNING_PRIVATE_KEY }}
+        run: |
+          python scripts/encrypt_rules.py
+          python - <<'EOF'
+          import json
+          env = json.load(open('scraper_rules.json.enc'))
+          if env.get('v') == 1 or not env.get('sig'):
+              print('::warning::Payload is UNSIGNED — add the '
+                    'OTA_SIGNING_PRIVATE_KEY secret (ECDSA P-256 PEM) to enable '
+                    'signed OTA. Apps on recent builds will still accept it, but '
+                    'tampering protection is OFF.')
+          else:
+              print('Payload signed OK (v2 envelope).')
+          EOF
+
+      - name: Commit rebuilt payload
+        run: |
+          git config user.name "anonrode-bot"
+          git config user.email "anonrode-bot@users.noreply.github.com"
+          git add scraper_rules.json.enc
+          if git diff --cached --quiet; then
+            echo "No payload changes to commit."
+          else
+            git commit -m "Rebuild signed OTA rules payload from scraper_rules.json"
+            git push
+          fi

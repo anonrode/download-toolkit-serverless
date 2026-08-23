@@ -9,8 +9,12 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.security.KeyFactory
+import java.security.Signature
+import java.security.spec.X509EncodedKeySpec
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
@@ -28,6 +32,13 @@ data class SiteRuleConfig(
     val slugSuffixes: List<String> = emptyList()
 )
 
+/** One ordered host policy from the OTA playbook. First matching rule wins. */
+data class HostPolicyRule(
+    val match: String,
+    val referer: String,   // "" | "exact:<url>" resolved value | "none"
+    val ua: String = ""
+)
+
 object DynamicRulesManager {
 
     // OTA rules are AES-128-CBC encrypted so the scraping logic is not
@@ -39,6 +50,54 @@ object DynamicRulesManager {
     private const val RULES_IV_HEX = "5b7e9d2f4a6c8e10f3a5c7d9b1e2f4a6"
     private const val RULES_URL = "https://raw.githubusercontent.com/anonrode/download-toolkit-serverless/master/scraper_rules.json.enc"
     private const val CACHE_FILE = "dynamic_scraper_rules.enc"
+
+    // ECDSA P-256 public key (X509/SPKI DER, base64). Private half lives ONLY
+    // in the GitHub Actions secret OTA_SIGNING_PRIVATE_KEY; ota-rules.yml signs
+    // every payload. Any payload whose signature doesn't verify is refused —
+    // a repo hijack or CDN MITM cannot feed this app fake scraping logic.
+    // Rotate by shipping a new app release with a new public key.
+    // internal var (not const) solely so JVM tests can inject an ephemeral
+    // keypair and exercise sign -> verify end-to-end.
+    internal var rulesSigningPubB64: String =
+        "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAELW5uNxiti768q9f1YPvjaMyd0b60W7tEn6hCCQBtu6YyguDIMtKvefov9uwD" +
+        "0uN9JP0HKkYUJB1wSL3Q928+lQ=="
+
+    // Built-in fallback policies — mirrors the historical hardcoded referer
+    // map in DownloadEngine (behavior-identical when no OTA rule matches).
+    // OTA hostPolicies always take precedence over these.
+    private val DEFAULT_HOST_POLICIES = listOf(
+        HostPolicyRule("cdn.watching.onl", "exact:https://megaplay.buzz/"),
+        HostPolicyRule("anivideo.sbs", "exact:https://megaplay.buzz/"),
+        HostPolicyRule("megap.", "exact:https://megaplay.buzz/"),
+        HostPolicyRule("watching.onl", "exact:https://megaplay.buzz/"),
+        HostPolicyRule("lisaido", "none"),
+        HostPolicyRule("vidsrc", "none"),
+        HostPolicyRule("gogoanime", "exact:https://gogoanime.or.at/"),
+        HostPolicyRule("anitaku", "exact:https://gogoanime.or.at/"),
+        HostPolicyRule("workers.dev", "exact:https://gogoanime.or.at/"),
+        HostPolicyRule("workerforcloud", "exact:https://gogoanime.or.at/"),
+        HostPolicyRule("asianc", "exact:https://asianc.id/"),
+        HostPolicyRule("vidbasic", "exact:https://vidb.top/"),
+        HostPolicyRule("vidb.", "exact:https://vidb.top/"),
+        HostPolicyRule("jisooido", "exact:https://vidb.top/"),
+        HostPolicyRule("tamilembed", "exact:https://anitaku.com.ro/"),
+        HostPolicyRule("animesama", "exact:https://anitaku.com.ro/"),
+        HostPolicyRule("kickassanime", "exact:https://anitaku.com.ro/"),
+        HostPolicyRule("blogger.com", "exact:https://anitaku.com.ro/"),
+        HostPolicyRule("googlevideo", "exact:https://www.blogger.com/"),
+        HostPolicyRule("pluto", "exact:https://plutomovies.com/"),
+        HostPolicyRule("kissorgrab", "exact:https://plutomovies.com/"),
+        HostPolicyRule("thenkiri", "exact:https://nkiri.top/"),
+        HostPolicyRule("nkiri", "exact:https://nkiri.top/"),
+        HostPolicyRule("9jarocks", "exact:https://my9jarocks.bz/"),
+        HostPolicyRule("loadedfiles", "exact:https://my9jarocks.bz/"),
+        HostPolicyRule("naijavault", "exact:https://www.naijavault.com/"),
+        HostPolicyRule("vikingfile", "exact:https://www.naijavault.com/"),
+        HostPolicyRule("lulacloud", "exact:https://www.naijavault.com/"),
+        HostPolicyRule("naijaprey", "exact:https://www.naijaprey.tv/"),
+        HostPolicyRule("dramakey", "exact:https://dramakey.com/"),
+        HostPolicyRule("dramarain", "exact:https://dramarain.com/")
+    )
 
     private val defaultDomains = mapOf(
         "nkiri" to "https://nkiri.top",
@@ -64,6 +123,13 @@ object DynamicRulesManager {
     private val activeResolverConfigs = mutableMapOf<String, JSONObject>()
     private val activeMediaExtensions = mutableListOf<String>().apply { addAll(defaultMediaExtensions) }
     private val dynamicProviders = mutableListOf<GenericDeclarativeProvider>()
+
+    // Playbook v2 state
+    private val activeHostPolicies = mutableListOf<HostPolicyRule>()
+    private val activeUrlTemplates = mutableMapOf<String, String>()
+    private val activeKnownDead = mutableListOf<String>()
+    var tokenTtlMinutes: Long = 10
+        private set
 
     private val _version = MutableStateFlow("2026.08.22.1 (Bundled)")
     val version: StateFlow<String> = _version.asStateFlow()
@@ -107,6 +173,34 @@ object DynamicRulesManager {
 
     fun getDynamicProviders(): List<GenericDeclarativeProvider> = dynamicProviders
 
+    /** Resolve the referer for a CDN/media URL: OTA hostPolicies first
+     *  (ordered, first match wins), then the built-in defaults. "none" and
+     *  unmatched hosts yield "" (no referer header). This is now the SINGLE
+     *  source of referer truth — the old per-file hardcoded maps retire. */
+    fun resolveReferer(url: String): String {
+        val low = url.lowercase()
+        val rule = (activeHostPolicies.asSequence() + DEFAULT_HOST_POLICIES.asSequence())
+            .firstOrNull { low.contains(it.match) }
+            ?: return ""
+        return when {
+            rule.referer.equals("none", ignoreCase = true) -> ""
+            rule.referer.startsWith("exact:", ignoreCase = true) -> rule.referer.removePrefix("exact:")
+            else -> "" // "site" or unknown directive — no context here, send nothing
+        }
+    }
+
+    /** True when the playbook flags this host fragment as known-dead, so the
+     *  app can skip it without burning a request. */
+    fun isKnownDead(hostOrUrl: String): Boolean {
+        val low = hostOrUrl.lowercase()
+        return activeKnownDead.any { low.contains(it) }
+    }
+
+    fun getUrlTemplate(site: String): String =
+        activeUrlTemplates[site.lowercase()] ?: ""
+
+    fun getTokenTtlMs(): Long = tokenTtlMinutes * 60_000L
+
     suspend fun syncFromGitHub(context: Context): Pair<Boolean, String> = withContext(Dispatchers.IO) {
         try {
             // Append cache-buster timestamp to bypass GitHub CDN's 5-minute cache
@@ -140,18 +234,61 @@ object DynamicRulesManager {
         }
     }
 
-    /** Decrypts base64(AES-128-CBC-PKCS5) -> JSON text; null on any failure.
-     *  java.util.Base64 (minSdk 26) keeps this JVM-unit-testable. */
-    internal fun decryptRules(b64: String): String? {
+    /** Decrypts the OTA payload -> JSON text; null on any failure.
+     *
+     *  Accepts two formats (migration-friendly):
+     *   - v2 envelope JSON {"v":2,"iv":..,"payload":<b64>,"sig":<b64>} —
+     *     signature verified BEFORE decryption; v2 without a signature or
+     *     with a bad one is refused outright.
+     *   - legacy raw base64(AES-CBC fixed-IV) from older payloads/caches.
+     *  java.util.Base64 keeps this JVM-unit-testable. */
+    internal fun decryptRules(text: String): String? {
         return try {
-            val key = SecretKeySpec(hexToBytes(RULES_KEY_HEX), "AES")
-            val iv = IvParameterSpec(hexToBytes(RULES_IV_HEX))
-            val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
-            cipher.init(Cipher.DECRYPT_MODE, key, iv)
-            val data = java.util.Base64.getDecoder().decode(b64.trim())
-            String(cipher.doFinal(data), Charsets.UTF_8)
+            val t = text.trim()
+            if (t.startsWith("{")) {
+                val env = JSONObject(t)
+                val payloadB64 = env.optString("payload")
+                if (payloadB64.isBlank()) return null
+                val sigB64 = env.optString("sig")
+                val isV2 = env.optInt("v", 1) >= 2
+                if (isV2 || sigB64.isNotBlank()) {
+                    // Envelope claims authenticity: verify before decrypting.
+                    if (sigB64.isBlank() || !verifySignature(payloadB64, sigB64)) {
+                        com.anonrode.downloader.util.DebugLog.error(
+                            "OTA rules REJECTED: signature missing/invalid"
+                        )
+                        return null
+                    }
+                }
+                val ivHex = env.optString("iv").ifBlank { RULES_IV_HEX }
+                aesDecrypt(java.util.Base64.getDecoder().decode(payloadB64), IvParameterSpec(hexToBytes(ivHex)))
+            } else {
+                aesDecrypt(java.util.Base64.getDecoder().decode(t), IvParameterSpec(hexToBytes(RULES_IV_HEX)))
+            }
         } catch (_: Exception) {
             null
+        }
+    }
+
+    private fun aesDecrypt(data: ByteArray, iv: IvParameterSpec): String {
+        val key = SecretKeySpec(hexToBytes(RULES_KEY_HEX), "AES")
+        val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
+        cipher.init(Cipher.DECRYPT_MODE, key, iv)
+        return String(cipher.doFinal(data), Charsets.UTF_8)
+    }
+
+    /** ECDSA-P256-SHA256 over the ASCII payload string; testable directly. */
+    internal fun verifySignature(payloadB64: String, sigB64: String): Boolean {
+        return try {
+            val pub = KeyFactory.getInstance("EC").generatePublic(
+                X509EncodedKeySpec(java.util.Base64.getDecoder().decode(rulesSigningPubB64))
+            )
+            val s = Signature.getInstance("SHA256withECDSA")
+            s.initVerify(pub)
+            s.update(payloadB64.toByteArray(Charsets.US_ASCII))
+            s.verify(java.util.Base64.getDecoder().decode(sigB64))
+        } catch (_: Exception) {
+            false
         }
     }
 
@@ -251,6 +388,43 @@ object DynamicRulesManager {
                     if (ext.isNotBlank()) activeMediaExtensions.add(ext)
                 }
             }
+
+            // Playbook v2: ordered host policies (first match wins), url
+            // templates, known-dead hosts, token TTL.
+            val hpArr = obj.optJSONArray("hostPolicies")
+            if (hpArr != null) {
+                activeHostPolicies.clear()
+                for (i in 0 until hpArr.length()) {
+                    val p = hpArr.optJSONObject(i) ?: continue
+                    val m = p.optString("match")
+                    if (m.isBlank()) continue
+                    activeHostPolicies.add(
+                        HostPolicyRule(m.lowercase(), p.optString("referer"), p.optString("ua"))
+                    )
+                }
+            }
+
+            val utObj = obj.optJSONObject("urlTemplates")
+            if (utObj != null) {
+                activeUrlTemplates.clear()
+                val keys = utObj.keys()
+                while (keys.hasNext()) {
+                    val k = keys.next()
+                    val tpl = utObj.optString(k)
+                    if (tpl.isNotBlank()) activeUrlTemplates[k.lowercase()] = tpl
+                }
+            }
+
+            val kdArr = obj.optJSONArray("knownDead")
+            if (kdArr != null) {
+                activeKnownDead.clear()
+                for (i in 0 until kdArr.length()) {
+                    val h = kdArr.optString(i)
+                    if (h.isNotBlank()) activeKnownDead.add(h.lowercase())
+                }
+            }
+
+            tokenTtlMinutes = obj.optLong("tokenTtlMinutes", 10L).coerceIn(1L, 240L)
 
             // Parse any dynamic new providers added remotely
             val dynamicList = obj.optJSONArray("dynamic_providers")

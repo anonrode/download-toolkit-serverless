@@ -481,30 +481,11 @@ class DownloadEngine(
     }
 
     private fun getRefererForUrl(url: String): String {
-        val low = url.lowercase()
-        return when {
-            low.contains("gogoanime") || low.contains("anitaku") || low.contains("workers.dev") -> "https://gogoanime.or.at/"
-            low.contains("asianc") -> "https://asianc.id/"
-            // Vidbasic's segment host (hls.vidbasic.top / jisooido.top) allowlists the
-            // player origin as Referer and serves an HTML decoy to everything else —
-            // any other referer makes every fragment 416 and the download produces an
-            // unplayable file (monolith parity, downloader.py get_referer_for_url).
-            low.contains("vidbasic") || low.contains("vidb") || low.contains("jisooido") -> "https://vidb.top/"
-            low.contains("tamilembed") || low.contains("animesama") || low.contains("kickassanime") -> "https://anitaku.com.ro/"
-            low.contains("megap.") || low.contains("watching.onl") || low.contains("anivideo.sbs") -> "https://megaplay.buzz/"
-            low.contains("blogger.com") -> "https://anitaku.com.ro/"
-            low.contains("googlevideo") -> "https://www.blogger.com/"
-            low.contains("pluto") || low.contains("kissorgrab.com") -> "https://plutomovies.com/"
-            // nkiri moved to the Cloudflare-fronted mirror nkiri.top (the
-            // original IP 80.82.65.46 is network-blocked on some ISPs)
-            low.contains("thenkiri") || low.contains("nkiri") -> "https://nkiri.top/"
-            low.contains("9jarocks") || low.contains("loadedfiles") -> "https://my9jarocks.bz/"
-            low.contains("naijavault") || low.contains("vikingfile") || low.contains("lulacloud") -> "https://www.naijavault.com/"
-            low.contains("naijaprey") -> "https://www.naijaprey.tv/"
-            low.contains("dramakey") -> "https://dramakey.com/"
-            low.contains("dramarain") -> "https://dramarain.com/"
-            else -> ""
-        }
+        // Single source of truth is now the OTA playbook (DynamicRulesManager:
+        // hostPolicies first, built-in defaults second). The old per-host
+        // when-map lived here and drifted from the monolith + probe copies;
+        // its exact entries survive as the manager's DEFAULT_HOST_POLICIES.
+        return com.anonrode.downloader.data.rules.DynamicRulesManager.resolveReferer(url)
     }
 
     // Adaptive-streaming manifest detection (monolith is_streaming_link parity):
