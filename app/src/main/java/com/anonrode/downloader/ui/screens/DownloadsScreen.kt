@@ -231,6 +231,20 @@ fun DownloadCard(
                         ) {
                             Text(text = extText, color = TextPrimary, fontSize = 9.sp, fontWeight = FontWeight.Bold)
                         }
+                        // Quality/resolution chip: the real stream resolution
+                        // for HLS (parsed from the master's RESOLUTION during
+                        // preflight), the requested quality otherwise.
+                        val qualityLabel = task.resolution ?: task.quality
+                        if (qualityLabel != null) {
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(Radius.xs))
+                                    .background(SurfaceElevated)
+                                    .padding(horizontal = Spacing.sm, vertical = 2.dp)
+                            ) {
+                                Text(text = qualityLabel, color = TextSecondary, fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
+                            }
+                        }
                         Text(
                             text = "$sizeText • Tap to Play In-App",
                             color = TextMuted,
@@ -348,6 +362,10 @@ fun DownloadCard(
                     TaskStatus.DOWNLOADING -> {
                         // With an unknown total (e.g. HLS) show size + speed, no percentage.
                         val parts = mutableListOf<String>()
+                        // Real stream resolution first when known (HLS masters
+                        // carry RESOLUTION; the requested quality falls back
+                        // only when resolution was never parsed).
+                        (task.resolution ?: task.quality)?.let { parts += it }
                         if (task.totalBytes > 0) parts += "$pctInt%"
                         if (sizeStr.isNotBlank()) parts += sizeStr
                         speedStr?.let { parts += it }

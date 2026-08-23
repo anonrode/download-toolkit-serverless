@@ -769,7 +769,9 @@ class DownloadEngine(
         taskId: String,
         masterUrl: String,
         referer: String?,
-        estimatedTotalBytes: LongArray = LongArray(1)
+        estimatedTotalBytes: LongArray = LongArray(1),
+        requestedQuality: String? = null,
+        resolutionOut: Array<String?> = arrayOfNulls(1)
     ): File? {
         val cacheDir = File(context.cacheDir, "hls").apply { mkdirs() }
         val created = mutableListOf<File>()
@@ -800,6 +802,13 @@ class DownloadEngine(
                 "task=$taskId rewritten master: ${masterFile.readText().take(300).replace("\n", " | ")}"
             )
         }
+
+        // The master's RESOLUTION attributes are the REAL stream quality —
+        // a requested "720p" can resolve to 1080p if that's all the host
+        // offers. Mirror yt-dlp's height-limited format selection: the
+        // highest variant at or below the requested height (or the smallest
+        // when nothing fits). Exposed for the download card's quality chip.
+        resolutionOut[0] = pickHlsResolution(playlist, requestedQuality)
 
         // Walk one variant level: rewrite referenced variant playlists to
         // local files too and repoint the master at them (relative name),
@@ -881,6 +890,26 @@ class DownloadEngine(
      * HLS size estimate (hls-size-estimate=...). Purely diagnostic — every
      * failure yields null and never disturbs preflightHls' outcome.
      */
+    /**
+     * Best-effort pick of the variant height a download will land on, from
+     * the master playlist's EXT-X-STREAM-INF RESOLUTION attributes. Mirrors
+     * yt-dlp's height-limited format selection (highest <= requested;
+     * smallest if nothing fits). Null when the master declares no heights.
+     */
+    private fun pickHlsResolution(masterText: String, requestedQuality: String?): String? {
+        val heights = mutableListOf<Int>()
+        val re = Pattern.compile("""#EXT-X-STREAM-INF:[^\n]*RESOLUTION=\d+x(\d+)""")
+        val m = re.matcher(masterText)
+        while (m.find()) heights.add(m.group(1).toInt())
+        if (heights.isEmpty()) return null
+        val requested = requestedQuality?.filter { it.isDigit() }?.toIntOrNull()
+        val chosen = when {
+            requested == null -> heights.maxOrNull() ?: return null
+            else -> heights.filter { it <= requested }.maxOrNull() ?: heights.min()
+        }
+        return "${chosen}p"
+    }
+
     private suspend fun runSizeEstimate(
         taskId: String,
         masterText: String,
@@ -1259,9 +1288,15 @@ class DownloadEngine(
                 // 0 = none). Kept current across every preflight invocation
                 // so a future consumer always sees the latest estimate.
                 val hlsSizeEstimate = LongArray(1)
+                // Out-holder for the real stream resolution from the master
+                // playlist (e.g. "1080p"), shown on the download card.
+                val hlsResolution = arrayOfNulls<String>(1)
                 if (finalBackend == "yt-dlp" && isHlsStream) {
                     try {
-                        hlsMasterFile = preflightHls(context, task.id, streamUrl, refererToPass, hlsSizeEstimate)
+                        hlsMasterFile = preflightHls(
+                            context, task.id, streamUrl, refererToPass, hlsSizeEstimate,
+                            task.quality ?: defaultQuality, hlsResolution
+                        )
                     } catch (e: StaleStreamLinkException) {
                         // A persisted HLS URL carries a token that dies within
                         // hours — and the router trusts .m3u8 as "already
@@ -1280,7 +1315,10 @@ class DownloadEngine(
                                 directUrl = if (isDirectMediaUrl(streamUrl) || isProvablyDirectFile(streamUrl)) streamUrl else t.directUrl
                             )
                         }
-                        hlsMasterFile = preflightHls(context, task.id, streamUrl, getRefererForUrl(streamUrl), hlsSizeEstimate)
+                        hlsMasterFile = preflightHls(
+                            context, task.id, streamUrl, getRefererForUrl(streamUrl),
+                            hlsSizeEstimate, task.quality ?: defaultQuality, hlsResolution
+                        )
                     }
                 }
 
@@ -1290,6 +1328,11 @@ class DownloadEngine(
                 // is the most accurate pre-download projection available).
                 if (hlsSizeEstimate[0] > 0L) {
                     repository.updateProgress(task.id, downloaded = 0L, total = hlsSizeEstimate[0], speed = 0.0, eta = 0L)
+                }
+                // Same for the resolution: show the ACTUAL stream quality the
+                // master offers at/below the requested height.
+                hlsResolution[0]?.let { r ->
+                    repository.update(task.id) { t -> t.copy(resolution = r) }
                 }
 
                 var producedFile: File? = null
@@ -1542,7 +1585,7 @@ class DownloadEngine(
                             var freshMaster: File? = null
                             if (isHlsStream) {
                                 try {
-                                    freshMaster = preflightHls(context, task.id, freshUrl, getRefererForUrl(freshUrl), hlsSizeEstimate)
+                                    freshMaster = preflightHls(context, task.id, freshUrl, getRefererForUrl(freshUrl), hlsSizeEstimate, task.quality ?: defaultQuality, hlsResolution)
                                 } catch (e: kotlinx.coroutines.CancellationException) {
                                     throw e
                                 } catch (e: Exception) {
