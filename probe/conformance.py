@@ -112,6 +112,175 @@ def bs4_parse(body):
     return BeautifulSoup(body, "html.parser")
 
 
+# ================= search-quality mode (strict hits) ======================
+# Lesson from the side-session fuzz test (log_search_test_results.json):
+# counting "page returned 200 with content" as a hit scores fake shows
+# 15/15. A hit here means: parsed RESULT TITLES fuzzy-match the query.
+
+def _norm(s):
+    import re
+    return re.sub(r"[^a-z0-9 ]", " ", s.lower()).split()
+
+
+def _fuzzy_hit(query, titles):
+    """True when any result title closely matches the query tokens."""
+    q = " ".join(_norm(query))
+    if not q:
+        return False
+    for t in titles:
+        tt = " ".join(_norm(t))
+        if not tt:
+            continue
+        if q in tt or tt in q:
+            return True
+        import difflib
+        if difflib.SequenceMatcher(None, q, tt).ratio() >= 0.6:
+            return True
+    return False
+
+
+def extract_titles(site, rules, st, body):
+    """Pull human-readable result titles out of each site's response shape."""
+    titles = []
+    cfg = rules["sites"].get(site, {})
+    t = cfg.get("searchType", "html")
+    try:
+        if t == "rss":
+            import re
+            titles = re.findall(rb"<title>(.*?)</title>", body, re.S)[1:]
+            titles = [x.decode("utf-8", "ignore") for x in titles]
+        elif t == "json":
+            data = json.loads(body)
+
+            def walk(o):
+                if isinstance(o, dict):
+                    for k, v in o.items():
+                        if k.lower() in ("title", "name") and isinstance(v, str) and v.strip():
+                            titles.append(v)
+                        else:
+                            walk(v)
+                elif isinstance(o, list):
+                    for x in o:
+                        walk(x)
+            walk(data)
+        else:
+            soup = bs4_parse(body)
+            sel = cfg.get("cardSelector") or "article"
+            for card in soup.select(sel):
+                a = card if card.name == "a" else card.select_first("a[href], h2 a, .entry-title a")
+                txt = (a.get_text(" ", strip=True) if a else "") or ""
+                if txt.strip():
+                    titles.append(txt)
+            if not titles:  # last resort: every anchor text on the page
+                titles = [a.get_text(" ", strip=True) for a in soup.find_all("a", href=True)]
+    except Exception:
+        pass
+    return [x for x in titles if x and len(x) > 2][:40]
+
+
+CURATED_QUERIES = [
+    # real titles across the catalogs (K-drama / Nollywood / anime / movies)
+    "vincenzo", "cobra kai", "the impossible", "the beekeeper", "titanic",
+    "uncharted", "house of anubis", "talking stage", "kesari",
+    "eran iya osogbo", "muniru ati ambali", "kori kosun", "abbott",
+    "the heirs", "yellow stone", "divergent", "goblin", "the omen",
+    # deliberate fakes + typos: correct behaviour is a MISS on these
+    "denice the menace", "cobta", "dennice the menamce", "yellow stont",
+    "the tatanic", "bee keejet",
+]
+
+
+def run_search_quality(s, rules, site, queries, out_path):
+    """Per-query strict-hit testing; returns records."""
+    records = []
+    base = rules["domains"].get(site, "")
+    cfg = rules["sites"].get(site)
+    if not base or not cfg:
+        return [{"site": site, "query": "-", "pass": None, "detail": "no search config"}]
+    for q in queries:
+        url = base.rstrip("/") + cfg["searchPattern"].replace("{query}", q.replace(" ", "%20"))
+        st, body = s.get(url, referer_for(rules, base))
+        titles = extract_titles(site, rules, st, body) if st == 200 else []
+        hit = _fuzzy_hit(q, titles)
+        records.append({"site": site, "query": q,
+                        "pass": hit if st == 200 else None,
+                        "status": st, "titles_seen": len(titles),
+                        "detail": f"HTTP {st}, {len(titles)} titles" + ("" if not hit else ", MATCH")})
+        with open(out_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(records[-1]) + "\n")
+    return records
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--titles", type=int, default=1)
+    ap.add_argument("--shows", type=int, default=3)
+    ap.add_argument("--site", action="append", default=None)
+    ap.add_argument("--out-dir", default="probe")
+    ap.add_argument("--strict", action="store_true")
+    ap.add_argument("--search-quality", action="store_true",
+                    help="strict per-query hit testing instead of the stage sweep")
+    ap.add_argument("--queries-file", default=None,
+                    help="JSON file with 'searches' list; default = curated subset")
+    args = ap.parse_args()
+
+    rules = load_signed_payload()
+    sites = args.site or list(rules["domains"].keys())
+    total_fail = 0
+
+    if args.search_quality:
+        queries = CURATED_QUERIES
+        if args.queries_file:
+            fixture = json.load(open(args.queries_file, encoding="utf-8"))
+            queries = fixture["searches"]
+        print(f"search-quality: {len(queries)} queries x {len(sites)} sites\n")
+        scorecard = {}
+        for site in sites:
+            out = os.path.join(args.out_dir, f"results-searchq-{site}.jsonl")
+            if os.path.exists(out):
+                os.remove(out)
+            s = Paced()
+            try:
+                recs = run_search_quality(s, rules, site, queries, out)
+            except Exception as e:
+                recs = [{"site": site, "query": "-", "pass": False, "detail": str(e)[:160]}]
+            hits = sum(1 for r in recs if r["pass"])
+            tested = sum(1 for r in recs if r["pass"] is not None)
+            scorecard[site] = {"hits": hits, "tested": tested}
+        print("\n=== SEARCH-QUALITY SCORECARD ===")
+        for site, sc in scorecard.items():
+            rate = 100.0 * sc["hits"] / sc["tested"] if sc["tested"] else 0
+            print(f"{site:12s} {sc['hits']}/{sc['tested']} strict hits ({rate:.0f}%)")
+        return
+
+    # ---- default mode: stage sweep ----
+    scorecard = {}
+    for site in sites:
+        out = os.path.join(args.out_dir, f"results-conformance-{site}.jsonl")
+        if os.path.exists(out):
+            os.remove(out)
+        try:
+            recs = run_site(site, rules, args.titles, args.shows, out)
+        except Exception as e:
+            recs = [{"site": site, "stage": "runner", "pass": False, "detail": str(e)[:160]}]
+        passed = [r for r in recs if r["pass"]]
+        failed = [r for r in recs if r["pass"] is False]
+        skipped = [r for r in recs if r["pass"] is None]
+        scorecard[site] = {"pass": len(passed), "fail": len(failed), "skip": len(skipped)}
+        for r in recs:
+            print(f"[{site}] {'PASS' if r['pass'] else ('SKIP' if r['pass'] is None else 'FAIL')} "
+                  f"{r['stage']}: {r['detail']}")
+
+    print("\n=== CONFORMANCE SCORECARD ===")
+    total_fail = 0
+    for site, sc in scorecard.items():
+        flag = "OK" if sc["fail"] == 0 else "DECAY?"
+        total_fail += sc["fail"]
+        print(f"{site:12s} pass={sc['pass']} fail={sc['fail']} skip={sc['skip']} {flag}")
+    if args.strict and total_fail:
+        sys.exit(1)
+
+
 def stage_search(s, rules, site, query):
     cfg = rules["sites"].get(site)
     base = rules["domains"].get(site)
@@ -197,44 +366,6 @@ def run_site(site, rules, titles, shows_cap, out_path):
         for r in records:
             f.write(json.dumps(r) + "\n")
     return records
-
-
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--titles", type=int, default=1)
-    ap.add_argument("--shows", type=int, default=3)
-    ap.add_argument("--site", action="append", default=None)
-    ap.add_argument("--out-dir", default="probe")
-    ap.add_argument("--strict", action="store_true")
-    args = ap.parse_args()
-
-    rules = load_signed_payload()
-    sites = args.site or list(rules["domains"].keys())
-    scorecard = {}
-    for site in sites:
-        out = os.path.join(args.out_dir, f"results-conformance-{site}.jsonl")
-        if os.path.exists(out):
-            os.remove(out)
-        try:
-            recs = run_site(site, rules, args.titles, args.shows, out)
-        except Exception as e:
-            recs = [{"site": site, "stage": "runner", "pass": False, "detail": str(e)[:160]}]
-        passed = [r for r in recs if r["pass"]]
-        failed = [r for r in recs if r["pass"] is False]
-        skipped = [r for r in recs if r["pass"] is None]
-        scorecard[site] = {"pass": len(passed), "fail": len(failed), "skip": len(skipped)}
-        for r in recs:
-            print(f"[{site}] {'PASS' if r['pass'] else ('SKIP' if r['pass'] is None else 'FAIL')} "
-                  f"{r['stage']}: {r['detail']}")
-
-    print("\n=== CONFORMANCE SCORECARD ===")
-    total_fail = 0
-    for site, sc in scorecard.items():
-        flag = "OK" if sc["fail"] == 0 else "DECAY?"
-        total_fail += sc["fail"]
-        print(f"{site:12s} pass={sc['pass']} fail={sc['fail']} skip={sc['skip']} {flag}")
-    if args.strict and total_fail:
-        sys.exit(1)
 
 
 if __name__ == "__main__":
