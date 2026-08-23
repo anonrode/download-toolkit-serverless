@@ -92,11 +92,10 @@ def load_signed_payload():
     sig = env.get("sig")
     if not sig:
         raise SystemExit("REFUSING to run against an UNSIGNED payload")
-    der = b64mod.b64decode(os.environ.get(
-        "CONFORMANCE_PUB_B64",
-        # same public key embedded in DynamicRulesManager (concatenated)
-        "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAELW5uNxiti768q9f1YPvjaMyd0b60W7tEn6hCCQBtu6YyguDIMtKvefov9uwD"
-        "0uN9JP0HKkYUJB1wSL3Q928+lQ=="))
+    # Empty secret (unset) must not shadow the embedded public key.
+    der = b64mod.b64decode((os.environ.get("CONFORMANCE_PUB_B64") or "").strip()
+                           or "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAELW5uNxiti768q9f1YPvjaMyd0b60W7tEn6hCCQBtu6YyguDIMtKvefov9uwD"
+                           "0uN9JP0HKkYUJB1wSL3Q928+lQ==")
     pub = load_der_public_key(der)
     try:
         pub.verify(b64mod.b64decode(env["sig"]),
