@@ -535,7 +535,32 @@ def run_site(site, rules, titles, shows_cap, out_path):
                          referer_for(rules, base))
         if st == 200:
             stype_cfg = rules["sites"][site].get("searchType", "html")
-            if stype_cfg == "rss":
+            if stype_cfg == "json":
+                # JSON search responses carry the show URL in a "link" field
+                # (wp-json posts, asianc JSON) — walk the tree like the app's
+                # providers do.
+                links = []
+
+                def walk(o):
+                    if isinstance(o, dict):
+                        u = o.get("link") or o.get("url")
+                        if isinstance(u, str) and u.strip() and \
+                                not u.startswith(("data:", "javascript:", "mailto:")):
+                            links.append(u)
+                        for v in o.values():
+                            walk(v)
+                    elif isinstance(o, list):
+                        for x in o:
+                            walk(x)
+                try:
+                    walk(json.loads(body))
+                except Exception:
+                    pass
+                hrefs = links[:50]
+                if links:
+                    show_url = urljoin(base + "/", links[0])
+                    ep_ok, ep_detail, ep_body = stage_episodes(s, rules, site, show_url)
+            elif stype_cfg == "rss":
                 # <link> is a void element under the HTML parser, so its URL
                 # text never lands inside the tag — regex the raw body, same
                 # approach as extract_titles() for <title>.
