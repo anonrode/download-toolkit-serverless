@@ -22,8 +22,10 @@ import base64
 import hashlib
 import json
 import os
+import re
 import sys
 import time
+from urllib.parse import quote, urljoin
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
 import encrypt_rules as ota  # noqa: E402  (canonical pipeline module)
@@ -330,6 +332,84 @@ def stage_direct_pass(rules, hrefs):
     return bool(exts), f"direct-media anchors found: {len(hits)}"
 
 
+def run_strategy_chain(s, rules, site, query):
+    """Execute the site's OTA searchStrategies chain, in order, until one
+    yields a real show URL. Mirrors SearchStrategyRunner.kt semantics:
+      slugGuess  : probe pattern URLs with {slug} (query slugified) and each
+                   {suffix}/{country} variant; HTTP 200 = found show URL.
+      urlTemplate: fetch pattern URL, extract card links via cardSelector +
+                   linkSelector; drop shallow nav-junk links (requires >=3
+                   path segments, same guard as the app).
+      rss        : fetch pattern URL, take <item> <link> entries.
+    Returns (show_url, strategy_type) or (None, None).
+    """
+    strategies = rules.get("searchStrategies", {}).get(site, [])
+    if not strategies:
+        return None, None
+    base = rules["domains"].get(site, "")
+    if not base:
+        return None, None
+
+    for st in strategies:
+        stype = st.get("type")
+        if stype == "slugGuess":
+            slug = re.sub(r"[^a-z0-9]+", "-", query.lower()).strip("-")
+            pattern = st.get("pattern", "/{slug}{suffix}/")
+            suffixes = st.get("suffixes", [""])
+            countries = st.get("countries", [])
+            # Playbook may express variants as {suffix} or {country}.
+            variants = countries if countries else suffixes
+            placeholder = "{country}" if countries else "{suffix}"
+            for v in variants:
+                url = (base.rstrip("/") + pattern
+                       .replace("{slug}", slug)
+                       .replace(placeholder, v))
+                code, _ = s.get(url, referer_for(rules, base))
+                if code == 200:
+                    return url, "slugGuess"
+
+        elif stype == "urlTemplate":
+            pattern = st.get("pattern", "/?s={query}")
+            url = base.rstrip("/") + pattern.replace("{query}", quote(query))
+            code, body = s.get(url, referer_for(rules, base))
+            if code != 200:
+                continue
+            soup = bs4_parse(body)
+            card_sel = st.get("cardSelector", "article")
+            link_sel = st.get("linkSelector", "a[href], h2 a, .entry-title a")
+            for card in soup.select(card_sel):
+                a = card if card.name == "a" else card.select_one(link_sel)
+                if not a or not a.get("href"):
+                    continue
+                full_url = urljoin(base + "/", a["href"])
+                # Nav-junk guard, same semantics as SearchStrategyRunner.kt:
+                # dead search endpoints return category cards like
+                # /chinese-drama/ (1 segment); real show pages are deep.
+                # Count slashes after the first path segment, require >=2.
+                path = full_url.replace(base, "").strip("/")
+                if path.count("/") < 2:
+                    continue
+                return full_url, "urlTemplate"
+
+        elif stype == "rss":
+            pattern = st.get("pattern", "/search/{query}/feed/rss2/")
+            url = base.rstrip("/") + pattern.replace("{query}", quote(query))
+            code, body = s.get(url, referer_for(rules, base))
+            if code != 200:
+                continue
+            if b"<item" not in body:
+                continue
+            soup = bs4_parse(body)
+            for item in soup.select("item"):
+                link = item.select_one("link")
+                if link:
+                    href = link.text.strip() or link.get("href", "")
+                    if href:
+                        return href, "rss"
+
+    return None, None
+
+
 def run_site(site, rules, titles, shows_cap, out_path):
     s = Paced()
     records = []
@@ -337,6 +417,7 @@ def run_site(site, rules, titles, shows_cap, out_path):
     search_ok, search_detail = stage_search(s, rules, site, q)
 
     ep_ok, ep_detail, hrefs = None, "skipped", []
+    via_strategy = None
     if search_ok:
         # Reuse the search page's first plausible internal link as the "show".
         base = rules["domains"].get(site, "")
@@ -349,18 +430,31 @@ def run_site(site, rules, titles, shows_cap, out_path):
             hrefs = cands[:50]
             internal = [h for h in cands if h.startswith("/") or base in h]
             if internal:
-                from urllib.parse import urljoin
                 show_url = urljoin(base + "/", internal[0])
                 ep_ok, ep_detail = stage_episodes(s, rules, site, show_url)
+
+    # Strategy-chain fallback: a dead/junk search endpoint (dramarain's ?s=
+    # returns category cards) or a chosen link with no episode links must not
+    # report FAIL when the playbook's searchStrategies find the real show.
+    if not ep_ok:
+        strategy_url, stype = run_strategy_chain(s, rules, site, q)
+        if strategy_url:
+            ep_ok, ep_detail = stage_episodes(s, rules, site, strategy_url)
+            via_strategy = stype
+            if ep_ok:
+                ep_detail = f"{ep_detail} [via strategy: {stype}]"
 
     dp_ok, dp_detail = stage_direct_pass(rules, hrefs or [])
 
     for name, okv, detail in (("search", search_ok, search_detail),
                               ("episodes", ep_ok, ep_detail),
                               ("direct_pass", dp_ok, dp_detail)):
-        records.append({"site": site, "stage": name,
-                        "pass": bool(okv) if okv is not None else None,
-                        "detail": detail})
+        rec = {"site": site, "stage": name,
+               "pass": bool(okv) if okv is not None else None,
+               "detail": detail}
+        if name == "episodes" and via_strategy:
+            rec["via"] = "strategy"
+        records.append(rec)
     with open(out_path, "a", encoding="utf-8") as f:
         for r in records:
             f.write(json.dumps(r) + "\n")
