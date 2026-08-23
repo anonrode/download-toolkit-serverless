@@ -57,6 +57,7 @@ class DownloadEngine(
     var clipboardDetect: Boolean = true
     var completionNotifications: Boolean = true
     var debugLogging: Boolean = false
+    var logRetentionDays: Int = 7
 
     // No byte movement (parsed progress or filesystem bytes) for this long while
     // DOWNLOADING means the backend is hung; the watchdog kills it so the retry
@@ -155,6 +156,9 @@ class DownloadEngine(
         clipboardDetect = prefs.getBoolean("pref_clipboard_detect", true)
         completionNotifications = prefs.getBoolean("pref_completion_notifications", true)
         debugLogging = prefs.getBoolean("pref_debug_logging", false)
+        logRetentionDays = prefs.getInt("pref_log_retention_days", 7)
+        // Retention applies at startup, not just when the setting changes.
+        com.anonrode.downloader.util.DebugLog.configureRetention(logRetentionDays)
     }
 
     fun setShowPosters(show: Boolean) {
@@ -192,7 +196,8 @@ class DownloadEngine(
         wifiAll: Boolean = false,
         clipboard: Boolean = true,
         notifications: Boolean = true,
-        debugLog: Boolean = false
+        debugLog: Boolean = false,
+        logRetention: Int = 7
     ) {
         this.maxConcurrentDownloads = maxConcurrent
         this.parallelSocketsPerFile = parallelSockets
@@ -213,6 +218,8 @@ class DownloadEngine(
         this.clipboardDetect = clipboard
         this.completionNotifications = notifications
         this.debugLogging = debugLog
+        this.logRetentionDays = logRetention.coerceIn(1, 90)
+        com.anonrode.downloader.util.DebugLog.configureRetention(this.logRetentionDays)
 
         context.getSharedPreferences("downloader_settings", Context.MODE_PRIVATE).edit()
             .putInt("pref_max_downloads", maxConcurrent)
@@ -234,6 +241,7 @@ class DownloadEngine(
             .putBoolean("pref_clipboard_detect", clipboard)
             .putBoolean("pref_completion_notifications", notifications)
             .putBoolean("pref_debug_logging", debugLog)
+            .putInt("pref_log_retention_days", this.logRetentionDays)
             .apply()
     }
 

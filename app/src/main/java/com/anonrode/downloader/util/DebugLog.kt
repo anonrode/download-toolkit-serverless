@@ -18,8 +18,8 @@ import java.util.concurrent.Executors
  *  - Writes go through a single background thread: callers never block on I/O,
  *    and lines from concurrent coroutines stay ordered.
  *  - Rotation: one file per day (app-YYYY-MM-DD.txt); when a day file passes
- *    [MAX_FILE_BYTES] it rolls to .1/.2; days older than [KEEP_DAYS] are
- *    deleted on init. Worst case disk use is a few MB.
+ *    [MAX_FILE_BYTES] it rolls to .1/.2; days older than the user-chosen
+ *    retention window (default 7, see [configureRetention]) are deleted.
  *  - Categories tag each line so a shared log can be filtered visually:
  *    USER (what the user did), ENGINE (state machine), RESOLVE (cracking),
  *    NET (every HTTP request), BACKEND (yt-dlp/aria2c/Turbo), ERROR.
@@ -36,7 +36,10 @@ object DebugLog {
     private val timeFormat = SimpleDateFormat("MM-dd HH:mm:ss.SSS", Locale.US)
 
     private const val MAX_FILE_BYTES = 8L * 1024 * 1024
-    private const val KEEP_DAYS = 3
+
+    /** User-configurable retention (Settings > Diagnostics); default 7 days. */
+    @Volatile
+    private var keepDays: Int = 7
 
     private val writer = Executors.newSingleThreadExecutor { r ->
         Thread(r, "ActivityLog").apply { isDaemon = true }
@@ -137,9 +140,17 @@ object DebugLog {
         return f
     }
 
+    /** Applies a user-chosen retention window and purges immediately, so
+     *  lowering the setting frees the space right away instead of waiting
+     *  for the next app start. */
+    fun configureRetention(days: Int) {
+        keepDays = days.coerceIn(1, 90)
+        purgeOldDays()
+    }
+
     private fun purgeOldDays() {
         val dir = logDir ?: return
-        val cutoff = System.currentTimeMillis() - KEEP_DAYS * 86_400_000L
+        val cutoff = System.currentTimeMillis() - keepDays * 86_400_000L
         dir.listFiles { f -> f.name.startsWith("app-") && f.lastModified() < cutoff }?.forEach { f ->
             try { f.delete() } catch (_: Exception) {}
         }
