@@ -3,3 +3,5 @@ scraper_rules.json
 
 # local conformance run artifacts
 probe/results-*.jsonl
+__pycache__/
+*.pyc
