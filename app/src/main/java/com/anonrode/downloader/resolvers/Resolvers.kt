@@ -1,6 +1,8 @@
 package com.anonrode.downloader.resolvers
 
 import com.anonrode.downloader.data.net.HttpClient
+import com.anonrode.downloader.pipeline.PipelineError
+import com.anonrode.downloader.pipeline.PipelineJournal
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
@@ -167,7 +169,7 @@ object ResolverRegistry {
                 com.anonrode.downloader.pipeline.PipelineJournal.hop(
                     site = "", stage = "crack:${resolver::class.simpleName}",
                     url = trimmed, ok = false, ms = elapsed,
-                    detail = HttpClient.lastFailure?.take(120)
+                    detail = HttpClient.lastFailure?.take(120) ?: ""
                 )
             }
         }
@@ -527,13 +529,18 @@ object VidsrcResolver : BaseResolver {
             var embedUrl = url.replace("nepu.to/", "nepu.gd/")
             if (embedUrl.contains("nepu.gd/watch")) {
                 // Watch pages hide the player in iframe#playerFrame (or a
-                // vidsrc-src iframe) — hop through it to the embed URL.
-                val html = HttpClient.getText(embedUrl, referer = "https://nepu.gd/") ?: return null
-                val doc = Jsoup.parse(html, embedUrl)
-                val iframe = doc.selectFirst("iframe#playerFrame")
-                    ?: doc.selectFirst("iframe[src*=vidsrc]")
-                    ?: return null
-                embedUrl = HttpClient.safeResolveUri(embedUrl, iframe.attr("src"))
+                // vidsrc-src iframe) — hop through it to the embed URL if present.
+                try {
+                    val html = HttpClient.getText(embedUrl, referer = "https://nepu.gd/")
+                    if (!html.isNullOrBlank()) {
+                        val doc = Jsoup.parse(html, embedUrl)
+                        val iframe = doc.selectFirst("iframe#playerFrame")
+                            ?: doc.selectFirst("iframe[src*=vidsrc]")
+                        if (iframe != null && iframe.attr("src").isNotBlank()) {
+                            embedUrl = HttpClient.safeResolveUri(embedUrl, iframe.attr("src"))
+                        }
+                    }
+                } catch (_: Exception) {}
             }
 
             // The embed URL carries the TMDB id (and season/episode for TV).

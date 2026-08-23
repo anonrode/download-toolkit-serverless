@@ -105,14 +105,20 @@ object AnitakuProvider : SiteProvider {
 
             val episodes = mutableListOf<EpisodeItem>()
             val seen = mutableSetOf<String>()
-            val epLinks = doc.select(".bixbox.bxcl.epcheck a, .eplister ul li a, #episode_related a, .episodes a, ul.episodes-lists li a, a[href*='episode']")
+            val epLinks = doc.select(
+                ".bixbox.bxcl.epcheck a, .eplister ul li a, #episode_related a, .episodes a, ul.episodes-lists li a, a[href*='-episode-'], a[href*='-movie-'], a[href*='episode']"
+            )
 
             for (a in epLinks) {
-                val rawHref = a.attr("href")
+                val rawHref = a.attr("href").trim()
+                if (rawHref.isBlank() || rawHref == "#" || rawHref.startsWith("#") || rawHref.startsWith("javascript:")) continue
+
                 val href = a.attr("abs:href").ifBlank {
                     HttpClient.safeResolveUri(showUrl, rawHref)
-                }
-                if (href.isBlank() || href in seen || href.contains("/category/") || href.contains("/genre/")) continue
+                }.substringBefore('#')
+
+                if (href.isBlank() || href == showUrl || href in seen || href.contains("/category/") || href.contains("/genre/")) continue
+                if (showUrl.contains("/anime/") && href.endsWith("/anime/")) continue
                 seen.add(href)
 
                 val nameText = a.text().trim()
@@ -122,12 +128,27 @@ object AnitakuProvider : SiteProvider {
 
                 episodes.add(
                     EpisodeItem(
-                        title = "Episode $num",
+                        title = if (nameText.isNotBlank() && !nameText.equals("#", ignoreCase = true)) nameText else "Episode $num",
                         url = href,
                         episodeNum = num,
                         site = name
                     )
                 )
+            }
+
+            // Single-episode / Movie fallback if epLinks were empty or pointed to the show page itself
+            if (episodes.isEmpty()) {
+                val playerIframe = doc.selectFirst("iframe[src], .anime_muti_link a[data-video], .servers a[data-video]")
+                if (playerIframe != null) {
+                    episodes.add(
+                        EpisodeItem(
+                            title = "Movie / Episode 1",
+                            url = showUrl,
+                            episodeNum = 1,
+                            site = name
+                        )
+                    )
+                }
             }
 
             val card = ShowCard(title = title, url = showUrl, posterUrl = poster, site = name)
@@ -142,66 +163,64 @@ object AnitakuProvider : SiteProvider {
 
         try {
             val html = HttpClient.getText(episodeUrl, referer = "https://gogoanime.or.at/") ?: ""
-            
-            // 0. Check Gogoanime direct download links API
-            val malMatch = Pattern.compile("""malId\s*=\s*['"](\d+)['"]""").matcher(html)
-            val epMatch = Pattern.compile("""ep\s*=\s*['"](\d+)['"]""").matcher(html)
-            if (malMatch.find() && epMatch.find()) {
-                val malId = malMatch.group(1) ?: ""
-                val ep = epMatch.group(1) ?: ""
-                val host = HttpClient.safeHost(episodeUrl, "gogoanime.or.at")
-                val ajaxUrl = "https://$host/wp-admin/admin-ajax.php"
 
-                val form = FormBody.Builder()
-                    .add("action", "fetch_download_links")
-                    .add("mal_id", malId)
-                    .add("ep", ep)
-                    .build()
+            // 1. Direct candidate player embeds on page (newplayer.php, megaplay.buzz, megaplays.se, takuembed)
+            val doc = Jsoup.parse(html, episodeUrl)
+            val candidates = mutableListOf<String>()
+            for (a in doc.select(".anime_muti_link a[data-video], .servers a[data-video], .anime_muti_link a[href]")) {
+                val dataVideo = a.attr("data-video").ifEmpty { a.attr("href") }
+                if (dataVideo.isNotBlank() && !dataVideo.startsWith("javascript:")) candidates.add(dataVideo)
+            }
+            for (iframe in doc.select("iframe[src]")) {
+                val src = iframe.attr("src")
+                if (src.isNotBlank() && !src.startsWith("javascript:")) candidates.add(src)
+            }
 
-                val req = Request.Builder()
-                    .url(ajaxUrl)
-                    .header("User-Agent", HttpClient.DEFAULT_UA)
-                    .header("Referer", episodeUrl)
-                    .header("X-Requested-With", "XMLHttpRequest")
-                    .post(form)
-                    .build()
-
-                HttpClient.shared.newCall(req).execute().use { res ->
-                    if (res.isSuccessful) {
-                        val body = res.body?.string() ?: ""
-                        val dlHtml = JSONObject(body).optJSONObject("data")?.optString("result") ?: ""
-                        if (dlHtml.isNotBlank()) {
-                            val dlDoc = Jsoup.parse(dlHtml, episodeUrl)
-                            for (a in dlDoc.select("a[href]")) {
-                                val dlLink = a.attr("href")
-                                val resolved = ResolverRegistry.resolve(dlLink, quality)
-                                if (!resolved.isNullOrBlank()) {
-                                    direct = resolved
-                                    break
-                                }
-                            }
-                        }
-                    }
+            if (candidates.isNotEmpty()) {
+                val fullCandidates = candidates.map { HttpClient.safeResolveUri(episodeUrl, it) }
+                val resolved = ResolverRegistry.resolveAny(fullCandidates, quality)
+                if (!resolved.isNullOrBlank()) {
+                    direct = resolved
                 }
             }
 
+            // 2. Gogoanime fetch_download_links API fallback
             if (direct.isNullOrBlank()) {
-                val doc = Jsoup.parse(html, episodeUrl)
-                val candidates = mutableListOf<String>()
-                for (a in doc.select(".anime_muti_link a[data-video], .servers a[data-video], .anime_muti_link a[href]")) {
-                    val dataVideo = a.attr("data-video").ifEmpty { a.attr("href") }
-                    if (dataVideo.isNotBlank()) candidates.add(dataVideo)
-                }
-                for (iframe in doc.select("iframe[src]")) {
-                    candidates.add(iframe.attr("src"))
-                }
+                val malMatch = Pattern.compile("""malId\s*=\s*['"](\d+)['"]""").matcher(html)
+                val epMatch = Pattern.compile("""ep\s*=\s*['"](\d+)['"]""").matcher(html)
+                if (malMatch.find() && epMatch.find()) {
+                    val malId = malMatch.group(1) ?: ""
+                    val ep = epMatch.group(1) ?: ""
+                    val host = HttpClient.safeHost(episodeUrl, "gogoanime.or.at")
+                    val ajaxUrl = "https://$host/wp-admin/admin-ajax.php"
 
-                for (cand in candidates) {
-                    val src = HttpClient.safeResolveUri(episodeUrl, cand)
-                    val resolved = ResolverRegistry.resolve(src, quality)
-                    if (!resolved.isNullOrBlank()) {
-                        direct = resolved
-                        break
+                    val form = FormBody.Builder()
+                        .add("action", "fetch_download_links")
+                        .add("mal_id", malId)
+                        .add("ep", ep)
+                        .build()
+
+                    val req = Request.Builder()
+                        .url(ajaxUrl)
+                        .header("User-Agent", HttpClient.DEFAULT_UA)
+                        .header("Referer", episodeUrl)
+                        .header("X-Requested-With", "XMLHttpRequest")
+                        .post(form)
+                        .build()
+
+                    HttpClient.shared.newCall(req).execute().use { res ->
+                        if (res.isSuccessful) {
+                            val body = res.body?.string() ?: ""
+                            val dlHtml = JSONObject(body).optJSONObject("data")?.optString("result") ?: ""
+                            if (dlHtml.isNotBlank()) {
+                                val dlDoc = Jsoup.parse(dlHtml, episodeUrl)
+                                val dlLinks = dlDoc.select("a[href]").map { it.attr("href") }
+                                val resolved = ResolverRegistry.resolveAny(dlLinks, quality)
+                                if (!resolved.isNullOrBlank()) {
+                                    direct = resolved
+                                }
+                            }
+                        }
                     }
                 }
             }

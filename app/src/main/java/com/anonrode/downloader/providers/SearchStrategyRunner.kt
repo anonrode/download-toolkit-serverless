@@ -62,18 +62,18 @@ object SearchStrategyRunner {
         val cardSel = st.optString("cardSelector", "article")
         val out = mutableListOf<ShowCard>()
         for (item in doc.select(cardSel)) {
-            val a = if (item.tagName() == "a") item
-            else item.selectFirst(st.optString("linkSelector", "h2 a, .entry-title a, a[href]")) ?: continue
-            val title = a.text().trim()
-            val href = a.attr("abs:href").ifBlank {
-                HttpClient.safeResolveUri(url, a.attr("href"))
-            } ?: ""
-            if (href.isNotBlank() && title.isNotBlank() && out.none { it.url == href }) {
-                out.add(ShowCard(
-                    title = title, url = href,
-                    posterUrl = item.selectFirst("img")?.attr("abs:src"),
-                    site = siteName, category = ""
-                ))
+val a = if (item.tagName() == "a") item
+                    else item.selectFirst(st.optString("linkSelector", "h2 a, .entry-title a, a[href]")) ?: continue
+                    val title = a.text().trim()
+                    val href = a.attr("abs:href").ifBlank {
+                        HttpClient.safeResolveUri(url, a.attr("href"))
+                    } ?: ""
+                    if (href.isNotBlank() && title.isNotBlank() && out.none { it.url == href }) {
+                        out.add(ShowCard(
+                            title = title, url = href,
+                            posterUrl = item.selectFirst("img")?.attr("abs:src") ?: "",
+                            site = siteName, category = ""
+                        ))
             }
         }
         out
@@ -93,7 +93,7 @@ object SearchStrategyRunner {
                 ?: item.selectFirst("link")?.attr("href") ?: return@mapNotNull null
             ShowCard(
                 title = title, url = link,
-                posterUrl = item.selectFirst("thumbnail, enclosure, image")?.attr("url"),
+                posterUrl = item.selectFirst("thumbnail, enclosure, image")?.attr("url") ?: "",
                 site = siteName, category = ""
             )
         }

@@ -194,7 +194,7 @@ fun TorrentFilePickerDialog(
             }
         },
         dismissButton = if (safeFiles.isNotEmpty()) {
-            TextButton(onClick = { onDismiss(null) }) { Text("Whole torrent", color = AccentPrimary) }
+            { TextButton(onClick = { onDismiss(null) }) { Text("Whole torrent", color = AccentPrimary) } }
         } else null
     )
 }
