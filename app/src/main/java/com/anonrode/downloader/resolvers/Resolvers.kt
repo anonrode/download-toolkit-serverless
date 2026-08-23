@@ -783,9 +783,19 @@ object PlutoMoviesResolver : BaseResolver {
             val dlAnchor = soup.selectFirst("a[href*='dl.plutomovies.com']")
             if (dlAnchor != null) {
                 val href = dlAnchor.attr("abs:href")
-                if (href.isNotBlank() && !href.equals(url, ignoreCase = true)) return href
+                if (href.isNotBlank() && !href.equals(url, ignoreCase = true)) {
+                    // The dl anchor often lands on an intermediate page whose
+                    // own locker/download link is the real file — descend a
+                    // bounded depth (monolith parity: PlutoMoviesResolver
+                    // follows the anchor chain).
+                    if (depth < 3) {
+                        val nested = resolve(href, quality, depth + 1)
+                        if (!nested.isNullOrBlank()) return nested
+                    }
+                    return href
+                }
             }
-            val btn = soup.selectFirst("a[href*='kissorgrab.com']")
+            val btn = soup.selectFirst("a[href*='kissorgrab.com'], a[href*='/download/'], a.download-btn, a[href*='download'], a[href*='.mp4'], a[href*='.mkv']")
             if (btn != null) {
                 val href = btn.attr("abs:href")
                 if (href.isNotBlank() && !href.equals(url, ignoreCase = true) && !isRootLockerDomain(href)) return href
