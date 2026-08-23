@@ -3,34 +3,14 @@
 **Target Codebase:** `C:\Users\Anon\download-toolkit-serverless` (Android / Kotlin / Jetpack Compose / OkHttp / libaria2c / youtubedl-android)
 **Reference Python Monolith:** `C:\Users\Anon\download-toolkit` (`src/downloader.py`, `src/resolvers.py`, `src/extractors/`) — **the battle-tested reference; the Kotlin app is a port of it, and porting infidelities are the #1 bug source.**
 **Operating Charter:** `.agents/AGENTS.md` (Permanent source of truth — never delete)
-**Status:** Latest push `689ffee` — CI ✅ green. Local commits `33b0c73` (OTA rules), `a53c513` (m3u8 fix), `5c6468b` (nkiri/anitaku/asianc), `c37c2d8` (yt-dlp referer split), plus nkiri host failover (pending commit) — **NOT pushed** (user: commit only).
-**This file replaces the previous handover (which stopped at `de0a67e`). Last updated: 2026-08-22 ~14:30 UTC+1.**
-
-## 📊 Verification suite (2026-08-22, 50-title × 11 sites)
-
-`probe/verify_batch.py` (monolith repo) — 4-stage pipeline (S1 search / S2 episodes / S3 crack / S4 1KB probe), rules-aware (reads `scraper_rules.json`), 150ms pacing, hard 1KB probe cap. Scorecard (after fix sweep):
-
-| Site | S1 | S2 | S3 | S4 | Notes |
-|---|---|---|---|---|---|
-| 9jarocks | 48/48 | 8/8 | 8/8 | 8/8 | fully healthy |
-| pluto | 45/45 | 7/8 | 7/8 | 7/8 | 1 clip page legitimately linkless |
-| torrents | 49/49 | n/a | 8/8 | n/a | 8/8 magnets |
-| naijaprey | 47/47 | 8/8 | 8/8 | 6/6→5/6 | chains fixed; dead /d/ links honest 404 |
-| anitaku | 40/40 | 8/8 | 8/8 | **0/8 → 4/4** | needs Referer `https://megaplay.buzz/` exactly (engine map now covers watching.onl/anivideo.sbs); worker API path Cloudflare-challenged (app fallback works) |
-| asianc | 46/46 | 8/8 | 8/8 | 2/8 → 2/4 | vidbasic 3rdplayer→lisaido.top works with NO referer; jisooido/jiminido dead site-side |
-| dramarain | 47/47 | 4/8 | 4/8 | 3/8 | ?s= broken site-side; slugs work |
-| nkiri | 0/50 → **5/5** | — | — | proven | original IP 80.82.65.46 IP-range-blocked on this network; switched to Cloudflare mirror **nkiri.top** (partial catalog ~591 posts, no squid game etc.) |
-| nepu | 44/44 | 1/3 | 0/3 | 0/3 | vidsrc chain still open (fix-agent infra failed; known hostile) |
-| naijavault | 49/49 | 1/8 | 1/8 | 0/8 | decay confirmed; filevault 526 |
-| dramakey | 0/25 | — | — | — | dead site — app correctly disabled it |
-
-Key suite-side fixes: `app_resolver.py` broken regex `["\]` (root cause of historical all-None smoke tests), anitaku mirror (`malId/ep` → fetch_download_links → megaplay fallback), Kotlin-faithful streamwish/vidhide ports, naijaprey class-anchor chain (+wildshare//d/ terminal hops), pluto dl-anchor/descent backport, monolith `urlunparse` NameError fix. New files: `probe/verify_batch.py`, `probe/aggregate_scorecard.py`, `probe/results-verify-*.jsonl`, `probe/verify-scorecard.json`.
+**Status:** Last pushed commit `689ffee` (v3.0.2 release). Four local commits NOT pushed — **user: DON'T PUSH WITHOUT ASKING.** Latest: `24ce28d` (24ce28d Fix naijaprey vdl chain + unseed moviereleases.net).
+**This file replaces the previous handover (which stopped at `689ffee`). Last updated: 2026-08-23 ~22:00 UTC+1.**
 
 ---
 
 ## 🏛️ 1. PROJECT CONTEXT
 
-Anon Downloader = 100% serverless on-device Android downloader. Multi-site search (nkiri, 9jarocks, naijavault, naijaprey, nepu, asianc, pluto, dramarain) → per-site episode drawers → 3-engine downloading:
+Anon Downloader = 100% serverless on-device Android downloader. Multi-site search (nkiri, 9jarocks, naijavault, naijaprey, nepu, asianc, pluto, dramarain, dramakey, anitaku, torrents) → per-site episode drawers → 3-engine downloading:
 - **TurboDownloader**: Kotlin OkHttp segmented range downloader (default engine for direct files)
 - **aria2c**: via bundled yt-dlp `--downloader libaria2c.so`
 - **yt-dlp**: social embeds, HLS `.m3u8`, generic extractor fallbacks
@@ -40,92 +20,154 @@ Magnets → aria2c with selective-file picker. No backend servers anywhere.
 1. **Never add AI attribution to commits.**
 2. **Never bulk-read `src/downloader.py` (~4200 lines)** or other huge files — grep/sed narrowly.
 3. **Verify against the live world before coding.** Log-only guessing has been repeatedly wrong.
-4. **Do not waste the user's mobile data.** Page fetches OK; video downloads NEVER without explicit permission. Test harness caps every download at 100KB.
-5. **GitHub builds, not local** — no local Gradle/Android toolchain exists. CI: `.github/workflows/build-apk.yml` overwrites release assets on tag `v3.0.0` per push to master. Always `gh run watch` after pushing.
+4. **Do not waste the user's mobile data.** Page fetches OK; video downloads NEVER without explicit permission. Test harness caps every download at 1KB (capped range probes only).
+5. **GitHub builds, not local** — no local Gradle/Android toolchain exists. CI: `.github/workflows/build-apk.yml` overwrites release assets on tag push. Always `gh run watch` after pushing.
 6. **Ask before pushing** (user has revoked pushes mid-flight).
 7. Things that worked yesterday must still work tomorrow — verify fixes against live sites before shipping.
+8. **Subagents must NEVER push.** Push decision is main-agent-only, user-approved.
 
 ### 🧰 DIAGNOSTIC LIFEBLOOD
 The activity log (`filesDir/logs/app-YYYY-MM-DD.txt`, shared via Settings → "Share Activity Log") records EVERYTHING: USER actions, NET requests, ENGINE transitions, RESOLVE attempts, BACKEND lifecycle, ERROR lines. The user shares these constantly — read them first, they are the primary diagnostic artifact. Categories: `[USER] [NET] [ENGINE] [RESOLVE] [BACKEND] [ERROR] [CRASH]`.
 
 ---
 
-## 📌 2. CURRENT STATE AT HANDOVER
+## 📌 2. CURRENT STATE — LOCAL COMMITS (NOT PUSHED, NOT IN v3.0.2)
 
-Latest commit pushed: **`689ffee`**, CI green. Commit chain: `b3beeaa` → `30402bf` → `b9248ec` → `341069e` → `6db3acf` → `9b5eab9` → `689ffee`.
+Four commits ahead of the last pushed release (v3.0.2 / `689ffee`):
 
-### ✅ Verified working (live-tested 2026-08-22, probe harness + user logs + live curl)
-| Chain | Status |
-|---|---|
-| nkiri → downloadwella → direct MKV | 22/22 verified |
-| 9jarocks → loadedfiles → gfrdaseazzs CDN | 13/13 after fixes; **user log confirms Vincenzo resolved+downloading** |
-| Instagram/social (yt-dlp) | always works |
-| asianc Vincenzo | **FIXED, user-log confirmed**: Vidbasic mirror-selector delegation → Streamwish(sfastwish) → premilkyway HLS moved real bytes |
-| pluto drawer + movies | drawer loads (baseUri fix); movies 10/15 verified; series episode extraction added (`dl.plutomovies.com` anchors on `/series/` pages). `689ffee`: hub/season directory descent live-walked All-American hub → season-8 → s08e07 → dl anchor |
-| dramarain gateway→waffi | end-to-end verified (site-side TLS/transient failures remain) |
-| naijavault drawer | loads episodes (many posts genuinely lost their links — site decay) |
-
-### ⚠️ Known-broken / open (do not re-diagnose from scratch — this is the map)
-1. **vidsrc HLS deep-dive**: nepu TV HLS historically stalled at 0 bytes. Root causes found & fixed: segment CDNs 403 ANY Referer (referer suppression added for rewritten masters), stale persisted tokens 403-loop (StaleStreamLinkException re-resolves), variant root-absolute paths handled. **Next user log will show yt-dlp's own stderr per attempt** (instrumentation added) — confirm the stall is gone.
-2. **asianc segment CDN `cdn.jisooido.top` domain-locks** (403 "domain forbidden" for every referer) — site-side; some episodes undownloadable. premilkyway masters expire within minutes. Site increasingly hostile.
-3. **naijavault content decay**: most posts expose no links anymore; filevault.com.ng is down (Cloudflare 526). Site-side.
-4. **asianc hglink.to secondary mirrors all dead** ("file expired") — site-side; primary vidbasic path works now.
-5. **nkiri search (thenkiri.com) connect-timeouts from the user's network** — site-side connectivity.
-6. **dramarain `?s=` search broken server-side** (2026-08-22): "Nothing Found" even for titles its own sidebar links to. App-side slug guessing now covers category-suffixed slugs (`-chinese-drama/-thai-drama/-japanese-drama/-philippines-drama`, live-verified 200); Korean-title searches stay empty — the site has no Korean section, that's correct behavior.
-7. **Monolith bug**: `src/resolvers.py` ~1546 Vidhide uses unimported `urlunparse` → NameError (reference-side only).
-8. **Log-share filename staleness**: the Aug 21 23:20 session was shared as `app-2026-08-13.txt` (content timestamps authoritative). Cosmetic, uninvestigated.
-
----
-
-## 🏛️ 3. ARCHITECTURE (key files)
-
-- **`engine/DownloadEngine.kt`** — task state machine; resolution gate (`isDirectMediaUrl` / `isKnownLockerHost` / `isProvablyDirectFile`); routing; watchdog (crawl floor 64KiB/60s, rate-drop detector, zombie cap 4×stall+<1MiB); HLS preflight+rewrite (`preflightHls`, `rewriteHlsMaster`, `resolveSegmentUrl`, `StaleStreamLinkException` → re-resolve on 401/403); failure notifications; registry-recursion consumer.
-- **`engine/YoutubeDlDownloader.kt`** — yt-dlp wrapper: attempt loop w/ resume, **per-attempt stderr logging**, `hlsMasterFile` (file:// + --enable-file-urls), referer suppression for rewritten masters.
-- **`engine/DownloadRepository.kt`** — JSON persistence; **reopen NEVER auto-resumes** (parking markers cleared on init).
-- **`resolvers/Resolvers.kt`** — 25 resolvers + `ResolverRegistry` (**now recursive** — intermediate results re-enter the registry, Python resolvers.py:2185 parity) + helpers. `isDirectMediaUrl` also accepts hyphen-extension forms (`…s01e19-mp4`, dl.plutomovies.com style) — engine routes them Turbo/aria2c and recursion stops there; PlutoMoviesResolver descends hub→season→episode directories when no anchor extracts.
-- **`providers/*.kt`** — per-site search/drawers/resolveEpisode. NaijaPreyProvider chases vdl.np-downloader.com/sdm_downloads → a.sdm_download anchor → wildshare → direct MKV.
-- **`data/net/HttpClient.kt`** — shared client + cookie jar (LOAD-BEARING for locker chains), search-call tagging (`cancelTagged("search")` spares live searches), `probe()` (headers-only reachability), capped body reads (3MB text / 5MB bin).
-- **`providers/ProviderRegistry.kt`** — search fan-out (7s timeout, 4-min result cache, `searchEnabled` flag — dramakey disabled), episodesCache 5-min.
-- **`service/DownloadService.kt` + `RetryReceiver.kt`** — progress/complete/failure notifications; failure ones carry a Retry action.
-- **`util/DebugLog.kt` + `util/CrashHandler.kt`** — always-on journal; crashes land in it.
-- Probe harness lives in the monolith repo: `C:\Users\Anon\download-toolkit\probe\`.
-
----
-
-## 📋 4. THE AUDIT SYSTEM (regression alarm — use it!)
-
-`C:\Users\Anon\download-toolkit\probe\probe_harness.py`: searches real titles per site → resolves → downloads ONLY the first 100KB (Range-capped) → verifies magic bytes (MP4 `ftyp`, MKV `1a45dfa3`, TS `0x47`). Usage:
-```bash
-cd C:/Users/Anon/download-toolkit/probe
-python probe_harness.py --site nkiri --max 15 [--mode app]
 ```
-Results → `results-<site>-<type>.jsonl`. `app_resolver.py` mirrors the FIXED Kotlin logic in Python (`--mode app`) so app algorithms can be validated without an Android build — **INCOMPLETE: smoke test returned None everywhere; known bug fixed was `_get` no-redirect body-read; needs debugging** (monolith resolves the same URLs fine).
+24ce28d Fix naijaprey vdl chain (tokenless wildshare bait) + unseed moviereleases.net
+c3893a4 Seed vdl.np-downloader.com + www.moviereleases.net in lockerHosts; conformance JSON search fixes
+2ef8688 HostHealth learning + nav-junk refinement + conformance locker-discovery stage
+4927e5d LockerRegistry: evidence-based locker discovery (extract everything, arbitrate by evidence)
+```
 
-Harness quirks learned: 9jarocks RSS carries URLs in `<link>` elements (not hrefs); pluto emits relative hrefs; dramarain show slugs look like categories (`<title>-chinese-drama/`) so category-skips must be anchored (`^https://dramarain.com/[a-z]+-drama/$`); nepu api/search dropped its `url` field (build watch URLs from id+media_type); asianc emits relative episode hrefs.
+### Commit 1: `4927e5d` — LockerRegistry + NaijaVault swap + OTA field + tests
+
+**What it does:** Extracts locker-host knowledge from per-provider hardcoded lists into a single `LockerRegistry` with evidence-based classification.
+
+**Key files:**
+- `resolvers/LockerRegistry.kt` — Central registry, 3 methods:
+  - `classify(url)` → `MediaKind.Direct` (known media extension) / `Locker(host)` (OTA-seeded + built-in known hosts, hostname-boundary match — no substring false positives) / `Unknown(host)` (never gated — the evidence-based contract: "extract everything, arbitrate by evidence") / `None` (nav junk: root pages, single-segment paths without media markers, known nav words).
+  - `findLockerLinksInHtml(html)` — Jsoup-first (href/data-video/data-src) with regex fallback; nav-junk filtered.
+  - `resolveCandidates(urls, quality)` — direct files passthrough, known lockers race via `ResolverRegistry.resolveAny` (max 3 concurrent), **unknown hosts probed once via `StreamValidator`** — valid streams work on first contact, no code path can refuse an unfamiliar link.
+- `providers/NaijaVaultProvider.kt` — Replaced hardcoded substring list with `classify(href) != MediaKind.None` for its download-link gate. `resolveEpisode` now uses `resolveAny` over all locker matches (including unseeded hosts like streamsss).
+- `data/rules/DynamicRulesManager.kt` — Added `lockerHosts` field parsing + `getLockerHosts()` accessor.
+- `scraper_rules.json.enc` — Signed envelope regenerated with 22 seeded locker hosts.
+- `test/.../LockerRegistryTest.kt` — 8 JVM tests: classify cases, extraction, nav-junk, OTA seeding.
+
+**Design philosophy:** The old design had each provider maintain its own host list, and any host it didn't know was silently dropped → "0 episodes" on shows using new lockers. The new design: EXTRACT EVERYTHING, ARBITRATE BY EVIDENCE. Every plausible anchor from the episode page is collected (no host filter), classify() sorts by evidence, resolveCandidates() races known lockers and probes unknown hosts. HostHealth records successes so unknown hosts derive their own reputation. The playbook seeds the initial list; the app learns beyond it.
+
+**Nav-junk filter (as of 4927e5d, refined in 2ef8688):** Single-segment paths (count '/' <= 1) → None. This is the baseline; the refinement in the next commit adds the `NAV_SEGMENTS` set and media-marker rules.
+
+### Commit 2: `2ef8688` — HostHealth learning + nav-junk refinement + conformance locker-discovery stage
+
+**Move 2 — HostHealth learning:**
+- `HostHealth.hasProvenLocker(host)`: `records[host]?.ok >= 1` → any host that successfully served ≥1 stream is treated as a known locker from then on, no OTA needed.
+- `LockerRegistry.classify()` calls `hasProvenLocker` before path heuristics — proven hosts never gate on nav-junk rules.
+
+**Nav-junk refinement:**
+- `NAV_SEGMENTS` set: `tag/category/dmca/menu/date/archive/author/cdn-cgi/email-protection/series-download/movie-download/download-movies/...` — exact match, `startsWith('how-to')`, `endsWith('-menu')`, `contains('movies')`. Applied to unknown hosts only (known lockers and proven hosts already returned).
+- Single-segment paths kept only when they carry media markers: `-episode-`, `season`, `-movie-`, or a show-style `-drama` slug with ≥2 dashes (`vincenzo-korean-drama` survives, `chinese-drama` doesn't — the latter is a category page).
+- `/dl-` and deep `/download/` paths preserved above nav check.
+- **Live-verified:** Nkiri show page: old substring gate kept 20 links (all real), new gate kept 36 (same 20 + 16 same-site show links / fragment anchors). 9jarocks: old 2, new 64 (62 `/date/` archive junk). **These were BEFORE the NAV_SEGMENTS fix** — the fix eliminates the /tag/ /date/ /dmca/ /korean-drama-menu/ noise. The remaining same-site noise is additive, not destructive.
+- **IMPORTANT: Only NaijaVaultProvider uses `classify` for gating.** NkiriProvider, RocksProvider, DramaRainProvider were REVERTED to their committed substring-based gates after live probes proved classify regressions (DramaRain: `/download?link=` single-segment episodes dropped; Nkiri/9jarocks: 44-62 nav junk entries added). The classify gate stays where the design intends it: NaijaVault's download-link filter, `findLockerLinksInHtml`, and `resolveCandidates`.
+
+**Move 3 — Conformance locker-discovery stage (Stage 4):**
+- `probe/conformance.py` adds `classify_media()` mirror (20/20 parity verified against Kotlin), `DEFAULT_LOCKER_HOSTS` + `NAV_SEGMENTS` constants, and `stage_locker_discovery()`.
+- `run_site` wires the stage on whichever page was fetched (episodes or strategy-chain fallback). Reports `UNKNOWN HOSTS FOUND` with link counts per host — playbook gaps the app learns via `HostHealth.hasProvenLocker`.
+- Fresh conformance run (2026-08-23): surfaced `vdl.np-downloader.com` (5 links, real naijaprey download host) and `www.moviereleases.net` (10 links, later proven to be a release-date tracker — unseeded in commit 3).
+- **RSS show-URL extraction fix:** `<link>` is a void element under the HTML parser, so URL text never lands inside the tag. Fixed with regex on raw body (same approach as `extract_titles`).
+- **JSON search fix:** naijavault + asianc use JSON search endpoints. `run_site` now walks `link`/`url` fields accepting relative URLs (asianc returns `/drama-detail/vincenzo`).
+
+**Tests:**
+- `classify_navJunkIsNone` extended: `/date/archive/`, `/dmca/`.
+- `classify_shallowShowSlugsAreUnknown`: single-segment markers survive.
+- `classify_knownLockerHosts` fixed: `.mkv` URL triggered Direct (ext check fires first), changed to non-media path to test boundary matching as intended.
+
+### Commit 3: `c3893a4` — Seed vdl.np-downloader.com + www.moviereleases.net; conformance JSON search fix
+
+- `lockerHosts`: 22 → 24.
+- Signed envelope regenerated locally.
+- Conformance JSON search show-URL extraction (relative URLs, `url` field fallback for asianc).
+
+### Commit 4: `24ce28d` — Naijaprey vdl chain fix + unseed moviereleases.net
+
+**Live-verified chain (2026-08-23, 1KB probes only):**
+```
+naijaprey show page → vdl.np-downloader.com/sdm_downloads/download-<slug>/ (SDM post)
+→ a.sdm_download → wildshare.net/<fileId> → ?pt= token (session-bound cookies!)
+→ 302 → silversurfer.wildshare.net/<id>/<name>.mkv?download_token=...
+→ 206 video/x-matroska (MKV magic 1A45DFA3)
+```
+
+**Bug found and fixed — the app's chain-chaser was returning the wrong URL at TWO points:**
+1. `extractFileLink`'s first-match regex hit `site.webmanifest` (a WP favicon link) before the real file, because `.webmanifest` contains `.webm` as a prefix. **Fix:** `(?![a-zA-Z0-9])` after the extension group + strip HTML entities (`&quot;`/`&amp;`) off the tail. Same fix applied to `extractMp4FromHtml` in `Resolvers.kt` (used by GenericLocker/VikingFile/LulaCloud/Embed/FivePlay resolvers).
+2. The wildshare page's `.mkv` link is **hotlink bait**: without the `?pt=` token it answers 206 with `text/html` (anti-hotlink). **Fix:** `resolveEpisode` in `NaijaPreyProvider.kt` now re-routes wildshare.net `*.mkv`/`*.mp4` results back through `ResolverRegistry`, where `WildshareResolver` stamps `pt=` and follows the 302 to the tokenized CDN file. The app's persistent cookie jar (`sessionCookieJar` in `HttpClient.kt`) makes the session-bound `pt` token work.
+
+**Unseed `www.moviereleases.net`:** Live probe proved it's a TMDB-driven release-date tracker — the 10 "links" were naijaprey's trailers sidebar widget (YouTube embeds, zero download links anywhere). `classify() → Locker → raced via resolveAny` would have been pointless. Removed from `lockerHosts` (now 23 hosts). Signed envelope regenerated.
+
+**`seriezloaded.com.ng`:** Appeared in dramarain's conformance discovery (1 link). Probed: DNS NXDOMAIN. Not seeded.
+
+---
+
+## 📋 3. ARCHITECTURE (key files)
+
+### Core pipeline
+- **`pipeline/HostHealth.kt`** — Persistent per-host health ledger. Exponential backoff (30s<<consec-1, cap 1h). ≥3 consecutive failures triggers backoff window. `hasProvenLocker(host)` — any host that successfully served ≥1 stream is a known locker. Cancellation errors ignored (search typing no longer poisons hosts).
+- **`pipeline/StreamValidator.kt`** — 1KB Range probe with real download headers. Rejects HTML/archive/exec. Throws `PipelineError.ValidationFailed`.
+- **`pipeline/ResolveCache.kt`** — In-memory, TTL = `tokenTtlMinutes` from playbook. Engine invalidates before refresh.
+- **`pipeline/PipelineJournal.kt`** — Structured `[hop]` lines with ms + page hash.
+- **`pipeline/PipelineError.kt`** — Sealed class: `SiteDown/HostDead/RateLimited/BlockedIp/TokenExpired/ParseEmpty/ValidationFailed/BudgetExceeded`.
+
+### Resolver layer
+- **`resolvers/Resolvers.kt`** — 25 resolvers + `ResolverRegistry`. `resolve()` = cache+health wrapper; `resolveAny(urls, quality, max=3)` races candidates concurrently. Recursive descent (intermediate results re-enter the registry). GenericLockerResolver handles vikingfile/lulacloud.
+- **`resolvers/LockerRegistry.kt`** — Evidence-based locker discovery. `classify(url)` → Direct/Locker/Unknown/None. `findLockerLinksInHtml(html)` → extraction. `resolveCandidates(urls, quality)` → racing + probing. `NAV_SEGMENTS` set + media-marker rules for single-segment paths.
+
+### Provider layer
+- **`providers/*.kt`** — Per-site search/drawers/resolveEpisode.
+- **NaijaPreyProvider:** Uses `extractFileLink()` for vdl.np-downloader.com/sdm_downloads → a.sdm_download → wildshare → MKV. Now re-routes wildshare bait through WildshareResolver (pt= token → 302 → CDN).
+- **NaijaVaultProvider:** Uses `LockerRegistry.classify()` for download-link gate. `resolveAny` over all locker matches. **Known issue:** episode list includes same-site sidebar links + #mh-comments fragments (the playbook has a precise episodeSelector but the provider ignores it — uses all-links sweep instead).
+- **NkiriProvider, RocksProvider, DramaRainProvider:** NO classify usage (reverted to committed substring-based gates). See "Reverts" section below.
+- **SearchStrategyRunner:** Executes OTA searchStrategies chain (urlTemplate/rss/slugGuess). Nav-junk guard: single-segment paths dropped unless they carry media markers.
+- **`providers/ProviderRegistry.kt`** — Search fan-out (7s timeout, 4-min result cache, searchEnabled flag).
+
+### OTA Playbooks
+- **`data/rules/DynamicRulesManager.kt`** — Signed envelope decryption + field parsing. `lockerHosts`, `hostPolicies` (ordered referer rules), `searchStrategies`, `knownDead`, `tokenTtlMinutes`, `directMediaExtensions`, `slugSuffixes`, `countries`, `mirrors`.
+- **`scripts/encrypt_rules.py`** — Canonical pipeline: validate → encrypt (AES-128-CBC) → sign (ECDSA P-256 SHA256) → envelope. Field allow-list, selector/size caps.
+- **`scraper_rules.json.enc`** — Signed v2 envelope (git-tracked). Plaintext `scraper_rules.json` is gitignored.
+
+### Conformance
+- **`probe/conformance.py`** — Signature-verifying runner (refuses unsigned payloads). 4 stages: search/episodes/direct-pass/locker-discovery. `--search-quality` mode for strict per-query hit testing. JSON search show-URL extraction (walk link/url fields, accept relative URLs). RSS show-URL extraction (regex on raw body).
+
+### Reverts from Move 1
+⚠️ **The following providers were reverted to committed code after live probes proved classify regressions:**
+- **DramaRainProvider:** Its episode links are `/download?link=...` — single-segment path → `classify()` returned None → every episode dropped. Reverted to old category/tag gate.
+- **NkiriProvider:** The `classify != None` gate added 44+ nav-junk entries (`/tag/`, `/dmca/`, `/korean-drama-menu/`) to the episode list. Old substring-based gate was precise (20 real MKV links). Reverted.
+- **RocksProvider (9jarocks):** Same story — 62 `/date/` archive links. Reverted.
+
+The `classify` gate stays where the design intends it: NaijaVault's download-link filter, `findLockerLinksInHtml`, and `resolveCandidates`.
+
+---
+
+## 📋 4. KNOWN-BROKEN / OPEN (do not re-diagnose from scratch)
+
+1. **NaijaVault episode-list noise** — The playbook's `episodeSelector` for naijavault is precise (`a[href*='nkiserv'], a[href*='filevault'], '/dl-'`), but the app's `NaijaVaultProvider.loadEpisodes` uses an all-links sweep with `classify != None` gate, producing 23 noise entries (same-site sidebar links + `#mh-comments` fragments) per real download. **Fix:** wire the provider to prefer the OTA episodeSelector. Data-only change (no APK rebuild needed if the OTA field is read — but the code currently doesn't read it for episodes). Small Kotlin change needed for a future iteration.
+2. **vidsrc HLS deep-dive** — nepu TV HLS historically stalled at 0 bytes. Root causes found & fixed in earlier commits (689ffee era). Confirm with new user log.
+3. **asianc segment CDN `cdn.jisooido.top` domain-locks** — site-side; some episodes undownloadable.
+4. **naijavault content decay** — most posts expose no links anymore; filevault.com.ng is down (Cloudflare 526). Site-side.
+5. **nkiri search (thenkiri.com) connect-timeouts** — site-side connectivity (user's network).
+6. **dramarain `?s=` search broken server-side** — site-side; slug guessing works.
+7. **9jarocks HTTP 522** — transient Cloudflare, not app issue.
+8. **seriezloaded.com.ng** — dead domain (DNS NXDOMAIN). Not seeded. Ignore.
 
 ---
 
 ## 📋 5. INCOMING AI QUICK-START CHECKLIST
-1. `git status` (master, clean) and `gh run list --limit 2` — confirm latest CI green.
-2. Ask the user for the newest activity log if anything's broken — read `[ERROR]/[RESOLVE]/[ENGINE]` lines first; the instrumentation now shows yt-dlp stderr per attempt and rewritten-master dumps.
-3. For any chain failure: run the probe harness for that site BEFORE coding; compare against the monolith resolver (parity diff); check `audit-*.json` reports in the probe folder.
-4. vidsrc chain reference (as of today): watch page → iframe vidsrc.mov/embed → `data.vidsrcme.ru/api.php?type=tv|movie&tmdb=N[&season&episode]&stream_urls` → wasm ChaCha20 decrypt (rotating wasm module) → playlist on rotating `<name>.site/.space` domains → generate.php JWT (IP-bound, hours) → master.m3u8?token → variants → segments (403 ANY Referer). Movies often null = genuinely no stream. Tokens die fast → always re-resolve on 401/403.
-5. Never regress these user-facing guarantees: reopen never auto-resumes; pause actually pauses; failures notify with Retry; searches cancel their predecessors; nothing silently consumes data.
 
-## 🏛️ Architecture Upgrade (2026-08-23): Kernel + OTA Playbooks v2 + Reliability Engine
-
-**Status line update:** local commits `cbb8e61` (torrent shield hardening), `4f115b6` (playbooks v2 + signing), `74cf53a` (pipeline), `b4b0e91` (conformance + search chains), `ee29857` (log retention), `c31f789` (search-quality), `c149b68` (pluto leak) — **NOT pushed** (user: don't push yet).
-
-### What changed and where
-1. **Signed OTA pipeline** — `scraper_rules.json.enc` is now a v2 envelope `{"v":2,"iv":<random>,"payload":<b64>,"sig":<ECDSA-P256>}`. `DynamicRulesManager.decryptRules` verifies the signature BEFORE decrypting; v2 unsigned/tampered payloads refused; legacy fixed-IV payloads still parse (migration). Signing private key = GitHub secret `OTA_SIGNING_PRIVATE_KEY` (SET live 2026-08-23); public key embedded in manager (`rulesSigningPubB64`). Workflow `ota-rules.yml` regenerates+seals the payload on `scraper_rules.json` pushes. Canonical tooling: `scripts/encrypt_rules.py` (strict schema validation incl. field allow-list, selector/size caps). Mirror: monolith `probe/encrypt_rules.py` (keys in gitignored `ota_keys/`).
-2. **Host policies as data** — `hostPolicies[]` (ordered match→referer rules) in the playbook; `DynamicRulesManager.resolveReferer()` is the SINGLE referer source. `DownloadEngine.getRefererForUrl` is now a one-line delegate. The old hardcoded map lives on as `DEFAULT_HOST_POLICIES` fallback. Also new playbook fields: `urlTemplates` (nepu /watch rebuild), `knownDead` (jisooido etc.), `tokenTtlMinutes`, `searchStrategies` (ordered fallback chains per site; `SearchStrategyRunner` executes urlTemplate/rss/slugGuess; dramarain wired).
-3. **pipeline/ package** — `PipelineError` (typed: SiteDown/HostDead/RateLimited/BlockedIp/TokenExpired/ParseEmpty/ValidationFailed/BudgetExceeded + classify()), `PipelineJournal` (structured `[hop]` lines with ms + page hash; wired into ResolverRegistry), `HostHealth` (persistent per-host ok/fail/429 + exponential backoff, seeded by knownDead; init in AnonApp), `ResolveCache` (token-TTL in-memory cache; `resolveStreamUrl` invalidates before refresh so the 403 self-heal can't be served a stale URL), `StreamValidator` (1KB ranged pre-enqueue check with REAL download headers; wired in engine direct path; throws PipelineError.ValidationFailed).
-4. **ResolverRegistry** — resolve() = cache+health wrapper around resolveInternal (recursion uncached); `resolveAny(urls, quality, max=3)` races locker candidates, first winner cancels losers. NaijaVault adopted it (multi-locker /dl- pages).
-5. **Conformance** — `probe/conformance.py` (serverless repo): signature-verifying runner (refuses unsigned payloads); stage sweep + `--search-quality` mode (strict hit = parsed-title fuzzy match; 24-query curated set + `probe/search_queries_fixture.json` 232-query fixture). Workflow `conformance.yml`: MANUAL dispatch only (live site traffic from GitHub IPs). Local run 2026-08-23: all sites OK except dramarain search (known decay; slug-guess OTA chain is the fix) + 9jarocks/naijaprey RSS "100% hits incl. fake titles" = junk-feed signal (RelevanceScorer filters app-side).
-6. **Log retention user setting** — Settings > Diagnostics "Keep Activity Logs" 1–30 days (default 7), applied live via `DebugLog.configureRetention`.
-
-### Known-open items
-- anitaku + nepu "Could not crack stream link" — debug prompt handed to Antigravity (screenshots 2026-08-22 21:xx).
-- 9jaRocks episode grouping/sorting (2-ep posts, newest-first).
-- KPop tasks stuck PAUSED at small sizes — undiagnosed.
-- Pluto leak FIXED locally (c149b68): episode links scoped to same series id/slug.
+1. `git log --oneline -6` to see the current local commit stack. All 4 commits are NOT pushed. **Do NOT push without asking the user.**
+2. Ask the user for the newest activity log if anything's broken — read `[ERROR]/[RESOLVE]/[ENGINE]` lines first.
+3. The `LockerRegistry` design: **extract everything, arbitrate by evidence.** `classify()` never gates on unknown hosts — they get probed once via StreamValidator, and HostHealth records the outcome. The playbook is just a seed; the app learns its own locker list.
+4. For the nav-junk filter: `NAV_SEGMENTS` set + media-marker rules. See `LockerRegistry.classify()` for the canonical logic; `probe/conformance.py` has a verified Python mirror.
+5. If debugging a failed download: trace the chain. For naijaprey: show page → vdl.sdm_downloads → a.sdm_download → wildshare → pt= → 302 → silversurfer CDN. The app's `extractFileLink` + `WildshareResolver` handle it. Test with a session-based Python script (cookies are load-bearing).
+6. Never regress these user-facing guarantees: reopen never auto-resumes; pause actually pauses; failures notify with Retry; searches cancel their predecessors; nothing silently consumes data.
