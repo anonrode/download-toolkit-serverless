@@ -120,6 +120,19 @@ jobs:
       - name: Build Release APKs
         run: gradle :app:assembleRelease --stacktrace --no-daemon
 
+      - name: Rename APKs to human-friendly names
+        # Default Gradle split naming is app-<abi>-release.apk (e.g.
+        # app-arm64-v8a-release.apk). Rename to AnonDownloader-<version>-<abi>.apk
+        # so GitHub artifact/release downloads are self-explanatory. <version>
+        # is the git ref (v3.0.2 on tags, branch name on branch pushes).
+        run: |
+          for f in app/build/outputs/apk/release/*.apk; do
+            base=$(basename "$f")
+            abi="${base#app-}"
+            abi="${abi%-release.apk}"
+            mv "$f" "app/build/outputs/apk/release/AnonDownloader-${{ github.ref_name }}-${abi}.apk"
+          done
+
       - name: Upload APK Artifacts
         uses: actions/upload-artifact@v4
         with:
