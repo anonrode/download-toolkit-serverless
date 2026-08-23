@@ -143,21 +143,23 @@ object TorrentSecurityShield {
         val clean = name.lowercase().trim()
         val segments = clean.split('.')
 
-        // Check final extension
-        if (segments.size > 1) {
-            val finalExt = "." + segments.last()
-            if (finalExt in BLOCKED_EXTENSIONS) {
-                return Pair(false, "Blocked extension: $finalExt")
-            }
-        }
-
-        // Check double-extension attack (e.g. Movie.mp4.exe)
+        // Check double-extension attack first (e.g. Movie.mp4.apk): a blocked
+        // extension anywhere in the name — not just the final position — is a
+        // hidden-executable disguise and must be reported as such.
         if (segments.size >= 3) {
             for (i in 1 until segments.size) {
                 val segExt = "." + segments[i]
                 if (segExt in BLOCKED_EXTENSIONS) {
                     return Pair(false, "Hidden executable in name: ...${segments[i - 1]}.${segments[i]}")
                 }
+            }
+        }
+
+        // Check final extension
+        if (segments.size > 1) {
+            val finalExt = "." + segments.last()
+            if (finalExt in BLOCKED_EXTENSIONS) {
+                return Pair(false, "Blocked extension: $finalExt")
             }
         }
 
