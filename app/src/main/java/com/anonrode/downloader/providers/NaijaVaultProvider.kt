@@ -76,13 +76,38 @@ object NaijaVaultProvider : SiteProvider {
 
             val episodes = mutableListOf<EpisodeItem>()
             val seen = mutableSetOf<String>()
-            // Full-document scan (charter rule 3): the monolith walks every <a>
-            // because the site's theme drops .entry-content on some layouts —
-            // constraining to that container found zero episodes (user-reported).
-            val allLinks = doc.select("a[href]")
+            // OTA episodeSelector wins when the playbook declares one: it
+            // matches on href substrings (a[href*='nkiserv'], a[href*='/dl-'],
+            // ...) so it is theme-independent AND precise — the all-links
+            // sweep below lets sidebar/comment links (other shows, #mh-
+            // comments fragments) into the episode list as junk entries
+            // (live-verified: ~23 junk per real download link).
+            //
+            // The selector is static, though — union in any OTHER link
+            // classify() KNOWS as a direct file or a known locker
+            // (playbook-seeded OR learned via HostHealth), so a host the
+            // selector never listed (streamsss, streamwish, ...) still
+            // surfaces. Unknown/deep same-site links stay excluded — they
+            // are sidebar junk naijavault cannot resolve anyway.
+            // Fallback = full-document scan (charter rule 3): the monolith
+            // walks every <a> because the site's theme drops .entry-content
+            // on some layouts — constraining to that container found zero
+            // episodes (user-reported).
+            val otaSel = DynamicRulesManager.getSiteConfig(name)
+                ?.episodeSelector?.takeIf { it.isNotBlank() }
+            val links: List<org.jsoup.nodes.Element> = if (otaSel != null) {
+                val ota = doc.select(otaSel)
+                val knownElsewhere = doc.select("a[href]").filter { a ->
+                    val h = a.attr("abs:href").ifBlank { a.attr("href") }
+                    com.anonrode.downloader.resolvers.LockerRegistry.isKnownMedia(h)
+                }
+                (ota + knownElsewhere).distinctBy { it.attr("abs:href").ifBlank { it.attr("href") } }
+            } else {
+                doc.select("a[href]")
+            }
 
             var count = 1
-            for (a in allLinks) {
+            for (a in links) {
                 val rawHref = a.attr("href")
                 val href = a.attr("abs:href").ifBlank {
                     HttpClient.safeResolveUri(showUrl, rawHref)

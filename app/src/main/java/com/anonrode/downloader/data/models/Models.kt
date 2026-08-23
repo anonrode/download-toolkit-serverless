@@ -70,5 +70,9 @@ data class DownloadTask(
     val headers: Map<String, String> = emptyMap(),
     val audioOnly: Boolean = false,
     val errorMessage: String? = null,
-    val quality: String? = null
+    val quality: String? = null,
+    /** Real stream resolution extracted from the HLS master playlist
+     *  (e.g. "1080p", "720p"). Populated during preflight when the master
+     *  declares RESOLUTION attributes; null for direct files and unknown. */
+    val resolution: String? = null
 )

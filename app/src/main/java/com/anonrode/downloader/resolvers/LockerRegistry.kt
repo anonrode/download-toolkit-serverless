@@ -115,6 +115,15 @@ object LockerRegistry {
         return Unknown(host)
     }
 
+    /** True when [url] is a direct media file or a KNOWN locker (playbook-
+     *  seeded or learned via HostHealth). Unknown hosts are excluded — they
+     *  belong in findLockerLinksInHtml/resolveCandidates, not in curated
+     *  episode lists. */
+    fun isKnownMedia(url: String): Boolean = when (classify(url)) {
+        is MediaKind.Direct, is MediaKind.Locker -> true
+        else -> false
+    }
+
     /**
      * Extract all plausible locker/media URLs from raw HTML.
      * Jsoup-first (href, data-video, data-src), regex fallback for obfuscated pages.
