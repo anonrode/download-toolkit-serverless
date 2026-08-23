@@ -280,7 +280,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         wifiAll: Boolean = false,
         clipboard: Boolean = true,
         notifications: Boolean = true,
-        debugLog: Boolean = false
+        debugLog: Boolean = false,
+        logRetention: Int = 7
     ) {
         engine.saveAllSettings(
             maxConcurrent = maxConcurrent,
@@ -301,7 +302,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             wifiAll = wifiAll,
             clipboard = clipboard,
             notifications = notifications,
-            debugLog = debugLog
+            debugLog = debugLog,
+            logRetention = logRetention
         )
         com.anonrode.downloader.util.DebugLog.user(
             "settings saved (sockets=$parallelSockets quality=$quality stall=${stallTimeout}s hls=$hlsFragments peers=$peers speedLimit=$speedLimit)"

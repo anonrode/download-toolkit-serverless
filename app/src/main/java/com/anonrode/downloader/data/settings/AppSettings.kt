@@ -31,7 +31,8 @@ data class AppSettings(
     val storageGuardGb: Double = 1.0,
     val clipboardDetect: Boolean = true,
     val completionNotifications: Boolean = true,
-    val debugLogging: Boolean = false
+    val debugLogging: Boolean = false,
+    val logRetentionDays: Int = 7
 ) {
     companion object {
         const val PREFS_NAME = "downloader_settings"
@@ -58,7 +59,8 @@ data class AppSettings(
                 storageGuardGb = prefs.getFloat("pref_storage_guard", 1.0f).toDouble(),
                 clipboardDetect = prefs.getBoolean("pref_clipboard_detect", true),
                 completionNotifications = prefs.getBoolean("pref_completion_notifications", true),
-                debugLogging = prefs.getBoolean("pref_debug_logging", false)
+                debugLogging = prefs.getBoolean("pref_debug_logging", false),
+                logRetentionDays = prefs.getInt("pref_log_retention_days", 7)
             )
         }
 
@@ -83,6 +85,7 @@ data class AppSettings(
                 .putBoolean("pref_clipboard_detect", s.clipboardDetect)
                 .putBoolean("pref_completion_notifications", s.completionNotifications)
                 .putBoolean("pref_debug_logging", s.debugLogging)
+                .putInt("pref_log_retention_days", s.logRetentionDays)
                 .apply()
         }
 

@@ -65,6 +65,7 @@ fun SettingsSheet(
     var clipboardDetect by remember { mutableStateOf(viewModel.engine.clipboardDetect) }
     var completionNotifications by remember { mutableStateOf(viewModel.engine.completionNotifications) }
     var debugLogging by remember { mutableStateOf(viewModel.engine.debugLogging) }
+    var logRetention by remember { mutableStateOf(viewModel.engine.logRetentionDays) }
 
     var isUpdatingYtDlp by remember { mutableStateOf(false) }
     var isSyncingRules by remember { mutableStateOf(false) }
@@ -749,6 +750,41 @@ fun SettingsSheet(
             // SECTION 8: Diagnostics
             SettingsCategoryHeader(title = "Diagnostics")
             SettingsCard {
+                // Activity-log retention: how many days of journal files are
+                // kept before auto-deletion (default 7). Lowering it purges
+                // immediately on save.
+                Column(modifier = Modifier.padding(Spacing.md)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Rounded.History, contentDescription = null, tint = AccentPrimary, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(Spacing.sm))
+                            Column {
+                                Text("Keep Activity Logs", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = TextPrimary)
+                                Text("Days of history before old log files are deleted", fontSize = 11.sp, color = TextMuted)
+                            }
+                        }
+                        Text("$logRetention days", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AccentPrimary)
+                    }
+                    Slider(
+                        value = logRetention.toFloat(),
+                        onValueChange = { logRetention = it.toInt().coerceIn(1, 30) },
+                        valueRange = 1f..30f,
+                        steps = 29,
+                        thumb = { SettingsSliderThumb() },
+                        colors = SliderDefaults.colors(
+                            thumbColor = AccentPrimary,
+                            activeTrackColor = AccentPrimary,
+                            inactiveTrackColor = SurfaceElevated
+                        )
+                    )
+                }
+
+                HorizontalDivider(color = BorderHairline, modifier = Modifier.padding(horizontal = Spacing.md))
+
                 // The activity journal is always on (daily rotating files under
                 // filesDir/logs); this row hands the current day's file to any
                 // share target so misbehavior can be diagnosed from it alone.
@@ -819,7 +855,8 @@ fun SettingsSheet(
                         wifiAll = wifiOnlyAll,
                         clipboard = clipboardDetect,
                         notifications = completionNotifications,
-                        debugLog = debugLogging
+                        debugLog = debugLogging,
+                        logRetention = logRetention
                     )
                     Toast.makeText(context, "Settings saved successfully", Toast.LENGTH_SHORT).show()
                     onDismiss()
