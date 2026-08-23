@@ -1,7 +1,10 @@
 package com.anonrode.downloader.resolvers
 
 import com.anonrode.downloader.data.net.HttpClient
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import okhttp3.FormBody
 import okhttp3.Request
 import org.json.JSONArray
@@ -53,17 +56,96 @@ object ResolverRegistry {
     )
 
     suspend fun resolve(url: String, quality: String = "720p", depth: Int = 0): String? {
-        if (depth > RESOLVE_DEPTH_LIMIT) return null
+        // Cache + health apply ONCE per user-facing resolve (depth==0); the
+        // recursive descent below stays uncached so gateway chains work.
+        val cacheKey = com.anonrode.downloader.pipeline.ResolveCache.keyFor(url, quality)
+        if (depth == 0) {
+            com.anonrode.downloader.pipeline.ResolveCache.get(cacheKey)?.let { cached ->
+                com.anonrode.downloader.pipeline.PipelineJournal.hop(
+                    site = "", stage = "cache", url = url, ok = true, ms = 0
+                )
+                return cached
+            }
+            if (!com.anonrode.downloader.pipeline.HostHealth.isUsable(url)) {
+                com.anonrode.downloader.pipeline.PipelineJournal.hop(
+                    site = "", stage = "health-gate", url = url, ok = false, ms = 0,
+                    detail = "host dead or in backoff window — skipped without a request"
+                )
+                return null
+            }
+        }
+        val result = resolveInternal(url, quality, depth)
+        if (depth == 0) {
+            val host = url.trim().substringAfter("://").substringBefore('/').substringBefore('?')
+            if (result != null) {
+                com.anonrode.downloader.pipeline.ResolveCache.put(cacheKey, result)
+                com.anonrode.downloader.pipeline.HostHealth.recordOk(host)
+            } else {
+                com.anonrode.downloader.pipeline.HostHealth.recordFail(
+                    host,
+                    rateLimited = HttpClient.lastFailure?.contains("429") == true
+                )
+            }
+        }
+        return result
+    }
+
+    /**
+     * Race up to [maxConcurrency] locker candidates CONCURRENTLY and return
+     * the first success; losers are cancelled mid-flight. Health-dead hosts
+     * are filtered before launch. This is where the app beats the monolith:
+     * a page embedding three lockers with two dead costs seconds, not the
+     * full sequential walk.
+     */
+    suspend fun resolveAny(urls: List<String>, quality: String = "720p", maxConcurrency: Int = 3): String? {
+        val candidates = urls.asSequence()
+            .filter { it.isNotBlank() }
+            .distinct()
+            .filter { com.anonrode.downloader.pipeline.HostHealth.isUsable(it) }
+            .take(maxConcurrency.coerceIn(1, 6))
+            .toList()
+        if (candidates.isEmpty()) return null
+        if (candidates.size == 1) return resolve(candidates.first(), quality)
+
+        return kotlinx.coroutines.coroutineScope {
+            val done = Channel<Pair<String, String?>>(Channel.UNLIMITED)
+            val jobs = candidates.map { u ->
+                launch {
+                    val r = try { resolve(u, quality) } catch (_: Exception) { null }
+                    done.send(u to r)
+                }
+            }
+            var winner: String? = null
+            repeat(jobs.size) {
+                val (_, r) = done.receive()
+                if (r != null && winner == null) {
+                    winner = r
+                    jobs.forEach { it.cancel() }
+                }
+            }
+            winner
+        }
+    }
+
+    private suspend fun resolveInternal(url: String, quality: String = "720p", depth: Int = 0): String? {
+        if (depth > RESOLVE_DEPTH_LIMIT) {
+            com.anonrode.downloader.pipeline.PipelineJournal.hop(
+                site = "", stage = "registry", url = url, ok = false, ms = 0,
+                detail = PipelineError.BudgetExceeded("depth", 0).message ?: "depth limit"
+            )
+            return null
+        }
         val trimmed = url.trim()
         for (resolver in RESOLVERS) {
             if (resolver.canResolve(trimmed)) {
-                com.anonrode.downloader.util.DebugLog.resolve(
-                    "try ${resolver::class.simpleName} depth=$depth url=${trimmed.take(110)}"
-                )
+                val start = System.currentTimeMillis()
                 val direct = resolveWithRetry(resolver, trimmed, quality, depth)
+                val elapsed = System.currentTimeMillis() - start
                 if (!direct.isNullOrBlank()) {
-                    com.anonrode.downloader.util.DebugLog.resolve(
-                        "HIT ${resolver::class.simpleName} -> ${direct.take(110)}"
+                    com.anonrode.downloader.pipeline.PipelineJournal.hop(
+                        site = "", stage = "crack:${resolver::class.simpleName}",
+                        url = trimmed, ok = true, ms = elapsed,
+                        detail = "-> ${direct.take(80)}"
                     )
                     // Reference parity (resolvers.py:2185): an intermediate
                     // result that differs from the input flows BACK through
@@ -76,14 +158,16 @@ object ResolverRegistry {
                         val mediaPath = isDirectMediaUrl(path)
                         val sameResolverReclaims = resolver.canResolve(direct)
                         if (!(sameResolverReclaims && mediaPath)) {
-                            val deeper = resolve(direct, quality, depth + 1)
+                            val deeper = resolveInternal(direct, quality, depth + 1)
                             if (!deeper.isNullOrBlank()) return deeper
                         }
                     }
                     return direct
                 }
-                com.anonrode.downloader.util.DebugLog.resolve(
-                    "miss ${resolver::class.simpleName} on ${trimmed.take(110)}"
+                com.anonrode.downloader.pipeline.PipelineJournal.hop(
+                    site = "", stage = "crack:${resolver::class.simpleName}",
+                    url = trimmed, ok = false, ms = elapsed,
+                    detail = HttpClient.lastFailure?.take(120)
                 )
             }
         }

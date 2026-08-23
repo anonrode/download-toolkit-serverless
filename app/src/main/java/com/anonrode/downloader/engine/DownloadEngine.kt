@@ -7,6 +7,8 @@ import android.os.StatFs
 import com.anonrode.downloader.data.models.DownloadTask
 import com.anonrode.downloader.data.models.TaskStatus
 import com.anonrode.downloader.data.net.HttpClient
+import com.anonrode.downloader.pipeline.PipelineError
+import com.anonrode.downloader.pipeline.StreamValidator
 import com.anonrode.downloader.providers.ProviderRegistry
 import com.anonrode.downloader.resolvers.ResolverRegistry
 import com.anonrode.downloader.resolvers.isDirectMediaUrl
@@ -670,7 +672,12 @@ class DownloadEngine(
             return !isKnownLockerHost(out)
         }
 
-        // 1. Try direct resolution via ResolverRegistry
+        // 1. Try direct resolution via ResolverRegistry.
+        // This function's semantic is "fetch a FRESH link" (called on token
+        // expiry), so the resolution cache must never serve the dead URL here.
+        com.anonrode.downloader.pipeline.ResolveCache.invalidate(
+            com.anonrode.downloader.pipeline.ResolveCache.keyFor(permUrl, defaultQual)
+        )
         var resolved = ResolverRegistry.resolve(permUrl, defaultQual)
         if (accept(resolved)) {
             return resolved
@@ -1179,7 +1186,9 @@ class DownloadEngine(
                 }
 
                 val targetFolder = getDownloadDirectory(task.showTitle, createDirs = true)
-                val refererToPass = getRefererForUrl(streamUrl)
+                // var: recomputed whenever a token refresh swaps streamUrl,
+                // so the fallback backends never run with a stale referer.
+                var refererToPass = getRefererForUrl(streamUrl)
 
                 // HLS pre-flight: probe the segment CDN before yt-dlp so a dead
                 // stream host fails cleanly in seconds instead of pinning the
@@ -1202,6 +1211,7 @@ class DownloadEngine(
                             throw Exception("Stream link expired and no fresh link could be fetched — try again later.")
                         }
                         streamUrl = fresh
+                        refererToPass = getRefererForUrl(streamUrl)
                         repository.update(task.id) { t ->
                             t.copy(
                                 directUrl = if (isDirectMediaUrl(streamUrl) || isProvablyDirectFile(streamUrl)) streamUrl else t.directUrl
@@ -1218,6 +1228,16 @@ class DownloadEngine(
                     val hdrs = mutableMapOf("User-Agent" to HttpClient.DEFAULT_UA)
                     if (refererToPass.isNotBlank()) hdrs["Referer"] = refererToPass
                     val dest = File(targetFolder, File(task.filePath).name)
+
+                    // Strict pre-enqueue validation: one ranged 1KB request with
+                    // the REAL download headers rejects HTML-decoy/archive URLs
+                    // before any byte is persisted (the corrupted-"mp4" bug class).
+                    // Failure fails the task loudly instead of queueing garbage.
+                    if (!isSocial) {
+                        StreamValidator.validate(streamUrl, hdrs)?.let { reason ->
+                            throw PipelineError.ValidationFailed(reason)
+                        }
+                    }
 
                     val progressCb: (Long, Long, Long) -> Unit = { got, tot, bps ->
                         val eta = if (bps > 0 && tot > got) (tot - got) / bps else 0L
@@ -1268,6 +1288,7 @@ class DownloadEngine(
                                 updateServiceState(force = true)
 
                                 val freshReferer = getRefererForUrl(streamUrl)
+                                refererToPass = freshReferer
                                 val freshHdrs = mutableMapOf("User-Agent" to HttpClient.DEFAULT_UA)
                                 if (freshReferer.isNotBlank()) freshHdrs["Referer"] = freshReferer
 
