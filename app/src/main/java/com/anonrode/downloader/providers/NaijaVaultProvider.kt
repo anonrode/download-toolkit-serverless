@@ -185,13 +185,17 @@ object NaijaVaultProvider : SiteProvider {
                         direct = ResolverRegistry.resolve(cdnUrl, quality) ?: cdnUrl
                     }
                 } else {
-                    // Fallback to scanning HTML for locker hosts (vikingfile, lulacloud, etc.)
-                    val lockerMatch = Regex("""https?://(?:www\.)?(?:vikingfile|lulacloud|waffi)\.[a-z0-9-]+/[^\s"'<>]+""", RegexOption.IGNORE_CASE).find(html)
-                    if (lockerMatch != null) {
-                        val lockerUrl = lockerMatch.groupValues.getOrNull(0) ?: ""
-                        if (lockerUrl.isNotBlank()) {
-                            direct = ResolverRegistry.resolve(lockerUrl, quality) ?: lockerUrl
-                        }
+                    // Fallback to scanning HTML for locker hosts (vikingfile,
+                    // lulacloud, waffi...) — race ALL of them concurrently so
+                    // dead lockers cost nothing (the sequential walk used to
+                    // wait out every corpse).
+                    val lockerMatches = Regex(
+                        """https?://(?:www\.)?(?:vikingfile|lulacloud|waffi)\.[a-z0-9-]+/[^\s"'<>]+""",
+                        RegexOption.IGNORE_CASE
+                    ).findAll(html).map { it.groupValues.getOrNull(0) ?: "" }
+                        .filter { it.isNotBlank() }.toList()
+                    if (lockerMatches.isNotEmpty()) {
+                        direct = ResolverRegistry.resolveAny(lockerMatches, quality)
                     }
                 }
             } catch (_: Exception) {}
