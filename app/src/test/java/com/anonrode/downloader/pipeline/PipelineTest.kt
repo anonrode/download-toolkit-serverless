@@ -28,7 +28,7 @@ class PipelineTest {
     @Test
     fun sniff_rejectsArchiveAndExecutableContainers() {
         assertNotNull(StreamValidator.sniff(byteArrayOf(0x50, 0x4b, 0x03, 0x04)))           // PK zip/apk
-        assertNotNull(StreamValidator.sniff(byteArrayOf(0x4d, 0x5a, 0x90, 0x00)))           // MZ exe
+        assertNotNull(StreamValidator.sniff(byteArrayOf(0x4d, 0x5a, 0x90.toByte(), 0x00)))    // MZ exe
     }
 
     @Test

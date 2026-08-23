@@ -100,7 +100,7 @@ class DynamicRulesManagerTest {
         val kpg = java.security.KeyPairGenerator.getInstance("EC")
         kpg.initialize(java.security.spec.ECGenParameterSpec("secp256r1"))
         val pair = kpg.generateKeyPair()
-        val pubB64 = java.util.Base64.getEncoder().encodeString(pair.public.encoded)
+        val pubB64 = java.util.Base64.getEncoder().encodeToString(pair.public.encoded)
         val original = DynamicRulesManager.rulesSigningPubB64
         DynamicRulesManager.rulesSigningPubB64 = pubB64
         try {

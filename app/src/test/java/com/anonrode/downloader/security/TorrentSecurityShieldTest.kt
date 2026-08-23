@@ -81,7 +81,7 @@ class TorrentSecurityShieldTest {
 
     @Test
     fun windowsExecutableStillBlocked() {
-        val (ok, why) = validate("movie.mp4", byteArrayOf(0x4d, 0x5a, 0x90, 0x00)) // "MZ"
+        val (ok, why) = validate("movie.mp4", byteArrayOf(0x4d, 0x5a, 0x90.toByte(), 0x00)) // "MZ"
         assertFalse(ok)
         assertTrue(why.contains("MZ header"))
     }
