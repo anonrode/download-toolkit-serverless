@@ -1284,6 +1284,14 @@ class DownloadEngine(
                     }
                 }
 
+                // Seed the estimated total into the progress display so the
+                // UI shows "3.2 GB" immediately instead of "0 B" until yt-dlp
+                // emits its first parsed line (the segment-sampling estimator
+                // is the most accurate pre-download projection available).
+                if (hlsSizeEstimate[0] > 0L) {
+                    repository.updateProgress(task.id, downloaded = 0L, total = hlsSizeEstimate[0], speed = 0.0, eta = 0L)
+                }
+
                 var producedFile: File? = null
                 var turboFailure: TurboDownloader.TurboResult.Failure? = null
 
