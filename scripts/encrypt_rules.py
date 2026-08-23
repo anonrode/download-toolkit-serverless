@@ -22,10 +22,11 @@ Security model:
 Usage:
   python encrypt_rules.py                # validate + encrypt + sign (if key found)
   python encrypt_rules.py --no-sign      # validate + encrypt only (legacy-style output)
-  python encrypt_rules.py --gen-keys     # generate ota_keys/*.pem locally
+  python encrypt_rules.py --gen-keys     # generate the keypair locally
 
 Key lookup order for signing: --key <pem path> | $OTA_SIGNING_PRIVATE_KEY |
-ota_keys/ota_signing_private_key.pem (relative to this repo).
+~/anon-serverless-app-maintenance-build/ota_signing_private_key.pem
+(the dedicated maintenance folder OUTSIDE both repos — never committed).
 """
 import argparse
 import base64
@@ -45,10 +46,11 @@ RULES_KEY = bytes.fromhex("8f3a9c21d4e65b0789a2c4f6d1e3b5a7")   # 16 bytes (unch
 # is a mirror; keep the two in sync.
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SERVERLESS = REPO_ROOT
-# Local dev: the keypair lives in the monolith's ota_keys/ (gitignored).
+# Local dev: the keypair lives in ~/anon-serverless-app-maintenance-build/
+# (outside both repos, gitignored by not being IN any repo).
 # CI: signing uses $OTA_SIGNING_PRIVATE_KEY, never a file.
 KEY_PATH = os.environ.get("OTA_SIGNING_KEY_FILE") or os.path.join(
-    os.path.dirname(REPO_ROOT), "download-toolkit", "ota_keys", "ota_signing_private_key.pem")
+    os.path.expanduser("~"), "anon-serverless-app-maintenance-build", "ota_signing_private_key.pem")
 
 # PUBLIC half of the OTA signing keypair (safe to commit — it can only
 # VERIFY, never sign). Matches the constant embedded in the app's
