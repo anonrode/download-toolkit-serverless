@@ -1274,6 +1274,16 @@ class DownloadEngine(
                 }
 
                 val targetFolder = getDownloadDirectory(task.showTitle, createDirs = true)
+                // Android 11+ direct writes to public Downloads silently fail
+                // without "All files access" (MANAGE_EXTERNAL_STORAGE) — fail
+                // fast with the fix instead of a confusing mid-download IO
+                // error that looks like the site broke.
+                if (!targetFolder.isDirectory || !targetFolder.canWrite()) {
+                    throw Exception(
+                        "Storage permission missing — downloads are saved to your Downloads folder. " +
+                            "Enable \"All files access\" for Anon Downloader (Settings > Apps > Anon Downloader > Permissions)."
+                    )
+                }
                 // var: recomputed whenever a token refresh swaps streamUrl,
                 // so the fallback backends never run with a stale referer.
                 var refererToPass = getRefererForUrl(streamUrl)

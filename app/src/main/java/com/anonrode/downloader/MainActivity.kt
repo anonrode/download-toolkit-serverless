@@ -3,8 +3,11 @@ package com.anonrode.downloader
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
+import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -13,11 +16,22 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.*
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import com.anonrode.downloader.ui.screens.*
+import com.anonrode.downloader.ui.theme.AccentPrimary
 import com.anonrode.downloader.ui.theme.AnonDownloaderTheme
+import com.anonrode.downloader.ui.theme.SurfaceCard
+import com.anonrode.downloader.ui.theme.TextMuted
+import com.anonrode.downloader.ui.theme.TextPrimary
+import com.anonrode.downloader.ui.theme.TextSecondary
 import com.anonrode.downloader.viewmodel.MainViewModel
 
 class MainActivity : ComponentActivity() {
@@ -62,6 +76,42 @@ class MainActivity : ComponentActivity() {
                         if (!hasPermission) {
                             permissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
                         }
+                    }
+                }
+
+                // ---- Storage access ----
+                // Downloads are written straight into Download/Anon, which on
+                // Android 11+ (API 30+) requires MANAGE_EXTERNAL_STORAGE —
+                // "All files access". That permission has NO runtime dialog:
+                // it can only be granted via a Settings redirect. On Android
+                // 9-10 (API 26-29) it is a normal WRITE_EXTERNAL_STORAGE prompt.
+                // Neither was ever requested, so fresh installs failed with a
+                // confusing IO error until the user manually granted access in
+                // app info (tester report). Show a rationale dialog at launch
+                // and route to the right grant screen.
+                val context = LocalContext.current
+                var showStorageRationale by remember { mutableStateOf(false) }
+                val writeStorageLauncher = rememberLauncherForActivityResult(
+                    contract = ActivityResultContracts.RequestPermission()
+                ) { granted ->
+                    showStorageRationale = !granted
+                }
+                val manageStorageLauncher = rememberLauncherForActivityResult(
+                    contract = ActivityResultContracts.StartActivityForResult()
+                ) { _ ->
+                    // The result code is meaningless for the All-files-access
+                    // toggle — re-check the actual grant state on return.
+                    showStorageRationale = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
+                        !Environment.isExternalStorageManager()
+                }
+
+                LaunchedEffect(Unit) {
+                    showStorageRationale = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        !Environment.isExternalStorageManager()
+                    } else {
+                        ContextCompat.checkSelfPermission(
+                            context, Manifest.permission.WRITE_EXTERNAL_STORAGE
+                        ) != PackageManager.PERMISSION_GRANTED
                     }
                 }
 
@@ -119,6 +169,60 @@ class MainActivity : ComponentActivity() {
                         url = url,
                         viewModel = viewModel,
                         onDismiss = { activeSocialTarget.value = null }
+                    )
+                }
+
+                if (showStorageRationale) {
+                    AlertDialog(
+                        onDismissRequest = { showStorageRationale = false },
+                        containerColor = SurfaceCard,
+                        titleContentColor = TextPrimary,
+                        textContentColor = TextSecondary,
+                        title = {
+                            Text("Storage access needed", fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+                        },
+                        text = {
+                            Text(
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R)
+                                    "Anon Downloader saves downloads to your Downloads folder. " +
+                                        "On this Android version that needs \"All files access\" — " +
+                                        "tap Grant and switch it on. Downloads will fail until then."
+                                else
+                                    "Anon Downloader saves downloads to your Downloads folder. " +
+                                        "Grant storage permission so downloads can be written there.",
+                                fontSize = 13.sp
+                            )
+                        },
+                        confirmButton = {
+                            TextButton(onClick = {
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                                    try {
+                                        manageStorageLauncher.launch(
+                                            Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
+                                                data = Uri.parse("package:${context.packageName}")
+                                            }
+                                        )
+                                    } catch (_: Exception) {
+                                        // Some OEMs drop the All-files-access action —
+                                        // fall back to the app's own info page.
+                                        context.startActivity(
+                                            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                                                data = Uri.parse("package:${context.packageName}")
+                                            }
+                                        )
+                                    }
+                                } else {
+                                    writeStorageLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                                }
+                            }) {
+                                Text("Grant", color = AccentPrimary, fontWeight = FontWeight.SemiBold)
+                            }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = { showStorageRationale = false }) {
+                                Text("Not now", color = TextMuted)
+                            }
+                        }
                     )
                 }
             }
