@@ -90,6 +90,16 @@ object HostHealth {
     fun recordFail(hostOrUrl: String, rateLimited: Boolean = false) {
         val h = hostOf(hostOrUrl)
         if (h.isBlank()) return
+        // A USER-INITIATED cancellation (search typing, task pause) surfaces
+        // as an IOException: Canceled via HttpClient.lastFailure. That is NOT
+        // a host failure — recording it poisoned nepu.gd with a 60s backoff
+        // every time the user typed fast in search (live-verified).
+        val lastFail = com.anonrode.downloader.data.net.HttpClient.lastFailure ?: ""
+        if (lastFail.contains("Canceled", ignoreCase = true) ||
+            lastFail.contains("CancellationException", ignoreCase = true) ||
+            lastFail.contains("abort", ignoreCase = true)) {
+            return
+        }
         records.compute(h) { _, v -> (v ?: Rec()).apply {
             fail++
             if (rateLimited) rate429++

@@ -71,10 +71,16 @@ val a = if (item.tagName() == "a") item
                     if (href.isNotBlank() && title.isNotBlank() && out.none { it.url == href }) {
                         // Nav-junk guard (dramarain lesson): a dead search
                         // endpoint returns category/nav cards ("Chinese Drama"
-                        // -> /chinese-drama/). Real show pages are deep paths;
-                        // shallow links are never results.
+                        // -> /chinese-drama/). A single meaningful slug
+                        // (e.g. /the-blood-of-youth-chinese-drama/) is a REAL
+                        // show page though — only reject exact category roots
+                        // and generic shallow paths, keep drama/episode/season
+                        // slugs.
                         val path = href.substringAfter("://").substringAfter('/').substringBefore('?').trimEnd('/')
-                        if (path.count { it == '/' } < 2) continue
+                        val shallowGeneric = path.count { it == '/' } <= 1 &&
+                            !path.contains("-drama") && !path.contains("-episode-") &&
+                            !path.contains("season") && !path.contains("-movie-")
+                        if (shallowGeneric) continue
                         out.add(ShowCard(
                             title = title, url = href,
                             posterUrl = item.selectFirst("img")?.attr("abs:src") ?: "",

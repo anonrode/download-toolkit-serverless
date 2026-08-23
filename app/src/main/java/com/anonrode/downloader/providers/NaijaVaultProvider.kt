@@ -185,12 +185,16 @@ object NaijaVaultProvider : SiteProvider {
                         direct = ResolverRegistry.resolve(cdnUrl, quality) ?: cdnUrl
                     }
                 } else {
-                    // Fallback to scanning HTML for locker hosts (vikingfile,
-                    // lulacloud, waffi...) — race ALL of them concurrently so
-                    // dead lockers cost nothing (the sequential walk used to
-                    // wait out every corpse).
+                    // Fallback to scanning HTML for locker hosts. NaijaVault
+                    // uses a wide variety of lockers (streamsss, streamwish,
+                    // streamtape, doodstream, vidhide, mixdrop, mp4upload,
+                    // vikingfile, lulacloud, waffi, etc.) — race ALL of them
+                    // concurrently so dead lockers cost nothing (the sequential
+                    // walk used to wait out every corpse). Missing any one means
+                    // a show silently drops to "0 episodes" (live-verified: The
+                    // Blood of Youth had 40 episodes on streamsss, all ignored).
                     val lockerMatches = Regex(
-                        """https?://(?:www\.)?(?:vikingfile|lulacloud|waffi)\.[a-z0-9-]+/[^\s"'<>]+""",
+                        """https?://(?:www\.)?(?:streamsss|streamwish|streamtape|doodstream|dood\.|vidhide|mixdrop|mp4upload|vikingfile|lulacloud|waffi)\.[a-z0-9-]+/[^\s"'<>]+""",
                         RegexOption.IGNORE_CASE
                     ).findAll(html).map { it.groupValues.getOrNull(0) ?: "" }
                         .filter { it.isNotBlank() }.toList()
