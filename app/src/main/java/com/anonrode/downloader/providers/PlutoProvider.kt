@@ -78,23 +78,28 @@ object PlutoProvider : SiteProvider {
             val cfg = DynamicRulesManager.getSiteConfig(name)
 
             if (showUrl.contains("/series/") || showUrl.contains("/season")) {
-                // Footer/sidebar "recommended shows" leak: Pluto renders ~40
-                // other series' links under every show (live screenshot:
-                // Vincenzo showed 60 episodes, only 20 real). Scope episode
-                // links to THIS show's numeric series id / slug.
                 val showId = Regex("""/series/(\d+)/""", RegexOption.IGNORE_CASE)
                     .find(showUrl)?.groupValues?.get(1)
-                val showSlug = showUrl.substringAfterLast('/')
+                val showSlug = showUrl.substringAfterLast('/').substringBefore('?')
+                val baseSlug = showSlug.replace(Regex("""-season-\d+.*""", RegexOption.IGNORE_CASE), "")
                 val seasonRegex = Regex("""/(series|season)/[^/]+/[^/]*season-\d+""", RegexOption.IGNORE_CASE)
-                val seasonLinks = doc.select("a[href]").mapNotNull { a ->
-                    val href = a.attr("abs:href").ifBlank { HttpClient.safeResolveUri(showUrl, a.attr("href")) }
-                    if (href.isNotBlank() && href != showUrl && seasonRegex.containsMatchIn(href)) href else null
-                }.distinct()
 
-                val pagesToScan = if (seasonLinks.isEmpty()) listOf(showUrl) else seasonLinks
-                var count = 1
+                // Collect season links and pagination pages for this specific series
+                val pagesToScan = mutableListOf(showUrl)
+                for (a in doc.select("a[href]")) {
+                    val href = a.attr("abs:href").ifBlank { HttpClient.safeResolveUri(showUrl, a.attr("href")) }
+                    if (href.isNotBlank() && href != showUrl) {
+                        if (seasonRegex.containsMatchIn(href) && (showId == null || href.contains("/series/$showId/"))) {
+                            if (href !in pagesToScan) pagesToScan.add(href)
+                        } else if (showId != null && href.contains("/series/$showId/") && href.contains("/page/")) {
+                            if (href !in pagesToScan) pagesToScan.add(href)
+                        }
+                    }
+                }
+
+                val epRegex = Regex("""${Regex.escape(baseSlug)}.*-s\d+e\d+""", RegexOption.IGNORE_CASE)
                 val seen = mutableSetOf<String>()
-                for (pageUrl in pagesToScan) {
+                for (pageUrl in pagesToScan.distinct()) {
                     val pageDoc = if (pageUrl == showUrl) doc else {
                         val pageHtml = HttpClient.getText(pageUrl, referer = "$mainUrl/") ?: continue
                         Jsoup.parse(pageHtml, pageUrl)
@@ -102,32 +107,31 @@ object PlutoProvider : SiteProvider {
                     for (a in pageDoc.select("a[href]")) {
                         val href = a.attr("abs:href").ifBlank {
                             HttpClient.safeResolveUri(pageUrl, a.attr("href"))
-                        }
-                        if (href.isBlank() || href in seen || href == showUrl) continue
-                        // Same-show scoping: same numeric series id, or the
-                        // same slug in the path (dl.plutomovies.com links carry
-                        // the slug, e.g. vincenzo-s01e05), or a plain
-                        // /episodes/ URL belonging to this id. Anything else is
-                        // footer/sidebar noise.
-                        val sameShow = when {
-                            showId != null && href.contains("/series/$showId/") -> true
-                            showSlug.isNotBlank() && href.contains(showSlug, ignoreCase = true) -> true
-                            href.contains("/episodes/") && (showId == null || href.contains(showId)) -> true
-                            else -> false
-                        }
-                        val isEpisodeLink = (href.contains("/series/") || href.contains("/episodes/")) &&
-                            !seasonRegex.containsMatchIn(href) &&
-                            href != pageUrl && sameShow
-                        if (!isEpisodeLink) continue
+                        }.substringBefore('#')
+
+                        if (href.isBlank() || href in seen || href == showUrl || href == pageUrl) continue
+                        val sameShow = (showId != null && href.contains("/series/$showId/")) ||
+                            (baseSlug.isNotBlank() && href.contains(baseSlug, ignoreCase = true))
+                        val isEpisode = sameShow && (epRegex.containsMatchIn(href) || href.contains("/episodes/")) &&
+                            !seasonRegex.containsMatchIn(href)
+
+                        if (!isEpisode) continue
                         seen.add(href)
+
+                        val epNumMatch = Regex("""-s\d+e(\d+)""", RegexOption.IGNORE_CASE).find(href)
+                        val epNum = epNumMatch?.groupValues?.get(1)?.toIntOrNull()
+                            ?: Regex("""\d+""").find(a.text())?.value?.toIntOrNull()
+                            ?: (episodes.size + 1)
+
                         val epName = a.text().trim()
                             .replace(Regex("""(?i)^(previous|next)\s+episode\b\s*"""), "")
-                            .trim().ifEmpty { "Episode $count" }
+                            .trim().ifEmpty { "Episode $epNum" }
+
                         episodes.add(
                             EpisodeItem(
                                 title = epName,
                                 url = href,
-                                episodeNum = count++,
+                                episodeNum = epNum,
                                 site = name
                             )
                         )
