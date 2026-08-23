@@ -94,27 +94,16 @@ object NaijaVaultProvider : SiteProvider {
                 if (lowerHref.contains("telegram") || lowerHref.contains("facebook") || lowerHref.contains("twitter") || lowerHref.contains("whatsapp")) continue
 
                 // Direct-media detection: the site rotates download hosts
-                // (filevault.com.ng, harurei.gtoddl.site, dl6.wapkizfile.info,
-                // downloadwella, ...). The stable signal is the FILE ITSELF: any
-                // href ending in a media/archive extension or carrying a CDN
-                // marker (gtoddl, wapkizfile, /cdn/) is a download link.
-                val ext = lowerHref.substringBefore('?').substringBefore('#')
+                // (filevault, streamsss, streamwish, downloadwella, ...).
+                // The stable signal is the FILE ITSELF: any href ending in a
+                // media/archive extension or carrying a CDN marker. Using
+                // LockerRegistry.classify instead of a hardcoded host list
+                // means an unknown host works on first contact (no APK update
+                // needed — live-verified: The Blood of Youth's 40 streamsss
+                // episodes were silently dropped before this fix).
                 val isDownloadLink = lowerHref.contains("/dl-") ||
-                        lowerHref.contains("lulacloud.com") ||
-                        lowerHref.contains("pixeldrain.com") ||
-                        lowerHref.contains("loadedfiles") ||
-                        lowerHref.contains("downloadwella") ||
-                        lowerHref.contains("wetafiles") ||
-                        lowerHref.contains("waffi") ||
-                        lowerHref.contains("vikingfile") ||
-                        lowerHref.contains("nkiserv") ||
-                        lowerHref.contains("filevault") ||
-                        lowerHref.contains("gtoddl") ||
-                        lowerHref.contains("wapkizfile") ||
-                        lowerHref.contains("/cdn/") ||
-                        ext.endsWith(".mkv") || ext.endsWith(".mp4") ||
-                        ext.endsWith(".webm") || ext.endsWith(".avi") ||
-                        ext.endsWith(".zip") || ext.endsWith(".rar")
+                    lowerHref.contains("/cdn/") ||
+                    (com.anonrode.downloader.resolvers.LockerRegistry.classify(href) != com.anonrode.downloader.resolvers.LockerRegistry.MediaKind.None)
 
                 if (isDownloadLink) {
                     seen.add(href)
