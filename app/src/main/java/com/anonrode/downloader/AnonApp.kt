@@ -30,6 +30,8 @@ class AnonApp : Application(), ImageLoaderFactory {
         // Load cached scraper rules (domain fixes / dynamic providers) so a
         // manual sync in Settings survives app restarts.
         com.anonrode.downloader.data.rules.DynamicRulesManager.init(this)
+        // Per-host health ledger (backoff windows + playbook knownDead seeds).
+        com.anonrode.downloader.pipeline.HostHealth.init(this)
         engine = DownloadEngine(this, repository, com.anonrode.downloader.util.NetworkObserver(this))
         // Torrent selective-file picker: the engine suspends on this callback
         // while the Compose dialog (HomeScreen) shows the swarm's file list.
