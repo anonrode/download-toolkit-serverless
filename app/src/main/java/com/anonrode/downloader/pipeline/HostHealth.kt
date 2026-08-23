@@ -115,6 +115,11 @@ object HostHealth {
         if (DynamicRulesManager.isKnownDead(urlOrHost)) return false
         val r = records[hostOf(urlOrHost)] ?: return true
         val sinceLastFail = System.currentTimeMillis() - r.lastFailMs
+        // Backoff only after >= 3 CONSECUTIVE hard failures: a single hiccup
+        // (one 404, one timeout) must not gate a host for 30s+ — search
+        // cancellations and flaky single requests used to kill hosts
+        // (live-verified: nepu.gd backoff after fast search typing).
+        if (r.consecutiveFails < 3) return true
         return sinceLastFail >= backoffWindowMs(r.consecutiveFails)
     }
 
