@@ -69,6 +69,12 @@ val a = if (item.tagName() == "a") item
                         HttpClient.safeResolveUri(url, a.attr("href"))
                     } ?: ""
                     if (href.isNotBlank() && title.isNotBlank() && out.none { it.url == href }) {
+                        // Nav-junk guard (dramarain lesson): a dead search
+                        // endpoint returns category/nav cards ("Chinese Drama"
+                        // -> /chinese-drama/). Real show pages are deep paths;
+                        // shallow links are never results.
+                        val path = href.substringAfter("://").substringAfter('/').substringBefore('?').trimEnd('/')
+                        if (path.count { it == '/' } < 2) continue
                         out.add(ShowCard(
                             title = title, url = href,
                             posterUrl = item.selectFirst("img")?.attr("abs:src") ?: "",
