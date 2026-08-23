@@ -72,7 +72,14 @@ class PipelineTest {
         val host = "healthtest.example"
         HostHealth.recordFail(host)
         HostHealth.recordFail(host)
-        assertFalse("2 consecutive fails must open a backoff window",
+        // The backoff threshold is >= 3 CONSECUTIVE failures: a single
+        // hiccup (one 404, one timeout) must not gate a host for 30s+
+        // (live-verified: nepu.gd backoff after fast search typing).
+        assertTrue("2 consecutive fails must NOT yet open a backoff window",
+            HostHealth.isUsable("https://$host/file.mkv"))
+
+        HostHealth.recordFail(host)
+        assertFalse("3 consecutive fails must open a backoff window",
             HostHealth.isUsable("https://$host/file.mkv"))
 
         HostHealth.recordOk(host)
