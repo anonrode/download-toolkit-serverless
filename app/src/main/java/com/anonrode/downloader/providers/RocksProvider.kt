@@ -48,7 +48,18 @@ object RocksProvider : SiteProvider {
                 }
             }
         } catch (_: Exception) {}
-        return results
+
+        // Prioritize full packages / early episodes first
+        return results.sortedBy { card ->
+            val t = card.title
+            when {
+                Regex("""\b(complete|full|season\s*\d+\s*\(episode\s*1\s*-\s*\d+\)|1\s*-\s*\d+)\b""", RegexOption.IGNORE_CASE).containsMatchIn(t) -> 0
+                else -> {
+                    val m = Regex("""\b(?:episode|ep)\s*(\d+)""", RegexOption.IGNORE_CASE).find(t)
+                    m?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 50
+                }
+            }
+        }
     }
 
     override suspend fun loadEpisodes(showUrl: String): ShowDetails {
