@@ -105,15 +105,13 @@ object AsianCProvider : SiteProvider {
             try {
                 val html = HttpClient.getText(episodeUrl, referer = "$mainUrl/") ?: ""
                 val doc = Jsoup.parse(html, episodeUrl)
-                for (iframe in doc.select("iframe[src]")) {
+                val candidates = doc.select("iframe[src]").mapNotNull { iframe ->
                     val rawSrc = iframe.attr("abs:src").ifBlank { iframe.attr("src") }
                     val src = HttpClient.safeResolveUri(episodeUrl, rawSrc)
-
-                    val resolved = ResolverRegistry.resolve(src, quality)
-                    if (!resolved.isNullOrBlank()) {
-                        direct = resolved
-                        break
-                    }
+                    if (src.startsWith("http")) src else null
+                }
+                if (candidates.isNotEmpty()) {
+                    direct = ResolverRegistry.resolveAny(candidates, quality)
                 }
             } catch (_: Exception) {}
         }
