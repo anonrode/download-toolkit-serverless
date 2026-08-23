@@ -123,6 +123,13 @@ object HostHealth {
         return sinceLastFail >= backoffWindowMs(r.consecutiveFails)
     }
 
+    /** True when this host has successfully served at least one stream —
+     *  evidence-based proof it is a working locker. The playbook seeds known
+     *  hosts, but any host that proves itself in the field is treated as
+     *  known from then on (LockerRegistry.classify), no OTA needed. */
+    fun hasProvenLocker(hostOrUrl: String): Boolean =
+        (records[hostOf(hostOrUrl)]?.ok ?: 0L) >= 1L
+
     /** Debug summary for the activity log (bounded to the hottest entries). */
     fun snapshotForLog(limit: Int = 12): String {
         return records.entries.take(limit).joinToString(", ") { (k, v) ->
