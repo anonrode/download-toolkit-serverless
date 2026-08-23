@@ -1,10 +1,14 @@
 """OTA playbook conformance runner (manual, via conformance.yml).
 
 Scope — this validates the RULES PAYLOAD, not the resolver algorithms:
-  Stage 1  search      : rules-driven search returns >=1 result
-  Stage 2  episodes    : episodeSelector on a show page returns >=1 link
-  Stage 3  direct-pass : is_direct_media_url() recognises the payload's
-                         directMediaExtensions on real anchor hrefs
+  Stage 1  search          : rules-driven search returns >=1 result
+  Stage 2  episodes        : episodeSelector on a show page returns >=1 link
+  Stage 3  direct-pass     : is_direct_media_url() recognises the payload's
+                             directMediaExtensions on real anchor hrefs
+  Stage 4  locker-discovery: extract plausible media/locker links from the
+                             show page and diff hosts vs the playbook's
+                             lockerHosts — reports unknown hosts that the
+                             app would learn via HostHealth.hasProvenLocker
 Deep crack parity (JS unpackers, wasm) stays in the monolith's probe suite;
 this runner catches RULES DECAY (dead domains, changed selectors, broken
 search patterns) before app users hit it.
@@ -25,7 +29,7 @@ import os
 import re
 import sys
 import time
-from urllib.parse import quote, urljoin
+from urllib.parse import quote, urljoin, urlparse
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
 import encrypt_rules as ota  # noqa: E402  (canonical pipeline module)
@@ -37,6 +41,70 @@ TIMEOUT = (10, 20)
 PACE_S = 0.35          # per-host delay between requests
 UA = ("Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Mobile Safari/537.36")
+
+# Mirror of LockerRegistry.kt's built-in defaults, so the discovery diff
+# matches what the app would classify WITHOUT the playbook (playbook
+# lockerHosts are added at runtime; see classify_media()).
+DEFAULT_LOCKER_HOSTS = [
+    "streamsss.net", "streamwish.com", "streamtape.com", "doodstream.com",
+    "dood.", "vidhide.com", "mixdrop.co", "mp4upload.com", "hglink.tv",
+    "loadedfiles.net", "downloadwella.com", "wetafiles.com",
+    "vikingfile.com", "lulacloud.com", "waffi", "pixeldrain.com",
+    "filevault", "kissorgrab.com", "wildshare", "gtoddl", "wapkizfile",
+    "fastupload.io", "gofile.io", "krakenfiles.com", "swish",
+]
+
+
+# Mirror of LockerRegistry.kt's nav-junk path segments (unknown hosts only).
+NAV_SEGMENTS = {
+    "tag", "category", "categories", "dmca", "menu", "page", "pages",
+    "author", "about", "contact", "privacy", "policy", "terms", "sitemap",
+    "feed", "login", "register", "signin", "signup", "account", "cart",
+    "checkout", "search", "faq", "help", "request", "submit", "advertise",
+    "wp-content", "wp-json", "wp-admin", "cdn-cgi", "email-protection",
+    "series-download", "movie-download", "download-movies", "download-series",
+    "cant-download", "downloader", "date", "archive",
+}
+
+
+def classify_media(url, known_hosts):
+    """Mirror LockerRegistry.classify(): 'direct' | 'locker' | 'unknown' | 'none'.
+    Hostname-boundary matching, nav-junk path segments — same semantics as the app."""
+    from urllib.parse import urlparse
+    clean = (url or "").split("?")[0].split("#")[0]
+    if not clean:
+        return "none"
+    try:
+        p = urlparse(clean)
+        host = (p.hostname or "").lower()
+        path = p.path or ""
+    except Exception:
+        return "none"
+    if not host:
+        return "none"
+    ext = clean.rsplit(".", 1)[-1].lower()
+    if ext in ("mp4", "mkv", "webm", "avi", "m3u8", "m4v", "ts", "mp3"):
+        return "direct"
+    for kh in known_hosts:
+        kh = kh.lower()
+        if host == kh or host.endswith("." + kh):
+            return "locker"
+    segments = [s for s in path.split("/") if s]
+    if "/dl-" in path or ("/download/" in path and len(segments) >= 3):
+        return "unknown"
+    nav = any(s in NAV_SEGMENTS or s.startswith("how-to")
+              or s.endswith("-menu") or "movies" in s for s in segments)
+    if nav:
+        return "none"
+    if not segments:
+        return "none"
+    if len(segments) == 1:
+        seg = segments[0]
+        show_like = ("-episode-" in seg or "season" in seg or "-movie-" in seg
+                     or (seg.endswith("-drama") and seg.count("-") >= 2))
+        if not show_like:
+            return "none"
+    return "unknown"
 
 SEARCH_QUERIES = {
     "nkiri": ["vincenzo"], "dramakey": ["vincenzo"], "asianc": ["vincenzo"],
@@ -313,12 +381,12 @@ def stage_search(s, rules, site, query):
 def stage_episodes(s, rules, site, show_url):
     cfg = rules["sites"].get(site)
     if not cfg or not cfg.get("episodeSelector"):
-        return None, "no episodeSelector configured"
+        return None, "no episodeSelector configured", None
     st, body = s.get(show_url, referer_for(rules, show_url))
     if st != 200:
-        return None, f"HTTP {st} on show page"
+        return None, f"HTTP {st} on show page", None
     eps = bs4_parse(body).select(cfg["episodeSelector"])
-    return len(eps) > 0, f"{len(eps)} episode links"
+    return len(eps) > 0, f"{len(eps)} episode links", body
 
 
 def stage_direct_pass(rules, hrefs):
@@ -330,6 +398,45 @@ def stage_direct_pass(rules, hrefs):
 
     hits = [h for h in hrefs if is_direct(h)]
     return bool(exts), f"direct-media anchors found: {len(hits)}"
+
+
+def stage_locker_discovery(rules, site, body, page_url):
+    """Extract every plausible media/locker link from the show page (same
+    extraction rules as LockerRegistry.findLockerLinksInHtml) and diff their
+    hosts against the playbook's lockerHosts + built-in defaults.
+
+    PASS = extraction works. The detail reports UNKNOWN HOSTS FOUND — hosts
+    the playbook never seeded. Those are a playbook GAP, not a bug: the app
+    learns them via HostHealth.hasProvenLocker on first use. FAIL = no
+    plausible media links at all (selectors/extraction decayed).
+    """
+    known = [h.lower() for h in rules.get("lockerHosts", [])]
+    known += DEFAULT_LOCKER_HOSTS
+    found, unknown = [], {}
+    try:
+        soup = bs4_parse(body)
+        for a in soup.select("a[href], a[data-video], a[data-src], "
+                             "iframe[src], video[src], source[src]"):
+            u = a.get("href") or a.get("data-video") or a.get("data-src") or a.get("src")
+            if not u:
+                continue
+            u = urljoin(page_url, u)
+            kind = classify_media(u, known)
+            if kind == "none":
+                continue
+            found.append(u)
+            if kind == "unknown":
+                host = urlparse(u).hostname or "?"
+                unknown.setdefault(host.lower(), []).append(u)
+    except Exception as e:
+        return None, f"extract error: {e}"
+    if not found:
+        return False, "no plausible media/locker links on page (extraction decayed?)"
+    detail = f"{len(found)} media links"
+    if unknown:
+        hosts = ", ".join(f"{h}({len(v)} links)" for h, v in sorted(unknown.items()))
+        detail += f" | UNKNOWN HOSTS FOUND: {hosts}"
+    return True, detail
 
 
 def run_strategy_chain(s, rules, site, query):
@@ -416,7 +523,8 @@ def run_site(site, rules, titles, shows_cap, out_path):
     q = SEARCH_QUERIES.get(site, ["movie"])[0]
     search_ok, search_detail = stage_search(s, rules, site, q)
 
-    ep_ok, ep_detail, hrefs = None, "skipped", []
+    ep_ok, ep_detail, ep_body = None, "skipped", None
+    show_url = None
     via_strategy = None
     if search_ok:
         # Reuse the search page's first plausible internal link as the "show".
@@ -426,12 +534,25 @@ def run_site(site, rules, titles, shows_cap, out_path):
                          .replace("{query}", q.replace(" ", "%20")),
                          referer_for(rules, base))
         if st == 200:
-            cands = [a["href"] for a in bs4_parse(body).find_all("a", href=True)]
-            hrefs = cands[:50]
-            internal = [h for h in cands if h.startswith("/") or base in h]
-            if internal:
-                show_url = urljoin(base + "/", internal[0])
-                ep_ok, ep_detail = stage_episodes(s, rules, site, show_url)
+            stype_cfg = rules["sites"][site].get("searchType", "html")
+            if stype_cfg == "rss":
+                # <link> is a void element under the HTML parser, so its URL
+                # text never lands inside the tag — regex the raw body, same
+                # approach as extract_titles() for <title>.
+                links = [u.decode("utf-8", "ignore").strip()
+                         for u in re.findall(rb"<item>.*?<link>(.*?)</link>", body, re.S)]
+                links = [u for u in links if u]
+                hrefs = links[:50]
+                if links:
+                    show_url = urljoin(base + "/", links[0])
+                    ep_ok, ep_detail, ep_body = stage_episodes(s, rules, site, show_url)
+            else:
+                cands = [a["href"] for a in bs4_parse(body).find_all("a", href=True)]
+                hrefs = cands[:50]
+                internal = [h for h in cands if h.startswith("/") or base in h]
+                if internal:
+                    show_url = urljoin(base + "/", internal[0])
+                    ep_ok, ep_detail, ep_body = stage_episodes(s, rules, site, show_url)
 
     # Strategy-chain fallback: a dead/junk search endpoint (dramarain's ?s=
     # returns category cards) or a chosen link with no episode links must not
@@ -439,16 +560,25 @@ def run_site(site, rules, titles, shows_cap, out_path):
     if not ep_ok:
         strategy_url, stype = run_strategy_chain(s, rules, site, q)
         if strategy_url:
-            ep_ok, ep_detail = stage_episodes(s, rules, site, strategy_url)
+            ep_ok, ep_detail, ep_body = stage_episodes(s, rules, site, strategy_url)
             via_strategy = stype
             if ep_ok:
                 ep_detail = f"{ep_detail} [via strategy: {stype}]"
 
-    dp_ok, dp_detail = stage_direct_pass(rules, hrefs or [])
+    dp_ok, dp_detail = stage_direct_pass(rules, hrefs if search_ok else [])
+
+    # Stage 4: locker discovery on whichever page we landed on (the show page
+    # carries the download links; the strategy page carries them too when the
+    # search endpoint was junk).
+    ld_ok, ld_detail = None, "no page fetched"
+    if ep_body:
+        page_url = strategy_url if via_strategy else show_url
+        ld_ok, ld_detail = stage_locker_discovery(rules, site, ep_body, page_url or "")
 
     for name, okv, detail in (("search", search_ok, search_detail),
                               ("episodes", ep_ok, ep_detail),
-                              ("direct_pass", dp_ok, dp_detail)):
+                              ("direct_pass", dp_ok, dp_detail),
+                              ("locker_discovery", ld_ok, ld_detail)):
         rec = {"site": site, "stage": name,
                "pass": bool(okv) if okv is not None else None,
                "detail": detail}

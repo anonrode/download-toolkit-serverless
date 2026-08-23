@@ -30,9 +30,11 @@ class LockerRegistryTest {
             LockerRegistry.classify("https://streamsss.net/play/abc123"))
         assertEquals(LockerRegistry.MediaKind.Locker("streamwish.com"),
             LockerRegistry.classify("https://streamwish.com/embed/xyz"))
-        // Subdomain of a known locker host
+        // Subdomain of a known locker host (no media extension — the ext
+        // check fires first, so this must be a non-media path to test the
+        // hostname-boundary match)
         assertEquals(LockerRegistry.MediaKind.Locker("downloadwella.com"),
-            LockerRegistry.classify("https://fsmc02.downloadwella.com/file.mkv"))
+            LockerRegistry.classify("https://fsmc02.downloadwella.com/watch/xyz"))
     }
 
     @Test
@@ -50,6 +52,22 @@ class LockerRegistryTest {
             LockerRegistry.classify("https://naijaprey.tv/category/movies/"))
         assertEquals(LockerRegistry.MediaKind.None,
             LockerRegistry.classify("https://dramarain.com/chinese-drama/"))
+        assertEquals(LockerRegistry.MediaKind.None,
+            LockerRegistry.classify("https://9jarocks.net/date/2026/08/01"))
+        assertEquals(LockerRegistry.MediaKind.None,
+            LockerRegistry.classify("https://nkiri.ink/dmca/"))
+    }
+
+    @Test
+    fun classify_shallowShowSlugsAreUnknown() {
+        // Single-segment paths survive only when they carry media markers:
+        // a show-style slug (>= 2 dashes) or an episode/movie marker.
+        assertEquals(LockerRegistry.MediaKind.Unknown::class.java,
+            LockerRegistry.classify("https://thenkiri.com/vincenzo-korean-drama/").javaClass)
+        assertEquals(LockerRegistry.MediaKind.Unknown::class.java,
+            LockerRegistry.classify("https://naijaprey.tv/download-a-wish-for-the-stars-nollywood-movie-2022/").javaClass)
+        assertEquals(LockerRegistry.MediaKind.Unknown::class.java,
+            LockerRegistry.classify("https://thenkiri.com/vincenzo-episode-1/").javaClass)
     }
 
     @Test

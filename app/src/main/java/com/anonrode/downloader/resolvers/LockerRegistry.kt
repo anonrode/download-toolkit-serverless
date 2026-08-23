@@ -36,6 +36,18 @@ object LockerRegistry {
         "fastupload.io", "gofile.io", "krakenfiles.com", "swish"
     )
 
+    /** Path segments that mark a page as navigation, never media. Applied to
+     *  UNKNOWN hosts only — known lockers and proven hosts already returned. */
+    private val NAV_SEGMENTS = setOf(
+        "tag", "category", "categories", "dmca", "menu", "page", "pages",
+        "author", "about", "contact", "privacy", "policy", "terms", "sitemap",
+        "feed", "login", "register", "signin", "signup", "account", "cart",
+        "checkout", "search", "faq", "help", "request", "submit", "advertise",
+        "wp-content", "wp-json", "wp-admin", "cdn-cgi", "email-protection",
+        "series-download", "movie-download", "download-movies", "download-series",
+        "cant-download", "downloader", "date", "archive"
+    )
+
     sealed class MediaKind {
         /** Direct media file or known stream URL (unchanged since extraction). */
         object Direct : MediaKind()
@@ -58,18 +70,47 @@ object LockerRegistry {
         val ext = clean.substringAfterLast('.').lowercase()
         if (ext in setOf("mp4", "mkv", "webm", "avi", "m3u8", "m4v", "ts", "mp3")) return Direct
 
-        // Known locker hosts (OTA data + built-in defaults)
+        // Known locker hosts (OTA data + built-in defaults + learned from HostHealth)
         val knownHosts = DynamicRulesManager.getLockerHosts().ifEmpty { DEFAULT_LOCKER_HOSTS }
         for (kh in knownHosts) {
             if (host == kh || host.endsWith(".$kh")) return Locker(kh)
         }
+        // Move 2 (learning): a host that has PROVEN itself (>=1 successful
+        // crack recorded in HostHealth) is treated as known even if the
+        // playbook never listed it — streamsss.net works once, and every
+        // episode after that is a known locker, no OTA needed.
+        if (HostHealth.hasProvenLocker(host)) {
+            return Locker(host)
+        }
 
-        // Path-based heuristic: /dl-/, /download/ (but not nav: /download-movies/, length guard)
+        // Path-based heuristics for unknown hosts (known lockers and proven
+        // hosts already returned above).
         val path = try { java.net.URI(clean).path ?: "" } catch (_: Exception) { "" }
-        if (path.contains("/dl-") || (path.contains("/download/") && path.count { it == '/' } >= 3)) return Unknown(host)
+        val segments = path.split('/').filter { it.isNotBlank() }
 
-        // Nav-junk filter: single-segment paths, /category/, /tag/, root pages
-        if (path.count { it == '/' } <= 1) return None
+        // Strong media signals: /dl-xxx or deep /download/ paths.
+        if (path.contains("/dl-") || (path.contains("/download/") && segments.size >= 3)) return Unknown(host)
+
+        // Nav-junk: known nav words anywhere in the path (tag/category/dmca/
+        // menus/policy pages), or shallow generic paths — the dramarain ?s=
+        // lesson: a dead search endpoint returns single-segment category
+        // cards. Media markers (-episode-, season, -drama, -movie-) keep
+        // shallow paths alive (nkiri same-site episode links).
+        val navWord = segments.any { s ->
+            s in NAV_SEGMENTS || s.startsWith("how-to") || s.endsWith("-menu") || s.contains("movies")
+        }
+        if (navWord) return None
+        if (segments.isEmpty()) return None
+        // Shallow single-segment paths are nav unless they carry media
+        // markers: -episode-, season, -movie-, or a show-style slug ending
+        // in -drama with >= 2 dashes ("vincenzo-korean-drama" is a show;
+        // "chinese-drama" is a category page).
+        if (segments.size == 1) {
+            val seg = segments.first()
+            val showLike = seg.contains("-episode-") || seg.contains("season") ||
+                seg.contains("-movie-") || (seg.endsWith("-drama") && seg.count { it == '-' } >= 2)
+            if (!showLike) return None
+        }
 
         return Unknown(host)
     }
