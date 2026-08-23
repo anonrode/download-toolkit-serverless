@@ -128,6 +128,7 @@ object DynamicRulesManager {
     private val activeHostPolicies = mutableListOf<HostPolicyRule>()
     private val activeUrlTemplates = mutableMapOf<String, String>()
     private val activeKnownDead = mutableListOf<String>()
+    private val activeLockerHosts = mutableListOf<String>()
     private val activeSearchStrategies = mutableMapOf<String, List<JSONObject>>()
     var tokenTtlMinutes: Long = 10
         private set
@@ -199,6 +200,9 @@ object DynamicRulesManager {
 
     fun getUrlTemplate(site: String): String =
         activeUrlTemplates[site.lowercase()] ?: ""
+
+    fun getLockerHosts(): List<String> =
+        activeLockerHosts.ifEmpty { emptyList() }
 
     fun getTokenTtlMs(): Long = tokenTtlMinutes * 60_000L
 
@@ -427,6 +431,18 @@ object DynamicRulesManager {
                 for (i in 0 until kdArr.length()) {
                     val h = kdArr.optString(i)
                     if (h.isNotBlank()) activeKnownDead.add(h.lowercase())
+                }
+            }
+
+            // OTA locker host seeds: LockerRegistry.classify() consults these
+            // first (prioritization), but never gates — unknown hosts still
+            // get probed and can work on first contact.
+            val lhArr = obj.optJSONArray("lockerHosts")
+            if (lhArr != null) {
+                activeLockerHosts.clear()
+                for (i in 0 until lhArr.length()) {
+                    val h = lhArr.optString(i)
+                    if (h.isNotBlank()) activeLockerHosts.add(h.lowercase())
                 }
             }
 

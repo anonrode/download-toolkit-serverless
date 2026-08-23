@@ -162,7 +162,7 @@ def validate_schema(plain: bytes) -> list:
 
     for key in obj.keys():
         if key not in ("version", "domains", "mirrors", "sites", "resolvers",
-                       "directMediaExtensions", "dynamic_providers",
+                       "directMediaExtensions", "dynamic_providers", "lockerHosts",
                        "hostPolicies", "searchStrategies", "urlTemplates",
                        "knownDead", "tokenTtlMinutes", "validation",
                        "minAppVersion"):
