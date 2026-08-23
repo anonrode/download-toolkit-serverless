@@ -1418,9 +1418,11 @@ private fun extractM3u8FromHtml(html: String): String? {
 }
 
 private fun extractMp4FromHtml(html: String): String? {
-    val matcher = Pattern.compile("""https?://[^\s"'<>]+\.(?:mp4|mkv)[^\s"'<>]*""").matcher(html)
+    // (?![a-zA-Z0-9]) so "site.webmanifest" (a common WP favicon link) is not
+    // matched as ".webm"; HTML-escaped quotes are stripped off the tail.
+    val matcher = Pattern.compile("""https?://[^\s"'<>]+\.(?:mp4|mkv)(?![a-zA-Z0-9])[^\s"'<>]*""").matcher(html)
     if (matcher.find()) {
-        return matcher.group(0)
+        return matcher.group(0)?.substringBefore("&quot;")?.substringBefore("&amp;")
     }
     return null
 }
