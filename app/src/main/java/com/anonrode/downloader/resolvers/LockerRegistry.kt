@@ -61,26 +61,26 @@ object LockerRegistry {
 
     /** Single-pass classification: hostname-boundary match, no substring false positives. */
     fun classify(url: String): MediaKind {
-        if (url.isBlank()) return None
+        if (url.isBlank()) return MediaKind.None
         val clean = url.trim().substringBefore('?').substringBefore('#')
         val host = try { java.net.URI(clean).host?.lowercase() ?: "" } catch (_: Exception) { "" }
-        if (host.isBlank()) return None
+        if (host.isBlank()) return MediaKind.None
 
         // Direct media extensions
         val ext = clean.substringAfterLast('.').lowercase()
-        if (ext in setOf("mp4", "mkv", "webm", "avi", "m3u8", "m4v", "ts", "mp3")) return Direct
+        if (ext in setOf("mp4", "mkv", "webm", "avi", "m3u8", "m4v", "ts", "mp3")) return MediaKind.Direct
 
         // Known locker hosts (OTA data + built-in defaults + learned from HostHealth)
         val knownHosts = DynamicRulesManager.getLockerHosts().ifEmpty { DEFAULT_LOCKER_HOSTS }
         for (kh in knownHosts) {
-            if (host == kh || host.endsWith(".$kh")) return Locker(kh)
+            if (host == kh || host.endsWith(".$kh")) return MediaKind.Locker(kh)
         }
         // Move 2 (learning): a host that has PROVEN itself (>=1 successful
         // crack recorded in HostHealth) is treated as known even if the
         // playbook never listed it — streamsss.net works once, and every
         // episode after that is a known locker, no OTA needed.
         if (HostHealth.hasProvenLocker(host)) {
-            return Locker(host)
+            return MediaKind.Locker(host)
         }
 
         // Path-based heuristics for unknown hosts (known lockers and proven
@@ -89,7 +89,7 @@ object LockerRegistry {
         val segments = path.split('/').filter { it.isNotBlank() }
 
         // Strong media signals: /dl-xxx or deep /download/ paths.
-        if (path.contains("/dl-") || (path.contains("/download/") && segments.size >= 3)) return Unknown(host)
+        if (path.contains("/dl-") || (path.contains("/download/") && segments.size >= 3)) return MediaKind.Unknown(host)
 
         // Nav-junk: known nav words anywhere in the path (tag/category/dmca/
         // menus/policy pages), or shallow generic paths — the dramarain ?s=
@@ -99,8 +99,8 @@ object LockerRegistry {
         val navWord = segments.any { s ->
             s in NAV_SEGMENTS || s.startsWith("how-to") || s.endsWith("-menu") || s.contains("movies")
         }
-        if (navWord) return None
-        if (segments.isEmpty()) return None
+        if (navWord) return MediaKind.None
+        if (segments.isEmpty()) return MediaKind.None
         // Shallow single-segment paths are nav unless they carry media
         // markers: -episode-, season, -movie-, or a show-style slug ending
         // in -drama with >= 2 dashes ("vincenzo-korean-drama" is a show;
@@ -109,10 +109,10 @@ object LockerRegistry {
             val seg = segments.first()
             val showLike = seg.contains("-episode-") || seg.contains("season") ||
                 seg.contains("-movie-") || (seg.endsWith("-drama") && seg.count { it == '-' } >= 2)
-            if (!showLike) return None
+            if (!showLike) return MediaKind.None
         }
 
-        return Unknown(host)
+        return MediaKind.Unknown(host)
     }
 
     /** True when [url] is a direct media file or a KNOWN locker (playbook-
@@ -135,7 +135,7 @@ object LockerRegistry {
             val doc = Jsoup.parse(html)
             for (a in doc.select("a[href], a[data-video], a[data-src], iframe[src], video[src], source[src]")) {
                 val u = a.attr("abs:href").ifBlank { a.attr("href").ifBlank { a.attr("data-video").ifBlank { a.attr("data-src") } } }
-                if (u.isNotBlank() && classify(u) != None) found.add(u)
+                if (u.isNotBlank() && classify(u) != MediaKind.None) found.add(u)
             }
         } catch (_: Exception) {}
         // Regex fallback for obfuscated/scripted DOMs
@@ -143,7 +143,7 @@ object LockerRegistry {
             val re = Regex("""https?://[^\s"'<>]+(?:\.(?:mp4|mkv|webm|avi|m3u8)|/(?:dl-|download/|embed/|e/|d/))[^\s"'<>]*""", RegexOption.IGNORE_CASE)
             for (m in re.findAll(html)) {
                 val u = m.value.trimEnd('.', ',', ')', ']')
-                if (classify(u) != None) found.add(u)
+                if (classify(u) != MediaKind.None) found.add(u)
             }
         }
         return found.toList()
