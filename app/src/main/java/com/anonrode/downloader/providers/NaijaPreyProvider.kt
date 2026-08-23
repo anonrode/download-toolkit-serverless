@@ -126,6 +126,19 @@ object NaijaPreyProvider : SiteProvider {
             direct = extractFileLink(episodeUrl, 0)
         }
 
+        // The wildshare download page embeds a .mkv/.mp4 link as hotlink
+        // BAIT: without the ?pt= token it answers 206 with an HTML page,
+        // and handing it to the downloader fails validation. Re-route the
+        // page URL through the registry so WildshareResolver stamps pt= and
+        // follows the 302 to the tokenized CDN file (live-verified
+        // 2026-08-23: 206 video/x-matroska, MKV magic).
+        if (direct != null && direct.contains("wildshare.net") &&
+            (direct.endsWith(".mkv") || direct.endsWith(".mp4"))
+        ) {
+            val pageUrl = direct.substringBeforeLast('/')
+            ResolverRegistry.resolve(pageUrl, quality)?.let { direct = it }
+        }
+
         // Empty = resolution failure: the engine treats blank as a failed
         // resolve and fails cleanly. NEVER return the raw page URL as
         // directUrl — that "downloads" the HTML page itself.
@@ -149,8 +162,11 @@ object NaijaPreyProvider : SiteProvider {
         val html = HttpClient.getText(url) ?: return null
 
         // 1) A ready direct media URL anywhere in the markup wins immediately.
-        Regex("""https?://[^\s"'<>]+\.(?:mp4|mkv|avi|webm)[^\s"'<>]*""")
-            .find(html)?.value?.let { return it }
+        //    (?![a-zA-Z0-9]) stops ".webmanifest" matching as ".webm" (wildshare
+        //    pages ship a site.webmanifest favicon link BEFORE the real file),
+        //    and HTML-escaped quotes (&quot;) are stripped off the tail.
+        Regex("""https?://[^\s"'<>]+\.(?:mp4|mkv|avi|webm)(?![a-zA-Z0-9])[^\s"'<>]*""")
+            .find(html)?.value?.substringBefore("&quot;")?.substringBefore("&amp;")?.let { return it }
 
         // 2) Otherwise hop to the next stage: the sdm_download anchor's href,
         //    or any vdl/wildshare URL embedded in the page.
