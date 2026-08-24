@@ -1,6 +1,7 @@
 package com.anonrode.downloader.pipeline
 
 import com.anonrode.downloader.data.net.HttpClient
+import com.anonrode.downloader.data.net.isTlsChainFailure
 
 /**
  * Strict pre-enqueue URL validation (provider contract rule 3).
@@ -73,7 +74,7 @@ object StreamValidator {
                 }
                 break
             } catch (e: Exception) {
-                val tls = HttpClient.isTlsChainFailure(e)
+                val tls = isTlsChainFailure(e)
                 PipelineJournal.hop("", "validate", url, ok = true,
                     ms = System.currentTimeMillis() - start,
                     detail = if (tls && !tlsRetried)
