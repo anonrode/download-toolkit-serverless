@@ -192,24 +192,6 @@ object HttpClient {
     }
 
     /**
-     * True when [e]'s cause chain is a TLS handshake/chain failure (strict
-     * client vs a server that omits its intermediate cert). Only this class
-     * of error justifies the trust-all retry — timeouts, DNS and HTTP errors
-     * are still real failures and must not be papered over by disabling
-     * certificate validation.
-     */
-    fun isTlsChainFailure(e: Throwable): Boolean {
-        var t: Throwable? = e
-        while (t != null) {
-            if (t is javax.net.ssl.SSLException || t is java.security.cert.CertPathValidatorException) return true
-            val msg = t.message?.lowercase() ?: ""
-            if (msg.contains("trust anchor") || msg.contains("certpath") || msg.contains("certificate_unknown")) return true
-            t = t.cause
-        }
-        return false
-    }
-
-    /**
      * Execute a one-off probe call under the same cancellation registry as
      * [get] — pausing/cancelling a task must also kill the StreamValidator /
      * turbo probe so no straggler socket keeps draining data (v3.0.4 showed
@@ -438,4 +420,23 @@ object HttpClient {
             }
         }
     }
+}
+
+/**
+ * True when [e]'s cause chain is a TLS handshake/chain failure (strict
+ * client vs a server that omits its intermediate cert). Only this class
+ * of error justifies the trust-all retry — timeouts, DNS and HTTP errors
+ * are still real failures and must not be papered over by disabling
+ * certificate validation. Top-level (not an [HttpClient] member) so JVM
+ * tests can exercise it without initializing the Android-bound client.
+ */
+internal fun isTlsChainFailure(e: Throwable): Boolean {
+    var t: Throwable? = e
+    while (t != null) {
+        if (t is javax.net.ssl.SSLException || t is java.security.cert.CertPathValidatorException) return true
+        val msg = t.message?.lowercase() ?: ""
+        if (msg.contains("trust anchor") || msg.contains("certpath") || msg.contains("certificate_unknown")) return true
+        t = t.cause
+    }
+    return false
 }

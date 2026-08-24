@@ -1,6 +1,7 @@
 package com.anonrode.downloader.engine
 
 import com.anonrode.downloader.data.net.HttpClient
+import com.anonrode.downloader.data.net.isTlsChainFailure
 import kotlinx.coroutines.*
 import okhttp3.Call
 import okhttp3.OkHttpClient
@@ -144,7 +145,7 @@ object TurboDownloader {
         // burn a ~18s handshake failure — which is exactly how v3.0.4 fell
         // back to yt-dlp (slow start, MB-only progress). One trust-all retry
         // then runs the whole job on the permissive client.
-        if (probe is ProbeResult.Unreachable && probeError != null && HttpClient.isTlsChainFailure(probeError!!)) {
+        if (probe is ProbeResult.Unreachable && probeError != null && isTlsChainFailure(probeError!!)) {
             com.anonrode.downloader.util.DebugLog.backend(
                 "task=$taskId probe TLS chain failure (${probeError!!.message?.take(80)}), retrying trust-all"
             )

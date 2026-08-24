@@ -6,7 +6,6 @@ import com.anonrode.downloader.security.TorrentSecurityShield
 import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.youtubedl_android.YoutubeDLRequest
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.coroutines.coroutineContext
@@ -30,30 +29,6 @@ object YoutubeDlDownloader {
         "udp://explodie.org:6969/announce",
         "http://tracker.anirena.com:80/announce"
     ).joinToString(",")
-
-    private fun parseByteString(str: String): Long {
-        val clean = str.trim().uppercase()
-        val numPart = clean.takeWhile { it.isDigit() || it == '.' }.toDoubleOrNull() ?: return 0L
-        return when {
-            clean.endsWith("GIB") || clean.endsWith("GB") -> (numPart * 1024 * 1024 * 1024).toLong()
-            clean.endsWith("MIB") || clean.endsWith("MB") -> (numPart * 1024 * 1024).toLong()
-            clean.endsWith("KIB") || clean.endsWith("KB") -> (numPart * 1024).toLong()
-            clean.endsWith("B") -> numPart.toLong()
-            else -> (numPart * 1024 * 1024).toLong()
-        }
-    }
-
-    private fun parseSpeedString(str: String): Double {
-        val clean = str.trim().uppercase()
-        val numPart = clean.takeWhile { it.isDigit() || it == '.' }.toDoubleOrNull() ?: return 0.0
-        return when {
-            clean.contains("GB") || clean.contains("GIB") -> numPart * 1024 * 1024 * 1024
-            clean.contains("MB") || clean.contains("MIB") -> numPart * 1024 * 1024
-            clean.contains("KB") || clean.contains("KIB") -> numPart * 1024
-            clean.contains("B/S") || clean.contains("BPS") -> numPart
-            else -> numPart * 1024 * 1024
-        }
-    }
 
     suspend fun download(
         context: Context,
@@ -276,71 +251,13 @@ object YoutubeDlDownloader {
             try {
                 YoutubeDL.getInstance().execute(request, taskId) { progress, etaInSeconds, line ->
                     if (progress >= 0f) {
-                        var dlBytes = lastDl
-                        var totBytes = lastTot
-                        var spdBps = 0.0
+                        // All line parsing, library fallback and monotonic
+                        // clamping live in parseProgressTick (fixture-tested).
+                        val tick = parseProgressTick(line, progress, lastDl, lastTot)
+                        lastDl = tick.downloadedBytes
+                        lastTot = tick.totalBytes
                         val eta = if (etaInSeconds > 0) etaInSeconds else 0L
-
-                        if (!line.isNullOrBlank()) {
-                            // aria2c with a known total: [#123456 45MiB/65MiB(69%) CN:4 DL:3.8MiB ETA:5s]
-                            val ariaMatch = Regex("""\s*([\d.]+[KMGT]?i?B)/([\d.]+[KMGT]?i?B).*?DL:\s*([\d.]+[KMGT]?i?B(?:/s)?)""", RegexOption.IGNORE_CASE).find(line)
-                            if (ariaMatch != null) {
-                                dlBytes = parseByteString(ariaMatch.groupValues[1])
-                                totBytes = parseByteString(ariaMatch.groupValues[2])
-                                spdBps = parseSpeedString(ariaMatch.groupValues[3])
-                            } else {
-                                // aria2c WITHOUT a total (CDN omits Content-Length,
-                                // or a resumed piece queue): [#a1b2 100.7MiB(100%) CN:4 DL:3.8MiB ETA:1s]
-                                // The size is wire bytes (re-downloaded pieces over-count
-                                // the file), and the percentage infers the total from the
-                                // best total seen so far. Matched only after the
-                                // dl/total form above — its per-line size looks like the
-                                // second byte string of the first form.
-                                val ariaNoTotal = Regex("""([\d.]+[KMGT]?i?B)\((\d+)%\)(?:.*?DL:\s*([\d.]+[KMGT]?i?B(?:/s)?))?""", RegexOption.IGNORE_CASE).find(line)
-                                if (ariaNoTotal != null) {
-                                    dlBytes = parseByteString(ariaNoTotal.groupValues[1])
-                                    spdBps = parseSpeedString(ariaNoTotal.groupValues[3])
-                                    val pct = ariaNoTotal.groupValues[2].toDoubleOrNull()
-                                    if (pct != null && pct > 0.0 && pct <= 100.0 && lastTot > 0) {
-                                        totBytes = (dlBytes * 100.0 / pct).toLong()
-                                    }
-                                } else {
-                                    // yt-dlp format: [download]  45.2% of ~65.00MiB at 4.20MiB/s ETA 00:08
-                                    val ytdlMatch = Regex("""([\d.]+)%\s+of\s+~?([\d.]+[KMGT]?i?B).*?at\s+([\d.]+[KMGT]?i?B/s)""", RegexOption.IGNORE_CASE).find(line)
-                                    if (ytdlMatch != null) {
-                                        val pct = ytdlMatch.groupValues[1].toDoubleOrNull() ?: progress.toDouble()
-                                        totBytes = parseByteString(ytdlMatch.groupValues[2])
-                                        dlBytes = if (totBytes > 0) (totBytes * (pct / 100.0)).toLong() else 0L
-                                        spdBps = parseSpeedString(ytdlMatch.groupValues[3])
-                                    }
-                                }
-                            }
-                        }
-
-                        // Library-supplied percentage as the last-resort source when
-                        // the line itself carries no usable size (unknown formats,
-                        // mixed downloader output). The library reports pct as a
-                        // 0..1 fraction or 0..100 depending on version, so accept both.
-                        if (totBytes <= 0 && lastTot > 0) {
-                            val libPct = when {
-                                progress in 0f..1f -> progress * 100.0
-                                progress in 1f..100f -> progress.toDouble()
-                                else -> 0.0
-                            }
-                            if (libPct > 0.0 && libPct <= 100.0) {
-                                dlBytes = (lastTot * libPct / 100.0).toLong()
-                            }
-                        }
-
-                        // Never regress: aria restarts re-emit smaller totals and a
-                        // late tick racing COMPLETED must not shrink what the user
-                        // already saw. Unknown totals in later lines are dropped
-                        // rather than resetting a known total to 0 (the v3.0.4 bug:
-                        // a no-total line overwrote a parsed total with 0 and the UI
-                        // fell back to bare "100.7 MB").
-                        if (totBytes > 0) lastTot = maxOf(lastTot, totBytes)
-                        lastDl = maxOf(lastDl, dlBytes)
-                        onProgress(lastDl, lastTot, spdBps, eta)
+                        onProgress(lastDl, lastTot, tick.speedBytesPerSec, eta)
                     }
                 }
             } catch (e: Exception) {
@@ -384,17 +301,7 @@ object YoutubeDlDownloader {
                 com.anonrode.downloader.util.DebugLog.backend("task=$taskId yt-dlp attempt $attempts produced ${produced.name} ($sizeLabel)")
             }
             if (produced == null && attempts < ytdlpMaxAttempts) {
-                // Sleep in short slices and check coroutine cancellation so a
-                // paused/cancelled job aborts within ~250ms instead of mid-sleep
-                // (v3.0.4 teardowns landed 4-17s after the user tapped Pause —
-                // Thread.sleep is not interruptible by coroutine cancellation).
-                var remainingMs = 2_000L * attempts
-                while (remainingMs > 0) {
-                    if (!coroutineContext.isActive) throw CancellationException("Task was cancelled during yt-dlp retry wait")
-                    val slice = minOf(250L, remainingMs)
-                    delay(slice)
-                    remainingMs -= slice
-                }
+                cancellableRetryWait(2_000L * attempts)
             }
         }
         if (produced == null && errors.isNotBlank()) {
@@ -756,15 +663,7 @@ object YoutubeDlDownloader {
             if (!isActiveCheck()) throw CancellationException("Task was cancelled before magnet retry")
             produced = runOnce()
             if (produced == null && attempts < maxAttempts) {
-                // Same cancellable polling wait as the yt-dlp loop: pause/cancel
-                // must abort within ~250ms, not after the full 2-4s sleep.
-                var remainingMs = 2_000L * attempts
-                while (remainingMs > 0) {
-                    if (!isActiveCheck()) throw CancellationException("Task was cancelled during magnet retry wait")
-                    val slice = minOf(250L, remainingMs)
-                    delay(slice)
-                    remainingMs -= slice
-                }
+                cancellableRetryWait(2_000L * attempts, isActiveCheck = isActiveCheck)
             }
         }
         if (produced == null) {
