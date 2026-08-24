@@ -79,13 +79,17 @@ class DownloadEngine(
     init {
         loadPreferences()
         engineScope.launch {
-            // Auto-rescue tasks interrupted by app kill/crash. VALIDATING is
-            // included: a process death mid-check otherwise leaves the task
-            // stuck in VALIDATING forever (nothing ever transitions it).
+            // Park tasks interrupted by app kill/crash — never re-queue them.
+            // The repository restore (initPersistence) already mapped
+            // mid-flight statuses to PAUSED before the engine was built, so
+            // this is defense in depth for any future init reordering: a
+            // reopen must never auto-resume anything, including a task caught
+            // mid-VALIDATING (a pause there is a real user pause too, and the
+            // file on disk means a manual resume re-validates in seconds).
             val currentTasks = repository.tasks.value
             currentTasks.forEach { t ->
                 if (t.status == TaskStatus.DOWNLOADING || t.status == TaskStatus.RESOLVING || t.status == TaskStatus.VALIDATING) {
-                    repository.update(t.id) { it.copy(status = TaskStatus.QUEUED, speedBytesPerSec = 0.0) }
+                    repository.update(t.id) { it.copy(status = TaskStatus.PAUSED, speedBytesPerSec = 0.0, errorMessage = null) }
                 }
             }
             networkObserver.status.collect { net ->

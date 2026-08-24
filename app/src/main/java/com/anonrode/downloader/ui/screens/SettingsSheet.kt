@@ -26,12 +26,23 @@ import androidx.compose.ui.unit.sp
 import com.anonrode.downloader.BuildConfig
 import com.anonrode.downloader.data.rules.DynamicRulesManager
 import com.anonrode.downloader.ui.theme.*
+import com.anonrode.downloader.util.UpdateCheckResult
+import com.anonrode.downloader.util.UpdateChecker
 import com.anonrode.downloader.viewmodel.MainViewModel
 import com.yausername.youtubedl_android.YoutubeDL
 import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+
+/** Live state of the manual "Check for Updates" row. */
+private sealed interface UpdateUiState {
+    data object Idle : UpdateUiState
+    data object Checking : UpdateUiState
+    data class Available(val latestTag: String, val url: String) : UpdateUiState
+    data object UpToDate : UpdateUiState
+    data object Error : UpdateUiState
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -509,6 +520,21 @@ fun SettingsSheet(
 
             // SECTION 5: Storage & About
             SettingsCategoryHeader(title = "Storage & About")
+
+            // Manual update check against GitHub Releases (public repo, no
+            // token). Never runs at startup — only when the row is tapped.
+            var updateState by remember { mutableStateOf<UpdateUiState>(UpdateUiState.Idle) }
+            val runUpdateCheck: () -> Unit = {
+                updateState = UpdateUiState.Checking
+                scope.launch {
+                    updateState = when (val r = UpdateChecker.check()) {
+                        is UpdateCheckResult.Available -> UpdateUiState.Available(r.latestTag, r.releaseUrl)
+                        is UpdateCheckResult.UpToDate -> UpdateUiState.UpToDate(r.latestTag)
+                        UpdateCheckResult.Error -> UpdateUiState.Error
+                    }
+                }
+            }
+
             SettingsCard {
                 SettingsActionRow(
                     icon = Icons.Rounded.Storage,
@@ -524,6 +550,87 @@ fun SettingsSheet(
                     title = "Anonrode v${BuildConfig.VERSION_NAME}",
                     subtitle = "Serverless 100% On-Device Engine (libaria2c + yt-dlp)",
                     action = {}
+                )
+
+                HorizontalDivider(color = BorderHairline, modifier = Modifier.padding(horizontal = Spacing.md))
+
+                val checkState = updateState
+                SettingsActionRow(
+                    icon = Icons.Rounded.SystemUpdate,
+                    title = "Check for Updates",
+                    subtitle = when (checkState) {
+                        is UpdateUiState.Available -> "v${checkState.latestTag} is available — tap to open"
+                        UpdateUiState.UpToDate -> "You're on the latest build"
+                        UpdateUiState.Checking -> "Contacting GitHub…"
+                        UpdateUiState.Error -> "Couldn't reach GitHub — tap to retry"
+                        UpdateUiState.Idle -> "Compares this build against GitHub Releases"
+                    },
+                    action = {
+                        when (checkState) {
+                            is UpdateUiState.Available -> {
+                                Text(
+                                    text = "Open →",
+                                    color = AccentPrimary,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(Radius.xs))
+                                        .clickable { UpdateChecker.openInBrowser(context, checkState.url) }
+                                        .padding(horizontal = Spacing.xs, vertical = 4.dp)
+                                )
+                            }
+                            UpdateUiState.UpToDate -> {
+                                Text("Up to date", color = TextMuted, fontSize = 11.sp)
+                            }
+                            UpdateUiState.Checking -> {
+                                Text("Checking…", color = TextMuted, fontSize = 11.sp)
+                            }
+                            UpdateUiState.Error -> {
+                                Text(
+                                    text = "Retry",
+                                    color = StatusWarning,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(Radius.xs))
+                                        .clickable { runUpdateCheck() }
+                                        .padding(horizontal = Spacing.xs, vertical = 4.dp)
+                                )
+                            }
+                            UpdateUiState.Idle -> {
+                                Text(
+                                    text = "Check",
+                                    color = AccentPrimary,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(Radius.xs))
+                                        .clickable { runUpdateCheck() }
+                                        .padding(horizontal = Spacing.xs, vertical = 4.dp)
+                                )
+                            }
+                        }
+                    }
+                )
+
+                HorizontalDivider(color = BorderHairline, modifier = Modifier.padding(horizontal = Spacing.md))
+
+                SettingsActionRow(
+                    icon = Icons.Rounded.Github,
+                    title = "View Releases on GitHub",
+                    subtitle = "All builds, release notes and APKs",
+                    action = {
+                        Text(
+                            text = "Open",
+                            color = AccentPrimary,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(Radius.xs))
+                                .clickable { UpdateChecker.openInBrowser(context, UpdateChecker.RELEASES_PAGE) }
+                                .padding(horizontal = Spacing.xs, vertical = 4.dp)
+                        )
+                    }
                 )
             }
 
