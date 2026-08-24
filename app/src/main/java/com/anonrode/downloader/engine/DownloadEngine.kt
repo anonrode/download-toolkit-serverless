@@ -31,6 +31,10 @@ class DownloadEngine(
 ) {
     private val engineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val activeJobs = ConcurrentHashMap<String, Job>()
+    // Task ids whose NEXT resolution may bypass the HostHealth gate — one-shot
+    // manual-retry tokens, consumed (read-and-remove) at the start of the next
+    // startTask so a cooling-down host still gets the user's explicit attempt.
+    private val retryBypassTasks = ConcurrentHashMap.newKeySet<String>()
 
     var maxConcurrentDownloads: Int = 3
     var parallelSocketsPerFile: Int = 16
@@ -134,6 +138,28 @@ class DownloadEngine(
                     parked.forEach { repository.update(it.id) { t -> t.copy(status = TaskStatus.QUEUED, errorMessage = null) } }
                     processQueue()
                 }
+            }
+        }
+        // Cooldown-parked auto-retry: a task parked because its locker host
+        // is in HostHealth backoff re-queues itself once the host recovers —
+        // nothing else resumes it (the network collector only matches network
+        // messages). In-memory only: an app restart leaves it PAUSED for a
+        // manual resume (DownloadRepository restore), which is intended.
+        engineScope.launch {
+            while (true) {
+                delay(10_000)
+                val parked = repository.tasks.value.filter {
+                    it.status == TaskStatus.PAUSED && it.errorMessage?.startsWith(PARKED_HOST_MESSAGE) == true
+                }
+                if (parked.isEmpty()) continue
+                var requeued = false
+                parked.forEach { t ->
+                    if (com.anonrode.downloader.pipeline.HostHealth.isUsable(t.directUrl)) {
+                        repository.update(t.id) { task -> task.copy(status = TaskStatus.QUEUED, errorMessage = null) }
+                        requeued = true
+                    }
+                }
+                if (requeued) processQueue()
             }
         }
     }
@@ -367,6 +393,11 @@ class DownloadEngine(
     }
 
     fun retry(taskId: String) {
+        // Each tap grants ONE bypass of the host health gate: the next
+        // resolution attempt runs even while the host sits in HostHealth
+        // backoff (consumed in startTask). Bounded so stale ids cannot grow.
+        if (retryBypassTasks.size >= 16) retryBypassTasks.clear()
+        retryBypassTasks.add(taskId)
         repository.update(taskId) { it.copy(status = TaskStatus.QUEUED, errorMessage = null) }
         processQueue()
     }
@@ -577,6 +608,12 @@ class DownloadEngine(
         // a task in RESOLVING forever while the user's mobile data trickled
         // away on retries.
         private const val RESOLVE_TIMEOUT_MS = 90_000L
+
+        // Prefix of the errorMessage set when a task is parked because its
+        // locker host is in HostHealth backoff ("cooling down"). The
+        // auto-retry loop matches this prefix and re-queues the task once the
+        // host is usable again.
+        private const val PARKED_HOST_MESSAGE = "Download server cooling down"
     }
 
     private var lastNotificationTime: Long = 0L
@@ -706,7 +743,7 @@ class DownloadEngine(
         ).any { host.contains(it) }
     }
 
-    private suspend fun resolveStreamUrl(permUrl: String, site: String, defaultQual: String): String? {        // Resolver output is TRUSTED: a URL that differs from the input page was
+    private suspend fun resolveStreamUrl(permUrl: String, site: String, defaultQual: String, bypassHealth: Boolean = false): String? {        // Resolver output is TRUSTED: a URL that differs from the input page was
         // cracked. Locker CDN subdomains legitimately embed the locker's name
         // (fsmc02.downloadwella.com served nkiri's real .mkv — live-verified), so
         // isKnownLockerHost must not reject them; it only exists to stop an
@@ -723,7 +760,7 @@ class DownloadEngine(
         com.anonrode.downloader.pipeline.ResolveCache.invalidate(
             com.anonrode.downloader.pipeline.ResolveCache.keyFor(permUrl, defaultQual)
         )
-        var resolved = ResolverRegistry.resolve(permUrl, defaultQual)
+        var resolved = ResolverRegistry.resolve(permUrl, defaultQual, bypassHealth = bypassHealth)
         if (accept(resolved)) {
             return resolved
         }
@@ -1063,6 +1100,12 @@ class DownloadEngine(
                 val isSocial = task.showTitle.startsWith("Social/", ignoreCase = true) || task.backend.contains("yt-dlp")
                 val permUrl = task.sourceUrl.ifBlank { streamUrl }
 
+                // A manual retry tap grants ONE bypass of the HostHealth gate
+                // for this start's FIRST resolution attempt (consume-on-use;
+                // the stale-token / yt-dlp re-resolves later in this coroutine
+                // must NOT bypass, so the flag is read here and not re-derived).
+                val bypassHealth = retryBypassTasks.remove(task.id)
+
                 // Zero-Latency Resume: Check if streamUrl is already direct
                 val isAlreadyDirect = isDirectMediaUrl(streamUrl) && !isKnownLockerHost(streamUrl)
 
@@ -1075,7 +1118,7 @@ class DownloadEngine(
                     // the task in RESOLVING forever (user-reported).
                     val resolved = try {
                         kotlinx.coroutines.withTimeout(RESOLVE_TIMEOUT_MS) {
-                            resolveStreamUrl(permUrl, task.site, task.quality ?: defaultQuality)
+                            resolveStreamUrl(permUrl, task.site, task.quality ?: defaultQuality, bypassHealth = bypassHealth)
                         }
                     } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
                         com.anonrode.downloader.util.DebugLog.error("task=${task.id} resolution timed out after ${RESOLVE_TIMEOUT_MS / 1000}s")
@@ -1086,18 +1129,40 @@ class DownloadEngine(
                         streamUrl = resolved
                     } else if (isKnownLockerHost(streamUrl) || !isDirectMediaUrl(streamUrl)) {
                         if (task.site.isNotBlank()) {
-                            // A provider page whose cracking failed. yt-dlp cannot
+                            // A locker page whose cracking failed. yt-dlp cannot
                             // parse these sites — handing it the page URL produced
                             // the guaranteed "Unsupported URL" failure (user-reported).
                             // Fail with the real reason instead; retry re-runs the
-                            // resolver, which recovers from transient site issues.
-                            com.anonrode.downloader.util.DebugLog.resolve("task=${task.id} resolver chain EMPTY for ${streamUrl.take(120)} (site=${task.site}) — failing cleanly")
+                            // resolver, which recovers from transient host issues.
+                            // Name the ACTUAL failing host (the locker, e.g.
+                            // loadedfiles.net), not the provider site (9jarocks) —
+                            // the provider is fine; the locker is what refused us.
+                            val host = streamUrl.trim().substringAfter("://").substringBefore('/').substringBefore('?').substringBefore(':')
+                            com.anonrode.downloader.util.DebugLog.resolve("task=${task.id} resolver chain EMPTY for ${streamUrl.take(120)} (host=$host) — failing cleanly")
                             // Also flag it as an ERROR-category line: a resolution
                             // failure is the task's terminal outcome, and the log
                             // audit showed these only as RESOLVE lines (audit
                             // finding: "silent failures, no ERROR line").
-                            com.anonrode.downloader.util.DebugLog.error("task=${task.id} could not crack stream link (site=${task.site}) for ${streamUrl.take(120)}")
-                            throw Exception("Could not crack the stream link (${task.site}) — the site may have changed or the link expired. Retry, or try another server/episode.")
+                            com.anonrode.downloader.util.DebugLog.error("task=${task.id} could not crack stream link (host=$host) for ${streamUrl.take(120)}")
+                            // The locker host itself is in HostHealth backoff:
+                            // PARK the task instead of failing it — the
+                            // cooldown auto-retry loop re-queues it once the
+                            // host recovers. No throw, no completion
+                            // notification; filePath/directUrl stay as-is.
+                            if (!com.anonrode.downloader.pipeline.HostHealth.isUsable(streamUrl)) {
+                                val mins = maxOf(1L, com.anonrode.downloader.pipeline.HostHealth.remainingBackoffMs(streamUrl) / 60_000L)
+                                com.anonrode.downloader.util.DebugLog.resolve("task=${task.id} host $host in backoff — parking for ~${mins}m")
+                                repository.update(task.id) {
+                                    it.copy(
+                                        status = TaskStatus.PAUSED,
+                                        speedBytesPerSec = 0.0,
+                                        errorMessage = "$PARKED_HOST_MESSAGE — will retry in ~${mins}m"
+                                    )
+                                }
+                                updateServiceState(force = true)
+                                return@launch
+                            }
+                            throw Exception("Could not get a download link from the file host ($host) — it is not responding right now or the link expired. Try again in a few minutes, or choose another server/episode.")
                         }
                         // Social URLs: yt-dlp's generic extractor genuinely cracks
                         // these, so keep the fallback there.
@@ -1183,7 +1248,22 @@ class DownloadEngine(
                         delay(2000)
                         if (!isActive) break
                         val t = repository.find(task.id) ?: break
-                        if (t.status != TaskStatus.DOWNLOADING) continue
+                        when (t.status) {
+                            // DOWNLOADING is the watchdog's home turf: the
+                            // stall/crawl/zombie/throttle logic below runs
+                            // only while the backend moves (or should move).
+                            TaskStatus.DOWNLOADING -> {}
+                            // Token-refresh blip: the coroutine owning this
+                            // loop flips the task to RESOLVING and back, so
+                            // the watchdog must survive the window.
+                            TaskStatus.RESOLVING -> continue
+                            // Terminal/parked states: this loop must EXIT.
+                            // A parked-cooldown task's job is otherwise kept
+                            // alive by the loop forever, re-listing the
+                            // filesystem every 2s and pinning the task in
+                            // activeJobs (the leak this fixes).
+                            else -> break
+                        }
                         val now = System.currentTimeMillis()
                         val disk = computeDiskBytes(t)
                         val parsed = t.downloadedBytes
