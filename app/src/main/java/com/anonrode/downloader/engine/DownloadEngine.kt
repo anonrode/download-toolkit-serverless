@@ -92,7 +92,13 @@ class DownloadEngine(
             // file on disk means a manual resume re-validates in seconds).
             val currentTasks = repository.tasks.value
             currentTasks.forEach { t ->
-                if (t.status == TaskStatus.DOWNLOADING || t.status == TaskStatus.RESOLVING || t.status == TaskStatus.VALIDATING) {
+                // QUEUED included: the repository restore parks it too, but a
+                // task persisted as QUEUED between enqueue and restore (async
+                // persist race) must not reach the network observer below,
+                // whose first emission auto-starts every QUEUED task the
+                // moment the app opens.
+                if (t.status == TaskStatus.DOWNLOADING || t.status == TaskStatus.RESOLVING ||
+                    t.status == TaskStatus.VALIDATING || t.status == TaskStatus.QUEUED) {
                     repository.update(t.id) { it.copy(status = TaskStatus.PAUSED, speedBytesPerSec = 0.0, errorMessage = null) }
                 }
             }

@@ -166,14 +166,62 @@ object HttpClient {
      * Trust-all SSL client for locker hosts with broken TLS chains
      * (wetafiles.com omits its intermediate, kissorgrab.com serves an
      * invalid cert). Used ONLY by DownloadwellaResolver (downloadwella
-     * family) — the shared client stays strict because trust-all must
-     * never apply to every request the app makes.
+     * family) and the permissive probe fallback — the shared client stays
+     * strict because trust-all must never apply to every request the app
+     * makes.
      */
     val permissiveClient: OkHttpClient by lazy {
         shared.newBuilder()
             .sslSocketFactory(sslSocketFactory, trustAllCerts[0] as javax.net.ssl.X509TrustManager)
             .hostnameVerifier { _, _ -> true }
             .build()
+    }
+
+    /**
+     * Trust-all variant of [downloadClient] (longer streaming timeouts) for
+     * the download path: when a strict probe proves the chain is broken, the
+     * whole turbo job must run trust-all — mixing a permissive probe with
+     * strict sockets would just re-trigger the same handshake failure on all
+     * 16 segments. Only reached after [isTlsChainFailure] matched.
+     */
+    val permissiveDownloadClient: OkHttpClient by lazy {
+        downloadClient.newBuilder()
+            .sslSocketFactory(sslSocketFactory, trustAllCerts[0] as javax.net.ssl.X509TrustManager)
+            .hostnameVerifier { _, _ -> true }
+            .build()
+    }
+
+    /**
+     * True when [e]'s cause chain is a TLS handshake/chain failure (strict
+     * client vs a server that omits its intermediate cert). Only this class
+     * of error justifies the trust-all retry — timeouts, DNS and HTTP errors
+     * are still real failures and must not be papered over by disabling
+     * certificate validation.
+     */
+    fun isTlsChainFailure(e: Throwable): Boolean {
+        var t: Throwable? = e
+        while (t != null) {
+            if (t is javax.net.ssl.SSLException || t is java.security.cert.CertPathValidatorException) return true
+            val msg = t.message?.lowercase() ?: ""
+            if (msg.contains("trust anchor") || msg.contains("certpath") || msg.contains("certificate_unknown")) return true
+            t = t.cause
+        }
+        return false
+    }
+
+    /**
+     * Execute a one-off probe call under the same cancellation registry as
+     * [get] — pausing/cancelling a task must also kill the StreamValidator /
+     * turbo probe so no straggler socket keeps draining data (v3.0.4 showed
+     * traffic continuing seconds after a cancel).
+     */
+    fun executeRegistered(call: okhttp3.Call): okhttp3.Response {
+        inFlightCalls.add(call)
+        try {
+            return call.execute()
+        } finally {
+            inFlightCalls.remove(call)
+        }
     }
 
     fun safeResolveUri(base: String, relative: String): String {

@@ -31,31 +31,62 @@ object StreamValidator {
         val start = System.currentTimeMillis()
         var status: Int = -1
         var head = ByteArray(0)
-        try {
-            val builder = okhttp3.Request.Builder()
+
+        val req = try {
+            okhttp3.Request.Builder()
                 .url(url)
                 .header("Range", "bytes=0-${PROBE_BYTES - 1}")
                 .header("User-Agent", HttpClient.DEFAULT_UA)
                 .header("Accept", "*/*")
-            for ((k, v) in headers) {
-                if (k.isNotBlank() && v.isNotBlank()) {
-                    try { builder.header(k, v) } catch (_: IllegalArgumentException) {}
+                .apply {
+                    for ((k, v) in headers) {
+                        if (k.isNotBlank() && v.isNotBlank()) {
+                            try { header(k, v) } catch (_: IllegalArgumentException) {}
+                        }
+                    }
                 }
-            }
-            HttpClient.shared.newBuilder().build().newCall(builder.build()).execute().use { res ->
-                status = res.code
-                if (status in 200..299 || status == 416) {
-                    val stream = res.body?.byteStream() ?: return null
-                    head = stream.readNBytes(PROBE_BYTES)
-                }
-            }
+                .build()
         } catch (e: Exception) {
-            // Network-class errors during probe are NOT proof of a bad link;
-            // let the backend's retry machinery handle them.
+            // Malformed URL — same deferral contract as a network error: not
+            // proof of a bad link from the probe's point of view.
             PipelineJournal.hop("", "validate", url, ok = true,
                 ms = System.currentTimeMillis() - start,
-                detail = "probe network error, deferring to backend: ${e.message?.take(80)}")
+                detail = "probe request error, deferring to backend: ${e.message?.take(80)}")
             return null
+        }
+
+        // Strict probe first; a broken TLS chain (wetafiles omits its
+        // intermediate) must fall back to the trust-all client instead of
+        // deferring to the backends — the backends are strict too, so the
+        // deferral just handed the job to yt-dlp's own transport (v3.0.4:
+        // ~18s of failing handshakes, no total, then yt-dlp with MB-only
+        // progress). One retry only.
+        var tlsRetried = false
+        while (true) {
+            try {
+                val client = if (tlsRetried) HttpClient.permissiveClient else HttpClient.shared.newBuilder().build()
+                HttpClient.executeRegistered(client.newCall(req)).use { res ->
+                    status = res.code
+                    if (status in 200..299 || status == 416) {
+                        head = res.body?.byteStream()?.readNBytes(PROBE_BYTES) ?: ByteArray(0)
+                    }
+                }
+                break
+            } catch (e: Exception) {
+                val tls = HttpClient.isTlsChainFailure(e)
+                PipelineJournal.hop("", "validate", url, ok = true,
+                    ms = System.currentTimeMillis() - start,
+                    detail = if (tls && !tlsRetried)
+                        "strict TLS probe failed (${e.message?.take(60)}), retrying permissive"
+                    else
+                        "probe network error, deferring to backend: ${e.message?.take(80)}")
+                if (!tls || tlsRetried) {
+                    // Network-class errors during probe are NOT proof of a bad
+                    // link; let the backend's retry machinery handle them.
+                    return null
+                }
+                tlsRetried = true
+            }
         }
 
         if (status == 416 || head.isEmpty()) {
