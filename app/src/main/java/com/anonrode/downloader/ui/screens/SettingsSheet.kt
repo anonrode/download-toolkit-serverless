@@ -529,7 +529,7 @@ fun SettingsSheet(
                 scope.launch {
                     updateState = when (val r = UpdateChecker.check()) {
                         is UpdateCheckResult.Available -> UpdateUiState.Available(r.latestTag, r.releaseUrl)
-                        is UpdateCheckResult.UpToDate -> UpdateUiState.UpToDate(r.latestTag)
+                        is UpdateCheckResult.UpToDate -> UpdateUiState.UpToDate
                         UpdateCheckResult.Error -> UpdateUiState.Error
                     }
                 }
@@ -616,7 +616,7 @@ fun SettingsSheet(
                 HorizontalDivider(color = BorderHairline, modifier = Modifier.padding(horizontal = Spacing.md))
 
                 SettingsActionRow(
-                    icon = Icons.Rounded.Github,
+                    icon = Icons.Rounded.OpenInNew,
                     title = "View Releases on GitHub",
                     subtitle = "All builds, release notes and APKs",
                     action = {
