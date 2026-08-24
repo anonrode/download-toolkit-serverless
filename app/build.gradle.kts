@@ -47,6 +47,18 @@ android {
         getByName("debug") {
             // Standard debug signing for release artifact distribution
         }
+        // Real release key, used only when CI provides it via GitHub
+        // secrets. Local/dev builds fall back to debug signing so the
+        // project still builds without the secrets set.
+        create("release") {
+            val ksPath = System.getenv("KEYSTORE_PATH")
+            if (!ksPath.isNullOrBlank()) {
+                storeFile = file(ksPath)
+                storePassword = System.getenv("KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("KEY_ALIAS")
+                keyPassword = System.getenv("KEY_PASSWORD")
+            }
+        }
     }
 
     buildTypes {
@@ -57,7 +69,10 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = if (System.getenv("KEYSTORE_PATH").isNullOrBlank())
+                signingConfigs.getByName("debug")
+            else
+                signingConfigs.getByName("release")
         }
         debug {
             applicationIdSuffix = ".debug"

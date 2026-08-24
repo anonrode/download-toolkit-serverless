@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- API 23-30 backup rules: keep settings/downloads in backups but NEVER
+     the activity log — it contains search history, pasted URLs and
+     tokenized stream links (privacy). -->
+<full-backup-content>
+    <exclude domain="file" path="logs/" />
+</full-backup-content>
