@@ -28,6 +28,7 @@ import com.anonrode.downloader.data.rules.DynamicRulesManager
 import com.anonrode.downloader.ui.theme.*
 import com.anonrode.downloader.viewmodel.MainViewModel
 import com.yausername.youtubedl_android.YoutubeDL
+import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -798,8 +799,19 @@ fun SettingsSheet(
                                 Toast.makeText(context, "No activity log yet", Toast.LENGTH_SHORT).show()
                             } else {
                                 try {
+                                    // Redact token/secret values before sharing — the log
+                                    // contains ?token=, ?pt=, ?download_token=, ?expiry= URLs
+                                    // that are sensitive (session-bound stream tokens).
+                                    val raw = file.readText()
+                                    val redacted = raw.replace(
+                                        Regex("""[?&](token|download_token|pt|expiry|expires)=[^\s&]+""")
+                                    ) { match ->
+                                        "${match.value.substringBefore('=')}=***REDACTED***"
+                                    }
+                                    val shareFile = File(context.cacheDir, "activity-log-share.txt")
+                                    shareFile.writeText(redacted)
                                     val uri = androidx.core.content.FileProvider.getUriForFile(
-                                        context, "${context.packageName}.fileprovider", file
+                                        context, "${context.packageName}.fileprovider", shareFile
                                     )
                                     val send = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
                                         type = "text/plain"

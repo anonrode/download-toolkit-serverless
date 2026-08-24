@@ -117,6 +117,27 @@ jobs:
         with:
           gradle-version: '8.8'
 
+      - name: Prepare release signing key
+        # Decodes the release keystore from the GitHub secret and exports
+        # the signing env vars for gradle. When the secret is unset (fork
+        # builds, local runs), the gradle config falls back to debug
+        # signing so the build never breaks.
+        run: |
+          if [ -n "$ANDROID_KEYSTORE_B64" ]; then
+            echo "$ANDROID_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/anon-release.p12"
+            echo "KEYSTORE_PATH=$RUNNER_TEMP/anon-release.p12" >> "$GITHUB_ENV"
+            echo "KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
+            echo "KEY_ALIAS=release" >> "$GITHUB_ENV"
+            echo "KEY_PASSWORD=$KEY_PASSWORD" >> "$GITHUB_ENV"
+            echo "Release signing key prepared ($(wc -c < "$RUNNER_TEMP/anon-release.p12") bytes)."
+          else
+            echo "ANDROID_KEYSTORE_B64 not set — release will be debug-signed."
+          fi
+        env:
+          ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+
       - name: Build Release APKs
         run: gradle :app:assembleRelease --stacktrace --no-daemon
 

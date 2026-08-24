@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- API 31+ backup rules: same policy as backup_rules.xml (the activity
+     log never leaves the device; settings/downloads still back up). -->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="file" path="logs/" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="file" path="logs/" />
+    </device-transfer>
+</data-extraction-rules>

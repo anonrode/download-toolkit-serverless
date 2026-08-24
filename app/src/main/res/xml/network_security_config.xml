@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Cleartext is locked down globally; only the legacy locker hosts that
+  still serve http:// links are allowed to use it. Everything else must
+  use HTTPS. (MITM surface: an ISP/rogue AP can only tamper with these
+  few hosts' traffic, not with every page the app fetches.)
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">downloadwella.com</domain>
+        <domain includeSubdomains="true">wetafiles.com</domain>
+        <domain includeSubdomains="true">loadedfiles.net</domain>
+        <domain includeSubdomains="true">loadedfiles.st</domain>
+        <domain includeSubdomains="true">loadedfiles.to</domain>
+        <domain includeSubdomains="true">loadedfiles.org</domain>
+        <domain includeSubdomains="true">loadedfiles.com</domain>
+        <domain includeSubdomains="true">kissorgrab.com</domain>
+    </domain-config>
+</network-security-config>

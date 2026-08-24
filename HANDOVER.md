@@ -108,6 +108,14 @@ c3893a4 Seed vdl.np-downloader.com + www.moviereleases.net in lockerHosts; confo
 ### Conformance
 - **`probe/conformance.py`** — Signature-verifying runner (refuses unsigned payloads). 4 stages: search / episodes / direct-pass / **locker-discovery (NEW — reports UNKNOWN HOSTS FOUND with link counts)**. `--search-quality` mode. `classify_media()` Python mirror (20/20 parity verified). JSON searchType: walks link/url fields (accepts relative URLs). RSS: regex `<item><link>` (HTML parser treats `<link>` as void).
 
+### 🧱 Data vs Code split (the honest "thin kernel" answer)
+
+**Playbook-driven (OTA, no APK needed):** site base URLs + mirrors, search patterns/types + card/episode selectors, lockerHosts (unions with built-ins), hostPolicies (referers), urlTemplates, knownDead, tokenTtlMinutes, searchStrategies (urlTemplate/rss/slugGuess), directMediaExtensions, episodeSelector (NaijaVault reads it), minAppVersion (parsed, NOT enforced).
+
+**Hardcoded in the APK (requires a release to change):** the 25 resolver implementations (JS unpackers, AES/wasm crypto, token chains — these are algorithms, not config), the resolver registry list + order, LockerRegistry DEFAULT_LOCKER_HOSTS/NAV_SEGMENTS fallbacks, engine constants (watchdog floors, socket counts, timeouts), provider extraction logic. Porting these to data is deliberately NOT planned — the schema can't express algorithms, and data-driven behavior would enlarge the attack surface if the signing key ever leaked.
+
+**Design rule of thumb:** lists/selectors/strings that rotate → playbook. Logic/parsing/crypto → code. Recent history (~1 OTA fix per 8 Kotlin fixes) reflects that most real failures are algorithmic, not config — the "thin kernel" is an aspiration, the current split is the right line.
+
 ---
 
 ## ⚠️ 4. REVERTS MAP (do not re-introduce)
