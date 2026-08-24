@@ -3,10 +3,10 @@ package com.anonrode.downloader.resolvers
 import com.anonrode.downloader.data.net.HttpClient
 import com.anonrode.downloader.pipeline.PipelineError
 import com.anonrode.downloader.pipeline.PipelineJournal
-import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.supervisorScope
+import kotlinx.coroutines.selects.select
 import okhttp3.FormBody
 import okhttp3.Request
 import org.json.JSONArray
@@ -109,22 +109,18 @@ object ResolverRegistry {
         if (candidates.isEmpty()) return null
         if (candidates.size == 1) return resolve(candidates.first(), quality)
 
-        return kotlinx.coroutines.coroutineScope {
-            val done = Channel<Pair<String, String?>>(Channel.UNLIMITED)
-            val jobs = candidates.map { u ->
-                launch {
-                    val r = try { resolve(u, quality) } catch (_: Exception) { null }
-                    done.send(u to r)
+        return kotlinx.coroutines.supervisorScope {
+            val deferreds = candidates.map { u ->
+                async {
+                    try { resolve(u, quality) } catch (_: Exception) { null }
                 }
             }
-            var winner: String? = null
-            repeat(jobs.size) {
-                val (_, r) = done.receive()
-                if (r != null && winner == null) {
-                    winner = r
-                    jobs.forEach { it.cancel() }
+            val winner = select<String?> {
+                deferreds.forEach { d ->
+                    d.onAwait { it }
                 }
             }
+            deferreds.forEach { it.cancel() }
             winner
         }
     }

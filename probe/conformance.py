@@ -71,7 +71,7 @@ def classify_media(url, known_hosts):
     """Mirror LockerRegistry.classify(): 'direct' | 'locker' | 'unknown' | 'none'.
     Hostname-boundary matching, nav-junk path segments — same semantics as the app."""
     from urllib.parse import urlparse
-    clean = (url or "").split("?")[0].split("#")[0]
+    clean = (url or "").strip().split("?")[0].split("#")[0]
     if not clean:
         return "none"
     try:

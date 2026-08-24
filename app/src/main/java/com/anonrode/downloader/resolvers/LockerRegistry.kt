@@ -71,7 +71,7 @@ object LockerRegistry {
         if (ext in setOf("mp4", "mkv", "webm", "avi", "m3u8", "m4v", "ts", "mp3")) return MediaKind.Direct
 
         // Known locker hosts (OTA data + built-in defaults + learned from HostHealth)
-        val knownHosts = DynamicRulesManager.getLockerHosts().ifEmpty { DEFAULT_LOCKER_HOSTS }
+        val knownHosts = (DynamicRulesManager.getLockerHosts() + DEFAULT_LOCKER_HOSTS).distinct()
         for (kh in knownHosts) {
             if (host == kh || host.endsWith(".$kh")) return MediaKind.Locker(kh)
         }

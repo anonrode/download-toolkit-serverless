@@ -1,11 +1,16 @@
 package com.anonrode.downloader.ui.screens
 
+import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
@@ -37,12 +42,50 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import com.anonrode.downloader.AnonApp
 import com.anonrode.downloader.data.router.ParsedUrl
 import com.anonrode.downloader.data.router.UrlRouter
 import com.anonrode.downloader.ui.theme.*
 
 class QuickShareActivity : ComponentActivity() {
+
+    // API 26-29 path: WRITE_EXTERNAL_STORAGE is a normal runtime permission.
+    // API 30+ has no runtime dialog — "All files access" is Settings-only,
+    // handled below with a toast directing the user there.
+    private val writeStoragePermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (!granted) {
+            Toast.makeText(this, "Storage permission required to download", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    // Gate every download on storage access. Without it the engine guard
+    // rejects the write with a confusing IO error (tester report): on
+    // API 30+ "All files access" must be enabled in Settings; on API 26-29
+    // a normal permission prompt is raised.
+    private fun ensureStoragePermission(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            if (Environment.isExternalStorageManager()) {
+                true
+            } else {
+                Toast.makeText(
+                    this,
+                    "Enable 'All files access' for Anon Downloader in Settings",
+                    Toast.LENGTH_SHORT
+                ).show()
+                false
+            }
+        } else {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED) {
+                true
+            } else {
+                writeStoragePermissionLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                false
+            }
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -86,6 +129,7 @@ class QuickShareActivity : ComponentActivity() {
                         rawUrl = sharedText,
                         onDismiss = { finish() },
                         onDownload = { quality, audioOnly, makeInstant, engineOverride ->
+                            if (!ensureStoragePermission()) return@onDownload false
                             if (makeInstant) {
                                 prefs.edit().putBoolean("pref_instant_social", true).apply()
                                 (application as? AnonApp)?.engine?.instantSocialDownload = true
@@ -93,6 +137,7 @@ class QuickShareActivity : ComponentActivity() {
                             dispatchDownload(parsed, sharedText, quality, audioOnly, engineOverride)
                             Toast.makeText(this@QuickShareActivity, "🚀 Download queued in background", Toast.LENGTH_SHORT).show()
                             finish()
+                            true
                         }
                     )
                 }
@@ -122,6 +167,7 @@ class QuickShareActivity : ComponentActivity() {
     }
 
     private fun handleInstantDownload(parsed: ParsedUrl, rawUrl: String) {
+        if (!ensureStoragePermission()) return
         dispatchDownload(parsed, rawUrl, quality = "720p", audioOnly = false)
         val label = when (parsed) {
             is ParsedUrl.SocialUrl -> parsed.platform
@@ -212,7 +258,7 @@ fun QuickShareCard(
     parsedUrl: ParsedUrl,
     rawUrl: String,
     onDismiss: () -> Unit,
-    onDownload: (quality: String, audioOnly: Boolean, makeInstant: Boolean, engineOverride: String) -> Unit
+    onDownload: (quality: String, audioOnly: Boolean, makeInstant: Boolean, engineOverride: String) -> Boolean
 ) {
     var audioOnly by remember { mutableStateOf(false) }
     var selectedQuality by remember { mutableStateOf("720p") }
@@ -527,7 +573,12 @@ fun QuickShareCard(
                     onClick = {
                         if (enqueued) return@Button
                         enqueued = true
-                        onDownload(selectedQuality, audioOnly, alwaysInstant, engineOverride)
+                        // The storage permission check can block the download
+                        // (sheet stays open): only keep the double-tap guard
+                        // armed when a task was actually queued, so the user
+                        // can retry after granting permission.
+                        val queued = onDownload(selectedQuality, audioOnly, alwaysInstant, engineOverride)
+                        if (!queued) enqueued = false
                     },
                     modifier = Modifier
                         .weight(1.4f)

@@ -1,5 +1,6 @@
 package com.anonrode.downloader.ui.screens
 
+import android.widget.Toast
 import androidx.compose.animation.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -20,6 +21,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -39,6 +41,7 @@ fun EpisodeDrawer(
     val uiState by viewModel.uiState.collectAsState()
     val episodes = uiState.drawerEpisodes
     val isLoading = uiState.isEpisodesLoading
+    val context = LocalContext.current
 
     var selectedEpisodes by remember(episodes) { mutableStateOf(setOf<EpisodeItem>()) }
     var rangeText by remember { mutableStateOf("") }
@@ -259,12 +262,17 @@ fun EpisodeDrawer(
                     Button(
                         onClick = {
                             if (enqueued) return@Button
+                            // Never silently queue the whole show: an empty
+                            // selection is a tap mistake, not a request for
+                            // every episode (40+ items, tens of GB on mobile).
+                            if (selectedEpisodes.isEmpty()) {
+                                Toast.makeText(context, "Select at least one episode first", Toast.LENGTH_SHORT).show()
+                                return@Button
+                            }
                             enqueued = true
                             // Respect the range the user typed: the field feeds
-                            // selectedEpisodes, so queue exactly those (fall back
-                            // to everything when the selection was cleared).
-                            val targets = selectedEpisodes.ifEmpty { episodes.toSet() }
-                            val sorted = targets.sortedBy { it.episodeNum }
+                            // selectedEpisodes, so queue exactly those.
+                            val sorted = selectedEpisodes.sortedBy { it.episodeNum }
                             for (ep in sorted) {
                                 viewModel.engine.enqueue(
                                     showTitle = show.title,

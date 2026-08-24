@@ -312,7 +312,6 @@ class DownloadEngine(
         // without these, a paused task kept draining mobile data until the app
         // was killed (user-reported).
         TurboDownloader.cancelTask(taskId)
-        HttpClient.cancelInFlight()
         com.anonrode.downloader.util.DebugLog.user("pause $taskId")
         // Clear the errorMessage: a stale NETWORK_PAUSE_MESSAGE from an earlier
         // network blip would otherwise make the network observer's reconnect
@@ -331,7 +330,6 @@ class DownloadEngine(
         activeJobs.remove(taskId)
         YoutubeDlDownloader.killProcess(taskId)
         TurboDownloader.cancelTask(taskId)
-        HttpClient.cancelInFlight()
         repository.update(taskId) { it.copy(status = TaskStatus.PAUSED, speedBytesPerSec = 0.0, errorMessage = NETWORK_PAUSE_MESSAGE) }
         updateServiceState(force = true)
     }

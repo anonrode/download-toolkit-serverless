@@ -53,7 +53,10 @@ object NaijaVaultProvider : SiteProvider {
                     )
                 }
             }
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            // silently ignore others
+        }
         return results
     }
 
@@ -183,7 +186,8 @@ object NaijaVaultProvider : SiteProvider {
             val card = ShowCard(title = title, url = showUrl, posterUrl = poster, site = name)
             com.anonrode.downloader.util.DebugLog.resolve("naijavault loadEpisodes: found ${episodes.size} episodes")
             return ShowDetails(show = card, synopsis = synopsis, episodes = episodes)
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
             return ShowDetails(show = show)
         }
     }
@@ -216,7 +220,9 @@ object NaijaVaultProvider : SiteProvider {
                         direct = ResolverRegistry.resolveAny(lockerMatches, quality)
                     }
                 }
-            } catch (_: Exception) {}
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+            }
         }
         val finalUrl = direct ?: episodeUrl
         return DownloadRecipe(

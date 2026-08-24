@@ -1,6 +1,7 @@
 package com.anonrode.downloader.resolvers
 
 import com.anonrode.downloader.data.rules.DynamicRulesManager
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -11,6 +12,11 @@ import org.junit.Test
  * nav-junk filtering), and the OTA lockerHosts seeding.
  */
 class LockerRegistryTest {
+
+    @After
+    fun tearDown() {
+        DynamicRulesManager.parseRulesJson("""{"version":"t.reset"}""")
+    }
 
     // ---------------- classify() ----------------
 
