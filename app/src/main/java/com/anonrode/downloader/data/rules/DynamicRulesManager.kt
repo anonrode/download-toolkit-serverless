@@ -246,11 +246,16 @@ object DynamicRulesManager {
 
     /** Decrypts the OTA payload -> JSON text; null on any failure.
      *
-     *  Accepts two formats (migration-friendly):
+     *  Accepts only SIGNED envelopes:
      *   - v2 envelope JSON {"v":2,"iv":..,"payload":<b64>,"sig":<b64>} —
      *     signature verified BEFORE decryption; v2 without a signature or
      *     with a bad one is refused outright.
-     *   - legacy raw base64(AES-CBC fixed-IV) from older payloads/caches.
+     *  Legacy formats are refused — both are indistinguishable from a
+     *  hijacked unsigned payload:
+     *   - v1/versionless envelope {"v":1,"payload":<b64>} with no "sig": a
+     *     repo hijack could push one and bypass signature verification.
+     *   - bare base64(AES-CBC fixed-IV) from older payloads/caches: no
+     *     version, no signature; callers must use the signed v2 envelope.
      *  java.util.Base64 keeps this JVM-unit-testable. */
     internal fun decryptRules(text: String): String? {
         return try {
@@ -261,6 +266,16 @@ object DynamicRulesManager {
                 if (payloadB64.isBlank()) return null
                 val sigB64 = env.optString("sig")
                 val isV2 = env.optInt("v", 1) >= 2
+                if (!isV2 && sigB64.isBlank()) {
+                    // Legacy v1 envelope (explicit "v":"1" or versionless)
+                    // with no signature: refused. Accepting it would let a
+                    // repo hijack push {"v":1,"payload":...} and bypass
+                    // signature verification entirely.
+                    com.anonrode.downloader.util.DebugLog.error(
+                        "OTA rules REJECTED: unsigned legacy envelope — callers must use v2 signed"
+                    )
+                    return null
+                }
                 if (isV2 || sigB64.isNotBlank()) {
                     // Envelope claims authenticity: verify before decrypting.
                     if (sigB64.isBlank() || !verifySignature(payloadB64, sigB64)) {
@@ -273,7 +288,13 @@ object DynamicRulesManager {
                 val ivHex = env.optString("iv").ifBlank { RULES_IV_HEX }
                 aesDecrypt(java.util.Base64.getDecoder().decode(payloadB64), IvParameterSpec(hexToBytes(ivHex)))
             } else {
-                aesDecrypt(java.util.Base64.getDecoder().decode(t), IvParameterSpec(hexToBytes(RULES_IV_HEX)))
+                // Bare base64 (legacy pre-envelope format): no version, no
+                // signature — a hijacked payload could arrive in exactly this
+                // shape, so it is refused outright.
+                com.anonrode.downloader.util.DebugLog.error(
+                    "OTA rules REJECTED: legacy unsigned payload — callers must use v2 signed"
+                )
+                null
             }
         } catch (_: Exception) {
             null
@@ -305,6 +326,22 @@ object DynamicRulesManager {
     /** Returns false when the payload is malformed; bundled defaults stay active.
      *  internal so JVM unit tests can exercise the full parse path. */
     internal fun parseRulesJson(jsonStr: String): Boolean {
+        // Clear ALL playbook-driven state BEFORE parsing, so a failure
+        // anywhere below leaves a fully-default state instead of a
+        // half-applied playbook. Every getter already falls back to its
+        // bundled default when its collection is empty.
+        activeDomains.clear()
+        activeMirrors.clear()
+        activeSiteConfigs.clear()
+        activeResolverConfigs.clear()
+        activeMediaExtensions.clear()
+        activeHostPolicies.clear()
+        activeUrlTemplates.clear()
+        activeKnownDead.clear()
+        activeLockerHosts.clear()
+        activeSearchStrategies.clear()
+        dynamicProviders.clear()
+        tokenTtlMinutes = 10
         return try {
             val obj = JSONObject(jsonStr)
             val ver = obj.optString("version", "2026.08.22.1")
@@ -392,7 +429,6 @@ object DynamicRulesManager {
 
             val mediaExtArr = obj.optJSONArray("directMediaExtensions")
             if (mediaExtArr != null && mediaExtArr.length() > 0) {
-                activeMediaExtensions.clear()
                 for (idx in 0 until mediaExtArr.length()) {
                     val ext = mediaExtArr.optString(idx)
                     if (ext.isNotBlank()) activeMediaExtensions.add(ext)
@@ -403,7 +439,6 @@ object DynamicRulesManager {
             // templates, known-dead hosts, token TTL.
             val hpArr = obj.optJSONArray("hostPolicies")
             if (hpArr != null) {
-                activeHostPolicies.clear()
                 for (i in 0 until hpArr.length()) {
                     val p = hpArr.optJSONObject(i) ?: continue
                     val m = p.optString("match")
@@ -416,7 +451,6 @@ object DynamicRulesManager {
 
             val utObj = obj.optJSONObject("urlTemplates")
             if (utObj != null) {
-                activeUrlTemplates.clear()
                 val keys = utObj.keys()
                 while (keys.hasNext()) {
                     val k = keys.next()
@@ -427,7 +461,6 @@ object DynamicRulesManager {
 
             val kdArr = obj.optJSONArray("knownDead")
             if (kdArr != null) {
-                activeKnownDead.clear()
                 for (i in 0 until kdArr.length()) {
                     val h = kdArr.optString(i)
                     if (h.isNotBlank()) activeKnownDead.add(h.lowercase())
@@ -439,7 +472,6 @@ object DynamicRulesManager {
             // get probed and can work on first contact.
             val lhArr = obj.optJSONArray("lockerHosts")
             if (lhArr != null) {
-                activeLockerHosts.clear()
                 for (i in 0 until lhArr.length()) {
                     val h = lhArr.optString(i)
                     if (h.isNotBlank()) activeLockerHosts.add(h.lowercase())
@@ -453,7 +485,6 @@ object DynamicRulesManager {
             // data — no APK rebuild.
             val ssObj = obj.optJSONObject("searchStrategies")
             if (ssObj != null) {
-                activeSearchStrategies.clear()
                 val keys = ssObj.keys()
                 while (keys.hasNext()) {
                     val k = keys.next()
@@ -469,7 +500,6 @@ object DynamicRulesManager {
             // Parse any dynamic new providers added remotely
             val dynamicList = obj.optJSONArray("dynamic_providers")
             if (dynamicList != null) {
-                dynamicProviders.clear()
                 for (i in 0 until dynamicList.length()) {
                     val item = dynamicList.getJSONObject(i)
                     val cfg = DynamicSiteConfig(

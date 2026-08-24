@@ -23,6 +23,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.anonrode.downloader.BuildConfig
 import com.anonrode.downloader.data.rules.DynamicRulesManager
 import com.anonrode.downloader.ui.theme.*
 import com.anonrode.downloader.viewmodel.MainViewModel
@@ -519,7 +520,7 @@ fun SettingsSheet(
 
                 SettingsActionRow(
                     icon = Icons.Rounded.Info,
-                    title = "Anonrode v3.1.0",
+                    title = "Anonrode v${BuildConfig.VERSION_NAME}",
                     subtitle = "Serverless 100% On-Device Engine (libaria2c + yt-dlp)",
                     action = {}
                 )

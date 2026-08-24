@@ -19,13 +19,18 @@ class DynamicRulesManagerTest {
 
     @Test
     fun decryptRules_recoversKnownPayload() {
-        val plain = DynamicRulesManager.decryptRules(fixtureB64)
-        assertNotNull(plain)
-        // json.dumps emits 'version": "test.1"' (space after colon) — assert
-        // on the values, not the exact serializer formatting.
-        assertTrue(plain!!.contains("\"version\""))
-        assertTrue(plain.contains("test.1"))
-        assertTrue(plain.contains("https://thenkiri.com"))
+        withEphemeralSigningKey { sign ->
+            // Legacy bare-base64 payloads are refused post-signing; the
+            // fixture now rides a signed v2 envelope (same AES content).
+            val env = envelopeJson(fixtureB64, sign(fixtureB64))
+            val plain = DynamicRulesManager.decryptRules(env)
+            assertNotNull(plain)
+            // json.dumps emits 'version": "test.1"' (space after colon) — assert
+            // on the values, not the exact serializer formatting.
+            assertTrue(plain!!.contains("\"version\""))
+            assertTrue(plain.contains("test.1"))
+            assertTrue(plain.contains("https://thenkiri.com"))
+        }
     }
 
     @Test
@@ -82,14 +87,17 @@ class DynamicRulesManagerTest {
 
     @Test
     fun decryptThenParse_fullPipelineFromEncryptedPayload() {
-        val plain = DynamicRulesManager.decryptRules(fixtureB64)!!
-        assertTrue(DynamicRulesManager.parseRulesJson(plain))
-        assertEquals("test.1", DynamicRulesManager.version.value)
-        assertEquals(listOf("https://thenkiri.com", "https://nkiri.top"),
-            DynamicRulesManager.getBaseUrls("nkiri"))
-        val exts = DynamicRulesManager.getDirectMediaExtensions()
-        assertTrue(exts.contains(".m3u8"))
-        assertTrue(exts.contains("-mkv"))
+        withEphemeralSigningKey { sign ->
+            val env = envelopeJson(fixtureB64, sign(fixtureB64))
+            val plain = DynamicRulesManager.decryptRules(env)!!
+            assertTrue(DynamicRulesManager.parseRulesJson(plain))
+            assertEquals("test.1", DynamicRulesManager.version.value)
+            assertEquals(listOf("https://thenkiri.com", "https://nkiri.top"),
+                DynamicRulesManager.getBaseUrls("nkiri"))
+            val exts = DynamicRulesManager.getDirectMediaExtensions()
+            assertTrue(exts.contains(".m3u8"))
+            assertTrue(exts.contains("-mkv"))
+        }
     }
 
     // ---------------- v2 envelope: signature verification ----------------

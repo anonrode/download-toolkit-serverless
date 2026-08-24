@@ -1,7 +1,30 @@
-# OTA rules plaintext stays local — only the encrypted payload is committed
-scraper_rules.json
+# Built binaries & packages
+*.apk
+*.aab
+*.dex
+*.class
 
-# local conformance run artifacts
+# Gradle & Android build output (HUGE token/LSP consumers)
+.gradle/
+build/
+app/build/
+.cxx/
+.externalNativeBuild/
+captures/
+
+# IDE & OS caches
+.idea/
+.vscode/
+*.iml
+.DS_Store
+local.properties
+
+# Logs & temp files
+*.log
+*.tmp
 probe/results-*.jsonl
 __pycache__/
 *.pyc
+
+# OTA rules plaintext stays local — only the encrypted payload is committed
+scraper_rules.json

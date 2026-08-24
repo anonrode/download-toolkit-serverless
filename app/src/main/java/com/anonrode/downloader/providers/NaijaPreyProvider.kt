@@ -50,7 +50,10 @@ object NaijaPreyProvider : SiteProvider {
                     )
                 }
             }
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            // silently ignore others
+        }
         return results
     }
 
@@ -106,7 +109,8 @@ object NaijaPreyProvider : SiteProvider {
 
             val card = ShowCard(title = title, url = showUrl, posterUrl = poster, site = name)
             return ShowDetails(show = card, synopsis = synopsis, episodes = episodes)
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
             return ShowDetails(show = show)
         }
     }
