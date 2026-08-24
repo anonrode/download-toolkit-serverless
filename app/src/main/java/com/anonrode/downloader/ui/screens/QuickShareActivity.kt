@@ -129,15 +129,18 @@ class QuickShareActivity : ComponentActivity() {
                         rawUrl = sharedText,
                         onDismiss = { finish() },
                         onDownload = { quality, audioOnly, makeInstant, engineOverride ->
-                            if (!ensureStoragePermission()) return@onDownload false
-                            if (makeInstant) {
-                                prefs.edit().putBoolean("pref_instant_social", true).apply()
-                                (application as? AnonApp)?.engine?.instantSocialDownload = true
+                            if (!ensureStoragePermission()) {
+                                false
+                            } else {
+                                if (makeInstant) {
+                                    prefs.edit().putBoolean("pref_instant_social", true).apply()
+                                    (application as? AnonApp)?.engine?.instantSocialDownload = true
+                                }
+                                dispatchDownload(parsed, sharedText, quality, audioOnly, engineOverride)
+                                Toast.makeText(this@QuickShareActivity, "🚀 Download queued in background", Toast.LENGTH_SHORT).show()
+                                finish()
+                                true
                             }
-                            dispatchDownload(parsed, sharedText, quality, audioOnly, engineOverride)
-                            Toast.makeText(this@QuickShareActivity, "🚀 Download queued in background", Toast.LENGTH_SHORT).show()
-                            finish()
-                            true
                         }
                     )
                 }
