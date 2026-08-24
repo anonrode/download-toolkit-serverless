@@ -307,6 +307,21 @@ fun DownloadCard(
                         }
                     }
                 }
+
+                // Honest verification note (if any): the engine could not fully
+                // prove the file (unknown container verified by decoder, size
+                // vs stream estimate, or nothing at all) — amber tells the user
+                // to check it plays before keeping.
+                if (task.validationNote != null) {
+                    Text(
+                        text = task.validationNote,
+                        color = StatusWarning,
+                        fontSize = 10.sp,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(start = Spacing.xs, top = 2.dp)
+                    )
+                }
             } else {
                 // ---- ACTIVE / QUEUED / PAUSED / FAILED ----
                 // Seal-Style Visual Segment Progress Bar (frozen at 0 for QUEUED)

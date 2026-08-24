@@ -74,5 +74,10 @@ data class DownloadTask(
     /** Real stream resolution extracted from the HLS master playlist
      *  (e.g. "1080p", "720p"). Populated during preflight when the master
      *  declares RESOLUTION attributes; null for direct files and unknown. */
-    val resolution: String? = null
+    val resolution: String? = null,
+    /** Honest warning shown on COMPLETED cards when the file could not be
+     *  fully verified (e.g. no recognizable container signature but the
+     *  platform decoder accepted it, or size fell short of the HLS
+     *  estimate). Null = verified clean. */
+    val validationNote: String? = null
 )

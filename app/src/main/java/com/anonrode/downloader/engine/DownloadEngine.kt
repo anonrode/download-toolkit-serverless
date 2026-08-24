@@ -392,6 +392,41 @@ class DownloadEngine(
     }
 
     /**
+     * Tier-2 verification: ask the platform codec stack whether the file is
+     * actually decodable media. MediaExtractor parses the container and exposes
+     * its tracks plus per-track duration; a garbage blob yields no usable
+     * track, real media yields at least one with a positive duration. This is a
+     * container parse only (no frames decoded), so it is cheap, and it is
+     * bounded by the platform's own parser — no manual timeout needed.
+     */
+    private fun decodeCheck(file: File): Boolean {
+        return try {
+            val extractor = android.media.MediaExtractor()
+            try {
+                extractor.setDataSource(file.absolutePath)
+                var ok = false
+                for (i in 0 until extractor.trackCount) {
+                    val fmt = extractor.getTrackFormat(i)
+                    val mime = fmt.getString(android.media.MediaFormat.KEY_MIME)
+                    if (!mime.isNullOrBlank() && fmt.containsKey(android.media.MediaFormat.KEY_DURATION) &&
+                        fmt.getLong(android.media.MediaFormat.KEY_DURATION) > 0L
+                    ) {
+                        ok = true
+                        break
+                    }
+                }
+                com.anonrode.downloader.util.DebugLog.write("decodeCheck ${file.name}: tracks=${extractor.trackCount} decodable=$ok")
+                ok
+            } finally {
+                try { extractor.release() } catch (_: Exception) {}
+            }
+        } catch (e: Exception) {
+            com.anonrode.downloader.util.DebugLog.write("decodeCheck ${file.name}: ${e.message}")
+            false
+        }
+    }
+
+    /**
      * Actual bytes this task has written to disk: the final file, its .part /
      * .ytdl partials, and yt-dlp's concurrent fragment files. The UI progress
      * watchdog uses this as the source of truth when backend output parsing
@@ -1645,9 +1680,49 @@ class DownloadEngine(
 
                 val isAudio = task.filePath.lowercase().let { it.endsWith(".mp3") || it.endsWith(".m4a") || it.endsWith(".aac") }
                 val minSize = if (isAudio) 10 * 1024L else 50 * 1024L
-                val isLargeValidFile = producedFile != null && producedFile.exists() && producedFile.length() >= 5 * 1024 * 1024L && !looksLikeHtml(producedFile)
+
+                // ---- Tiered verification: answer "is it media / complete /
+                // playable" with the strongest evidence available, instead of
+                // the old ">5MB => trust it" size guess.
+                // Tier 0 — transfer truth: non-HLS backends got the exact
+                //           content length from the server; matching bytes =
+                //           complete by protocol guarantee.
+                // Tier 1 — structure: shield magic + atom scan (any known
+                //           media atom in the head/tail windows proves a
+                //           container, whatever its first box was).
+                // Tier 2 — platform decode: MediaExtractor finds decodable
+                //           tracks with a duration -> the OS itself confirms
+                //           the file is playable media.
+                // Tier 3 — HLS estimate: size within 90% of the
+                //           segment-sampling estimate.
+                val transferComplete = !isHlsStream && task.backend != "yt-dlp" &&
+                    (repository.find(task.id)?.totalBytes ?: 0L) > 0 &&
+                    producedFile != null && producedFile.exists() &&
+                    producedFile.length() >= (repository.find(task.id)?.totalBytes ?: 0L)
+                val structuralOk = validation.first
+                val decodeOk = !structuralOk && !transferComplete &&
+                    producedFile != null && producedFile.exists() &&
+                    producedFile.length() >= minSize &&
+                    !looksLikeHtml(producedFile) && decodeCheck(producedFile)
+                val hlsComplete = isHlsStream && hlsSizeEstimate[0] > 0 &&
+                    producedFile != null && producedFile.exists() &&
+                    producedFile.length() >= 0.9 * hlsSizeEstimate[0]
+                val verified = transferComplete || structuralOk || decodeOk || hlsComplete
+                val path = when {
+                    structuralOk -> "structure"
+                    transferComplete -> "transfer"
+                    decodeOk -> "decode"
+                    hlsComplete -> "estimate"
+                    else -> "none"
+                }
+                val note = when {
+                    !verified || structuralOk || transferComplete -> null
+                    decodeOk -> "Downloaded — format not in the known container list, but the system decoder verified it plays."
+                    else -> "Downloaded — file size matches the stream estimate."
+                }
+
                 if (producedFile != null && producedFile.exists() && producedFile.length() >= minSize
-                    && !looksLikeHtml(producedFile) && (validation.first || isLargeValidFile)) {
+                    && !looksLikeHtml(producedFile) && verified) {
                     // The block above ran without suspension points, so a pause
                     // landing mid-validation could not interrupt it. Re-check
                     // here: a cancelled job must never flip to COMPLETED after
@@ -1663,7 +1738,8 @@ class DownloadEngine(
                             totalBytes = finalBytes,
                             speedBytesPerSec = 0.0,
                             etaSeconds = 0L,
-                            status = TaskStatus.COMPLETED
+                            status = TaskStatus.COMPLETED,
+                            validationNote = note
                         )
                     }
 
@@ -1685,7 +1761,37 @@ class DownloadEngine(
                     if (completionNotifications) {
                         DownloadService.notifyCompleted(context, finalTitle)
                     }
-                    com.anonrode.downloader.util.DebugLog.write("completed task=${task.id} file=${producedFile.absolutePath} bytes=$finalBytes")
+                    com.anonrode.downloader.util.DebugLog.write("completed task=${task.id} file=${producedFile.absolutePath} bytes=$finalBytes validation=$path")
+                } else if (producedFile != null && producedFile.exists() && producedFile.length() >= minSize
+                    && !looksLikeHtml(producedFile)) {
+                    // A real file IS on disk but no tier could verify it. Keep
+                    // the file and say so honestly — never auto-delete it and
+                    // never re-download over it (that is exactly what the old
+                    // FAILED + retry path did, silently destroying the file).
+                    coroutineContext.ensureActive()
+                    val finalTitle = producedFile.nameWithoutExtension
+                    val finalBytes = producedFile.length()
+                    repository.update(task.id) {
+                        it.copy(
+                            filePath = producedFile.absolutePath,
+                            episodeTitle = if (isExtractor) finalTitle else it.episodeTitle,
+                            downloadedBytes = finalBytes,
+                            totalBytes = finalBytes,
+                            speedBytesPerSec = 0.0,
+                            etaSeconds = 0L,
+                            status = TaskStatus.COMPLETED,
+                            validationNote = "File saved, but its format could not be verified — check that it plays before keeping."
+                        )
+                    }
+                    try {
+                        MediaScannerConnection.scanFile(
+                            context,
+                            arrayOf(producedFile.absolutePath),
+                            null,
+                            null
+                        )
+                    } catch (_: Throwable) {}
+                    com.anonrode.downloader.util.DebugLog.write("completed-unverified task=${task.id} file=${producedFile.absolutePath} bytes=$finalBytes validation=none")
                 } else {
                     val errReason = when {
                         producedFile != null && looksLikeHtml(producedFile) -> "Server returned an HTML page instead of the file"
