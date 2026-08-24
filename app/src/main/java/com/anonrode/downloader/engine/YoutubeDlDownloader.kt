@@ -315,7 +315,7 @@ object YoutubeDlDownloader {
                 return null
             }
 
-            fun isFinal(f: File) = f.length() > 0 &&
+            fun isFinal(f: File) = (f.length() > 0 || f.isDirectory) &&
                 !f.name.endsWith(".aria2") && !f.name.endsWith(".part") && !f.name.endsWith(".ytdl")
 
             val candidates = targetDir.listFiles { f -> isFinal(f) }?.toList() ?: emptyList()
@@ -324,6 +324,10 @@ object YoutubeDlDownloader {
             return fresh.firstOrNull { it.nameWithoutExtension == stem || it.name.startsWith("$stem.") }
                 ?: fresh.maxByOrNull { it.lastModified() }
                 ?: candidates.firstOrNull { it.nameWithoutExtension == stem || it.name.startsWith("$stem.") }
+                // Multi-file downloads (season packs) land as a NEW directory
+                // whose File.length() is ~0 — when no file matched, take the
+                // most-recently-created directory as the produced artifact.
+                ?: targetDir.listFiles { f -> f.isDirectory && f.absolutePath !in before }?.maxByOrNull { it.lastModified() }
         }
 
         // Same-engine retry with resume: yt-dlp's .part (native) and aria2c's
@@ -678,7 +682,7 @@ object YoutubeDlDownloader {
                 return null
             }
 
-            fun isFinal(f: File) = f.length() > 0 &&
+            fun isFinal(f: File) = (f.length() > 0 || f.isDirectory) &&
                     !f.name.endsWith(".aria2") && !f.name.endsWith(".part") &&
                     !f.name.endsWith(".ytdl") && !f.name.endsWith(".torrent")
 
@@ -688,6 +692,10 @@ object YoutubeDlDownloader {
             val found = fresh.firstOrNull { it.nameWithoutExtension == stem || it.name.startsWith("$stem.") }
                 ?: fresh.maxByOrNull { it.lastModified() }
                 ?: candidates.maxByOrNull { it.lastModified() }
+                // Multi-file torrents (season packs) land as a NEW directory
+                // whose File.length() is ~0 — when no file matched, take the
+                // most-recently-created directory as the produced artifact.
+                ?: targetDir.listFiles { f -> f.isDirectory && f.absolutePath !in before }?.maxByOrNull { it.lastModified() }
 
             // A sibling .aria2 control file marks the data file as still partial
             // (resume bookkeeping), so never treat it as a finished download.
