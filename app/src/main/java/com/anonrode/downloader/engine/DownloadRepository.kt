@@ -35,23 +35,25 @@ class DownloadRepository {
                 if (raw.isNotBlank()) {
                 _tasks.value = json.decodeFromString<List<DownloadTask>>(raw)
                     .map {
-                        // A task that was mid-flight when the app died resumes as
-                        // PAUSED, never auto-QUEUED: silently re-consuming mobile
-                        // data on reopen (user-reported) is the wrong surprise.
-                        // VALIDATING is the one safe auto-resume — the file is
-                        // already on disk and only needs the integrity check.
-                        // errorMessage is cleared for every parked task: the
-                        // network observer auto-resumes tasks carrying
-                        // NETWORK_PAUSE_MESSAGE / "Waiting for Wi-Fi" markers,
-                        // and those markers survived a restart — so a download
-                        // parked right before the app died silently resumed on
-                        // reopen (user-reported). Reopen never auto-resumes;
-                        // in-session network recovery still works.
+                        // Reopen never auto-resumes, period. Mid-flight statuses
+                        // (DOWNLOADING/RESOLVING/VALIDATING) park as PAUSED:
+                        // silently re-consuming mobile data on reopen
+                        // (user-reported) is the wrong surprise. VALIDATING is
+                        // included deliberately — a pause landing during the
+                        // integrity check (which now does real work: atom
+                        // scans, decoder probes) must not resurrect as QUEUED,
+                        // and the file on disk means a manual resume
+                        // re-validates in seconds. errorMessage is cleared for
+                        // every parked task: the network observer auto-resumes
+                        // tasks carrying NETWORK_PAUSE_MESSAGE / "Waiting for
+                        // Wi-Fi" markers, and those markers survived a restart
+                        // — so a download parked right before the app died
+                        // silently resumed on reopen (user-reported). Reopen
+                        // never auto-resumes; in-session network recovery
+                        // still works.
                         when (it.status) {
-                            TaskStatus.DOWNLOADING, TaskStatus.RESOLVING ->
+                            TaskStatus.DOWNLOADING, TaskStatus.RESOLVING, TaskStatus.VALIDATING ->
                                 it.copy(status = TaskStatus.PAUSED, speedBytesPerSec = 0.0, errorMessage = null)
-                            TaskStatus.VALIDATING ->
-                                it.copy(status = TaskStatus.QUEUED, speedBytesPerSec = 0.0)
                             TaskStatus.PAUSED ->
                                 it.copy(errorMessage = null)
                             else -> it
