@@ -131,6 +131,18 @@ object HttpClient {
         }
     }
 
+    private val trustAllCerts = arrayOf<javax.net.ssl.TrustManager>(object : javax.net.ssl.X509TrustManager {
+        override fun checkClientTrusted(chain: Array<out java.security.cert.X509Certificate>?, authType: String?) {}
+        override fun checkServerTrusted(chain: Array<out java.security.cert.X509Certificate>?, authType: String?) {}
+        override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = arrayOf()
+    })
+
+    private val sslSocketFactory: javax.net.ssl.SSLSocketFactory by lazy {
+        val sslContext = javax.net.ssl.SSLContext.getInstance("TLS")
+        sslContext.init(null, trustAllCerts, java.security.SecureRandom())
+        sslContext.socketFactory
+    }
+
     val shared: OkHttpClient = OkHttpClient.Builder()
         .dns(hybridDns)
         .connectionPool(pool)
@@ -149,6 +161,20 @@ object HttpClient {
         .readTimeout(30, TimeUnit.SECONDS)
         .writeTimeout(15, TimeUnit.SECONDS)
         .build()
+
+    /**
+     * Trust-all SSL client for locker hosts with broken TLS chains
+     * (wetafiles.com omits its intermediate, kissorgrab.com serves an
+     * invalid cert). Used ONLY by DownloadwellaResolver (downloadwella
+     * family) — the shared client stays strict because trust-all must
+     * never apply to every request the app makes.
+     */
+    val permissiveClient: OkHttpClient by lazy {
+        shared.newBuilder()
+            .sslSocketFactory(sslSocketFactory, trustAllCerts[0] as javax.net.ssl.X509TrustManager)
+            .hostnameVerifier { _, _ -> true }
+            .build()
+    }
 
     fun safeResolveUri(base: String, relative: String): String {
         if (relative.startsWith("http://", ignoreCase = true) || relative.startsWith("https://", ignoreCase = true) || relative.startsWith("magnet:", ignoreCase = true)) {
@@ -185,7 +211,7 @@ object HttpClient {
         return if (parts.size > 1) "$base?${parts[1]}" else base
     }
 
-    fun get(url: String, referer: String? = null, headers: Map<String, String> = emptyMap(), tag: String? = null): Response {
+    fun get(url: String, referer: String? = null, headers: Map<String, String> = emptyMap(), tag: String? = null, permissive: Boolean = false): Response {
         val reqBuilder = Request.Builder()
             .url(safeUrl(url))
             .header("User-Agent", DEFAULT_UA)
@@ -197,7 +223,8 @@ object HttpClient {
         }
         headers.forEach { (k, v) -> reqBuilder.header(k, v) }
 
-        val call = shared.newCall(reqBuilder.build())
+        val client = if (permissive) permissiveClient else shared
+        val call = client.newCall(reqBuilder.build())
         inFlightCalls.add(call)
         if (tag != null) {
             taggedCalls.computeIfAbsent(tag) { java.util.concurrent.CopyOnWriteArrayList() }.add(call)
@@ -306,9 +333,9 @@ object HttpClient {
         return bytes
     }
 
-    fun getText(url: String, referer: String? = null, headers: Map<String, String> = emptyMap(), acceptStatus: Set<Int> = emptySet(), tag: String? = null): String? {
+    fun getText(url: String, referer: String? = null, headers: Map<String, String> = emptyMap(), acceptStatus: Set<Int> = emptySet(), tag: String? = null, permissive: Boolean = false): String? {
         return try {
-            get(url, referer, headers, tag).use { res ->
+            get(url, referer, headers, tag, permissive).use { res ->
                 if (res.isSuccessful || res.code in acceptStatus) {
                     cappedText(res)
                 } else {
