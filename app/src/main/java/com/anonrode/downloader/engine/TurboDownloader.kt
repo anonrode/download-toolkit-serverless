@@ -135,7 +135,23 @@ object TurboDownloader {
         dest.parentFile?.mkdirs()
         val safe = HttpClient.safeUrl(url)
 
-        val probe = probe(safe, headers, client)
+        var effectiveClient = client
+        var probeError: Throwable? = null
+        var probe = probe(safe, headers, effectiveClient) { probeError = it }
+        // Broken TLS chain (wetafiles omits its intermediate): the strict
+        // client can't even finish the handshake, so the probe reports
+        // Unreachable with no total and EVERY segmented socket below would
+        // burn a ~18s handshake failure — which is exactly how v3.0.4 fell
+        // back to yt-dlp (slow start, MB-only progress). One trust-all retry
+        // then runs the whole job on the permissive client.
+        if (probe is ProbeResult.Unreachable && probeError != null && HttpClient.isTlsChainFailure(probeError!!)) {
+            com.anonrode.downloader.util.DebugLog.backend(
+                "task=$taskId probe TLS chain failure (${probeError!!.message?.take(80)}), retrying trust-all"
+            )
+            effectiveClient = HttpClient.permissiveDownloadClient
+            probeError = null
+            probe = probe(safe, headers, effectiveClient) { probeError = it }
+        }
         val total: Long
         val acceptsRanges: Boolean
         when (probe) {
@@ -164,21 +180,21 @@ object TurboDownloader {
         val failureMessage = AtomicReference<String?>(null)
 
         return@withContext if (useSegmented) {
-            val ok = segmented(safe, partFile, headers, total, sockets, state, failureStatus, failureMessage, onProgress, client, taskId)
+            val ok = segmented(safe, partFile, headers, total, sockets, state, failureStatus, failureMessage, onProgress, effectiveClient, taskId)
             if (ok) {
                 state.delete()
                 atomicMove(partFile, dest)
                 TurboResult.Success(dest, dest.length(), true)
             } else if (!partFile.exists() || partFile.length() == 0L) {
                 state.delete()
-                if (single(safe, partFile, headers, total, failureStatus, failureMessage, onProgress, client, taskId)) {
+                if (single(safe, partFile, headers, total, failureStatus, failureMessage, onProgress, effectiveClient, taskId)) {
                     atomicMove(partFile, dest)
                     TurboResult.Success(dest, dest.length(), false)
                 } else failure(failureStatus, failureMessage)
             } else failure(failureStatus, failureMessage)
         } else {
             state.delete()
-            if (single(safe, partFile, headers, total, failureStatus, failureMessage, onProgress, client, taskId)) {
+            if (single(safe, partFile, headers, total, failureStatus, failureMessage, onProgress, effectiveClient, taskId)) {
                 state.delete()
                 atomicMove(partFile, dest)
                 TurboResult.Success(dest, dest.length(), false)
@@ -202,7 +218,7 @@ object TurboDownloader {
      * short-circuits to HtmlPage so the caller never downloads a locker page or
      * expired-token error page as a video file.
      */
-    private fun probe(url: String, headers: Map<String, String>, client: OkHttpClient): ProbeResult {
+    private fun probe(url: String, headers: Map<String, String>, client: OkHttpClient, onFailure: (Throwable) -> Unit = {}): ProbeResult {
         fun buildReq(head: Boolean) = Request.Builder().url(url).apply {
             header("User-Agent", headers["User-Agent"] ?: HttpClient.DEFAULT_UA)
             headers.forEach { (k, v) -> if (!k.equals("User-Agent", true)) header(k, v) }
@@ -216,9 +232,10 @@ object TurboDownloader {
 
         var totalLength = -1L
 
-        // 1. Try HEAD request
+        // 1. Try HEAD request. Registered probe calls so pause/cancel kills
+        // them too (v3.0.4: turborouter traffic outlived a cancel).
         try {
-            client.newCall(buildReq(true)).execute().use { r ->
+            HttpClient.executeRegistered(client.newCall(buildReq(true))).use { r ->
                 if (isHtmlPage(r.header("Content-Type"))) return ProbeResult.HtmlPage
                 val len = r.header("Content-Length")?.toLongOrNull() ?: -1L
                 val ranges = r.header("Accept-Ranges")?.contains("bytes", true) == true
@@ -229,11 +246,13 @@ object TurboDownloader {
                     }
                 }
             }
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+            onFailure(e)
+        }
 
         // 2. If Accept-Ranges was not explicit on HEAD, probe with Range: bytes=0-0
         try {
-            client.newCall(buildReq(false)).execute().use { r ->
+            HttpClient.executeRegistered(client.newCall(buildReq(false))).use { r ->
                 if (isHtmlPage(r.header("Content-Type"))) return ProbeResult.HtmlPage
                 val cr = r.header("Content-Range")
                 val totalFromCr = cr?.substringAfter('/')?.trim()?.toLongOrNull() ?: -1L
@@ -246,7 +265,9 @@ object TurboDownloader {
                     if (len > 0) totalLength = len
                 }
             }
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+            onFailure(e)
+        }
 
         return ProbeResult.Unreachable(totalLength)
     }

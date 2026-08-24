@@ -2,7 +2,11 @@ package com.anonrode.downloader.ui.screens
 
 import android.content.Context
 import android.content.Intent
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -197,8 +201,11 @@ fun DownloadCard(
 
             Spacer(modifier = Modifier.height(Spacing.sm))
 
+            val totalKnown = task.totalBytes > 0
+            val isDownloadingNow = task.status == TaskStatus.DOWNLOADING
+
             val targetProgress = when {
-                task.totalBytes > 0 -> (task.downloadedBytes.toFloat() / task.totalBytes.toFloat()).coerceIn(0f, 1f)
+                totalKnown -> (task.downloadedBytes.toFloat() / task.totalBytes.toFloat()).coerceIn(0f, 1f)
                 task.downloadedBytes in 1..100 -> (task.downloadedBytes.toFloat() / 100f).coerceIn(0f, 1f)
                 else -> 0f
             }
@@ -324,24 +331,49 @@ fun DownloadCard(
                 }
             } else {
                 // ---- ACTIVE / QUEUED / PAUSED / FAILED ----
-                // Seal-Style Visual Segment Progress Bar (frozen at 0 for QUEUED)
-                Box(
+                // Seal-Style Visual Segment Progress Bar (frozen at 0 for QUEUED;
+                // indeterminate sweep while downloading with an unknown total)
+                BoxWithConstraints(
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(6.dp)
                         .clip(RoundedCornerShape(Radius.xs))
                         .background(SurfaceElevated)
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth(fraction = animatedProgress)
-                            .fillMaxHeight()
-                            .clip(RoundedCornerShape(Radius.xs))
-                            .background(
-                                if (isFailed) Brush.horizontalGradient(listOf(StatusError, StatusError))
-                                else Brush.horizontalGradient(listOf(AccentViolet, AccentPink, AccentPrimary))
-                            )
-                    )
+                    if (totalKnown || !isDownloadingNow) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth(fraction = animatedProgress)
+                                .fillMaxHeight()
+                                .clip(RoundedCornerShape(Radius.xs))
+                                .background(
+                                    if (isFailed) Brush.horizontalGradient(listOf(StatusError, StatusError))
+                                    else Brush.horizontalGradient(listOf(AccentViolet, AccentPink, AccentPrimary))
+                                )
+                        )
+                    } else {
+                        // Indeterminate sweep (only reachable while DOWNLOADING
+                        // with an unknown total — CDN without Content-Length,
+                        // HLS before the variant is measured): a dead 0% bar
+                        // next to "100.7 MB" told the user nothing, so a sliding
+                        // segment signals "in flight" without pretending to know
+                        // a percentage.
+                        val sweepWidth = 64.dp
+                        val sweep by rememberInfiniteTransition(label = "indeterminate").animateFloat(
+                            initialValue = 0f,
+                            targetValue = 1f,
+                            animationSpec = infiniteRepeatable(tween(durationMillis = 1100, easing = LinearEasing)),
+                            label = "indeterminateValue"
+                        )
+                        Box(
+                            modifier = Modifier
+                                .width(sweepWidth)
+                                .fillMaxHeight()
+                                .clip(RoundedCornerShape(Radius.xs))
+                                .offset(x = (maxWidth - sweepWidth) * sweep)
+                                .background(Brush.horizontalGradient(listOf(AccentViolet, AccentPink, AccentPrimary)))
+                        )
+                    }
                 }
 
                 Spacer(modifier = Modifier.height(Spacing.sm))
@@ -363,7 +395,10 @@ fun DownloadCard(
                     else -> null
                 }
                 val etaStr = if (task.etaSeconds > 0) formatEta(task.etaSeconds) else null
-                val estimating = task.status == TaskStatus.DOWNLOADING && task.speedBytesPerSec < 1024.0 && task.totalBytes > task.downloadedBytes
+                // "Estimating..." also applies to unknown-total downloads: with
+                // no total there is no ETA yet, and silence read as a hang.
+                val estimating = task.status == TaskStatus.DOWNLOADING && task.speedBytesPerSec < 1024.0 &&
+                    (task.totalBytes > task.downloadedBytes || task.totalBytes <= 0L)
 
                 val progressText = when (task.status) {
                     TaskStatus.QUEUED -> "Queued • Waiting to start"
