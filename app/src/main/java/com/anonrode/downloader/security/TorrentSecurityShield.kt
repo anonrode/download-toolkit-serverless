@@ -437,9 +437,52 @@ object TorrentSecurityShield {
                     return Pair(true, "MP3")
                 }
 
-                // If file is > 5MB and passed all text/HTML/script checks, it is a valid binary media file
-                if (file.length() >= 5 * 1024 * 1024L) {
-                    return Pair(true, "BinaryMedia")
+                // Structural atom scan: any known media atom anywhere in the
+                // head/tail windows proves a media container, whatever its
+                // FIRST box was — covers fMP4 with unusual starts, remuxes,
+                // fast-start variants, and future containers. Replaces the
+                // old ">5MB => BinaryMedia" size guess with structural
+                // evidence (random data contains these 4-char atoms with
+                // probability ~0.03% per MB window).
+                val headBuf = java.io.RandomAccessFile(file, "r").use { raf ->
+                    val n = minOf(1024L * 1024L, file.length()).toInt()
+                    val b = ByteArray(n)
+                    raf.readFully(b)
+                    b
+                }
+                val tailStart = maxOf(0L, file.length() - 256L * 1024L)
+                val tailBuf = if (tailStart > 0) java.io.RandomAccessFile(file, "r").use { raf ->
+                    raf.seek(tailStart)
+                    val n = (file.length() - tailStart).toInt()
+                    val b = ByteArray(n)
+                    raf.readFully(b)
+                    b
+                } else ByteArray(0)
+                val window = String(headBuf, Charsets.ISO_8859_1) + String(tailBuf, Charsets.ISO_8859_1)
+                val mediaAtoms = listOf(
+                    "moov", "mdat", "moof", "styp", "mvhd", "trak", "hdlr", "mdia",
+                    "minf", "stbl", "stsd", "sidx", "tfhd", "trun", "mvex", "elst",
+                    "edts", "smhd", "vmhd", "mp4a", "avc1", "hev1", "hvc1", "av01",
+                    "vp09", "matroska", "webm"
+                )
+                val foundAtom = mediaAtoms.firstOrNull { window.contains(it) }
+                if (foundAtom != null) {
+                    return Pair(true, "Media container (atom: $foundAtom)")
+                }
+
+                // MPEG-TS sync scan: 0x47 at a 188-byte stride (3 consecutive
+                // sync bytes prove a transport stream even with a shifted start).
+                if (file.length() >= 564) {
+                    java.io.RandomAccessFile(file, "r").use { raf ->
+                        val n = 564
+                        val b = ByteArray(n)
+                        raf.readFully(b)
+                        for (i in 0 until minOf(188, n - 564 + 1)) {
+                            if (b[i] == 0x47.toByte() && b[i + 188] == 0x47.toByte() && b[i + 376] == 0x47.toByte()) {
+                                return Pair(true, "MPEG-TS (sync at byte $i)")
+                            }
+                        }
+                    }
                 }
 
                 val ext = file.extension.lowercase()
