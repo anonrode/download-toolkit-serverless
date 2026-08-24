@@ -405,10 +405,17 @@ object TorrentSecurityShield {
                 if (header.copyOfRange(0, 4).contentEquals(MAGIC_MKV)) {
                     return Pair(true, "MKV")
                 }
-                // ISO BMFF: "ftyp" must be at offset 4 (standard box header layout)
-                if (bytesRead >= 8 && header[4] == 0x66.toByte() && header[5] == 0x74.toByte() &&
-                    header[6] == 0x79.toByte() && header[7] == 0x70.toByte()) {
-                    return Pair(true, "MP4/M4A/MOV")
+                // ISO BMFF / MP4 / MOV / fragmented MP4 (fMP4): check box type at offset 4
+                if (bytesRead >= 8) {
+                    val boxType = String(header, 4, 4, Charsets.US_ASCII).lowercase()
+                    val validMp4Boxes = setOf("ftyp", "moov", "mdat", "free", "wide", "skip", "moof", "styp", "uuid", "pnot")
+                    if (boxType in validMp4Boxes) {
+                        return Pair(true, "MP4/M4A/MOV/fMP4 ($boxType)")
+                    }
+                }
+                // MPEG-TS Transport Stream sync byte (0x47)
+                if (bytesRead >= 1 && header[0] == 0x47.toByte()) {
+                    return Pair(true, "MPEG-TS")
                 }
                 if (textHead.startsWith("riff") && textHead.contains("avi ")) {
                     return Pair(true, "AVI")
@@ -428,6 +435,11 @@ object TorrentSecurityShield {
                 }
                 if (header.copyOfRange(0, 3).contentEquals(MAGIC_ID3)) {
                     return Pair(true, "MP3")
+                }
+
+                // If file is > 5MB and passed all text/HTML/script checks, it is a valid binary media file
+                if (file.length() >= 5 * 1024 * 1024L) {
+                    return Pair(true, "BinaryMedia")
                 }
 
                 val ext = file.extension.lowercase()

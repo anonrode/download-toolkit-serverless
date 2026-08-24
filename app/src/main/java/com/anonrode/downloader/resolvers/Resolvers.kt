@@ -671,7 +671,10 @@ object LulaCloudResolver : BaseResolver {
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
         try {
-            val html = HttpClient.getText(url, referer = "https://www.naijavault.com/") ?: return null
+            // lulacloud.com serves a broken CA chain (live-verified verify
+            // code 20) — permissive client, same bounded scope as the
+            // downloadwella family.
+            val html = HttpClient.getText(url, referer = "https://www.naijavault.com/", permissive = true) ?: return null
             val m = Pattern.compile("""(?:window\.location|location\.href)\s*=\s*["']([^"']+)["']""").matcher(html)
             if (m.find()) {
                 return m.group(1)
@@ -834,7 +837,11 @@ object DownloadwellaResolver : BaseResolver {
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
         try {
-            val html = HttpClient.getText(url, referer = url) ?: return null
+            // Permissive client: wetafiles.com omits its TLS intermediate and
+            // kissorgrab.com serves an invalid cert — strict verification
+            // fails every crack on those hosts (live-verified). Scoped here
+            // only; the shared client stays strict for everything else.
+            val html = HttpClient.getText(url, referer = url, permissive = true) ?: return null
             val doc = Jsoup.parse(html, url)
             val formEl = doc.selectFirst("form") ?: return null
 
@@ -859,7 +866,7 @@ object DownloadwellaResolver : BaseResolver {
                 .post(form)
                 .build()
 
-            HttpClient.shared.newCall(req).execute().use { res ->
+            HttpClient.permissiveClient.newCall(req).execute().use { res ->
                 if (!res.isSuccessful) return null
                 val body = HttpClient.cappedText(res) ?: return null
 
@@ -889,7 +896,7 @@ object DownloadwellaResolver : BaseResolver {
                         .header("Referer", url)
                         .post(step2Builder.build())
                         .build()
-                    HttpClient.shared.newCall(step2Req).execute().use { res2 ->
+                    HttpClient.permissiveClient.newCall(step2Req).execute().use { res2 ->
                         if (res2.isSuccessful) {
                             val body2 = HttpClient.cappedText(res2) ?: ""
                             val direct2 = findDirectMediaUrl(body2)
@@ -1377,7 +1384,9 @@ object GenericLockerResolver : BaseResolver {
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
         try {
-            val html = HttpClient.getText(url, referer = url) ?: return null
+            // Covers lulacloud.com (broken CA chain) — permissive, bounded
+            // to these locker page fetches only.
+            val html = HttpClient.getText(url, referer = url, permissive = true) ?: return null
             val m3u8 = extractM3u8FromHtml(html)
             if (!m3u8.isNullOrBlank()) return m3u8
 
