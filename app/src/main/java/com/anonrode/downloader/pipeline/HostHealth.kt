@@ -87,17 +87,20 @@ object HostHealth {
         persist()
     }
 
-    fun recordFail(hostOrUrl: String, rateLimited: Boolean = false) {
+    fun recordFail(hostOrUrl: String, rateLimited: Boolean = false, reason: String? = null) {
         val h = hostOf(hostOrUrl)
         if (h.isBlank()) return
         // A USER-INITIATED cancellation (search typing, task pause) surfaces
-        // as an IOException: Canceled via HttpClient.lastFailure. That is NOT
-        // a host failure — recording it poisoned nepu.gd with a 60s backoff
-        // every time the user typed fast in search (live-verified).
-        val lastFail = com.anonrode.downloader.data.net.HttpClient.lastFailure ?: ""
-        if (lastFail.contains("Canceled", ignoreCase = true) ||
-            lastFail.contains("CancellationException", ignoreCase = true) ||
-            lastFail.contains("abort", ignoreCase = true)) {
+        // as an IOException: Canceled. That is NOT a host failure — recording
+        // it poisoned nepu.gd with a 60s backoff every time the user typed
+        // fast in search (live-verified). The reason comes from the CALLER
+        // (the resolver's per-attempt failure), never the global
+        // HttpClient.lastFailure, which is stale for resolvers with their own
+        // OkHttp clients and would misattribute both ways.
+        val failure = reason ?: ""
+        if (failure.contains("Canceled", ignoreCase = true) ||
+            failure.contains("CancellationException", ignoreCase = true) ||
+            failure.contains("abort", ignoreCase = true)) {
             return
         }
         records.compute(h) { _, v -> (v ?: Rec()).apply {
@@ -121,6 +124,17 @@ object HostHealth {
         // (live-verified: nepu.gd backoff after fast search typing).
         if (r.consecutiveFails < 3) return true
         return sinceLastFail >= backoffWindowMs(r.consecutiveFails)
+    }
+
+    /** Milliseconds until [isUsable] becomes true again — 0 when the host is
+     *  usable or has no record. Powers the cooldown-parking message and its
+     *  auto-retry loop (the engine parks a task while this is > 0). */
+    fun remainingBackoffMs(urlOrHost: String): Long {
+        val r = records[hostOf(urlOrHost)] ?: return 0L
+        if (r.consecutiveFails < 3) return 0L
+        val elapsed = System.currentTimeMillis() - r.lastFailMs
+        val window = backoffWindowMs(r.consecutiveFails)
+        return maxOf(0L, window - elapsed)
     }
 
     /** True when this host has successfully served at least one stream —
