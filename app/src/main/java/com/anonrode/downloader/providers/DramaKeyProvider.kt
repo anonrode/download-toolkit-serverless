@@ -7,78 +7,54 @@ import com.anonrode.downloader.data.models.ShowDetails
 import com.anonrode.downloader.data.net.HttpClient
 import com.anonrode.downloader.resolvers.ResolverRegistry
 import org.jsoup.Jsoup
-import java.net.URI
+import java.net.URLEncoder
 
 object DramaKeyProvider : SiteProvider {
     override val name: String = "dramakey"
     override val mainUrl: String = "https://dramakey.com"
 
-    // Live-verified 2026-08-21: dramakey.cc serves the same 67KiB homepage for
-    // EVERY slug (soft-404) and dramakey.com 404s every drama path — the domain
-    // has no show content at all. The old 35-request slug-guessing search
-    // burned ~2MiB per query for zero results (user's activity log). Search is
-    // disabled; pasted dramakey links still resolve through the registry.
-    override val searchEnabled: Boolean get() = false
+    // Live-verified 2026-08-24: dramakey.com is a live WordPress site — search
+    // (?s=) returns real drama cards and episode pages carry per-episode locker
+    // links (downloadwella). An earlier 2026-08-21 verification declared the
+    // domain dead (soft-404 on every slug) and disabled search; that finding is
+    // stale/wrong — the ?s= endpoint works, so search is back on.
+    override val searchEnabled: Boolean get() = true
 
     override suspend fun search(query: String): List<ShowCard> {
         val results = mutableListOf<ShowCard>()
         try {
-            val clean = query.trim().lowercase().replace(Regex("""[^a-z0-9]+"""), "-")
-            val candidateSlugs = listOf(
-                clean,
-                "$clean-korean-drama",
-                "$clean-chinese-drama",
-                "$clean-thai-drama",
-                "$clean-season-1"
-            )
+            val clean = query.trim()
+            if (clean.isBlank()) return results
+            val encoded = URLEncoder.encode(clean, "UTF-8")
+            val url = "https://dramakey.com/?s=$encoded"
+            val html = HttpClient.getText(url) ?: return results
+            val doc = Jsoup.parse(html, url)
 
-            val candidateUrls = candidateSlugs.flatMap { slug ->
-                listOf(
-                    "https://dramakey.com/$slug/",
-                    "https://dramakey.com/drama/$slug/",
-                    "https://dramakey.cc/$slug/",
-                    "https://dramakey.cc/drama/$slug/",
-                    "https://dramakey.cc/chinese/$slug/",
-                    "https://dramakey.cc/korean/$slug/",
-                    "https://dramakey.cc/thai/$slug/"
-                )
-            }
+            for (article in doc.select("article.entry")) {
+                val titleA = article.selectFirst(".search-entry-title a") ?: continue
+                val rawTitle = titleA.text().trim()
+                if (rawTitle.isBlank()) continue
+                val href = titleA.attr("abs:href")
+                if (href.isBlank()) continue
 
-            val queryTokens = clean.split(Regex("""[\s-]+""")).filter { it.length > 1 }.toSet()
+                val category = article.classNames()
+                    .firstOrNull { it.startsWith("category-") }
+                    ?.removePrefix("category-")?.replace('-', ' ')
+                    ?.replaceFirstChar { it.uppercase() }
+                    ?: "Asian Drama"
 
-            for (url in candidateUrls) {
-                val html = HttpClient.getText(url) ?: continue
-                val doc = Jsoup.parse(html, url)
-                val rawTitle = doc.selectFirst("h1.entry-title, h1")?.text()?.trim() ?: continue
-
-                // Soft-404 Guard: Reject the generic homepage/catalog title
-                val lowerTitle = rawTitle.lowercase()
-                if (lowerTitle.contains("download korean, chinese, thai") || lowerTitle.contains("latest dramas")) {
-                    continue
-                }
-
-                // Verify token overlap between searched query and matched title
-                val titleTokens = lowerTitle.split(Regex("""[^a-z0-9]+""")).filter { it.length > 1 }.toSet()
-                val overlap = queryTokens.intersect(titleTokens).size.toDouble() / maxOf(queryTokens.size, 1).toDouble()
-
-                if (overlap < 0.5 && !lowerTitle.contains(clean.replace("-", " "))) {
-                    continue
-                }
-
-                val poster = doc.selectFirst(".entry-content img, .post-thumbnail img, meta[property=og:image]")?.let {
-                    if (it.tagName() == "meta") it.attr("content") else it.attr("abs:src")
-                } ?: ""
+                val poster = article.selectFirst(".thumbnail img, .search-entry-thumbnail img")?.attr("abs:src")
+                    ?: ""
 
                 results.add(
                     ShowCard(
                         title = rawTitle,
-                        url = url,
+                        url = href,
                         posterUrl = poster,
                         site = name,
-                        category = "Asian Drama"
+                        category = category
                     )
                 )
-                break
             }
         } catch (_: Exception) {}
         return results
@@ -90,15 +66,28 @@ object DramaKeyProvider : SiteProvider {
             val html = HttpClient.getText(showUrl) ?: return ShowDetails(show = show)
             val doc = Jsoup.parse(html, showUrl)
 
-            val title = doc.selectFirst("h1.entry-title, h1")?.text()?.trim() ?: "Asian Drama"
+            // Strip the boilerplate "DOWNLOAD " prefix and trailing
+            // "| Chinese Drama" suffix the site puts on every title.
+            val rawTitle = doc.selectFirst("h1.entry-title, h1")?.text()?.trim() ?: "Asian Drama"
+            val title = rawTitle.removePrefix("DOWNLOAD").trim().substringBefore(" |").trim()
             val poster = doc.selectFirst(".entry-content img, .post-thumbnail img, meta[property='og:image']")?.let {
                 if (it.tagName() == "meta") it.attr("content") else it.attr("abs:src").ifBlank { it.attr("src") }
             } ?: ""
             val synopsis = doc.selectFirst(".entry-content p")?.text()?.trim() ?: ""
 
+            // Per-episode download links: lockers only (downloadwella is the
+            // site's host, others may appear later). Anchor text is a generic
+            // "Download Episode" for every row, so the real episode identity
+            // comes from the filename in the URL (The.Road...S01E01...mkv).
             val episodes = mutableListOf<EpisodeItem>()
             val seen = mutableSetOf<String>()
-            val links = doc.select("a[href*='download'], a[href*='episode'], a[href*='downloadwella'], .entry-content a")
+            val episodeRe = Regex("""(?i)S(\d+)E(\d+)""")
+            val links = doc.select("a[href]").filter { a ->
+                val h = a.attr("abs:href").ifBlank { a.attr("href") }
+                h.contains("downloadwella.com") || h.contains("wetafiles.com") ||
+                    h.contains("loadedfiles.") || h.contains("dood.") ||
+                    h.contains("mega.") || h.contains("/download/") || h.contains("?download")
+            }
 
             var count = 1
             for (a in links) {
@@ -106,18 +95,22 @@ object DramaKeyProvider : SiteProvider {
                 val href = a.attr("abs:href").ifBlank {
                     HttpClient.safeResolveUri(showUrl, rawHref)
                 }
-                val text = a.text().trim()
-                if (href.isNotBlank() && href !in seen && !href.contains("/category/") && !href.contains("/tag/")) {
-                    seen.add(href)
-                    episodes.add(
-                        EpisodeItem(
-                            title = if (text.isNotBlank() && !text.equals("Download", ignoreCase = true)) text else "Episode $count",
-                            url = href,
-                            episodeNum = count++,
-                            site = name
-                        )
+                if (href.isBlank() || href in seen || href.contains("/category/") || href.contains("/tag/")) continue
+                seen.add(href)
+
+                val filename = href.substringAfterLast('/').substringBefore('?').substringBefore('#')
+                val label = episodeRe.find(filename)?.let { m ->
+                    "S${m.groupValues[1]} E${m.groupValues[2]}"
+                } ?: "Episode $count"
+
+                episodes.add(
+                    EpisodeItem(
+                        title = label,
+                        url = href,
+                        episodeNum = count++,
+                        site = name
                     )
-                }
+                )
             }
 
             val card = ShowCard(title = title, url = showUrl, posterUrl = poster, site = name)
