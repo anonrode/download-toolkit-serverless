@@ -594,6 +594,41 @@ class DownloadEngine(
             "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"
         )
 
+        // Locker hosts whose URLs are pages to crack, not direct files. Hoisted
+        // out of isKnownLockerHost so the list is built once instead of on
+        // every call (it runs per resolve attempt).
+        private val KNOWN_LOCKER_HOSTS = listOf(
+            "downloadwella.com",
+            "loadedfiles.",
+            "wetafiles.com",
+            "vikingfile.com",
+            "lulacloud.com",
+            "waffi",
+            "dood.",
+            "streamwish.",
+            "strwsh.",
+            "stwish.",
+            "sfastwish.",
+            "vidhide.",
+            "kissorgrab.com",
+            // nkiserv.com REMOVED: naijavault drawers hand out direct
+            // ds2.nkiserv.com/TV/*.mkv files (nkiri's own CDN). Listing it as
+            // a locker made the engine try to 'crack' a finished direct file
+            // and fail cleanly every time (live log 23:23:03).
+            "wildshare.net",
+            "vidmoly.",
+            "mixdrop.",
+            "mixdrp.",
+            "streamtape.",
+            "pixeldrain.com",
+            "vidbasic.",
+            "vidb.top",
+            "lightdl.cc",
+            "5play.cc",
+            "megaplay.",
+            "blogger.com"
+        )
+
         // Stall handling: a window must move at least this many bytes to count
         // as live progress (HLS CDNs throttle to ~1 KB/s instead of dying; the
         // crawl is a stall in disguise). 64 KiB per 60s window ≈ 1 KiB/s floor.
@@ -710,37 +745,7 @@ class DownloadEngine(
         // must NOT exempt them from resolution — the host decides whether a URL
         // is a page to crack or a direct file.
         val host = lower.substringAfter("://", "").substringBefore('/').substringBefore(':')
-        return listOf(
-            "downloadwella.com",
-            "loadedfiles.",
-            "wetafiles.com",
-            "vikingfile.com",
-            "lulacloud.com",
-            "waffi",
-            "dood.",
-            "streamwish.",
-            "strwsh.",
-            "stwish.",
-            "sfastwish.",
-            "vidhide.",
-            "kissorgrab.com",
-            // nkiserv.com REMOVED: naijavault drawers hand out direct
-            // ds2.nkiserv.com/TV/*.mkv files (nkiri's own CDN). Listing it as
-            // a locker made the engine try to 'crack' a finished direct file
-            // and fail cleanly every time (live log 23:23:03).
-            "wildshare.net",
-            "vidmoly.",
-            "mixdrop.",
-            "mixdrp.",
-            "streamtape.",
-            "pixeldrain.com",
-            "vidbasic.",
-            "vidb.top",
-            "lightdl.cc",
-            "5play.cc",
-            "megaplay.",
-            "blogger.com"
-        ).any { host.contains(it) }
+        return KNOWN_LOCKER_HOSTS.any { host.contains(it) }
     }
 
     private suspend fun resolveStreamUrl(permUrl: String, site: String, defaultQual: String, bypassHealth: Boolean = false): String? {        // Resolver output is TRUSTED: a URL that differs from the input page was
@@ -895,19 +900,33 @@ class DownloadEngine(
         if (mediaLines.isNotEmpty()) {
             var firstResolved = resolveSegmentUrl(currentUrl, mediaLines[0])
             if (firstResolved != null && firstResolved.contains(".m3u8")) {
-                for ((idx, line) in mediaLines.withIndex()) {
-                    val vUrl = resolveSegmentUrl(currentUrl, line) ?: continue
-                    if (!vUrl.contains(".m3u8")) continue
-                    var variant: String? = null
-                    var variantStale = false
-                    try {
-                        HttpClient.get(vUrl, referer = referer, tag = "preflight").use { res ->
-                            when {
-                                res.code == 401 || res.code == 403 -> variantStale = true
-                                res.isSuccessful -> variant = HttpClient.cappedText(res)
-                            }
+                // Fetch every variant playlist CONCURRENTLY: the old sequential
+                // loop let one slow variant stall the whole preflight. Each
+                // result keeps its original index so the first-variant probe /
+                // size-estimate logic still runs in stream order afterwards.
+                val variantResults = coroutineScope {
+                    mediaLines.mapIndexedNotNull { idx, line ->
+                        val vUrl = resolveSegmentUrl(currentUrl, line) ?: return@mapIndexedNotNull null
+                        if (!vUrl.contains(".m3u8")) return@mapIndexedNotNull null
+                        async {
+                            var variant: String? = null
+                            var variantStale = false
+                            try {
+                                HttpClient.get(vUrl, referer = referer, tag = "preflight").use { res ->
+                                    when {
+                                        res.code == 401 || res.code == 403 -> variantStale = true
+                                        res.isSuccessful -> variant = HttpClient.cappedText(res)
+                                    }
+                                }
+                            } catch (_: Exception) {}
+                            idx to Triple(vUrl, variant, variantStale)
                         }
-                    } catch (_: Exception) {}
+                    }
+                }.awaitAll()
+                // All fetches complete: a stale token surfaces first (in stream
+                // order), then the variant-level rewrite/repoint/estimate runs.
+                for ((idx, res) in variantResults) {
+                    val (vUrl, variant, variantStale) = res
                     if (variantStale) throw StaleStreamLinkException("Stream link expired — fetching a fresh one")
                     if (variant == null) continue
                     val vFile = rewriteHlsMaster(variant, vUrl, "hls-$taskId-v$idx.m3u8", cacheDir)
@@ -1083,6 +1102,17 @@ class DownloadEngine(
         } catch (_: Exception) {
             null
         }
+    }
+
+    /**
+     * Size of the produced artifact. A single-file download is a plain File,
+     * but a multi-file torrent (season pack) lands as a DIRECTORY whose
+     * File.length() is ~0 (or a block size) — the completion gate must sum
+     * the tree instead of trusting the directory's own stat size.
+     */
+    private fun fileSize(file: File): Long {
+        return if (file.isFile) file.length()
+        else file.walkTopDown().filter { it.isFile }.sumOf { it.length() }
     }
 
     private fun startTask(task: DownloadTask) {
@@ -1779,10 +1809,11 @@ class DownloadEngine(
                 //           the file is playable media.
                 // Tier 3 — HLS estimate: size within 90% of the
                 //           segment-sampling estimate.
+                val taskTotalBytes = repository.find(task.id)?.totalBytes ?: 0L
                 val transferComplete = !isHlsStream && task.backend != "yt-dlp" &&
-                    (repository.find(task.id)?.totalBytes ?: 0L) > 0 &&
+                    taskTotalBytes > 0 &&
                     producedFile != null && producedFile.exists() &&
-                    producedFile.length() >= (repository.find(task.id)?.totalBytes ?: 0L)
+                    fileSize(producedFile) >= taskTotalBytes
                 val structuralOk = validation.first
                 val decodeOk = !structuralOk && !transferComplete &&
                     producedFile != null && producedFile.exists() &&
@@ -1805,7 +1836,7 @@ class DownloadEngine(
                     else -> "Downloaded — file size matches the stream estimate."
                 }
 
-                if (producedFile != null && producedFile.exists() && producedFile.length() >= minSize
+                if (producedFile != null && producedFile.exists() && fileSize(producedFile) >= minSize
                     && !looksLikeHtml(producedFile) && verified) {
                     // The block above ran without suspension points, so a pause
                     // landing mid-validation could not interrupt it. Re-check
@@ -1846,7 +1877,7 @@ class DownloadEngine(
                         DownloadService.notifyCompleted(context, finalTitle)
                     }
                     com.anonrode.downloader.util.DebugLog.write("completed task=${task.id} file=${producedFile.absolutePath} bytes=$finalBytes validation=$path")
-                } else if (producedFile != null && producedFile.exists() && producedFile.length() >= minSize
+                } else if (producedFile != null && producedFile.exists() && fileSize(producedFile) >= minSize
                     && !looksLikeHtml(producedFile)) {
                     // A real file IS on disk but no tier could verify it. Keep
                     // the file and say so honestly — never auto-delete it and
@@ -1897,7 +1928,13 @@ class DownloadEngine(
                 // from the queue processor or scope shutdown).
                 YoutubeDlDownloader.killProcess(task.id)
                 TurboDownloader.cancelTask(task.id)
-                HttpClient.cancelInFlight()
+                // Only cancel global in-flight HTTP when the task was fully removed (cancel),
+                // not when the user paused or the network parked it — pause()/pauseForNetwork
+                // already killed the specific backends, and a global cancelInFlight would kill
+                // OTHER tasks' in-flight requests — the cross-talk bug.
+                if (repository.find(task.id) == null) {
+                    HttpClient.cancelInFlight()
+                }
                 // A pause landing during VALIDATING (after the first
                 // ensureActive passed but before the terminal write) leaves the
                 // status at VALIDATING — rescue it to PAUSED so the card is not

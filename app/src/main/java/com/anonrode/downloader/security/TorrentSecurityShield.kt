@@ -359,6 +359,34 @@ object TorrentSecurityShield {
             return Pair(false, "Path validation error: ${e.message}")
         }
 
+        if (file.isDirectory) {
+            // Multi-file torrents (season packs) land as a DIRECTORY — there is
+            // no single header to inspect, so scan every file in the tree for
+            // blocked executable/container magic (same checks as the file path).
+            val dirFiles = file.walkTopDown().filter { it.isFile }.toList()
+            for (f in dirFiles) {
+                try {
+                    RandomAccessFile(f, "r").use { raf ->
+                        val header = ByteArray(512)
+                        val bytesRead = raf.read(header)
+                        if (bytesRead >= 2 && header[0] == MAGIC_EXE_MZ[0] && header[1] == MAGIC_EXE_MZ[1]) {
+                            f.delete()
+                            return Pair(false, "BLOCKED: Windows executable (MZ header) disguised as media")
+                        }
+                        if (bytesRead >= 4 && header.copyOfRange(0, 4).contentEquals(MAGIC_ELF)) {
+                            f.delete()
+                            return Pair(false, "BLOCKED: Linux ELF binary disguised as media")
+                        }
+                        if (bytesRead >= 2 && header[0] == MAGIC_ZIP_PK[0] && header[1] == MAGIC_ZIP_PK[1]) {
+                            f.delete()
+                            return Pair(false, "BLOCKED: Archive/APK container (PK header) disguised as media")
+                        }
+                    }
+                } catch (_: Exception) {}
+            }
+            return Pair(true, "Torrent directory ($dirFiles.size files)")
+        }
+
         if (!file.exists() || file.length() < 4) {
             return Pair(false, "File too small or missing")
         }
