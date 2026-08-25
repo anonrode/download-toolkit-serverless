@@ -29,11 +29,23 @@ class MainSmokeTest {
     val permissionRule: GrantPermissionRule =
         GrantPermissionRule.grant(android.Manifest.permission.POST_NOTIFICATIONS)
 
-    /** Splash holds ~1.1s; wait until the home screen is actually visible. */
+    // SplashContent also renders "ANONRODE", so polling for that string
+    // alone returns while the splash is still up. Wait for the search bar
+    // placeholder instead — that text only exists in the post-splash
+    // HomeScreen. This is the same fix applied to EmulatorGatingSmokeTest.
     private fun waitForMainScreen() {
         composeRule.waitUntil(timeoutMillis = 30_000) {
-            composeRule.onAllNodesWithText("ANONRODE")
-                .fetchSemanticsNodes().isNotEmpty()
+            composeRule.onAllNodesWithText(
+                "Search series, anime, movies, torrents..."
+            ).fetchSemanticsNodes().isNotEmpty()
+        }
+        // Storage rationale AlertDialog (API 30+) covers HomeScreen with a
+        // scrim. Dismiss it before any click/assertion. The button only
+        // exists on Android 11+; on older API the query is empty and the
+        // call is a no-op.
+        if (composeRule.onAllNodesWithText("Not now")
+                .fetchSemanticsNodes().isNotEmpty()) {
+            composeRule.onNodeWithText("Not now").performClick()
         }
     }
 
