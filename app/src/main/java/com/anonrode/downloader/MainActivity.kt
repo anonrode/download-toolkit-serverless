@@ -8,9 +8,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.provider.Settings
-import android.widget.Toast
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -25,7 +23,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
-import com.anonrode.downloader.ui.screens.*
+import com.anonrode.downloader.ui.components.MainScaffold
+import com.anonrode.downloader.ui.components.MainTab
+import com.anonrode.downloader.ui.screens.SocialModal
+import com.anonrode.downloader.ui.screens.SplashContent
 import com.anonrode.downloader.ui.theme.AccentPrimary
 import com.anonrode.downloader.ui.theme.AnonDownloaderTheme
 import com.anonrode.downloader.ui.theme.SurfaceCard
@@ -51,13 +52,21 @@ class MainActivity : ComponentActivity() {
 
         val prefs = getSharedPreferences("downloader_settings", android.content.Context.MODE_PRIVATE)
 
+        // Read both persisted prefs outside the composable: the theme decides
+        // the initial colour scheme, the tab decides which screen renders
+        // first. Doing the read here (instead of inside Compose) keeps the
+        // restore decision in one place and avoids the "first composition
+        // flashes the wrong tab" bug.
+        val initialThemeMode = prefs.getString("pref_theme_mode", "dark") ?: "dark"
+        val initialTab = prefs.getString("pref_last_tab", MainTab.DEFAULT)?.let { stored ->
+            if (stored == MainTab.SEARCH || stored == MainTab.DOWNLOADS || stored == MainTab.SETTINGS) stored
+            else MainTab.DEFAULT
+        } ?: MainTab.DEFAULT
+
         setContent {
-            var themeMode by remember { mutableStateOf(prefs.getString("pref_theme_mode", "dark") ?: "dark") }
+            var themeMode by remember { mutableStateOf(initialThemeMode) }
 
             AnonDownloaderTheme(themeMode = themeMode) {
-                val uiState by viewModel.uiState.collectAsState()
-                var currentScreen by remember { mutableStateOf("home") }
-                var showSettings by remember { mutableStateOf(false) }
                 val socialTarget by activeSocialTarget
 
                 // Request Notification Permission on Android 13+ (API 33+)
@@ -115,10 +124,6 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
-                BackHandler(enabled = currentScreen != "home") {
-                    currentScreen = "home"
-                }
-
                 // Guaranteed-visible splash: the system SplashScreen API dismisses
                 // on first frame (never seen on fast devices), so hold a designed
                 // Compose splash for a short beat before revealing the app.
@@ -132,36 +137,21 @@ class MainActivity : ComponentActivity() {
                     return@AnonDownloaderTheme
                 }
 
-                when (currentScreen) {
-                    "home" -> {
-                        HomeScreen(
-                            viewModel = viewModel,
-                            onOpenDownloads = { currentScreen = "downloads" },
-                            onOpenSettings = { showSettings = true },
-                            onOpenSocial = { platform, url ->
-                                activeSocialTarget.value = Pair(platform, url)
-                            }
-                        )
+                MainScaffold(
+                    viewModel = viewModel,
+                    initialTab = initialTab,
+                    themeMode = themeMode,
+                    onThemeChanged = { newMode ->
+                        themeMode = newMode
+                        prefs.edit().putString("pref_theme_mode", newMode).apply()
+                    },
+                    onOpenSocial = { platform, url ->
+                        activeSocialTarget.value = Pair(platform, url)
+                    },
+                    onWriteTabPref = { newTab ->
+                        prefs.edit().putString("pref_last_tab", newTab).apply()
                     }
-                    "downloads" -> {
-                        DownloadsScreen(
-                            viewModel = viewModel,
-                            onBack = { currentScreen = "home" }
-                        )
-                    }
-                }
-
-                if (showSettings) {
-                    SettingsSheet(
-                        viewModel = viewModel,
-                        themeMode = themeMode,
-                        onThemeChanged = { newMode ->
-                            themeMode = newMode
-                            prefs.edit().putString("pref_theme_mode", newMode).apply()
-                        },
-                        onDismiss = { showSettings = false }
-                    )
-                }
+                )
 
                 socialTarget?.let { (platform, url) ->
                     SocialModal(

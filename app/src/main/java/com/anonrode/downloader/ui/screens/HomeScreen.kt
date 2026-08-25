@@ -38,6 +38,7 @@ import com.anonrode.downloader.viewmodel.MainViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
+@Suppress("UnusedParameter") // onOpenSettings is reserved for future use; Settings is now a bottom-nav tab.
 fun HomeScreen(
     viewModel: MainViewModel,
     onOpenDownloads: () -> Unit,
@@ -149,6 +150,11 @@ fun HomeScreen(
                 Spacer(modifier = Modifier.width(Spacing.lg))
 
                 Row(horizontalArrangement = Arrangement.spacedBy(Spacing.sm)) {
+                    // The Downloads icon is the only top-right affordance
+                    // now: Settings moved to a bottom-nav tab. The
+                    // `onOpenSettings` parameter is kept for API stability
+                    // but unused at this call site (see @Suppress on the
+                    // function declaration).
                     IconButton(
                         onClick = onOpenDownloads,
                         modifier = Modifier
@@ -175,21 +181,6 @@ fun HomeScreen(
                                 )
                             }
                         }
-                    }
-
-                    IconButton(
-                        onClick = onOpenSettings,
-                        modifier = Modifier
-                            .size(48.dp)
-                            .clip(CircleShape)
-                            .background(SurfaceCard, CircleShape)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Settings,
-                            contentDescription = "Settings",
-                            tint = TextPrimary,
-                            modifier = Modifier.size(22.dp)
-                        )
                     }
                 }
             }
