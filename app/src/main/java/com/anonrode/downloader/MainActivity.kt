@@ -236,10 +236,14 @@ class MainActivity : ComponentActivity() {
 
     private fun handleShareIntent(intent: Intent?) {
         if (intent?.action == Intent.ACTION_SEND && intent.type == "text/plain") {
-            val sharedText = intent.getStringExtra(Intent.EXTRA_TEXT)
-            val matcher = sharedText?.let { java.util.regex.Pattern.compile("""https?://[^\s"'<>]+""").matcher(it) }
-            val url = if (matcher?.find() == true) matcher.group(0) else sharedText?.trim()
-            if (!url.isNullOrBlank()) {
+            val sharedText = intent.getStringExtra(Intent.EXTRA_TEXT) ?: return
+            // Share payloads arrive in two shapes: a bare URL, or prose that
+            // wraps a URL ("Check this out: https://…"). Pull the URL out if
+            // one is embedded; fall back to the raw text so the router can
+            // classify it (e.g. as a search query).
+            val url = com.anonrode.downloader.util.UrlExtractor.firstUrl(sharedText)
+                ?: sharedText.trim()
+            if (url.isNotBlank()) {
                 viewModel.handlePastedInput(url) { platform, u ->
                     activeSocialTarget.value = Pair(platform, u)
                 }
