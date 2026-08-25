@@ -2,8 +2,6 @@ package com.anonrode.downloader.ui.screens
 
 import android.app.Application
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.test.assertDoesNotExist
-import androidx.compose.ui.test.assertExists
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onAllNodesWithText
