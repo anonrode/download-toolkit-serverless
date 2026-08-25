@@ -135,6 +135,20 @@ dependencies {
     implementation("io.github.junkfood02.youtubedl-android:library:$youtubedlAndroid")
     implementation("io.github.junkfood02.youtubedl-android:ffmpeg:$youtubedlAndroid")
 
+    // Media3 (ExoPlayer) for in-app playback. 1.4.1 is the newest line that
+    // still targets compileSdk 34; 1.5+ requires 35. media3-ui ships a
+    // PlayerView that owns the render surface + resizeMode, the cleanest
+    // stable base for the Compose-hosted modal. HLS covers the playlist
+    // sources the engine can produce; DASH is intentionally not included —
+    // this app has no DASH sources.
+    val media3 = "1.4.1"
+    implementation("androidx.media3:media3-exoplayer:$media3")
+    implementation("androidx.media3:media3-exoplayer-hls:$media3")
+    implementation("androidx.media3:media3-ui:$media3")
+    implementation("androidx.media3:media3-common:$media3")
+    implementation("androidx.media3:media3-session:$media3")
+    implementation("androidx.media3:media3-datasource:$media3")
+
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
 
