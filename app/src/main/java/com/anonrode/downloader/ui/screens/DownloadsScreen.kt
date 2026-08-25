@@ -34,6 +34,7 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
 import com.anonrode.downloader.data.models.DownloadTask
 import com.anonrode.downloader.data.models.TaskStatus
+import com.anonrode.downloader.ui.components.MediaPlayerContext
 import com.anonrode.downloader.ui.components.MediaPlayerModal
 import com.anonrode.downloader.ui.theme.*
 import com.anonrode.downloader.viewmodel.MainViewModel
@@ -48,10 +49,25 @@ fun DownloadsScreen(
     val context = LocalContext.current
     var activePlaybackTask by remember { mutableStateOf<DownloadTask?>(null) }
 
+    // The Next/Previous queue the modal steps through: every COMPLETED task
+    // whose filePath still exists, in the same order they appear on the
+    // Downloads screen. Recomputed whenever the task list changes so a newly
+    // completed download joins the queue and a deleted one drops out.
+    val completedQueuePaths = remember(tasks) {
+        tasks.filter { it.status == TaskStatus.COMPLETED && File(it.filePath).exists() }
+            .map { it.filePath }
+    }
+
     activePlaybackTask?.let { task ->
         MediaPlayerModal(
-            filePath = task.filePath,
-            title = task.episodeTitle,
+            ctx = MediaPlayerContext(
+                filePath = task.filePath,
+                title = task.episodeTitle,
+                queuePeerPaths = completedQueuePaths,
+                onPlayFile = { path ->
+                    activePlaybackTask = tasks.firstOrNull { it.filePath == path }
+                }
+            ),
             onDismiss = { activePlaybackTask = null }
         )
     }
