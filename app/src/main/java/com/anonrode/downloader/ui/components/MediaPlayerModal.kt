@@ -8,6 +8,9 @@ import android.net.Uri
 import android.os.Build
 import android.util.Rational
 import android.view.WindowManager
+import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
+import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -171,6 +174,7 @@ private fun MediaPlayerModalImpl(
 ) {
     val context = LocalContext.current
     val activity = context as? Activity
+    val componentActivity = context as? ComponentActivity
     val lifecycleOwner = LocalLifecycleOwner.current
 
     val file = remember(ctx.filePath) { File(ctx.filePath) }
@@ -182,6 +186,39 @@ private fun MediaPlayerModalImpl(
         if (!file.exists()) onDismiss()
     }
     if (!file.exists()) return
+
+    // The modal's body is a full-screen Color.Black (video) or a centered
+    // placeholder on the same background; the system bars are visible at
+    // the top and bottom and the icons need to be LIGHT to stay readable
+    // regardless of the app's theme.  When the modal dismisses, restore
+    // the theme-aware style MainActivity previously applied (so light-mode
+    // users go back to dark icons on near-white bars, dark-mode users go
+    // back to light icons on the dark surface).
+    val prefs: SharedPreferences? = remember {
+        runCatching { context.getSharedPreferences("downloader_settings", Context.MODE_PRIVATE) }
+            .getOrNull()
+    }
+    DisposableEffect(componentActivity) {
+        componentActivity?.enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
+        )
+        onDispose {
+            val theme = prefs?.getString("pref_theme_mode", "dark") ?: "dark"
+            val restoreStyle = if (theme.equals("light", ignoreCase = true)) {
+                SystemBarStyle.light(
+                    android.graphics.Color.TRANSPARENT,
+                    android.graphics.Color.TRANSPARENT
+                )
+            } else {
+                SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
+            }
+            componentActivity?.enableEdgeToEdge(
+                statusBarStyle = restoreStyle,
+                navigationBarStyle = restoreStyle
+            )
+        }
+    }
 
     val ext = file.extension.lowercase()
     val isAudio = ext in listOf("mp3", "m4a", "aac", "wav", "flac", "opus", "ogg")
