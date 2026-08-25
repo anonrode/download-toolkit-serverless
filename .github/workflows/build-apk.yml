@@ -1,9 +1,30 @@
+# Build Native Android Release APK
+#
+# Pipeline shape (Phase 3 — emulator gating + flake ledger):
+#   1. build            — JVM unit tests (Tier 0) + Robolectric UI tests (Tier 1)
+#   2. emulator-test    — instrumented smoke tests (Tier 2) on a real emulator.
+#                         First run is the gate. A failure re-runs ONLY the
+#                         failing test class once. If the retry passes, the
+#                         failure is recorded in flake-ledger.json and the
+#                         pipeline continues. If the retry fails, the job fails
+#                         and release is blocked.
+#   3. release          — Build & publish the release APK. Gated on BOTH build
+#                         and emulator-test passing (or flaking).
+#
+# The "gate" is the contract that `emulator-test` must be green (or a recorded
+# flake) for `release` to run. The "ledger" (flake-ledger.json at the repo
+# root) is the durable history of every flaky test class, versioned via SHA-1
+# fingerprints of the failure signature, with a 14-day pruning window so
+# stale flakes don't accumulate.
+
 name: Build Native Android Release APK
 
 on:
   push:
     branches: [ master, main ]
     tags: [ 'v*' ]
+  pull_request:
+    branches: [ master, main ]
   workflow_dispatch:
 
 permissions:
@@ -11,7 +32,7 @@ permissions:
 
 jobs:
   build:
-    name: Build Native APK
+    name: Build Native APK (Tier 0 + Tier 1)
     runs-on: ubuntu-latest
 
     steps:
@@ -45,8 +66,9 @@ jobs:
             app/build/test-results/testDebugUnitTest/*.xml
 
   emulator-test:
-    name: Emulator Smoke Tests
+    name: Emulator Smoke Tests (Tier 2 + ledger)
     runs-on: ubuntu-latest
+    needs: build
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -70,11 +92,12 @@ jobs:
           sudo chmod 666 /dev/kvm || true
           ls -l /dev/kvm
 
-      - name: Run Instrumented Smoke Tests (emulator)
+      - name: Run Instrumented Smoke Tests (emulator, first pass)
+        # The "gate" lives here: this step must pass on a real Android
+        # runtime. We no longer use continue-on-error — emulator is the
+        # source of truth for "does master actually run?".
+        id: first_run
         uses: reactivecircus/android-emulator-runner@v2
-        # Report-only: emulator flakiness must never block the APK. The
-        # release job below does not depend on this job.
-        continue-on-error: true
         with:
           api-level: 33
           arch: x86_64
@@ -83,7 +106,112 @@ jobs:
           disable-linux-hw-accel: false
           script: gradle :app:connectedDebugAndroidTest --no-daemon
 
-      - name: Upload Instrumented Test Results
+      - name: Archive first-run JUnit XML
+        # Persist the first-run XML outside the emulator runner's tmpfs so
+        # the parse and retry steps can read it. Use a job-level path under
+        # $GITHUB_WORKSPACE (not /tmp) so it survives step cleanup.
+        if: always()
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/.ci-artifacts/first"
+          if [ -d app/build/outputs/androidTest-results/connected ]; then
+            cp -r app/build/outputs/androidTest-results/connected/. \
+              "$GITHUB_WORKSPACE/.ci-artifacts/first/" || true
+          fi
+          ls -la "$GITHUB_WORKSPACE/.ci-artifacts/first" || true
+
+      - name: Parse first-run JUnit XML for failing classes
+        id: parse
+        if: always()
+        run: |
+          python3 scripts/ci/parse_instrumented_failures.py \
+            "$GITHUB_WORKSPACE/.ci-artifacts/first" >> "$GITHUB_OUTPUT"
+
+      - name: Re-run failing classes once (retry-once)
+        # Only runs if the first pass failed AND the parse step produced a
+        # non-empty failing_classes list. Re-runs the failing class with
+        # AndroidJUnitRunner's `class` argument so the runner scope is
+        # bounded to that single class.
+        id: retry
+        if: failure() && steps.parse.outputs.has_failures == 'true'
+        env:
+          FAILING_CLASSES: ${{ steps.parse.outputs.failures }}
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 33
+          arch: x86_64
+          target: google_apis
+          force-avd-creation: false
+          disable-linux-hw-accel: false
+          script: |
+            set -e
+            # FAILING_CLASSES is a JSON line; pull out the array.
+            CLASSES=$(python3 -c '
+              import json, os, sys
+              data = json.loads(os.environ.get("FAILING_CLASSES", "{}"))
+              print(" ".join(data.get("failing_classes", [])))
+            ')
+            echo "Re-running classes: $CLASSES"
+            # Reuse the same gradle task with -Pandroid.testInstrumentationRunnerArguments.class=
+            # to scope the re-run. The runner supports multiple via repeated
+            # `-Pandroid.testInstrumentationRunnerArguments.class=` flags;
+            # gradle will pass them through to AndroidJUnitRunner.
+            ARGS=""
+            for c in $CLASSES; do
+              ARGS="$ARGS -Pandroid.testInstrumentationRunnerArguments.class=$c"
+            done
+            gradle :app:connectedDebugAndroidTest --no-daemon $ARGS \
+              || EXIT_CODE=$?
+            exit ${EXIT_CODE:-0}
+
+      - name: Archive retry JUnit XML
+        if: always()
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/.ci-artifacts/retry"
+          if [ -d app/build/outputs/androidTest-results/connected ]; then
+            cp -r app/build/outputs/androidTest-results/connected/. \
+              "$GITHUB_WORKSPACE/.ci-artifacts/retry/" || true
+          fi
+          ls -la "$GITHUB_WORKSPACE/.ci-artifacts/retry" || true
+
+      - name: Decide gate outcome + update flake ledger
+        id: ledger
+        if: always()
+        env:
+          # First-run outcome: did `first_run` succeed? If it did, no
+          # retries happen, so the gate is just "passed" — the ledger step
+          # is a no-op.
+          FIRST_OUTCOME: ${{ steps.first_run.outcome }}
+          RETRY_OUTCOME: ${{ steps.retry.outcome }}
+        run: |
+          set -uo pipefail
+          if [ "$FIRST_OUTCOME" = "success" ]; then
+            echo "First run passed — no ledger update needed."
+            echo "gate=passed" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # First run failed. Did the retry run? If RETRY_OUTCOME is
+          # "success" we flaked; if it is anything else (failure, skipped,
+          # cancelled) we treat it as a real failure.
+          if [ "$RETRY_OUTCOME" = "success" ]; then
+            echo "First run failed, retry passed — recording flake."
+            python3 scripts/ci/update_flake_ledger.py \
+              flake-ledger.json \
+              "$GITHUB_WORKSPACE/.ci-artifacts/first" \
+              flaked \
+              "$GITHUB_WORKSPACE/.ci-artifacts/first"
+            echo "gate=flaked" >> "$GITHUB_OUTPUT"
+          else
+            echo "First run failed, retry also failed — recording failure."
+            python3 scripts/ci/update_flake_ledger.py \
+              flake-ledger.json \
+              "$GITHUB_WORKSPACE/.ci-artifacts/retry" \
+              failed
+            echo "gate=failed" >> "$GITHUB_OUTPUT"
+            # Re-fail the step so release is blocked.
+            exit 1
+          fi
+
+      - name: Upload instrumented test results
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -91,13 +219,25 @@ jobs:
           path: |
             app/build/reports/androidTests/
             app/build/outputs/androidTest-results/
+            .ci-artifacts/
+
+      - name: Upload updated flake-ledger.json
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flake-ledger
+          path: flake-ledger.json
 
   release:
-    # Independent of emulator-test on purpose: the APK must ship even when
-    # the CI-hosted emulator flakes. Only the unit-test job gates it.
+    # Gated on BOTH build (unit + Robolectric) AND emulator-test (instrumented
+    # + ledger). emulator-test only fails the pipeline when a real failure is
+    # recorded; flakes (retry passed) let release proceed. PRs only run the
+    # gating steps (build + emulator-test) for the merge check — the
+    # APK-assemble step is too heavy and unnecessary for every PR.
     name: Build & Release APK
     runs-on: ubuntu-latest
-    needs: build
+    needs: [build, emulator-test]
+    if: github.event_name != 'pull_request'
 
     steps:
       - name: Checkout repository
