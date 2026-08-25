@@ -97,10 +97,12 @@ jobs:
           python-version: '3.11'
 
       - name: Install Python dependencies
-        # Only the two modules the brief specifies. curl_cffi is NOT
-        # used here (intentional — Tier 4 is a clean-Python cross-check,
-        # not a curl-impersonation run).
-        run: pip install --quiet requests beautifulsoup4
+        # The brief lists requests + beautifulsoup4 for the Tier 4
+        # cross-check. We also pull cryptography because we share the
+        # signed-payload loader with probe/conformance.py (it uses
+        # ECDSA P-256 signature verification, which is the same gate
+        # the app uses on-device).
+        run: pip install --quiet requests beautifulsoup4 cryptography
 
       - name: Run nightly conformance
         env:
