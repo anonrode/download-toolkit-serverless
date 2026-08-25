@@ -414,6 +414,22 @@ def _looks_like_search_result(site: str, rules: dict, body: bytes, meta: dict) -
         return False
     if stype == "rss" or "xml" in ct:
         return b"<item" in body
+    # HTML search: most WordPress sites emit a "Nothing Found" / "no
+    # results" sentinel when the query has no matches, but the page still
+    # contains nav anchors and footer links, so a naive "has >=3 anchors"
+    # check would mark the empty results page as a successful search.
+    # Look for the no-results sentinels first; only if none are present
+    # do we fall back to the anchor-count heuristic.
+    try:
+        body_text = body.decode("utf-8", "ignore").lower() if isinstance(body, (bytes, bytearray)) else body.lower()
+    except Exception:
+        body_text = ""
+    no_results_markers = (
+        "nothing found", "no results", "no posts", "no matches",
+        "did not match", "sorry, no", "could not find", "0 results",
+    )
+    if any(m in body_text for m in no_results_markers):
+        return False
     try:
         soup = BeautifulSoup(body, "html.parser")
         n = len(soup.find_all("a", href=True))
@@ -571,13 +587,34 @@ def _pick_show_url(site: str, rules: dict, body: bytes, base: str,
 
     try:
         soup = BeautifulSoup(body, "html.parser")
+        # Many sites use a category-style URL (e.g. dramarain.com/chinese-drama/)
+        # as both a real category and as a slug suffix on show URLs.  When the
+        # page is the site's home, the loose `a[href*='-drama']` selector that
+        # often sits at the end of `cardSelector` can match those category-nav
+        # links and the script accepts them as show URLs.  The helper below
+        # strips the longest configured suffix from a path; if the path then
+        # has zero segments, the URL was just a bare category and we skip it.
+        slug_suffixes = list(cfg.get("slugSuffixes") or [])
+
+        def _strip_suffixes(path: str) -> str:
+            for suf in sorted(slug_suffixes, key=len, reverse=True):
+                if suf and path.endswith(suf):
+                    return path[: -len(suf)].rstrip("-")
+            return path
+
         card_sel = cfg.get("cardSelector", "article, .post, a[href]")
         for card in soup.select(card_sel):
             a = card if getattr(card, "name", None) == "a" else card.select_one("a[href]")
             if a and a.get("href"):
                 href = a["href"]
                 if (href.startswith("/") or base in href) and _is_show_like(href):
-                    return urllib.parse.urljoin(base + "/", href)
+                    full = urllib.parse.urljoin(base + "/", href)
+                    path = full.replace(base, "").strip("/")
+                    if slug_suffixes and _strip_suffixes(path).count("/") < 1:
+                        # bare category like /chinese-drama/ — skip and keep
+                        # looking for a real show link on this page
+                        continue
+                    return full
         for a in soup.find_all("a", href=True):
             href = a["href"]
             if not (href.startswith("/") or base in href):
@@ -586,6 +623,8 @@ def _pick_show_url(site: str, rules: dict, body: bytes, base: str,
                 continue
             full = urllib.parse.urljoin(base + "/", href)
             path = full.replace(base, "").strip("/")
+            if slug_suffixes:
+                path = _strip_suffixes(path)
             if path.count("/") >= 1:
                 return full
     except Exception:
