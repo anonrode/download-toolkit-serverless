@@ -34,11 +34,16 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
 import com.anonrode.downloader.data.models.DownloadTask
 import com.anonrode.downloader.data.models.TaskStatus
+import com.anonrode.downloader.ui.components.DownloadsSorter
 import com.anonrode.downloader.ui.components.MediaPlayerContext
 import com.anonrode.downloader.ui.components.MediaPlayerModal
+import com.anonrode.downloader.ui.components.downloadsStats
 import com.anonrode.downloader.ui.theme.*
 import com.anonrode.downloader.viewmodel.MainViewModel
 import java.io.File
+
+private const val PREF_SORT = "downloader_settings"
+private const val PREF_SORT_KEY = "pref_downloads_sort"
 
 @Composable
 fun DownloadsScreen(
@@ -48,6 +53,18 @@ fun DownloadsScreen(
     val tasks by viewModel.engine.tasks.collectAsState()
     val context = LocalContext.current
     var activePlaybackTask by remember { mutableStateOf<DownloadTask?>(null) }
+
+    // Read the persisted sort mode at composition. Default is "date" so
+    // a fresh install matches the prototype's default tab.  A missing key
+    // is treated the same as "date" so an upgrade from the old build lands
+    // in the familiar date-grouped view.
+    val initialSort = remember {
+        val raw = context.getSharedPreferences(PREF_SORT, Context.MODE_PRIVATE)
+            .getString(PREF_SORT_KEY, DownloadsSorter.SORT_DATE)
+        if (raw != null && raw in DownloadsSorter.ALL_MODES) raw else DownloadsSorter.SORT_DATE
+    }
+    var sortMode by remember { mutableStateOf(initialSort) }
+    var sortMenuOpen by remember { mutableStateOf(false) }
 
     // The Next/Previous queue the modal steps through: every COMPLETED task
     // whose filePath still exists, in the same order they appear on the
@@ -70,6 +87,28 @@ fun DownloadsScreen(
             ),
             onDismiss = { activePlaybackTask = null }
         )
+    }
+
+    // Build age-override map so "Date added" groups use the task's position
+    // in engine.tasks (newer = tail) as a proxy for recency. The data class
+    // has no enqueue timestamp; this preserves the visual grouping without
+    // touching the model.
+    val groups = remember(tasks, sortMode) {
+        if (tasks.isEmpty()) emptyList()
+        else {
+            // Re-seed age overrides on every recomposition: ids in the
+            // current list get age = position, ids no longer present are
+            // dropped by the next clear.
+            DownloadsSorter.clearAgeOverrides()
+            tasks.forEachIndexed { index, task ->
+                // 14 days for the oldest entry, 0 for the newest, 1-day
+                // increments in between. Buckets fall out of those values
+                // without any clock dependency.
+                val daysAgo = ((tasks.size - 1 - index).toLong()).coerceAtLeast(0L)
+                DownloadsSorter.setAgeOverride(task.id, daysAgo)
+            }
+            DownloadsSorter.sortDownloads(tasks, sortMode)
+        }
     }
 
     Column(
@@ -104,7 +143,7 @@ fun DownloadsScreen(
 
             Spacer(modifier = Modifier.width(Spacing.md))
 
-            Column {
+            Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = "DOWNLOADS & MEDIA",
                     fontSize = 18.sp,
@@ -118,9 +157,46 @@ fun DownloadsScreen(
                     color = TextSecondary
                 )
             }
+
+            // Sort menu: four modes from the prototype, persisted in
+            // SharedPreferences. Tapping a mode writes the pref and
+            // re-groups the list immediately.
+            Box {
+                SortChip(
+                    label = sortModeLabel(sortMode),
+                    onClick = { sortMenuOpen = true }
+                )
+                DropdownMenu(
+                    expanded = sortMenuOpen,
+                    onDismissRequest = { sortMenuOpen = false }
+                ) {
+                    DownloadsSorter.ALL_MODES.forEach { mode ->
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    text = sortModeLabel(mode),
+                                    fontWeight = if (mode == sortMode) FontWeight.Bold else FontWeight.Normal,
+                                    color = if (mode == sortMode) AccentPrimary else TextPrimary
+                                )
+                            },
+                            onClick = {
+                                sortMode = mode
+                                sortMenuOpen = false
+                                context.getSharedPreferences(PREF_SORT, Context.MODE_PRIVATE)
+                                    .edit().putString(PREF_SORT_KEY, mode).apply()
+                            }
+                        )
+                    }
+                }
+            }
         }
 
-        Spacer(modifier = Modifier.height(Spacing.sm))
+        // Stats strip: only on the populated state; the empty state has
+        // its own centred message instead.
+        if (tasks.isNotEmpty()) {
+            StatsStrip(tasks = tasks)
+            Spacer(modifier = Modifier.height(Spacing.sm))
+        }
 
         if (tasks.isEmpty()) {
             Box(
@@ -143,18 +219,110 @@ fun DownloadsScreen(
                 verticalArrangement = Arrangement.spacedBy(Spacing.md),
                 modifier = Modifier.fillMaxSize()
             ) {
-                items(tasks, key = { it.id }) { task ->
-                    DownloadCard(
-                        task = task,
-                        context = context,
-                        onPlay = { activePlaybackTask = task },
-                        onPause = { viewModel.engine.pause(task.id) },
-                        onRetry = { viewModel.engine.retry(task.id) },
-                        onCancel = { viewModel.engine.cancel(task.id) }
-                    )
+                groups.forEach { (header, items) ->
+                    item(key = "h-$header") {
+                        Text(
+                            text = "$header · ${items.size}",
+                            color = TextMuted,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 1.sp,
+                            modifier = Modifier.padding(top = Spacing.sm, bottom = Spacing.xxs)
+                        )
+                    }
+                    items(items, key = { it.id }) { task ->
+                        DownloadCard(
+                            task = task,
+                            context = context,
+                            onPlay = { activePlaybackTask = task },
+                            onPause = { viewModel.engine.pause(task.id) },
+                            onRetry = { viewModel.engine.retry(task.id) },
+                            onCancel = { viewModel.engine.cancel(task.id) }
+                        )
+                    }
                 }
             }
         }
+    }
+}
+
+private fun sortModeLabel(mode: String): String = when (mode) {
+    DownloadsSorter.SORT_LIBRARY -> "By show (Library)"
+    DownloadsSorter.SORT_STATUS -> "By status"
+    DownloadsSorter.SORT_SIZE -> "By size"
+    else -> "Date added"
+}
+
+@Composable
+private fun SortChip(label: String, onClick: () -> Unit) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .clip(RoundedCornerShape(Radius.full))
+            .background(SurfaceCard)
+            .border(1.dp, BorderHairline, RoundedCornerShape(Radius.full))
+            .clickable(onClick = onClick)
+            .padding(horizontal = Spacing.md, vertical = Spacing.xs)
+    ) {
+        Text(
+            text = label,
+            color = TextSecondary,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.SemiBold
+        )
+        Spacer(modifier = Modifier.width(Spacing.xs))
+        Text(
+            text = "▾",
+            color = TextSecondary,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Bold
+        )
+    }
+}
+
+@Composable
+private fun StatsStrip(tasks: List<DownloadTask>) {
+    val stats = remember(tasks) { downloadsStats(tasks) }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = Spacing.xs),
+        horizontalArrangement = Arrangement.spacedBy(Spacing.xs)
+    ) {
+        StatChip(label = "files", value = stats.files)
+        StatChip(label = "done", value = stats.done)
+        StatChip(label = "active", value = stats.active)
+        // Failed chip only renders when there are failures — a zero
+        // failure count is the expected steady state, not interesting.
+        if (stats.failed > 0) {
+            StatChip(label = "failed", value = stats.failed, accentError = true)
+        }
+    }
+}
+
+@Composable
+private fun StatChip(label: String, value: Int, accentError: Boolean = false) {
+    val accent = if (accentError) StatusError else AccentPrimary
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .clip(RoundedCornerShape(Radius.xs))
+            .background(SurfaceElevated)
+            .border(1.dp, BorderHairline, RoundedCornerShape(Radius.xs))
+            .padding(horizontal = Spacing.sm, vertical = 4.dp)
+    ) {
+        Text(
+            text = value.toString(),
+            color = accent,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Black
+        )
+        Spacer(modifier = Modifier.width(Spacing.xs))
+        Text(
+            text = label,
+            color = TextMuted,
+            fontSize = 11.sp
+        )
     }
 }
 
