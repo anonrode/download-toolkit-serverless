@@ -218,6 +218,38 @@ object YoutubeDlDownloader {
             // -o/-f and silently break the output path (monolith parity).
             addOption("--ignore-config")
 
+            // --progress-template: emit one templated progress line per tick,
+            // parsed by ProgressParser's YTDL_TEMPLATE_REGEX.  Two templates
+            // are emitted (yt-dlp allows multiple) — the first mirrors
+            // yt-dlp's native "[download] X% of Y at Z" format so the
+            // existing YTDL_REGEX keeps matching unchanged (belt-and-
+            // suspenders for any download where the structured fields
+            // fall back to "NA").  The second carries structured fields
+            // (percent, speed, eta, fragment_index, fragment_count,
+            // downloaded_bytes, total_bytes, total_bytes_estimate) needed
+            // for HLS / segmented downloads where the native line is
+            // fragment-internal and the engine's existing YTDL_REGEX
+            // never matched (dramakey / wetafiles symptom: "Starting..."
+            // for 90s, then BAM "DONE").  The @@DLP@@ sentinel is the
+            // same one the Python monolith uses.
+            addOption(
+                "--progress-template",
+                "download:[download]  %(progress._percent_str)s of ~%(progress._total_bytes_str)s at %(progress._speed_str)s ETA %(progress._eta_str)s"
+            )
+            addOption(
+                "--progress-template",
+                "download:@@DLP@@ %(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s|%(progress.fragment_index)s|%(progress.fragment_count)s|%(progress._downloaded_bytes_str)s|%(progress._total_bytes_str)s|%(progress._total_bytes_estimate_str)s"
+            )
+            // HLS / DASH: don't silently skip missing segments (default
+            // skips, leaving a short file with a gap).  Fail loudly so
+            // the engine's retry/resume machinery gets a clean signal —
+            // matches the aria2c / turbo contract (v3.0.4 honesty fix).
+            addOption("--abort-on-unavailable-fragments")
+            // Parallel fragment fetch — matches the external-aria2c speed
+            // the user sees on the same source.  Configurable through the
+            // existing `aria2c_connections` config key.
+            addOption("--concurrent-fragments", conns.toString())
+
             if (effReferer.isNotBlank()) addOption("--referer", effReferer)
             if (ua.isNotBlank()) addOption("--user-agent", ua)
 

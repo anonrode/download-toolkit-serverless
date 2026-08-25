@@ -1,6 +1,7 @@
 package com.anonrode.downloader.engine
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -129,4 +130,101 @@ class ProgressParserTest {
         assertEquals(512.0, parseSpeedString("512B/s"), 0.0)
         assertEquals(0.0, parseSpeedString("no speed"), 0.0)
     }
+
+    // --progress-template @@DLP@@ format: pipe-separated fields, mirrors the
+    // Python monolith's download.py:_ytdlp_parse_progress.  These tests pin the
+    // dramakey / wetafiles / naijaprey HLS case the user reported: a CDN
+    // segmented download where the engine needs fragment-derived totals.
+    @Test
+    fun ytdlTemplateFullFields() {
+        // percent|speed|eta|frag_idx|frag_cnt|downloaded|total|total_estimate
+        val t = parseProgressTick(
+            "download:@@DLP@@ 15.0%|5.00MiB/s|00:30|45|296|45.5MiB|300.0MiB|298.0MiB",
+            0f, 0L, 0L
+        )
+        // Explicit bytes are the most reliable source for HLS — use them
+        // directly rather than computing from percent * total.
+        assertEquals((45.5 * 1024 * 1024).toLong(), t.downloadedBytes)
+        assertEquals((300.0 * 1024 * 1024).toLong(), t.totalBytes)
+        assertEquals(5.0 * 1024 * 1024, t.speedBytesPerSec, 1.0)
+    }
+
+    @Test
+    fun ytdlTemplateHlsEstimateOnly() {
+        // HLS: total is "NA" (yt-dlp doesn't know the final size until the
+        // last segment lands), total_estimate is computed from segment math.
+        val t = parseProgressTick(
+            "download:@@DLP@@ 15.0%|5.00MiB/s|00:30|45|296|45.5MiB|NA|298.0MiB",
+            0f, 0L, 0L
+        )
+        assertEquals((45.5 * 1024 * 1024).toLong(), t.downloadedBytes)
+        // Falls back to total_estimate (HLS-friendly).
+        assertEquals((298.0 * 1024 * 1024).toLong(), t.totalBytes)
+    }
+
+    @Test
+    fun ytdlTemplateFragmentOnlyDerivesTotal() {
+        // HLS with downloaded bytes but no total AND no estimate: derive the
+        // total from fragment progress (dl * frag_cnt / frag_idx).  Monolith
+        // parity (download.py:_ytdlp_parse_progress L2951).
+        // 12 of 100 fragments, 10.0MiB downloaded -> 10.0 * 100 / 12 = 83.3MiB.
+        val t = parseProgressTick(
+            "download:@@DLP@@ 12.0%|2.00MiB/s|01:00|12|100|10.0MiB|NA|NA",
+            0f, 0L, 0L
+        )
+        assertEquals((10.0 * 1024 * 1024).toLong(), t.downloadedBytes)
+        val expectedTotal = (10.0 * 1024 * 1024 * 100L / 12L)
+        // Allow a few bytes of rounding tolerance (the parser does Long
+        // arithmetic; 83.3MiB rounds to 873813 bytes).
+        assertTrue(
+            "expected total near $expectedTotal, got ${t.totalBytes}",
+            kotlin.math.abs(t.totalBytes - expectedTotal) < 4096
+        )
+    }
+
+    @Test
+    fun ytdlTemplateSingleFileLikeNative() {
+        // Single-file IG-style download: template has exact total, no fragments.
+        // Verifies the same field-extraction logic that YTDL_REGEX uses, so
+        // the IG path keeps the byte counts the user already sees.
+        val t = parseProgressTick(
+            "download:@@DLP@@ 45.2%|4.20MiB/s|00:08|NA|NA|29.4MiB|65.0MiB|NA",
+            0f, 0L, 0L
+        )
+        assertEquals((29.4 * 1024 * 1024).toLong(), t.downloadedBytes)
+        assertEquals((65.0 * 1024 * 1024).toLong(), t.totalBytes)
+        assertEquals(4.2 * 1024 * 1024, t.speedBytesPerSec, 1.0)
+    }
+
+    @Test
+    fun ytdlTemplateHandlesNAEverywhere() {
+        // Worst case: yt-dlp emits "NA" in every field.  parsed = true (the
+        // line was a real templated line), but no byte data.  The existing
+        // library-progress fallback at line ~91 only fires when parsed == false,
+        // so we leave dl/tot at lastDl/lastTot and the engine's filesystem-fed
+        // poll takes over for the UI.  No regression.
+        val t = parseProgressTick(
+            "download:@@DLP@@ NA|NA|NA|NA|NA|NA|NA|NA",
+            0f, 50L * 1024 * 1024, 100L * 1024 * 1024
+        )
+        // lastDl / lastTot preserved (not zeroed).
+        assertEquals(50L * 1024 * 1024, t.downloadedBytes)
+        assertEquals(100L * 1024 * 1024, t.totalBytes)
+        assertEquals(0.0, t.speedBytesPerSec, 0.0)
+    }
+
+    @Test
+    fun ytdlTemplateDoesNotRegressKnownTotal() {
+        // A previous tick established 100MiB total.  The new template tick
+        // reports the same total -- must not regress.  Same monotonic
+        // guarantee the existing noTotalNeverResetsKnownTotal test pins
+        // for aria2c, now applied to yt-dlp.
+        val t = parseProgressTick(
+            "download:@@DLP@@ 25.0%|2.00MiB/s|00:30|NA|NA|25.0MiB|100.0MiB|100.0MiB",
+            0f, 0L, 100L * 1024 * 1024
+        )
+        assertEquals((25.0 * 1024 * 1024).toLong(), t.downloadedBytes)
+        assertEquals(100L * 1024 * 1024, t.totalBytes)
+    }
+}
 }

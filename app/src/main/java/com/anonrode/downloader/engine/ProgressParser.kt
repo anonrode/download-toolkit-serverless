@@ -31,6 +31,18 @@ private val YTDL_REGEX = Regex(
     RegexOption.IGNORE_CASE
 )
 
+// yt-dlp --progress-template with the @@DLP@@ sentinel (mirrors the Python
+// monolith).  Emitted as "download:@@DLP@@ percent|speed|eta|frag_idx|frag_cnt|
+// downloaded|total|total_estimate" — pipe-separated, every field.  yt-dlp
+// substitutes "NA" / "Unknown" for any field it can't fill, and those are
+// treated as "no value" by the parser.  Matched AFTER YTDL_REGEX so single-file
+// downloads (IG, TikTok) keep the exact byte counts they have today; this branch
+// is the new path that gives HLS / segmented downloads a real progress feed.
+private val YTDL_TEMPLATE_REGEX = Regex(
+    """@@DLP@@\s+([^|]*)\|([^|]*)\|([^|]*)\|([^|]*)\|([^|]*)\|([^|]*)\|([^|]*)\|([^|]*)""",
+    RegexOption.IGNORE_CASE
+)
+
 /**
  * Parse one progress tick from a downloader line against the previous
  * best-known bytes, so the reported numbers never regress:
@@ -76,6 +88,77 @@ internal fun parseProgressTick(line: String?, libraryProgress: Float, lastDl: Lo
                     totBytes = parseByteString(ytdlMatch.groupValues[2])
                     dlBytes = if (totBytes > 0) (totBytes * (pct / 100.0)).toLong() else 0L
                     spdBps = parseSpeedString(ytdlMatch.groupValues[3])
+                } else {
+                    // --progress-template @@DLP@@ format: pipe-separated
+                    // fields.  field 1 = percent string ("45.2%"), 2 = speed
+                    // ("5.00MiB/s"), 3 = eta ("00:30"), 4 = fragment_index
+                    // ("12"), 5 = fragment_count ("296"), 6 = downloaded
+                    // ("45.5MiB"), 7 = total ("100.0MiB"), 8 = total_estimate
+                    // ("98.2MiB").  Any field yt-dlp can't fill renders as
+                    // "NA" or "Unknown B/s" and is dropped.
+                    val tmpl = YTDL_TEMPLATE_REGEX.find(line)
+                    if (tmpl != null) {
+                        parsed = true
+                        val pctStr = tmpl.groupValues[1].trim()
+                        val spdStr = tmpl.groupValues[2].trim()
+                        val fiStr = tmpl.groupValues[4].trim()
+                        val fcStr = tmpl.groupValues[5].trim()
+                        val dlStr = tmpl.groupValues[6].trim()
+                        val totStr = tmpl.groupValues[7].trim()
+                        val estStr = tmpl.groupValues[8].trim()
+                        // Speed always parseable when present.
+                        spdBps = parseSpeedString(spdStr)
+                        // Downloaded bytes: prefer the explicit byte string
+                        // (most reliable for HLS where the percent lags
+                        // reality by one tick); fall back to percent*total
+                        // when explicit bytes are missing.
+                        val dlFromStr = if (dlStr.isNotBlank() && !dlStr.uppercase().startsWith("NA") && dlStr != "0B") {
+                            parseByteString(dlStr)
+                        } else 0L
+                        // Total: prefer exact total, then estimate (HLS
+                        // usually reports "NA" for total and an estimate
+                        // based on segment math).  Then fall through to
+                        // fragment-based estimation.
+                        val totFromStr = when {
+                            totStr.isNotBlank() && !totStr.uppercase().startsWith("NA") && totStr != "0B" -> parseByteString(totStr)
+                            estStr.isNotBlank() && !estStr.uppercase().startsWith("NA") && estStr != "0B" -> parseByteString(estStr)
+                            else -> 0L
+                        }
+                        val fi = fiStr.toIntOrNull()
+                        val fc = fcStr.toIntOrNull()
+                        val pct = pctStr.removeSuffix("%").toDoubleOrNull()
+                        when {
+                            dlFromStr > 0L -> {
+                                dlBytes = dlFromStr
+                                if (totFromStr > 0L) {
+                                    totBytes = totFromStr
+                                } else if (fi != null && fc != null && fc > 0) {
+                                    // HLS with downloaded bytes but no total:
+                                    // derive a total estimate from fragment
+                                    // progress.  Monolith parity
+                                    // (download.py:_ytdlp_parse_progress L2951).
+                                    totBytes = (dlFromStr.toDouble() * fc / fi).toLong()
+                                }
+                            }
+                            totFromStr > 0L && pct != null -> {
+                                // No explicit bytes but we have a total and
+                                // a percent: derive bytes (rare; mostly
+                                // single-file downloads land in the
+                                // YTDL_REGEX branch above this one).
+                                totBytes = totFromStr
+                                dlBytes = (totFromStr * (pct / 100.0)).toLong()
+                            }
+                            // Fragment-only ticks (no bytes, no total):
+                            // leave dlBytes / totBytes at 0.  Setting
+                            // `parsed = true` here is correct -- we did
+                            // parse a line, we just couldn't extract a
+                            // byte count from it.  The library-progress
+                            // fallback below (lastTot > 0) handles the
+                            // case where a previous tick established a
+                            // total and this tick only reports the
+                            // fragment index.
+                        }
+                    }
                 }
             }
         }
