@@ -1,3 +1,5 @@
+@file:OptIn(ExperimentalMaterial3Api::class)
+
 package com.anonrode.downloader.ui.screens
 
 import android.widget.Toast
@@ -36,8 +38,6 @@ import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-
-@file:OptIn(ExperimentalMaterial3Api::class)
 
 /** Live state of the manual "Check for Updates" row.  Internal (not
  *  private) because [SettingsState.updateState] exposes it as `internal`,
