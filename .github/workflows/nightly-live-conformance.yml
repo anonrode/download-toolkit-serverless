@@ -149,15 +149,19 @@ jobs:
           RUN_ID=$(basename "$SCORECARD" -scorecard.json)
           echo "Publishing scorecard for run_id=$RUN_ID to nightly-results branch"
 
+          # Copy the scorecard OUT of the workspace BEFORE the orphan
+          # checkout wipes the working tree (--orphan clears the index).
+          cp "$SCORECARD" "/tmp/${RUN_ID}-scorecard.json"
+
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git checkout --orphan nightly-results-tmp
           git rm -rf --quiet . || true
           mkdir -p nightly-results
-          cp "$SCORECARD" "nightly-results/${RUN_ID}-scorecard.json"
+          cp "/tmp/${RUN_ID}-scorecard.json" "nightly-results/${RUN_ID}-scorecard.json"
           # Keep a rolling 'latest' copy for easy debugging from the
           # GitHub UI (one file, always points at the most recent run).
-          cp "$SCORECARD" "nightly-results/latest-scorecard.json"
+          cp "/tmp/${RUN_ID}-scorecard.json" "nightly-results/latest-scorecard.json"
           git add nightly-results/
           git commit -m "nightly conformance: ${RUN_ID} (informational)"
           if git ls-remote --exit-code --heads origin nightly-results >/dev/null 2>&1; then
