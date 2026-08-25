@@ -866,18 +866,28 @@ def stage_probe(s: Paced, rules: dict, site: str, resolved, resolved_kind,
         out.append(rec)
         return rec
 
+    target = resolved
     if resolved_kind == "locker" or (resolved_kind == "direct"
                                      and resolved.lower().split("?")[0].endswith(".m3u8")):
         seg_url, seg_kind, seg_meta = _hls_follow(s, rules, resolved, referer=None)
         if not seg_url:
-            rec = {"site": site, "stage": "probe", "pass": False,
-                   "url": resolved, "http_status": seg_meta.get("status"),
-                   "error": f"hls:{seg_kind}"}
-            out.append(rec)
-            return rec
-        target = seg_url
-    else:
-        target = resolved
+            # The locker URL was probed but isn't an HLS playlist (most
+            # commonly an HTML page that loads HLS client-side via JS,
+            # or a CDN returning a media playlist directly without a
+            # master).  Fall through to the normal 1KB probe on the
+            # locker URL so HTML lockers get a sensible "not media"
+            # verdict instead of the misleading `hls:not_master`.
+            if seg_kind not in ("not_master", "not_media_playlist"):
+                # Real HLS fetch failure (network, variant error, etc.)
+                # — surface it instead of the misleading HTML verdict.
+                rec = {"site": site, "stage": "probe", "pass": False,
+                       "url": resolved, "http_status": seg_meta.get("status"),
+                       "error": f"hls:{seg_kind}"}
+                out.append(rec)
+                return rec
+            # else: keep `target = resolved` and fall through to the 1KB probe
+        else:
+            target = seg_url
 
     st, body, meta = s.range_get(target)
     meta_pass = (st in (200, 206) and len(body) <= PROBE_CAP)
