@@ -218,6 +218,28 @@ class DownloadCardStateTest {
     }
 
     @Test
+    fun resolvingWithBytesDownloaded_showsEstimatingAndSize() {
+        // Regression test for the dramakey/HLS/CDN-no-Content-Length case:
+        // bytes have started landing while we're still in RESOLVING (the
+        // engine's fallback chain tried aria2c, then turbo, then yt-dlp
+        // before the disk-byte poll reported any progress).  The card
+        // must show a real byte count and "Estimating..." so the user
+        // has a signal the download is in flight, not "Resolving..."
+        // (which would imply nothing has happened yet).
+        setCard(
+            task(
+                downloadedBytes = 100L * MB,
+                status = TaskStatus.RESOLVING
+            )
+        )
+        composeRule.onNodeWithText("100.0 MB • Estimating...").assertExists()
+        // The badge still says RESOLVING (transfer window) so pause
+        // stays available — we only changed the progress line, not the
+        // status surface.
+        composeRule.onNodeWithText("RESOLVING").assertExists()
+    }
+
+    @Test
     fun validating_showsCheckCopyWithoutTransferActions() {
         setCard(task(status = TaskStatus.VALIDATING))
         composeRule.onNodeWithText("Checking downloaded file...").assertExists()

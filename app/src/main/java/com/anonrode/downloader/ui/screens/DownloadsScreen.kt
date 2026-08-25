@@ -517,6 +517,13 @@ fun DownloadCard(
                 // ---- ACTIVE / QUEUED / PAUSED / FAILED ----
                 // Seal-Style Visual Segment Progress Bar (frozen at 0 for QUEUED;
                 // indeterminate sweep while downloading with an unknown total)
+                // Unknown-total + any in-flight state: indeterminate sweep so
+                // the user has a visual signal during the engine's RESOLVING
+                // phase and during yt-dlp / CDN downloads that don't emit a
+                // percentage.  PAUSED / COMPLETED / FAILED fall through to the
+                // static-fill branch (sweep would lie about progress).
+                val indeterminate = !totalKnown && task.downloadedBytes > 0 &&
+                    !isPaused && !isCompleted && !isFailed
                 BoxWithConstraints(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -524,7 +531,7 @@ fun DownloadCard(
                         .clip(RoundedCornerShape(Radius.xs))
                         .background(SurfaceElevated)
                 ) {
-                    if (totalKnown || !isDownloadingNow) {
+                    if (!indeterminate) {
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth(fraction = animatedProgress)
@@ -562,9 +569,16 @@ fun DownloadCard(
 
                 Spacer(modifier = Modifier.height(Spacing.sm))
 
+                // Show byte progress as soon as ANY bytes have landed.  The
+                // old 100-byte threshold left a 100-byte dead zone at the
+                // start of every download (the card would show "Starting..."
+                // until the engine's updateProgress crossed 100 bytes,
+                // which on slow CDN links took several seconds and read
+                // as a hang).  For unknown-total downloads we only show
+                // the downloaded count, not "0 B / 0 B".
                 val sizeStr = if (task.totalBytes > 0) {
                     formatBytes(task.downloadedBytes) + " / " + formatBytes(task.totalBytes)
-                } else if (task.downloadedBytes > 100) {
+                } else if (task.downloadedBytes > 0) {
                     formatBytes(task.downloadedBytes)
                 } else {
                     ""
@@ -579,9 +593,19 @@ fun DownloadCard(
                     else -> null
                 }
                 val etaStr = if (task.etaSeconds > 0) formatEta(task.etaSeconds) else null
-                // "Estimating..." also applies to unknown-total downloads: with
-                // no total there is no ETA yet, and silence read as a hang.
-                val estimating = task.status == TaskStatus.DOWNLOADING && task.speedBytesPerSec < 1024.0 &&
+                // "Estimating..." applies to any in-flight state where we
+                // have downloaded bytes but no total + no ETA.  Previously
+                // this was gated on (status==DOWNLOADING && speed<1024),
+                // which suppressed the label during the engine's 18s
+                // of fallback attempts (RESOLVING) and during the first
+                // 2s of fast downloads where the speed sample hadn't
+                // landed yet.  Showing "Estimating..." the moment any
+                // bytes have arrived gives the user a signal that the
+                // download is in flight even when the backend (yt-dlp
+                // on a segmented CDN) can't emit a percentage.
+                val estimating = task.downloadedBytes > 0 &&
+                    task.status != TaskStatus.PAUSED &&
+                    task.status != TaskStatus.COMPLETED &&
                     (task.totalBytes > task.downloadedBytes || task.totalBytes <= 0L)
 
                 val progressText = when (task.status) {

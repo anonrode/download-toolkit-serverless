@@ -345,7 +345,10 @@ fun HomeScreen(
                         Icon(Icons.Rounded.ContentPaste, contentDescription = null, tint = AccentPrimary, modifier = Modifier.size(16.dp))
                         Spacer(modifier = Modifier.width(Spacing.sm))
                         Text(
-                            text = "Paste link: ${snippetText.take(35)}...",
+                            text = run {
+                                val head = if (snippetText.length > 35) snippetText.take(35) + "..." else snippetText
+                                "Paste link: $head"
+                            },
                             color = TextPrimary,
                             fontSize = 12.sp,
                             maxLines = 1,
