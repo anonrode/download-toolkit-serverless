@@ -9,6 +9,7 @@ import android.os.Bundle
 import android.os.Environment
 import android.provider.Settings
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -46,7 +47,15 @@ class MainActivity : ComponentActivity() {
         } catch (_: Throwable) {}
 
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+        // Cold-start: pick the icon tint that matches the persisted theme so
+        // the first frame already has the right system-bar contrast. Without
+        // this, light mode launches with white-on-near-white status icons
+        // (invisible) until the SideEffect below re-runs on the first
+        // composition. The `dark()` overload is the no-arg fallback
+        // `enableEdgeToEdge()` already uses.
+        val coldPrefs = getSharedPreferences("downloader_settings", android.content.Context.MODE_PRIVATE)
+        val coldTheme = coldPrefs.getString("pref_theme_mode", "dark") ?: "dark"
+        applyEdgeToEdge(coldTheme)
 
         handleShareIntent(intent)
 
@@ -65,6 +74,17 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             var themeMode by remember { mutableStateOf(initialThemeMode) }
+
+            // Re-apply edge-to-edge whenever the user toggles the theme. The
+            // no-arg overload of enableEdgeToEdge() inspects the SYSTEM theme
+            // (not ours), so light mode would keep dark icons on a near-white
+            // background. `SystemBarStyle.light` flips the icons dark for
+            // light theme; `dark` keeps them light. Both styles use a fully
+            // transparent scrim so the app's surface bleeds through.
+            // SideEffect runs after every successful recomposition that
+            // observed themeMode, so this fires on initial composition AND
+            // every subsequent toggle.
+            SideEffect { applyEdgeToEdge(themeMode) }
 
             AnonDownloaderTheme(themeMode = themeMode) {
                 val socialTarget by activeSocialTarget
@@ -240,4 +260,32 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+}
+
+/**
+ * Re-applies the activity's edge-to-edge system-bar styling to match the
+ * app's current theme. The no-arg `enableEdgeToEdge()` is theme-agnostic
+ * (it inspects the system theme, not ours) and produces invisible status
+ * icons when light mode is active on a near-white app background. This
+ * helper is called from `onCreate` (cold start) and from a Compose
+ * `SideEffect` keyed on `themeMode` (every toggle), so the bars always
+ * match the surface underneath.
+ */
+private fun MainActivity.applyEdgeToEdge(themeMode: String) {
+    val style = if (themeMode.equals("light", ignoreCase = true)) {
+        // Light theme: dark icons on a transparent bar (the app's near-white
+        // surface bleeds through). `light(scrim, darkScrim)` both transparent
+        // because the app surface is always a clean light color and the OS
+        // scrim is only needed when the underlying content might be unreadable.
+        SystemBarStyle.light(
+            android.graphics.Color.TRANSPARENT,
+            android.graphics.Color.TRANSPARENT
+        )
+    } else {
+        // Dark theme (or unknown): light icons on a transparent bar. Matches
+        // the no-arg `enableEdgeToEdge()` behavior the app had before this
+        // change, so dark mode is unchanged for existing users.
+        SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
+    }
+    enableEdgeToEdge(statusBarStyle = style, navigationBarStyle = style)
 }
