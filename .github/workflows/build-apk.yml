@@ -104,7 +104,19 @@ jobs:
           target: google_apis
           force-avd-creation: false
           disable-linux-hw-accel: false
-          script: gradle :app:connectedDebugAndroidTest --no-daemon
+          # `|| true` keeps the step exit code the same as `gradle`'s so
+          # the workflow's `failure()` checks still fire on a real test
+          # failure. The trailing `adb logcat` dump is best-effort — it
+          # runs whether the tests passed or failed so the workflow log
+          # always has a tail of the device's recent logs available
+          # while debugging. Logcat output is bounded (a few hundred KB
+          # on this AVD/API combo) and is harmless on a green run.
+          script: |
+            gradle :app:connectedDebugAndroidTest --no-daemon || EXIT_CODE=$?
+            echo "===== adb logcat (last 200 lines, tag-filtered) ====="
+            adb logcat -d -t 200 '*:E' '*:W' 'TestRunner:*' 'AndroidXTracer:*' 'AnonApp:*' 2>&1 || true
+            echo "===== end logcat ====="
+            exit ${EXIT_CODE:-0}
 
       - name: Archive first-run JUnit XML
         # Persist the first-run XML outside the emulator runner's tmpfs so

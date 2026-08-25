@@ -77,11 +77,29 @@ class EmulatorGatingSmokeTest {
         repo.snapshot().forEach { repo.remove(it.id) }
     }
 
-    /** Splash holds ~1.1s; wait until the home header is actually visible. */
+    // SplashContent also renders the "ANONRODE" text, so polling for that
+    // string alone returns while the splash is still up and the real
+    // HomeScreen has not been composed. Wait for the search bar placeholder
+    // instead — that text only exists in the post-splash HomeScreen. The
+    // search bar is the canonical "the home tab is up" affordance, and it
+    // is also what the cold-start test asserts immediately after this call.
     private fun waitForHome() {
         composeRule.waitUntil(timeoutMillis = 30_000) {
-            composeRule.onAllNodesWithText("ANONRODE")
-                .fetchSemanticsNodes().isNotEmpty()
+            composeRule.onAllNodesWithText(
+                "Search series, anime, movies, torrents..."
+            ).fetchSemanticsNodes().isNotEmpty()
+        }
+        // Storage rationale dialog covers HomeScreen on API 30+ when the
+        // app does not hold MANAGE_EXTERNAL_STORAGE (always true for the
+        // instrumented test). The dialog is an AlertDialog on top of the
+        // composition, so HomeScreen nodes stay in the tree but the dialog
+        // scrim makes `assertIsDisplayed` fail. Dismiss it with "Not now"
+        // before any assertion or click so the test sees an unobscured
+        // HomeScreen. The dialog only appears on Android 11+ (R+); on
+        // older API the node simply won't exist and the call is a no-op.
+        if (composeRule.onAllNodesWithText("Not now")
+                .fetchSemanticsNodes().isNotEmpty()) {
+            composeRule.onNodeWithText("Not now").performClick()
         }
     }
 

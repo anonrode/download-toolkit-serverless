@@ -37,8 +37,12 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-/** Live state of the manual "Check for Updates" row. */
-private sealed interface UpdateUiState {
+@file:OptIn(ExperimentalMaterial3Api::class)
+
+/** Live state of the manual "Check for Updates" row.  Internal (not
+ *  private) because [SettingsState.updateState] exposes it as `internal`,
+ *  and Kotlin refuses a less-visible type behind a more-visible property. */
+internal sealed interface UpdateUiState {
     data object Idle : UpdateUiState
     data object Checking : UpdateUiState
     data class Available(val latestTag: String, val url: String) : UpdateUiState
