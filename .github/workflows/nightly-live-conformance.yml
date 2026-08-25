@@ -1,0 +1,168 @@
+# Informational only. Never gates any other job. Never triggered by push or PR.
+#
+# Nightly live-site conformance (Tier 4 of the CI test pyramid).
+#
+# Question this answers: "Did the live sites break since the last app
+# release, in a way the unit / Robolectric / instrumented tests can't
+# catch?"
+#
+# Schedule: 06:00 UTC daily (low-traffic window for the target sites).
+# Manual:  workflow_dispatch (so maintainers can spot-check after a fix).
+#
+# Persistence model — committing the latest scorecard to a dedicated
+# branch:
+#   1. On every run, the script writes probe/results-nightly/<run-id>*
+#      into the workspace. The workflow then pushes a single canonical
+#      "latest" scorecard to the nightly-results branch (auto-created
+#      on first push). The next run fetches nightly-results, so
+#      regression detection has a previous scorecard to diff against.
+#   2. The full per-run jsonl + scorecard are uploaded as workflow
+#      artifacts (90-day retention) for forensic inspection; the
+#      artifact TTL does not affect cross-run regression detection
+#      (that goes through the branch, not artifacts).
+#
+# Per-site failures are scorecard data, not workflow failures. The
+# workflow only fails if the script itself crashes (missing deps,
+# JSON parse error, etc.).
+#
+# Auto-filing: a single issue per (site, regression) is filed via the
+# gh CLI; if one is already open with the same label + title, a
+# comment is posted to the existing issue instead of duplicating.
+
+name: Nightly Live-Site Conformance (informational)
+
+on:
+  schedule:
+    # 06:00 UTC daily — quiet window for the target sites' traffic.
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+    inputs:
+      sites:
+        description: 'Comma-separated site keys (empty = all 11)'
+        required: false
+        default: ''
+      no_issue:
+        description: 'Skip auto-filing GitHub issues for regressions'
+        type: boolean
+        required: false
+        default: false
+
+# Nightly: minimum permissions to read the code, write artifacts, push
+# to nightly-results, and file issues. NEVER contents:write on master
+# (the script only writes to the nightly-results branch).
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  nightly:
+    name: Probe 11 live sites, write scorecard, file regressions
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Hard guard: this job is informational only. It can never be
+    # required by any other workflow (no `needs:` consumer exists and
+    # the workflow is never triggered by push or pull_request).
+
+    steps:
+      - name: Checkout repository (master)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch previous scorecard from nightly-results branch
+        # We pull just the scorecard dir from the nightly-results
+        # branch (created on first run). If the branch doesn't exist
+        # yet (first ever run), the script will simply skip regression
+        # detection — every site shows as "no previous run" and no
+        # issues are filed.
+        continue-on-error: true
+        run: |
+          mkdir -p probe/results-nightly
+          if git ls-remote --exit-code --heads origin nightly-results >/dev/null 2>&1; then
+            echo "Fetching previous scorecard from nightly-results..."
+            git fetch --depth=1 origin nightly-results
+            git checkout FETCH_HEAD -- 'probe/results-nightly/*-scorecard.json' 2>/dev/null || true
+            git checkout -- .
+            echo "Previous scorecards in workspace:"
+            ls -la probe/results-nightly/ 2>/dev/null || echo "(empty)"
+          else
+            echo "nightly-results branch not present yet (first run) — regression detection will skip."
+          fi
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        # Only the two modules the brief specifies. curl_cffi is NOT
+        # used here (intentional — Tier 4 is a clean-Python cross-check,
+        # not a curl-impersonation run).
+        run: pip install --quiet requests beautifulsoup4
+
+      - name: Run nightly conformance
+        env:
+          CONFORMANCE_PUB_B64: ${{ secrets.CONFORMANCE_PUB_B64 }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          ARGS=""
+          if [ -n "${{ github.event.inputs.sites }}" ]; then
+            for s in $(echo "${{ github.event.inputs.sites }}" | tr ',' ' '); do
+              ARGS="$ARGS --site $s"
+            done
+          fi
+          if [ "${{ github.event.inputs.no_issue }}" = "true" ]; then
+            ARGS="$ARGS --no-issue"
+          fi
+          echo "Running: python probe/nightly_conformance.py $ARGS"
+          # Per-site failures are scorecard data, not workflow failures.
+          # The script only exits non-zero on script-level crashes
+          # (missing deps, JSON parse error, etc.) which would already
+          # have surfaced earlier. We still `|| true` so a defensive
+          # non-zero exit code never blocks the branch update step.
+          python probe/nightly_conformance.py $ARGS || {
+            rc=$?
+            echo "::warning::nightly_conformance.py exited $rc — preserving any partial scorecard."
+          }
+
+      - name: Upload jsonl + scorecard as workflow artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-conformance-${{ github.run_id }}
+          path: probe/results-nightly/
+          retention-days: 90
+
+      - name: Commit latest scorecard to nightly-results branch
+        # We push ONLY the scorecard (not the per-query jsonl) to keep
+        # the branch small. The next run fetches it back as the
+        # 'previous run' baseline.
+        if: always()
+        run: |
+          set -e
+          SCORECARD=$(ls -t probe/results-nightly/*-scorecard.json 2>/dev/null | head -1)
+          if [ -z "$SCORECARD" ]; then
+            echo "No scorecard produced — skipping branch update."
+            exit 0
+          fi
+          RUN_ID=$(basename "$SCORECARD" -scorecard.json)
+          echo "Publishing scorecard for run_id=$RUN_ID to nightly-results branch"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout --orphan nightly-results-tmp
+          git rm -rf --quiet . || true
+          mkdir -p nightly-results
+          cp "$SCORECARD" "nightly-results/${RUN_ID}-scorecard.json"
+          # Keep a rolling 'latest' copy for easy debugging from the
+          # GitHub UI (one file, always points at the most recent run).
+          cp "$SCORECARD" "nightly-results/latest-scorecard.json"
+          git add nightly-results/
+          git commit -m "nightly conformance: ${RUN_ID} (informational)"
+          if git ls-remote --exit-code --heads origin nightly-results >/dev/null 2>&1; then
+            git push -f origin HEAD:nightly-results
+          else
+            git push -u origin HEAD:nightly-results
+          fi
+          git checkout master -- .
