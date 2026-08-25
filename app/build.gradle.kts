@@ -92,6 +92,14 @@ android {
         compose = true
         buildConfig = true
     }
+
+    testOptions {
+        unitTests {
+            // Robolectric needs the real merged manifest + Android resources
+            // (not the android.jar stub) to host Compose test activity launches.
+            isIncludeAndroidResources = true
+        }
+    }
 }
 
 dependencies {
@@ -137,6 +145,16 @@ dependencies {
     testImplementation("org.json:json:20240303")
     // MockWebServer for engine tests: flaky-connection, retry, and resume scenarios.
     testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
+
+    // Robolectric Compose UI tests (phase 2 test pyramid): shadows the Android
+    // framework so DownloadCard renders on the JVM. 4.16.x is the newest stable
+    // line covering compileSdk 34; it pins androidx.test:monitor to 1.8.x, so
+    // ActivityScenario core is raised from the 1.5.0 ui-test-junit4 drags in.
+    testImplementation("org.robolectric:robolectric:4.16.1")
+    testImplementation("androidx.test:core:1.6.1")
+    // Same Compose BOM as the app so the JVM test APIs match the UI under test.
+    testImplementation(composeBom)
+    testImplementation("androidx.compose.ui:ui-test-junit4")
 
     // Instrumented smoke tests (emulator in CI): Compose UI testing
     androidTestImplementation(composeBom)
