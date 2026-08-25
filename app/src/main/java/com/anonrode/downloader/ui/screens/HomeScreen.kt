@@ -33,6 +33,7 @@ import coil.compose.SubcomposeAsyncImage
 import com.anonrode.downloader.data.models.ShowCard
 import com.anonrode.downloader.data.models.TaskStatus
 import com.anonrode.downloader.ui.theme.*
+import com.anonrode.downloader.util.UrlExtractor
 import com.anonrode.downloader.viewmodel.MainViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -68,21 +69,44 @@ fun HomeScreen(
 
     var clipboardSnippet by remember { mutableStateOf<String?>(null) }
 
-    LaunchedEffect(Unit) {
-        // Privacy: clipboard auto-detect is off by default if the user disabled
-        // it in Settings (pref_clipboard_detect).
+    // Clipboard auto-detect: register while HomeScreen is in composition so
+    // anything copied after the app opens surfaces as a "Paste link:" banner
+    // without needing a relaunch. The OS only delivers change events to a
+    // foregrounded app — that's the intended behavior, not a bug to work
+    // around with polling (background clipboard reads are blocked since
+    // Android 10 for non-accessibility apps).
+    DisposableEffect(Unit) {
         val detectEnabled = try {
             context.getSharedPreferences("downloader_settings", android.content.Context.MODE_PRIVATE)
                 .getBoolean("pref_clipboard_detect", true)
         } catch (_: Exception) { true }
-        if (!detectEnabled) return@LaunchedEffect
+        if (!detectEnabled) {
+            return@DisposableEffect onDispose { }
+        }
+        val cm = try {
+            context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+        } catch (_: Exception) { null }
+        if (cm == null) {
+            return@DisposableEffect onDispose { }
+        }
+        // Seed with the current clipboard so a link already on the clipboard
+        // when the screen first composes still shows the banner.
         try {
-            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-            val item = cm.primaryClip?.getItemAt(0)?.text?.toString()?.trim()
-            if (!item.isNullOrBlank() && (item.startsWith("http://") || item.startsWith("https://") || item.startsWith("magnet:?"))) {
-                clipboardSnippet = item
-            }
+            val seed = cm.primaryClip?.getItemAt(0)?.text?.toString()?.trim()
+            clipboardSnippet = if (!seed.isNullOrBlank() && UrlExtractor.isLikelyUrl(seed)) seed else null
         } catch (_: Exception) {}
+        val listener = ClipboardManager.OnPrimaryClipChangedListener {
+            val text = try {
+                cm.primaryClip?.getItemAt(0)?.text?.toString()?.trim()
+            } catch (_: Exception) { null }
+            // Clear on a non-URL so a stale "Paste link:" banner does not
+            // linger after the user copies something unrelated (e.g. a
+            // password). Compose skips equal state, so identical re-copies
+            // don't cause flicker.
+            clipboardSnippet = if (!text.isNullOrBlank() && UrlExtractor.isLikelyUrl(text)) text else null
+        }
+        cm.addPrimaryClipChangedListener(listener)
+        onDispose { cm.removePrimaryClipChangedListener(listener) }
     }
 
     Box(
@@ -216,9 +240,27 @@ fun HomeScreen(
                             )
                         }
 
+                        // Long-press paste used to forward raw text into the
+                        // search query, so a pasted URL would be treated as a
+                        // movie title. Route the empty->URL jump through
+                        // handlePastedInput instead. The "previous was empty"
+                        // guard is what keeps ordinary typing ("titanic") from
+                        // being misread as a paste: a paste is a single jump
+                        // from blank to a full URL, not a per-keystroke build.
                         androidx.compose.foundation.text.BasicTextField(
                             value = uiState.query,
-                            onValueChange = { viewModel.onQueryChanged(it) },
+                            onValueChange = { newValue ->
+                                val previous = uiState.query
+                                if (previous.isEmpty() && UrlExtractor.isLikelyUrl(newValue)) {
+                                    clipboardSnippet = null
+                                    viewModel.handlePastedInput(newValue) { platform, url ->
+                                        onOpenSocial(platform, url)
+                                    }
+                                    viewModel.onQueryChanged("")
+                                } else {
+                                    viewModel.onQueryChanged(newValue)
+                                }
+                            },
                             singleLine = true,
                             textStyle = androidx.compose.ui.text.TextStyle(
                                 color = TextPrimary,
