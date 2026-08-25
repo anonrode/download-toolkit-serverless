@@ -21,16 +21,25 @@ import xml.etree.ElementTree as ET
 from typing import List, Set, Dict, Any
 
 
+def _walk_xml_files(results_dir: str) -> List[str]:
+    """Yield every .xml file under results_dir, recursively. The
+    Android Gradle plugin nests XML under
+    connected/<flavor>/<class>.xml, so a flat listdir misses them."""
+    out: List[str] = []
+    for root, _dirs, files in os.walk(results_dir):
+        for name in files:
+            if name.endswith(".xml"):
+                out.append(os.path.join(root, name))
+    return sorted(out)
+
+
 def collect_failures(results_dir: str) -> Dict[str, Any]:
     failing_classes: Set[str] = set()
     failing_tests: List[Dict[str, str]] = []
     if not os.path.isdir(results_dir):
         return {"failing_classes": [], "failing_tests": []}
 
-    for name in sorted(os.listdir(results_dir)):
-        if not name.endswith(".xml"):
-            continue
-        path = os.path.join(results_dir, name)
+    for path in _walk_xml_files(results_dir):
         try:
             tree = ET.parse(path)
         except ET.ParseError:
@@ -39,7 +48,7 @@ def collect_failures(results_dir: str) -> Dict[str, Any]:
             failing_classes.add("__malformed_xml__")
             failing_tests.append({
                 "class": "__malformed_xml__",
-                "name": name,
+                "name": os.path.basename(path),
                 "message": "JUnit XML parse error",
             })
             continue

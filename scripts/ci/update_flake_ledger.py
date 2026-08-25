@@ -75,14 +75,18 @@ def _collect_failures(xml_dir: str) -> List[Tuple[str, str, str]]:
     out: List[Tuple[str, str, str]] = []
     if not os.path.isdir(xml_dir):
         return out
-    for name in sorted(os.listdir(xml_dir)):
-        if not name.endswith(".xml"):
-            continue
-        path = os.path.join(xml_dir, name)
+    # Walk recursively — Android Gradle writes XML under
+    # connected/<flavor>/<class>.xml, not at the top level.
+    xml_files: List[str] = []
+    for root_dir, _dirs, files in os.walk(xml_dir):
+        for name in files:
+            if name.endswith(".xml"):
+                xml_files.append(os.path.join(root_dir, name))
+    for path in sorted(xml_files):
         try:
             tree = ET.parse(path)
         except ET.ParseError:
-            out.append(("__malformed_xml__", name, "JUnit XML parse error"))
+            out.append(("__malformed_xml__", os.path.basename(path), "JUnit XML parse error"))
             continue
         root = tree.getroot()
         suites = root.findall(".//testsuite") if root.tag == "testsuites" else [root]
