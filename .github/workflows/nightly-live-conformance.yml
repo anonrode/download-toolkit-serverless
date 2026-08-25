@@ -47,11 +47,13 @@ on:
         required: false
         default: false
 
-# Nightly: minimum permissions to read the code, write artifacts, push
-# to nightly-results, and file issues. NEVER contents:write on master
-# (the script only writes to the nightly-results branch).
+# Nightly: contents:write ONLY to push the scorecard to the
+# nightly-results branch (auto-created on first run). The script and
+# workflow never push to master or any other branch. The workflow is
+# informational-only — no other job depends on it, so the contents:write
+# permission cannot be used to gate a release.
 permissions:
-  contents: read
+  contents: write
   issues: write
 
 jobs:
