@@ -122,9 +122,13 @@ jobs:
       - name: Parse first-run JUnit XML for failing classes
         id: parse
         if: always()
+        # The python script writes its outputs (failures JSON + has_failures
+        # boolean) directly to $GITHUB_OUTPUT. Do NOT also redirect stdout
+        # to GITHUB_OUTPUT — that prepends the raw JSON before the heredoc
+        # markers and GitHub rejects the file with "Invalid format".
         run: |
           python3 scripts/ci/parse_instrumented_failures.py \
-            "$GITHUB_WORKSPACE/.ci-artifacts/first" >> "$GITHUB_OUTPUT"
+            "$GITHUB_WORKSPACE/.ci-artifacts/first"
 
       - name: Re-run failing classes once (retry-once)
         # Only runs if the first pass failed AND the parse step produced a
