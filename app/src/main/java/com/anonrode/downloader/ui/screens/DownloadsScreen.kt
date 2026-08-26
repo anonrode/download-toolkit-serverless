@@ -610,7 +610,15 @@ fun DownloadCard(
 
                 val progressText = when (task.status) {
                     TaskStatus.QUEUED -> "Queued • Waiting to start"
-                    TaskStatus.RESOLVING -> "Resolving stream link..."
+                    TaskStatus.RESOLVING -> {
+                        // Bytes already landing during the engine's fallback
+                        // chain (aria2c -> turbo -> yt-dlp) while the status
+                        // is still RESOLVING: surface the real byte count
+                        // instead of a stale "Resolving stream link..." that
+                        // reads as a hang (dramakey/HLS symptom).
+                        if (estimating && sizeStr.isNotBlank()) "$sizeStr • Estimating..."
+                        else "Resolving stream link..."
+                    }
                     TaskStatus.VALIDATING -> "Checking downloaded file..."
                     TaskStatus.PAUSED -> {
                         if (task.totalBytes > 0) "Paused at $pctInt% • $sizeStr"
