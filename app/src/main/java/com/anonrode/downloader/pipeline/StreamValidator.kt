@@ -2,6 +2,7 @@ package com.anonrode.downloader.pipeline
 
 import com.anonrode.downloader.data.net.HttpClient
 import com.anonrode.downloader.data.net.isTlsChainFailure
+import java.io.ByteArrayOutputStream
 
 /**
  * Strict pre-enqueue URL validation (provider contract rule 3).
@@ -69,7 +70,20 @@ object StreamValidator {
                 HttpClient.executeRegistered(client.newCall(req)).use { res ->
                     status = res.code
                     if (status in 200..299 || status == 416) {
-                        head = res.body?.byteStream()?.readNBytes(PROBE_BYTES) ?: ByteArray(0)
+                        // readNBytes is API 33+; on Android 10-12 it throws
+                        // NoSuchMethodError (an Error, invisible to the catch
+                        // below) and crashes the app. Read in a loop instead.
+                        head = res.body?.byteStream()?.let { s ->
+                            ByteArrayOutputStream(PROBE_BYTES).use { baos ->
+                                val buf = ByteArray(256)
+                                while (baos.size() < PROBE_BYTES) {
+                                    val read = s.read(buf, 0, minOf(buf.size, PROBE_BYTES - baos.size()))
+                                    if (read < 0) break
+                                    baos.write(buf, 0, read)
+                                }
+                                baos.toByteArray()
+                            }
+                        } ?: ByteArray(0)
                     }
                 }
                 break
