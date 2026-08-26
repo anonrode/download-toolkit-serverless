@@ -240,16 +240,6 @@ object YoutubeDlDownloader {
                 "--progress-template",
                 "download:@@DLP@@ %(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s|%(progress.fragment_index)s|%(progress.fragment_count)s|%(progress._downloaded_bytes_str)s|%(progress._total_bytes_str)s|%(progress._total_bytes_estimate_str)s"
             )
-            // HLS / DASH: don't silently skip missing segments (default
-            // skips, leaving a short file with a gap).  Fail loudly so
-            // the engine's retry/resume machinery gets a clean signal —
-            // matches the aria2c / turbo contract (v3.0.4 honesty fix).
-            addOption("--abort-on-unavailable-fragments")
-            // Parallel fragment fetch — matches the external-aria2c speed
-            // the user sees on the same source.  Configurable through the
-            // existing `aria2c_connections` config key.
-            addOption("--concurrent-fragments", conns.toString())
-
             if (effReferer.isNotBlank()) addOption("--referer", effReferer)
             if (ua.isNotBlank()) addOption("--user-agent", ua)
 
