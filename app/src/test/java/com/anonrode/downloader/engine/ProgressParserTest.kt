@@ -227,4 +227,3 @@ class ProgressParserTest {
         assertEquals(100L * 1024 * 1024, t.totalBytes)
     }
 }
-}
