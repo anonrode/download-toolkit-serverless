@@ -537,7 +537,7 @@ object RulesPipeline {
         // ---- numbering
         val numbering = items.optJSONObject("numbering")
         val numChain = numbering?.optJSONArray("chain")
-        val sortByNumber = numbering?.optBoolean("sortByNumber", false)
+        val sortByNumber = numbering != null && numbering.optBoolean("sortByNumber", false)
 
         fun deriveNum(ctx: AnchorCtx, position: Int): Int {
             if (numChain != null) {
