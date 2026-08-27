@@ -311,19 +311,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /** Re-reads free/total storage so the Settings sheet shows live values
-     *  instead of the app-start snapshot. */
+     *  instead of the app-start snapshot. Runs on IO: StatFs is a syscall
+     *  that can stall behind the storage daemon, and this is invoked from
+     *  a LaunchedEffect when Settings opens — doing it on the main thread
+     *  was the visible hitch on tapping the Settings tab. */
     fun refreshStorageInfo() {
-        try {
-            val path = Environment.getExternalStorageDirectory()
-            val stat = StatFs(path.path)
-            val blockSize = stat.blockSizeLong
-            val totalBlocks = stat.blockCountLong
-            val availableBlocks = stat.availableBlocksLong
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val path = Environment.getExternalStorageDirectory()
+                val stat = StatFs(path.path)
+                val blockSize = stat.blockSizeLong
+                val totalBlocks = stat.blockCountLong
+                val availableBlocks = stat.availableBlocksLong
 
-            val totalGb = (totalBlocks * blockSize) / (1024 * 1024 * 1024)
-            val freeGb = (availableBlocks * blockSize) / (1024 * 1024 * 1024)
+                val totalGb = (totalBlocks * blockSize) / (1024 * 1024 * 1024)
+                val freeGb = (availableBlocks * blockSize) / (1024 * 1024 * 1024)
 
-            _uiState.update { it.copy(freeStorageGb = freeGb, totalStorageGb = totalGb) }
-        } catch (_: Exception) {}
+                _uiState.update { it.copy(freeStorageGb = freeGb, totalStorageGb = totalGb) }
+            } catch (_: Exception) {}
+        }
     }
 }
