@@ -352,8 +352,7 @@ fun EpisodeDrawer(
                         .fillMaxWidth()
                         .weight(1f, fill = false)
                         .heightIn(max = 380.dp),
-                    verticalArrangement = Arrangement.spacedBy(Spacing.xs),
-                    contentPadding = WindowInsets.navigationBars.asPaddingValues()
+                    verticalArrangement = Arrangement.spacedBy(Spacing.xs)
                 ) {
                     items(episodes, key = { it.url }) { ep ->
                         val isSelected = ep in selectedEpisodes
