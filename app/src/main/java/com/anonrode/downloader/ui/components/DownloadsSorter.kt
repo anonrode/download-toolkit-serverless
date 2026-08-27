@@ -151,10 +151,11 @@ object DownloadsSorter {
 }
 
 /** Counts surfaced in the Downloads stats strip and the bottom-nav badge.
- *  `active` is the "in-flight + paused" set: tasks that the engine is still
- *  responsible for.  Queued tasks are intentionally *not* in `active` because
- *  a queued task hasn't claimed a download slot yet — the HTML prototype and
- *  the user spec both exclude it from the badge. */
+ *  `active` is the "actually transferring" set: DOWNLOADING / RESOLVING /
+ *  VALIDATING.  PAUSED is deliberately excluded — a paused task is parked,
+ *  and counting it made the badge read "2 active" while only one download
+ *  was moving (user-visible confusion).  Queued tasks are also excluded:
+ *  a queued task hasn't claimed a download slot yet. */
 data class DownloadsStats(
     val files: Int,
     val done: Int,
@@ -174,8 +175,8 @@ internal fun downloadsStats(tasks: List<DownloadTask>): DownloadsStats {
             TaskStatus.COMPLETED -> done++
             TaskStatus.DOWNLOADING,
             TaskStatus.RESOLVING,
-            TaskStatus.VALIDATING,
-            TaskStatus.PAUSED -> active++
+            TaskStatus.VALIDATING -> active++
+            TaskStatus.PAUSED -> { /* parked — visible on its own card, not "active" */ }
             TaskStatus.FAILED -> failed++
             TaskStatus.QUEUED -> { /* not in any user-facing bucket — see data class docs */ }
         }

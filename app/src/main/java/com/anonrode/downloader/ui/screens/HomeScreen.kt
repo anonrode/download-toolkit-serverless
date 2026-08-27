@@ -31,14 +31,13 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.SubcomposeAsyncImage
 import com.anonrode.downloader.data.models.ShowCard
-import com.anonrode.downloader.data.models.TaskStatus
 import com.anonrode.downloader.ui.theme.*
 import com.anonrode.downloader.util.UrlExtractor
 import com.anonrode.downloader.viewmodel.MainViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-@Suppress("UnusedParameter") // onOpenSettings is reserved for future use; Settings is now a bottom-nav tab.
+@Suppress("UnusedParameter") // onOpenDownloads/onOpenSettings are reserved; both destinations are bottom-nav tabs now.
 fun HomeScreen(
     viewModel: MainViewModel,
     onOpenDownloads: () -> Unit,
@@ -46,10 +45,6 @@ fun HomeScreen(
     onOpenSocial: (String, String) -> Unit
 ) {
     val uiState by viewModel.uiState.collectAsState()
-    val tasks by viewModel.engine.tasks.collectAsState()
-    val activeTasks = remember(tasks) {
-        tasks.filter { it.status == TaskStatus.DOWNLOADING || it.status == TaskStatus.RESOLVING }
-    }
     val context = LocalContext.current
     val keyboardController = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
 
@@ -146,43 +141,10 @@ fun HomeScreen(
                         overflow = TextOverflow.Ellipsis
                     )
                 }
-
-                Spacer(modifier = Modifier.width(Spacing.lg))
-
-                Row(horizontalArrangement = Arrangement.spacedBy(Spacing.sm)) {
-                    // The Downloads icon is the only top-right affordance
-                    // now: Settings moved to a bottom-nav tab. The
-                    // `onOpenSettings` parameter is kept for API stability
-                    // but unused at this call site (see @Suppress on the
-                    // function declaration).
-                    IconButton(
-                        onClick = onOpenDownloads,
-                        modifier = Modifier
-                            .size(48.dp)
-                            .clip(CircleShape)
-                            .background(SurfaceCard, CircleShape)
-                    ) {
-                        Box(
-                            modifier = Modifier.fillMaxSize(),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                imageVector = Icons.Rounded.Download,
-                                contentDescription = "Downloads",
-                                tint = TextPrimary,
-                                modifier = Modifier.size(22.dp)
-                            )
-                            if (activeTasks.isNotEmpty()) {
-                                ActiveTaskBadge(
-                                    count = activeTasks.size,
-                                    // align() is a BoxScope member: it must be
-                                    // applied from the parent Box's scope.
-                                    modifier = Modifier.align(Alignment.TopEnd)
-                                )
-                            }
-                        }
-                    }
-                }
+                // No top-right icon row: Downloads + Settings are bottom-nav
+                // tabs, and the live active-task badge lives on the Downloads
+                // nav icon itself (MainScaffold). The duplicate header button
+                // was redundant, so it was removed.
             }
 
             Spacer(modifier = Modifier.height(Spacing.sm))
@@ -637,29 +599,6 @@ private fun CardBadge(text: String, accent: Boolean) {
             fontWeight = FontWeight.Bold,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
-        )
-    }
-}
-
-/** Active-task count badge pinned at the top-end of the downloads circle button.
- *  Inset by the spacing rhythm so the badge stays fully inside the 48dp circle:
- *  it never extends past the button border and never collides with neighbours. */
-@Composable
-private fun ActiveTaskBadge(count: Int, modifier: Modifier = Modifier) {
-    Box(
-        modifier = modifier
-            .padding(Spacing.sm)
-            .defaultMinSize(minWidth = 20.dp, minHeight = 20.dp)
-            .clip(CircleShape)
-            .background(AccentPrimary),
-        contentAlignment = Alignment.Center
-    ) {
-        Text(
-            text = count.toString(),
-            color = BackgroundDark,
-            fontSize = 10.sp,
-            fontWeight = FontWeight.Bold,
-            maxLines = 1
         )
     }
 }

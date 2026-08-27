@@ -206,14 +206,16 @@ class DownloadsSorterTest {
         )
         val s = downloadsStats(tasks)
         assertEquals(8, s.files)
-        // active = downloading + resolving + validating + paused (4)
-        assertEquals(4, s.active)
+        // active = downloading + resolving + validating (3); paused is parked,
+        // not "active" — counting it made the badge read "2 active" while one
+        // task was paused and only one was moving.
+        assertEquals(3, s.active)
         // failed = 2
         assertEquals(2, s.failed)
         // done = 1
         assertEquals(1, s.done)
-        // badge = active (in-flight + paused)
-        assertEquals(4, s.badgeCount)
+        // badge = active (transferring only)
+        assertEquals(3, s.badgeCount)
     }
 
     @Test

@@ -577,7 +577,11 @@ fun DownloadCard(
                 // as a hang).  For unknown-total downloads we only show
                 // the downloaded count, not "0 B / 0 B".
                 val sizeStr = if (task.totalBytes > 0) {
-                    formatBytes(task.downloadedBytes) + " / " + formatBytes(task.totalBytes)
+                    // Clamp the downloaded side to the total: aria2c's no-total
+                    // wire bytes can overshoot the inferred total (re-downloaded
+                    // pieces + chunk overhead), and "100.7 MB / 84.1 MB" read
+                    // as a bug. The progress bar already clamps to 100%.
+                    formatBytes(minOf(task.downloadedBytes, task.totalBytes)) + " / " + formatBytes(task.totalBytes)
                 } else if (task.downloadedBytes > 0) {
                     formatBytes(task.downloadedBytes)
                 } else {

@@ -90,6 +90,22 @@ class DownloadCardStateTest {
     }
 
     @Test
+    fun downloadingOvershotTotal_clampsDisplayedBytes() {
+        // aria2c's no-total wire bytes can overshoot the inferred total
+        // (re-downloaded pieces + chunk overhead). The card must not render
+        // "105.0 MB / 100.0 MB" — the downloaded side clamps to the total,
+        // matching the progress bar which already clamps to 100%.
+        setCard(
+            task(
+                downloadedBytes = 105L * MB,
+                totalBytes = 100L * MB,
+                status = TaskStatus.DOWNLOADING
+            )
+        )
+        composeRule.onNodeWithText("100% • 100.0 MB / 100.0 MB").assertExists()
+    }
+
+    @Test
     fun downloadingUnknownTotal_estimatesWithoutBogusPercent() {
         setCard(
             task(
