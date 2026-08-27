@@ -460,6 +460,9 @@ class RulesPipelineTest {
         // rendering is what treats "null" as blank.
         assertEquals("null", RulesPipeline.jsonField(item, "poster_path"))
         assertNull(RulesPipeline.jsonField(item, "missing|also_missing"))
+        // cut applies to whichever alternative hit, not just the last one
+        val earlyHit = JSONObject("""{"release_date": "2023-01-02"}""")
+        assertEquals("2023", RulesPipeline.jsonField(earlyHit, "release_date|first_air_date:before(-)"))
         // date without the cut char -> empty (year unknown, not garbage)
         val noDash = JSONObject("""{"release_date": "unknown"}""")
         assertNull(RulesPipeline.jsonField(noDash, "release_date:before(-)"))
@@ -517,10 +520,10 @@ class RulesPipelineTest {
         // too many sources in one step
         val fiveSources = (1..5).joinToString(",") { """{"url": "http://x$it"}""" }
         assertNull(parseSitePipeline(JSONObject("""{"schema": 1, "search": {"steps": [{"sources": [$fiveSources]}]}}""")))
-        // bad method / mode / as enums
+        // bad method / mode / as enums (all step-level keys)
         assertNull(parseSitePipeline(JSONObject("""{"schema": 1, "search": {"steps": [{"sources": [{"url": "http://x", "method": "DELETE"}]}]}}""")))
-        assertNull(parseSitePipeline(JSONObject("""{"schema": 1, "search": {"mode": "yolo", "steps": [{"sources": [{"url": "http://x"}]}]}}""")))
-        assertNull(parseSitePipeline(JSONObject("""{"schema": 1, "search": {"as": "yaml", "steps": [{"sources": [{"url": "http://x"}]}]}}""")))
+        assertNull(parseSitePipeline(JSONObject("""{"schema": 1, "search": {"steps": [{"sources": [{"url": "http://x"}], "mode": "yolo"}]}}""")))
+        assertNull(parseSitePipeline(JSONObject("""{"schema": 1, "search": {"steps": [{"sources": [{"url": "http://x"}], "as": "yaml"}]}}""")))
         // neither search nor episodes -> nothing usable
         assertNull(parseSitePipeline(JSONObject("""{"schema": 1}""")))
     }

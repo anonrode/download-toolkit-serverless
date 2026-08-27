@@ -76,13 +76,17 @@ def render_template(tmpl, resolve):
 
 
 def json_field(item, path):
-    """Dot-path lookup with | fallbacks and an optional :before(<char>) cut."""
+    """Dot-path lookup with | fallbacks and an optional :before(<char>) cut.
+
+    The cut applies to the whole fallback chain, whichever alternative hit —
+    parsing it per-alt would leave early hits uncut (mirrors RulesPipeline.kt).
+    """
+    cut = None
+    m = re.search(r":before\((.)\)$", path)
+    if m:
+        cut = m.group(1)
+        path = path[: m.start()]
     for alt in path.split("|"):
-        cut = None
-        m = re.search(r":before\((.)\)$", alt)
-        if m:
-            cut = m.group(1)
-            alt = alt[: m.start()]
         node = item
         for seg in alt.split("."):
             node = node.get(seg) if isinstance(node, dict) else None
