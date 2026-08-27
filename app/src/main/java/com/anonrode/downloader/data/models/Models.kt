@@ -70,6 +70,14 @@ data class DownloadTask(
     val headers: Map<String, String> = emptyMap(),
     val audioOnly: Boolean = false,
     val errorMessage: String? = null,
+    /** True only when the USER explicitly paused (pause button/notification).
+     *  Every auto-resume path — network reconnect, storage self-heal, host
+     *  cooldown — must skip tasks carrying this flag; only an explicit resume
+     *  (retry) clears it. System parks (connectivity drop, Wi-Fi gate, storage
+     *  limit, host backoff) leave it false so genuinely interrupted downloads
+     *  still auto-recover. Persisted like any other field and preserved by
+     *  parkForRestore, so a user pause survives full app restarts. */
+    val userPaused: Boolean = false,
     val quality: String? = null,
     /** Real stream resolution extracted from the HLS master playlist
      *  (e.g. "1080p", "720p"). Populated during preflight when the master
