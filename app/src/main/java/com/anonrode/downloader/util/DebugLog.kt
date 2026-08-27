@@ -63,7 +63,7 @@ object DebugLog {
         if (on) engine("verbose logging re-enabled")
     }
 
-    /** Absolute path of today's log file (for the Share button in Settings). */
+    /** Absolute path of today's log file. */
     fun currentLogFile(): File? {
         val dir = logDir ?: return null
         return File(dir, "app-${dayFormat.format(Date())}.txt")
@@ -72,6 +72,25 @@ object DebugLog {
     fun allLogFiles(): List<File> {
         val dir = logDir ?: return emptyList()
         return dir.listFiles { f -> f.name.startsWith("app-") }?.sortedByDescending { it.name } ?: emptyList()
+    }
+
+    /**
+     * Log files inside the retention window, oldest first (including same-day
+     * rolls). This is what the Share button sends: sharing only today's file
+     * made the log look like it auto-cleared every 24 hours even though
+     * retention kept 7 days on disk (user-reported).
+     *
+     * Name-descending order is newest-first across days AND within a day
+     * (app-….txt is the current roll, .1 the oldest), so reversing yields
+     * chronological order.
+     */
+    fun retainedLogFiles(): List<File> {
+        val dir = logDir ?: return emptyList()
+        val cutoff = System.currentTimeMillis() - keepDays * 86_400_000L
+        return dir.listFiles { f -> f.name.startsWith("app-") && f.lastModified() >= cutoff }
+            ?.sortedByDescending { it.name }
+            ?.asReversed()
+            ?: emptyList()
     }
 
     // ---- category helpers -------------------------------------------------
