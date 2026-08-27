@@ -81,10 +81,12 @@ class MainActivity : ComponentActivity() {
             // background. `SystemBarStyle.light` flips the icons dark for
             // light theme; `dark` keeps them light. Both styles use a fully
             // transparent scrim so the app's surface bleeds through.
-            // SideEffect runs after every successful recomposition that
-            // observed themeMode, so this fires on initial composition AND
-            // every subsequent toggle.
-            SideEffect { applyEdgeToEdge(themeMode) }
+            // Keyed LaunchedEffect (not SideEffect): this now runs on first
+            // composition and on theme flips only, instead of re-invoking
+            // enableEdgeToEdge after EVERY recomposition of this scope —
+            // each call re-dispatches window insets and added a subtle hitch
+            // whenever top-level state changed.
+            LaunchedEffect(themeMode) { applyEdgeToEdge(themeMode) }
 
             AnonDownloaderTheme(themeMode = themeMode) {
                 val socialTarget by activeSocialTarget
@@ -146,10 +148,12 @@ class MainActivity : ComponentActivity() {
 
                 // Guaranteed-visible splash: the system SplashScreen API dismisses
                 // on first frame (never seen on fast devices), so hold a designed
-                // Compose splash for a short beat before revealing the app.
+                // Compose splash for a brief beat before revealing the app. Kept
+                // short on purpose — a long hold read as a slow response when
+                // tapping the app icon.
                 var showSplash by remember { mutableStateOf(true) }
                 LaunchedEffect(Unit) {
-                    kotlinx.coroutines.delay(1100)
+                    kotlinx.coroutines.delay(500)
                     showSplash = false
                 }
                 if (showSplash) {
