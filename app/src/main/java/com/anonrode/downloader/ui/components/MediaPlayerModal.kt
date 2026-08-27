@@ -1,15 +1,11 @@
 package com.anonrode.downloader.ui.components
 
 import android.app.Activity
-import android.app.PictureInPictureParams
-import android.content.pm.ActivityInfo
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
+import android.content.pm.ActivityInfo
 import android.net.Uri
-import android.os.Build
-import android.util.Rational
-import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.enableEdgeToEdge
@@ -25,10 +21,8 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -37,8 +31,7 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -47,23 +40,18 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Subtitles
-import androidx.compose.material.icons.rounded.AspectRatio
-import androidx.compose.material.icons.rounded.Brightness6
 import androidx.compose.material.icons.rounded.Forward10
 import androidx.compose.material.icons.rounded.Fullscreen
 import androidx.compose.material.icons.rounded.FullscreenExit
 import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.Pause
-import androidx.compose.material.icons.rounded.PictureInPicture
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Replay10
 import androidx.compose.material.icons.rounded.SkipNext
 import androidx.compose.material.icons.rounded.SkipPrevious
+import androidx.compose.material.icons.rounded.Speed
 import androidx.compose.material.icons.rounded.SubtitlesOff
-import androidx.compose.material.icons.rounded.VolumeDown
-import androidx.compose.material.icons.rounded.VolumeOff
-import androidx.compose.material.icons.rounded.VolumeUp
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Slider
@@ -77,6 +65,7 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -104,7 +93,6 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.common.TrackSelectionOverride
-import androidx.media3.common.TrackSelectionParameters
 import androidx.media3.common.Tracks
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultDataSource
@@ -112,7 +100,6 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
 import androidx.media3.session.MediaSession
-import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import com.anonrode.downloader.ui.theme.Spacing
 import com.anonrode.downloader.ui.theme.StatusError
@@ -120,49 +107,42 @@ import kotlinx.coroutines.delay
 import java.io.File
 
 /**
- * The public context the player needs to know about beyond the single file
- * being opened. Kept as a data class so adding fields (resume position, audio
- * track override, etc.) doesn't churn the call site.
+ * The public context the player needs beyond the single file being opened.
+ * [queuePeerPaths] is the Next/Previous list (Downloads screen order);
+ * [onPlayFile] asks the parent to point its active task at a peer path.
  */
 data class MediaPlayerContext(
     val filePath: String,
     val title: String,
-    /** Other file paths the user can step through with Next/Previous. Order
-     *  matches the Downloads screen so the queue feels familiar. The modal
-     *  does not own this list — it asks the parent to play by file path so
-     *  the parent can update its own state (activePlaybackTask). */
     val queuePeerPaths: List<String> = emptyList(),
-    /** Parent-driven: modal calls this to switch the active file, then
-     *  triggers its own dismiss so the parent re-opens with the new path. */
     val onPlayFile: (String) -> Unit = {}
 )
 
 private val SIDECAR_SUBTITLE_EXTS = listOf("srt", "vtt")
+private val AUDIO_EXTS = listOf("mp3", "m4a", "aac", "wav", "flac", "opus", "ogg")
+private val PLAYBACK_SPEEDS = listOf(0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 1.75f, 2.0f)
 
-// The player modal and its picker sheets are a permanently BLACK canvas
-// regardless of the app theme — video players are dark by convention. The
-// theme-aware tokens break on it in Light mode (the theme's accent is
-// near-black navy there: the play button and selected chips camouflage;
-// the theme's surface card is white: picker text turns white-on-white;
-// the theme's background is near-white: icon tints invert). Pin the
-// dark-palette values for this file instead.
+// The player is a permanently BLACK canvas regardless of app theme — the
+// theme tokens invert on it in Light mode, so the palette is pinned here.
 private val PlayerAccent = Color(0xFFFFFFFF)
 private val PlayerTextSecondary = Color(0xFF94A3B8)
 private val PlayerSurface = Color(0xFF101216)
 private val PlayerSurfaceElevated = Color(0xFF181B22)
 
 /**
- * Full-screen in-app video/audio player. Backed by Media3 ExoPlayer with HLS
- * support, sidecar + embedded subtitle loading, audio focus handed off to the
- * platform via Player.setAudioAttributes(handleAudioFocus = true), and a
- * MediaSession that surfaces the playback to the OS media controls for the
- * lifetime of the modal.
+ * Full-screen in-app player, rebuilt around one rule: ONE ExoPlayer instance
+ * for the whole modal lifetime. Switching files (Next/Previous/auto-advance)
+ * calls setMediaItem() on the same player instead of recreating it — the
+ * PlayerView stays attached the entire time, which removes the released-
+ * player-while-attached crash the old per-file player had, and switches are
+ * instant with no surface teardown.
  *
- * Auto-hides controls after 3.5s of play inactivity, preserves the original
- * window brightness on entry and restores it on dismiss, and falls back to
- * the system external player via ACTION_VIEW if ExoPlayer reports an error
- * (unsupported codec, broken HLS, etc.) — same escape hatch the previous
- * VideoView build had.
+ * The UI is deliberately basic: one layout for every orientation — black
+ * surface, letterboxed video, tap anywhere to toggle controls, auto-hide
+ * after 3s. Transport (prev / -10s / play / +10s / next), a seek bar, and
+ * three chips: speed (tap to cycle), audio track, subtitles. No PiP, no
+ * brightness/volume sliders, no aspect cycling — hardware keys and the
+ * system handle those.
  */
 @OptIn(UnstableApi::class)
 @Composable
@@ -197,23 +177,30 @@ private fun MediaPlayerModalImpl(
     val componentActivity = context as? ComponentActivity
     val lifecycleOwner = LocalLifecycleOwner.current
 
-    val file = remember(ctx.filePath) { File(ctx.filePath) }
-    // Guard against missing-file playback: dismiss the modal when the file is
-    // gone (deleted after download cancellation). Do it in a LaunchedEffect
-    // rather than directly during composition, which would write state during
-    // snapshot-apply and risk a crash.
-    LaunchedEffect(file.exists()) {
-        if (!file.exists()) onDismiss()
-    }
-    if (!file.exists()) return
+    // Listeners are registered once against the single player; they read the
+    // latest ctx/onDismiss through these holders so a file switch never has
+    // to re-register anything.
+    val currentCtx by rememberUpdatedState(ctx)
+    val currentOnDismiss by rememberUpdatedState(onDismiss)
 
-    // The modal's body is a full-screen Color.Black (video) or a centered
-    // placeholder on the same background; the system bars are visible at
-    // the top and bottom and the icons need to be LIGHT to stay readable
-    // regardless of the app's theme.  When the modal dismisses, restore
-    // the theme-aware style MainActivity previously applied (so light-mode
-    // users go back to dark icons on near-white bars, dark-mode users go
-    // back to light icons on the dark surface).
+    val file = remember(ctx.filePath) { File(ctx.filePath) }
+
+    // Missing file (deleted after completion): skip forward to the next
+    // playable peer; only close when nothing is left. Checked in an effect,
+    // never during composition.
+    LaunchedEffect(ctx.filePath) {
+        if (!file.exists()) {
+            val c = currentCtx
+            val next = c.queuePeerPaths
+                .drop(c.queuePeerPaths.indexOf(c.filePath) + 1)
+                .firstOrNull { File(it).exists() }
+            if (next != null) c.onPlayFile(next) else currentOnDismiss()
+        }
+    }
+
+    // The modal draws edge-to-edge black; system-bar icons must stay LIGHT
+    // regardless of the app theme while it is up. On dismiss, restore the
+    // theme-appropriate style MainActivity applied before.
     val prefs: SharedPreferences? = remember {
         runCatching { context.getSharedPreferences("downloader_settings", Context.MODE_PRIVATE) }
             .getOrNull()
@@ -224,8 +211,8 @@ private fun MediaPlayerModalImpl(
             navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
         )
         onDispose {
-            // Leaving the modal: drop any fullscreen rotation and bring the
-            // system bars back so the rest of the app isn't stuck in landscape.
+            // Drop any fullscreen rotation and bring the system bars back so
+            // the rest of the app isn't stuck in landscape.
             activity?.let { act ->
                 act.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
                 WindowCompat.getInsetsController(act.window, act.window.decorView)
@@ -248,12 +235,10 @@ private fun MediaPlayerModalImpl(
     }
 
     val ext = file.extension.lowercase()
-    val isAudio = ext in listOf("mp3", "m4a", "aac", "wav", "flac", "opus", "ogg")
+    val isAudio = ext in AUDIO_EXTS
 
     // ---- Persisted prefs ----
     val initialSpeed = remember { MediaPlayerPrefs.getPlaybackSpeed(context) }
-    val initialVolume = remember { MediaPlayerPrefs.getMediaVolume(context) }
-    val initialBrightness = remember { MediaPlayerPrefs.getWindowBrightness(context) }
     val initialSubtitle = remember { MediaPlayerPrefs.getSubtitleTrack(context) }
 
     // ---- UI state ----
@@ -262,9 +247,6 @@ private fun MediaPlayerModalImpl(
     var duration by remember { mutableLongStateOf(0L) }
     var showControls by remember { mutableStateOf(true) }
     var playbackSpeed by remember { mutableFloatStateOf(initialSpeed) }
-    var mediaVolume by remember { mutableFloatStateOf(initialVolume) }
-    var windowBrightness by remember { mutableFloatStateOf(initialBrightness) }
-    var resizeMode by remember { mutableStateOf(AspectRatioFrameLayout.RESIZE_MODE_FIT) }
     var audioTrackLabels by remember { mutableStateOf<List<String>>(emptyList()) }
     var currentAudioLabel by remember { mutableStateOf<String?>(null) }
     var subtitleOptions by remember { mutableStateOf<List<String>>(emptyList()) }
@@ -273,44 +255,12 @@ private fun MediaPlayerModalImpl(
     var showSubtitleSheet by remember { mutableStateOf(false) }
     var playerError by remember { mutableStateOf<String?>(null) }
     var tracksLoaded by remember { mutableStateOf(false) }
-    // Fullscreen (landscape) mode: rotates the device and hides the system
-    // bars so the video fills the whole screen, YouTube-style.
+    // Fullscreen: rotate to landscape + hide system bars, YouTube-style.
     var isFullscreen by remember { mutableStateOf(false) }
 
-    // Fullscreen toggle: rotate to landscape and hide the status/navigation
-    // bars so the video fills the whole screen; restore both when toggled off.
-    // SENSOR_LANDSCAPE (not USER_LANDSCAPE) so an explicit fullscreen tap works
-    // even when the user has system rotation locked to portrait.
-    LaunchedEffect(isFullscreen, activity) {
-        val act = activity ?: return@LaunchedEffect
-        val insetsController = WindowCompat.getInsetsController(act.window, act.window.decorView)
-        if (isFullscreen) {
-            // Entering fullscreen from the portrait layout: make sure the
-            // overlay controls are visible (portrait mode never uses them,
-            // so showControls may be stale-false).
-            showControls = true
-            act.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-            insetsController.systemBarsBehavior =
-                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-            insetsController.hide(WindowInsetsCompat.Type.systemBars())
-        } else {
-            act.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
-            insetsController.show(WindowInsetsCompat.Type.systemBars())
-        }
-    }
-
-    // Track the original window brightness so we can restore it on dismiss
-    // rather than leaving the slider's last value applied.
-    val originalBrightness = remember {
-        activity?.window?.attributes?.screenBrightness ?: -1f
-    }
-
-    // ---- Player + Session (one instance per file) ----
-    val exoPlayer = remember(ctx.filePath) {
+    // ---- Player + session: ONE instance for the modal's whole lifetime ----
+    val exoPlayer = remember {
         ExoPlayer.Builder(context)
-            // Player.setAudioAttributes(handleAudioFocus = true) hands the
-            // platform the AudioFocusRequest so music apps duck and resume
-            // correctly — no need to also wire AudioManager directly.
             .setAudioAttributes(
                 AudioAttributes.Builder()
                     .setUsage(C.USAGE_MEDIA)
@@ -327,31 +277,21 @@ private fun MediaPlayerModalImpl(
             .build()
             .apply {
                 playWhenReady = true
-                // setPlaybackParameters uses ExoPlayer's speed-change path
-                // which preserves pitch by default; the docs note this
-                // explicitly so a future reader doesn't try to "fix" it
-                // with a manual tempo post-process.
                 playbackParameters = PlaybackParameters(initialSpeed)
-                volume = initialVolume
             }
     }
-
-    val mediaSession = remember(ctx.filePath) {
-        // No MediaSessionService is registered — this session is scoped to
-        // the modal lifetime, so the system picks it up for transient
-        // media-button / Bluetooth intents but no persistent notification
-        // is required.
+    val mediaSession = remember {
+        // Scoped to the modal lifetime — the OS picks it up for media-button
+        // / Bluetooth intents; no persistent notification needed.
         MediaSession.Builder(context, exoPlayer).build()
     }
 
-    // Build the MediaItem for the playing file. Embedded subtitle tracks
-    // (multi-language subs inside an MKV) and sidecar .srt/.vtt siblings
-    // are both attached as SubtitleConfigurations on the same MediaItem, so
-    // ExoPlayer treats them uniformly.
+    // MediaItem for the current file. Embedded subtitle tracks (MKV multi-
+    // language subs) and sidecar .srt/.vtt siblings are attached together as
+    // SubtitleConfigurations so ExoPlayer treats them uniformly.
     val mediaItem = remember(ctx.filePath) {
-        val baseUri = Uri.fromFile(file)
         val builder = MediaItem.Builder()
-            .setUri(baseUri)
+            .setUri(Uri.fromFile(file))
             .setMediaId(ctx.filePath)
             .setMediaMetadata(
                 MediaMetadata.Builder()
@@ -359,29 +299,27 @@ private fun MediaPlayerModalImpl(
                     .setArtist(file.parentFile?.name ?: "")
                     .build()
             )
-        SIDECAR_SUBTITLE_EXTS.forEach { extName ->
+        val sidecars = SIDECAR_SUBTITLE_EXTS.mapNotNull { extName ->
             val sibling = File(file.parentFile, "${file.nameWithoutExtension}.$extName")
             if (sibling.exists() && sibling.canRead()) {
-                val srtConfig = MediaItem.SubtitleConfiguration.Builder(Uri.fromFile(sibling))
+                MediaItem.SubtitleConfiguration.Builder(Uri.fromFile(sibling))
                     .setMimeType(if (extName == "vtt") "text/vtt" else "application/x-subrip")
                     .setLanguage("und")
                     .setLabel(sibling.name)
                     .setSelectionFlags(0)
                     .build()
-                builder.setSubtitleConfigurations(listOf(srtConfig))
-            }
+            } else null
         }
+        if (sidecars.isNotEmpty()) builder.setSubtitleConfigurations(sidecars)
         builder.build()
     }
 
-    // Apply the MediaItem and seed the remembered subtitle preference.
-    LaunchedEffect(ctx.filePath, mediaItem) {
+    // File switch: point the SAME player at the new item. PlayerView never
+    // detaches, so Next/Previous is a seamless in-place swap. Per-file UI
+    // state resets here so nothing leaks across files.
+    LaunchedEffect(mediaItem) {
         exoPlayer.setMediaItem(mediaItem)
         exoPlayer.prepare()
-        // Fresh per-file state: a Next/Previous switch reuses this same
-        // modal composition (the parent just points ctx.filePath at the
-        // peer), so stale position/duration/track state from the previous
-        // file must not leak into the new one.
         currentPosition = 0L
         duration = 0L
         isPlaying = true
@@ -393,9 +331,7 @@ private fun MediaPlayerModalImpl(
         currentSubtitleLabel = initialSubtitle
     }
 
-    // Wire the player listener. onPlayerError is the escape hatch — it routes
-    // the same way the old VideoView setOnErrorListener did: hand off to the
-    // system external player, then dismiss.
+    // One listener for the player's lifetime.
     DisposableEffect(exoPlayer) {
         val listener = object : Player.Listener {
             override fun onIsPlayingChanged(playing: Boolean) {
@@ -408,31 +344,28 @@ private fun MediaPlayerModalImpl(
                         duration = exoPlayer.duration.coerceAtLeast(0L)
                     }
                     Player.STATE_ENDED -> {
-                        // Auto-advance to the next peer in the queue if there
-                        // is one. If we're at the end, the modal just sits
-                        // and the user can replay, close, or restart manually.
-                        // No onDismiss here — the parent swaps the file in
-                        // place (dismissing would close the player).
-                        val idx = ctx.queuePeerPaths.indexOf(ctx.filePath)
-                        val nextIdx = idx + 1
-                        if (idx >= 0 && nextIdx < ctx.queuePeerPaths.size) {
-                            ctx.onPlayFile(ctx.queuePeerPaths[nextIdx])
-                        }
+                        // Auto-advance to the next playable peer; missing
+                        // files are skipped. At the true end the player just
+                        // sits — no dismiss, the user can replay or close.
+                        val c = currentCtx
+                        val next = c.queuePeerPaths
+                            .drop(c.queuePeerPaths.indexOf(c.filePath) + 1)
+                            .firstOrNull { File(it).exists() }
+                        if (next != null) c.onPlayFile(next)
                     }
                 }
             }
 
             override fun onPlayerError(error: PlaybackException) {
-                // Fallback to external player on any decoder / extractor
-                // failure — unsupported codec, broken HLS, etc. Same pattern
-                // the previous setOnErrorListener used.
+                // Escape hatch for unsupported codecs / broken streams:
+                // hand the file to the system player, then close.
                 playerError = error.errorCodeName
-                playExternal(context, file)
-                onDismiss()
+                playExternal(context, File(currentCtx.filePath))
+                currentOnDismiss()
             }
 
             override fun onTracksChanged(tracks: Tracks) {
-                // Enumerate audio tracks for the picker.
+                // Audio tracks for the picker.
                 val audioGroups = tracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO }
                 val labels = audioGroups.map { g ->
                     val fmt = g.mediaTrackGroup.getFormat(0)
@@ -445,40 +378,23 @@ private fun MediaPlayerModalImpl(
                     }.ifBlank { "Track ${g.mediaTrackGroup.getFormat(0).id}" }
                 }
                 audioTrackLabels = labels
-                // Default: first audio track on first play.
                 if (currentAudioLabel == null && audioGroups.isNotEmpty()) {
-                    val first = audioGroups[0]
-                    val group = first.mediaTrackGroup
-                    val params = exoPlayer.trackSelectionParameters.buildUpon()
-                        .setOverrideForType(TrackSelectionOverride(group, 0))
-                        .build()
-                    exoPlayer.trackSelectionParameters = params
                     currentAudioLabel = labels.firstOrNull()
                 }
 
-                // Enumerate subtitle tracks. Embedded tracks show up as
-                // TRACK_TYPE_TEXT groups; sidecar subtitles do too because
-                // they were attached as SubtitleConfigurations above.
+                // Subtitle tracks (embedded + sidecar both surface here).
                 val subGroups = tracks.groups.filter { it.type == C.TRACK_TYPE_TEXT }
-                val subLabels = mutableListOf<String>()
-                subLabels += "Off"
+                val subLabels = mutableListOf("Off")
                 subGroups.forEach { g ->
                     val fmt = g.mediaTrackGroup.getFormat(0)
-                    val name = fmt.label
+                    subLabels += fmt.label
                         ?: fmt.language?.uppercase()
                         ?: "Track ${fmt.id}"
-                    subLabels += name
                 }
                 subtitleOptions = subLabels
-                // Apply remembered subtitle track once we know the available
-                // groups. Default is off, per the spec.
+                // Apply the remembered subtitle pick once per file.
                 if (currentSubtitleLabel != null && !tracksLoaded) {
-                    applySubtitleByLabel(
-                        exoPlayer,
-                        tracks,
-                        currentSubtitleLabel!!,
-                        enable = true
-                    )
+                    applySubtitleByLabel(exoPlayer, tracks, currentSubtitleLabel!!, enable = true)
                 }
                 tracksLoaded = true
             }
@@ -487,9 +403,7 @@ private fun MediaPlayerModalImpl(
         onDispose { exoPlayer.removeListener(listener) }
     }
 
-    // Progress polling. ExoPlayer exposes isPlaying/currentPosition/duration
-    // on the public Player API; we poll because there's no Compose-friendly
-    // state Flow for it.
+    // Progress polling — ExoPlayer has no Compose-friendly state Flow.
     LaunchedEffect(exoPlayer) {
         while (true) {
             try {
@@ -498,47 +412,48 @@ private fun MediaPlayerModalImpl(
                     val d = exoPlayer.duration
                     if (d > 0) duration = d
                 }
-            } catch (_: Exception) { /* ignore — race during teardown */ }
+            } catch (_: Exception) { /* race during teardown */ }
             delay(500)
         }
     }
 
-    // Auto-hide controls after 3.5s of playback.
+    // Auto-hide controls after 3s of playback.
     LaunchedEffect(showControls, isPlaying) {
         if (showControls && isPlaying) {
-            delay(3500)
+            delay(3000)
             showControls = false
         }
     }
 
-    // Apply window brightness on every change; persist the new value so the
-    // user doesn't have to re-set it next time. -1f means "follow system";
-    // we don't actually write that to the Window here because the default
-    // before any change is to follow system, so the slider starts there.
-    LaunchedEffect(windowBrightness) {
-        activity?.window?.let { win ->
-            val lp = win.attributes
-            lp.screenBrightness = if (windowBrightness < 0f) {
-                WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
-            } else {
-                windowBrightness
-            }
-            win.attributes = lp
+    // Fullscreen toggle: SENSOR_LANDSCAPE (not USER_LANDSCAPE) so the tap
+    // works even with system rotation locked. MainActivity declares
+    // orientation in configChanges, so the rotation does not recreate the
+    // activity or disturb the player.
+    LaunchedEffect(isFullscreen, activity) {
+        val act = activity ?: return@LaunchedEffect
+        val insetsController = WindowCompat.getInsetsController(act.window, act.window.decorView)
+        if (isFullscreen) {
+            showControls = true
+            act.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+            insetsController.systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            insetsController.hide(WindowInsetsCompat.Type.systemBars())
+        } else {
+            act.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+            insetsController.show(WindowInsetsCompat.Type.systemBars())
         }
-        MediaPlayerPrefs.setWindowBrightness(context, windowBrightness)
     }
 
-    // Lifecycle: release player + media session when the host lifecycle goes
-    // below STARTED. Audio focus is already handled by
-    // setAudioAttributes(handleAudioFocus = true), so we don't also touch
-    // AudioManager here.
+    // Release exactly once: when the modal leaves composition or the host
+    // lifecycle is destroyed. The player is never released mid-life (file
+    // switches reuse it), so there is no released-player race anywhere.
     DisposableEffect(lifecycleOwner, exoPlayer) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
                 Lifecycle.Event.ON_STOP -> exoPlayer.pause()
                 Lifecycle.Event.ON_DESTROY -> {
-                    exoPlayer.release()
-                    mediaSession.release()
+                    try { exoPlayer.release() } catch (_: Exception) {}
+                    try { mediaSession.release() } catch (_: Exception) {}
                 }
                 else -> { /* no-op */ }
             }
@@ -548,42 +463,32 @@ private fun MediaPlayerModalImpl(
             lifecycleOwner.lifecycle.removeObserver(observer)
             try { exoPlayer.release() } catch (_: Exception) {}
             try { mediaSession.release() } catch (_: Exception) {}
-            // Restore the original window brightness on dismiss so the user's
-            // global brightness preference isn't permanently clobbered.
-            activity?.window?.let { win ->
-                val lp = win.attributes
-                lp.screenBrightness = if (originalBrightness < 0f) {
-                    WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
-                } else {
-                    originalBrightness
-                }
-                win.attributes = lp
-            }
         }
     }
 
-    // Navigation helpers: step to the next/prev file in the queue by asking
-    // the parent to point its active playback task at the peer. The modal
-    // must NOT dismiss afterwards: the parent's onDismiss nulls the same
-    // state onPlayFile just wrote, so dismiss-then-reopen never reopened —
-    // Next/Previous simply exited the video (user-reported). Instead the
-    // parent recomposes this modal with the new ctx.filePath and the
-    // remember(ctx.filePath) player swaps in place.
+    // Next/Previous: step through peers, skipping files that no longer
+    // exist. The parent's onPlayFile just repoints its active task; this
+    // modal is recomposed with the new path and the same player swaps media.
+    val hasNext = remember(ctx.queuePeerPaths, ctx.filePath) {
+        val idx = ctx.queuePeerPaths.indexOf(ctx.filePath)
+        ctx.queuePeerPaths.drop(idx + 1).any { File(it).exists() }
+    }
+    val hasPrev = remember(ctx.queuePeerPaths, ctx.filePath) {
+        val idx = ctx.queuePeerPaths.indexOf(ctx.filePath)
+        idx > 0 && ctx.queuePeerPaths.take(idx).any { File(it).exists() }
+    }
     val playNext: () -> Unit = {
         val idx = ctx.queuePeerPaths.indexOf(ctx.filePath)
-        val nextIdx = idx + 1
-        if (idx >= 0 && nextIdx < ctx.queuePeerPaths.size) {
-            ctx.onPlayFile(ctx.queuePeerPaths[nextIdx])
-        }
+        val next = ctx.queuePeerPaths.drop(idx + 1).firstOrNull { File(it).exists() }
+        if (next != null) ctx.onPlayFile(next)
     }
     val playPrev: () -> Unit = {
         val idx = ctx.queuePeerPaths.indexOf(ctx.filePath)
-        if (idx > 0) {
-            ctx.onPlayFile(ctx.queuePeerPaths[idx - 1])
-        }
+        val prev = if (idx > 0) ctx.queuePeerPaths.take(idx).lastOrNull { File(it).exists() } else null
+        if (prev != null) ctx.onPlayFile(prev)
     }
 
-    // ---- UI ----
+    // ---- UI: one layout for every orientation ----
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(
@@ -603,9 +508,21 @@ private fun MediaPlayerModalImpl(
                     showControls = !showControls
                 }
         ) {
+            // Render surface. PlayerView is created ONCE and holds the same
+            // player for the modal's lifetime — update only syncs state the
+            // Compose side can change.
+            AndroidView(
+                factory = { viewCtx ->
+                    PlayerView(viewCtx).apply {
+                        useController = false
+                        player = exoPlayer
+                        setBackgroundColor(android.graphics.Color.BLACK)
+                    }
+                },
+                modifier = if (isAudio) Modifier.size(1.dp) else Modifier.fillMaxSize()
+            )
+
             if (isAudio) {
-                // Audio files have no video surface. Keep the same audio
-                // visualizer placeholder the previous build had.
                 Column(
                     modifier = Modifier.align(Alignment.Center),
                     horizontalAlignment = Alignment.CenterHorizontally
@@ -634,16 +551,13 @@ private fun MediaPlayerModalImpl(
                         modifier = Modifier.padding(horizontal = Spacing.xl)
                     )
                     Text(
-                        text = "Audio Playback • " + ext.uppercase(),
+                        text = "Audio • " + ext.uppercase(),
                         color = PlayerTextSecondary,
                         fontSize = 12.sp
                     )
                 }
             }
 
-            // Player error banner — only shown if the listener caught a
-            // recoverable-but-non-fatal error before we routed to the
-            // external player.
             playerError?.let { err ->
                 Text(
                     text = "Player error: $err",
@@ -656,26 +570,6 @@ private fun MediaPlayerModalImpl(
                 )
             }
 
-            if (isAudio || isFullscreen) {
-            // ExoPlayer render surface. PlayerView owns the SurfaceView and
-            // exposes resizeMode for Fit / Fill / Zoom; we suppress its
-            // default controller so our Compose overlay is the only UI.
-            AndroidView(
-                factory = { ctx ->
-                    PlayerView(ctx).apply {
-                        useController = false
-                        player = exoPlayer
-                        resizeMode = resizeMode
-                        setBackgroundColor(android.graphics.Color.BLACK)
-                    }
-                },
-                update = { view ->
-                    view.resizeMode = resizeMode
-                },
-                modifier = if (isAudio) Modifier.size(1.dp) else Modifier.fillMaxSize()
-            )
-
-            // Animated Overlay Controls
             AnimatedVisibility(
                 visible = showControls,
                 enter = fadeIn(),
@@ -685,15 +579,14 @@ private fun MediaPlayerModalImpl(
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .background(Color.Black.copy(alpha = 0.5f))
+                        .background(Color.Black.copy(alpha = 0.45f))
                 ) {
-                    // ---- Top Bar ----
+                    // ---- Top bar: close | title | fullscreen, external ----
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
                             .statusBarsPadding()
-                            .padding(horizontal = Spacing.lg, vertical = Spacing.md),
-                        horizontalArrangement = Arrangement.SpaceBetween,
+                            .padding(horizontal = Spacing.md, vertical = Spacing.sm),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         PlayerCircleButton(
@@ -701,7 +594,6 @@ private fun MediaPlayerModalImpl(
                             contentDescription = "Close",
                             onClick = onDismiss
                         )
-
                         Text(
                             text = ctx.title,
                             color = Color.White,
@@ -713,43 +605,25 @@ private fun MediaPlayerModalImpl(
                                 .weight(1f)
                                 .padding(horizontal = Spacing.md)
                         )
-
-                        Row(horizontalArrangement = Arrangement.spacedBy(Spacing.xs)) {
-                            if (!isAudio) {
-                                PlayerCircleButton(
-                                    icon = if (isFullscreen) Icons.Rounded.FullscreenExit else Icons.Rounded.Fullscreen,
-                                    contentDescription = if (isFullscreen) "Exit fullscreen" else "Fullscreen",
-                                    onClick = { isFullscreen = !isFullscreen }
-                                )
-                            }
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !isAudio) {
-                                PlayerCircleButton(
-                                    icon = Icons.Rounded.PictureInPicture,
-                                    contentDescription = "PiP",
-                                    onClick = {
-                                        activity?.let { act ->
-                                            try {
-                                                val params = PictureInPictureParams.Builder()
-                                                    .setAspectRatio(Rational(16, 9))
-                                                    .build()
-                                                act.enterPictureInPictureMode(params)
-                                            } catch (_: Exception) { /* PiP denied; ignore */ }
-                                        }
-                                    }
-                                )
-                            }
+                        if (!isAudio) {
                             PlayerCircleButton(
-                                icon = Icons.Rounded.OpenInNew,
-                                contentDescription = "External Player",
-                                onClick = {
-                                    playExternal(context, file)
-                                    onDismiss()
-                                }
+                                icon = if (isFullscreen) Icons.Rounded.FullscreenExit else Icons.Rounded.Fullscreen,
+                                contentDescription = if (isFullscreen) "Exit fullscreen" else "Fullscreen",
+                                onClick = { isFullscreen = !isFullscreen }
                             )
+                            Spacer(modifier = Modifier.width(Spacing.xs))
                         }
+                        PlayerCircleButton(
+                            icon = Icons.Rounded.OpenInNew,
+                            contentDescription = "Play in external app",
+                            onClick = {
+                                playExternal(context, file)
+                                onDismiss()
+                            }
+                        )
                     }
 
-                    // ---- Center Transport ----
+                    // ---- Center transport ----
                     Row(
                         modifier = Modifier.align(Alignment.Center),
                         horizontalArrangement = Arrangement.spacedBy(Spacing.lg),
@@ -759,13 +633,13 @@ private fun MediaPlayerModalImpl(
                             icon = Icons.Rounded.SkipPrevious,
                             contentDescription = "Previous",
                             onClick = playPrev,
-                            enabled = ctx.queuePeerPaths.indexOf(ctx.filePath) > 0,
+                            enabled = hasPrev,
                             size = 44.dp,
                             iconSize = 24.dp
                         )
                         PlayerCircleButton(
                             icon = Icons.Rounded.Replay10,
-                            contentDescription = "Rewind 10s",
+                            contentDescription = "Rewind 10 seconds",
                             onClick = {
                                 val target = (exoPlayer.currentPosition - 10_000).coerceAtLeast(0)
                                 exoPlayer.seekTo(target)
@@ -779,19 +653,19 @@ private fun MediaPlayerModalImpl(
                                 if (exoPlayer.isPlaying) exoPlayer.pause() else exoPlayer.play()
                             },
                             modifier = Modifier
-                                .size(64.dp)
+                                .size(68.dp)
                                 .background(PlayerAccent, CircleShape)
                         ) {
                             Icon(
                                 imageVector = if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
                                 contentDescription = if (isPlaying) "Pause" else "Play",
                                 tint = Color.Black,
-                                modifier = Modifier.size(36.dp)
+                                modifier = Modifier.size(38.dp)
                             )
                         }
                         PlayerCircleButton(
                             icon = Icons.Rounded.Forward10,
-                            contentDescription = "Forward 10s",
+                            contentDescription = "Forward 10 seconds",
                             onClick = {
                                 val target = (exoPlayer.currentPosition + 10_000).coerceAtMost(exoPlayer.duration)
                                 exoPlayer.seekTo(target)
@@ -804,13 +678,13 @@ private fun MediaPlayerModalImpl(
                             icon = Icons.Rounded.SkipNext,
                             contentDescription = "Next",
                             onClick = playNext,
-                            enabled = ctx.queuePeerPaths.indexOf(ctx.filePath) in 0 until ctx.queuePeerPaths.lastIndex,
+                            enabled = hasNext,
                             size = 44.dp,
                             iconSize = 24.dp
                         )
                     }
 
-                    // ---- Bottom Controls ----
+                    // ---- Bottom: seek, then speed / audio / subtitles ----
                     Column(
                         modifier = Modifier
                             .align(Alignment.BottomCenter)
@@ -835,7 +709,6 @@ private fun MediaPlayerModalImpl(
                                 fontWeight = FontWeight.Medium
                             )
                         }
-
                         Slider(
                             value = if (duration > 0) (currentPosition.toFloat() / duration.toFloat()).coerceIn(0f, 1f) else 0f,
                             onValueChange = { frac ->
@@ -850,465 +723,36 @@ private fun MediaPlayerModalImpl(
                             ),
                             modifier = Modifier.fillMaxWidth()
                         )
-
                         Spacer(modifier = Modifier.height(Spacing.sm))
-
-                        // Chip row: speed / audio / subtitles / aspect.
-                        LazyRow(
-                            horizontalArrangement = Arrangement.spacedBy(Spacing.xs),
-                            contentPadding = PaddingValues(horizontal = 0.dp)
-                        ) {
-                            items(PLAYBACK_SPEEDS) { sp ->
-                                Chip(
-                                    label = formatSpeed(sp),
-                                    selected = playbackSpeed == sp,
-                                    onClick = {
-                                        playbackSpeed = sp
-                                        exoPlayer.playbackParameters = PlaybackParameters(sp)
-                                        MediaPlayerPrefs.setPlaybackSpeed(context, sp)
-                                    }
-                                )
-                            }
-                            item {
-                                Chip(
-                                    label = currentAudioLabel ?: "Audio",
-                                    selected = false,
-                                    onClick = { showAudioSheet = true },
-                                    leading = {
-                                        Icon(
-                                            Icons.Filled.GraphicEq,
-                                            contentDescription = null,
-                                            tint = PlayerAccent,
-                                            modifier = Modifier.size(14.dp)
-                                        )
-                                    }
-                                )
-                            }
-                            item {
-                                Chip(
-                                    label = currentSubtitleLabel ?: "Subs",
-                                    selected = currentSubtitleLabel != null,
-                                    onClick = { showSubtitleSheet = true },
-                                    leading = {
-                                        Icon(
-                                            if (currentSubtitleLabel == null) Icons.Rounded.SubtitlesOff else Icons.Filled.Subtitles,
-                                            contentDescription = null,
-                                            tint = PlayerAccent,
-                                            modifier = Modifier.size(14.dp)
-                                        )
-                                    }
-                                )
-                            }
-                            item {
-                                Chip(
-                                    label = ASPECT_LABELS[resizeMode] ?: "Fit",
-                                    selected = false,
-                                    onClick = {
-                                        resizeMode = when (resizeMode) {
-                                            AspectRatioFrameLayout.RESIZE_MODE_FIT -> AspectRatioFrameLayout.RESIZE_MODE_FILL
-                                            AspectRatioFrameLayout.RESIZE_MODE_FILL -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM
-                                            else -> AspectRatioFrameLayout.RESIZE_MODE_FIT
-                                        }
-                                    },
-                                    leading = {
-                                        Icon(
-                                            Icons.Rounded.AspectRatio,
-                                            contentDescription = null,
-                                            tint = PlayerAccent,
-                                            modifier = Modifier.size(14.dp)
-                                        )
-                                    }
-                                )
-                            }
-                        }
-
-                        Spacer(modifier = Modifier.height(Spacing.sm))
-
-                        // Volume + brightness sliders side-by-side.
                         Row(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(Spacing.md)
+                            horizontalArrangement = Arrangement.spacedBy(Spacing.xs)
                         ) {
-                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
-                                Icon(
-                                    imageVector = when {
-                                        mediaVolume <= 0f -> Icons.Rounded.VolumeOff
-                                        mediaVolume < 0.5f -> Icons.Rounded.VolumeDown
-                                        else -> Icons.Rounded.VolumeUp
-                                    },
-                                    contentDescription = "Volume",
-                                    tint = Color.White,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                                Slider(
-                                    value = mediaVolume,
-                                    onValueChange = {
-                                        mediaVolume = it
-                                        exoPlayer.volume = it
-                                        MediaPlayerPrefs.setMediaVolume(context, it)
-                                    },
-                                    valueRange = 0f..1f,
-                                    colors = SliderDefaults.colors(
-                                        thumbColor = PlayerAccent,
-                                        activeTrackColor = PlayerAccent,
-                                        inactiveTrackColor = Color.White.copy(alpha = 0.3f)
-                                    ),
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .padding(start = Spacing.xs)
-                                )
-                            }
-                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
-                                Icon(
-                                    Icons.Rounded.Brightness6,
-                                    contentDescription = "Brightness",
-                                    tint = Color.White,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                                Slider(
-                                    value = if (windowBrightness < 0f) 0f else windowBrightness,
-                                    onValueChange = { v ->
-                                        windowBrightness = v
-                                    },
-                                    valueRange = 0f..1f,
-                                    colors = SliderDefaults.colors(
-                                        thumbColor = PlayerAccent,
-                                        activeTrackColor = PlayerAccent,
-                                        inactiveTrackColor = Color.White.copy(alpha = 0.3f)
-                                    ),
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .padding(start = Spacing.xs)
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-            } else {
-                // Portrait video layout: the picture sits in a 16:9 panel at
-                // the top (tap to play/pause) and every control lives below
-                // it, always visible — the overlay-on-letterbox design was
-                // unusable in portrait (user-reported). Fullscreen and audio
-                // keep the overlay experience above.
-                Column(modifier = Modifier.fillMaxSize()) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .statusBarsPadding()
-                            .clickable(
-                                interactionSource = remember { MutableInteractionSource() },
-                                indication = null
-                            ) {
-                                if (exoPlayer.isPlaying) exoPlayer.pause() else exoPlayer.play()
-                            },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        AndroidView(
-                            factory = { viewCtx ->
-                                PlayerView(viewCtx).apply {
-                                    useController = false
-                                    player = exoPlayer
-                                    resizeMode = resizeMode
-                                    setBackgroundColor(android.graphics.Color.BLACK)
-                                }
-                            },
-                            update = { view ->
-                                view.resizeMode = resizeMode
-                            },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .aspectRatio(16f / 9f)
-                        )
-                    }
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .weight(1f)
-                            .verticalScroll(rememberScrollState())
-                            .navigationBarsPadding()
-                            .padding(horizontal = Spacing.lg, vertical = Spacing.md),
-                        verticalArrangement = Arrangement.spacedBy(Spacing.md)
-                    ) {
-                        Text(
-                            text = ctx.title,
-                            color = Color.White,
-                            fontSize = 16.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = "Video • ${ext.uppercase()}",
-                                color = PlayerTextSecondary,
-                                fontSize = 12.sp,
-                                modifier = Modifier.padding(end = Spacing.sm)
-                            )
-                            Row(horizontalArrangement = Arrangement.spacedBy(Spacing.xs)) {
-                                PlayerCircleButton(
-                                    icon = Icons.Rounded.Fullscreen,
-                                    contentDescription = "Fullscreen",
-                                    onClick = { isFullscreen = !isFullscreen }
-                                )
-                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                                    PlayerCircleButton(
-                                        icon = Icons.Rounded.PictureInPicture,
-                                        contentDescription = "PiP",
-                                        onClick = {
-                                            activity?.let { act ->
-                                                try {
-                                                    val params = PictureInPictureParams.Builder()
-                                                        .setAspectRatio(Rational(16, 9))
-                                                        .build()
-                                                    act.enterPictureInPictureMode(params)
-                                                } catch (_: Exception) { /* PiP denied; ignore */ }
-                                            }
-                                        }
-                                    )
-                                }
-                                PlayerCircleButton(
-                                    icon = Icons.Rounded.OpenInNew,
-                                    contentDescription = "External Player",
-                                    onClick = {
-                                        playExternal(context, file)
-                                        onDismiss()
-                                    }
-                                )
-                                PlayerCircleButton(
-                                    icon = Icons.Default.Close,
-                                    contentDescription = "Close",
-                                    onClick = onDismiss
-                                )
-                            }
-                        }
-
-                        // Transport
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(Spacing.md, Alignment.CenterHorizontally),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            PlayerCircleButton(
-                                icon = Icons.Rounded.SkipPrevious,
-                                contentDescription = "Previous",
-                                onClick = playPrev,
-                                enabled = ctx.queuePeerPaths.indexOf(ctx.filePath) > 0,
-                                size = 44.dp,
-                                iconSize = 24.dp
-                            )
-                            PlayerCircleButton(
-                                icon = Icons.Rounded.Replay10,
-                                contentDescription = "Rewind 10s",
+                            PlayerChip(
+                                label = formatSpeed(playbackSpeed),
+                                selected = playbackSpeed != 1.0f,
                                 onClick = {
-                                    val target = (exoPlayer.currentPosition - 10_000).coerceAtLeast(0)
-                                    exoPlayer.seekTo(target)
-                                    currentPosition = target
+                                    val nextSpeed = PLAYBACK_SPEEDS[
+                                        (PLAYBACK_SPEEDS.indexOf(playbackSpeed) + 1) % PLAYBACK_SPEEDS.size
+                                    ]
+                                    playbackSpeed = nextSpeed
+                                    exoPlayer.playbackParameters = PlaybackParameters(nextSpeed)
+                                    MediaPlayerPrefs.setPlaybackSpeed(context, nextSpeed)
                                 },
-                                size = 48.dp,
-                                iconSize = 28.dp
+                                leading = Icons.Rounded.Speed
                             )
-                            IconButton(
-                                onClick = {
-                                    if (exoPlayer.isPlaying) exoPlayer.pause() else exoPlayer.play()
-                                },
-                                modifier = Modifier
-                                    .size(64.dp)
-                                    .background(PlayerAccent, CircleShape)
-                            ) {
-                                Icon(
-                                    imageVector = if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
-                                    contentDescription = if (isPlaying) "Pause" else "Play",
-                                    tint = Color.Black,
-                                    modifier = Modifier.size(36.dp)
-                                )
-                            }
-                            PlayerCircleButton(
-                                icon = Icons.Rounded.Forward10,
-                                contentDescription = "Forward 10s",
-                                onClick = {
-                                    val target = (exoPlayer.currentPosition + 10_000).coerceAtMost(exoPlayer.duration)
-                                    exoPlayer.seekTo(target)
-                                    currentPosition = target
-                                },
-                                size = 48.dp,
-                                iconSize = 28.dp
+                            PlayerChip(
+                                label = currentAudioLabel ?: "Audio",
+                                selected = false,
+                                onClick = { showAudioSheet = true },
+                                leading = Icons.Filled.GraphicEq
                             )
-                            PlayerCircleButton(
-                                icon = Icons.Rounded.SkipNext,
-                                contentDescription = "Next",
-                                onClick = playNext,
-                                enabled = ctx.queuePeerPaths.indexOf(ctx.filePath) in 0 until ctx.queuePeerPaths.lastIndex,
-                                size = 44.dp,
-                                iconSize = 24.dp
+                            PlayerChip(
+                                label = currentSubtitleLabel ?: "Subtitles",
+                                selected = currentSubtitleLabel != null,
+                                onClick = { showSubtitleSheet = true },
+                                leading = if (currentSubtitleLabel == null) Icons.Rounded.SubtitlesOff else Icons.Filled.Subtitles
                             )
-                        }
-
-                        // Seek
-                        Column {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Text(
-                                    text = formatDuration(currentPosition),
-                                    color = Color.White,
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Medium
-                                )
-                                Text(
-                                    text = formatDuration(duration),
-                                    color = PlayerTextSecondary,
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Medium
-                                )
-                            }
-                            Slider(
-                                value = if (duration > 0) (currentPosition.toFloat() / duration.toFloat()).coerceIn(0f, 1f) else 0f,
-                                onValueChange = { frac ->
-                                    val target = (frac * duration).toLong()
-                                    exoPlayer.seekTo(target)
-                                    currentPosition = target
-                                },
-                                colors = SliderDefaults.colors(
-                                    thumbColor = PlayerAccent,
-                                    activeTrackColor = PlayerAccent,
-                                    inactiveTrackColor = Color.White.copy(alpha = 0.3f)
-                                ),
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                        }
-
-                        // Chips: speed / audio / subtitles / aspect
-                        LazyRow(
-                            horizontalArrangement = Arrangement.spacedBy(Spacing.xs),
-                            contentPadding = PaddingValues(horizontal = 0.dp)
-                        ) {
-                            items(PLAYBACK_SPEEDS) { speed ->
-                                Chip(
-                                    label = formatSpeed(speed),
-                                    selected = playbackSpeed == speed,
-                                    onClick = {
-                                        playbackSpeed = speed
-                                        exoPlayer.playbackParameters = PlaybackParameters(speed)
-                                        MediaPlayerPrefs.setPlaybackSpeed(context, speed)
-                                    }
-                                )
-                            }
-                            item {
-                                Chip(
-                                    label = currentAudioLabel ?: "Audio",
-                                    selected = false,
-                                    onClick = { showAudioSheet = true },
-                                    leading = {
-                                        Icon(
-                                            Icons.Filled.GraphicEq,
-                                            contentDescription = null,
-                                            tint = PlayerAccent,
-                                            modifier = Modifier.size(14.dp)
-                                        )
-                                    }
-                                )
-                            }
-                            item {
-                                Chip(
-                                    label = currentSubtitleLabel ?: "Subs",
-                                    selected = currentSubtitleLabel != null,
-                                    onClick = { showSubtitleSheet = true },
-                                    leading = {
-                                        Icon(
-                                            if (currentSubtitleLabel == null) Icons.Rounded.SubtitlesOff else Icons.Filled.Subtitles,
-                                            contentDescription = null,
-                                            tint = PlayerAccent,
-                                            modifier = Modifier.size(14.dp)
-                                        )
-                                    }
-                                )
-                            }
-                            item {
-                                Chip(
-                                    label = ASPECT_LABELS[resizeMode] ?: "Fit",
-                                    selected = false,
-                                    onClick = {
-                                        resizeMode = when (resizeMode) {
-                                            AspectRatioFrameLayout.RESIZE_MODE_FIT -> AspectRatioFrameLayout.RESIZE_MODE_FILL
-                                            AspectRatioFrameLayout.RESIZE_MODE_FILL -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM
-                                            else -> AspectRatioFrameLayout.RESIZE_MODE_FIT
-                                        }
-                                    },
-                                    leading = {
-                                        Icon(
-                                            Icons.Rounded.AspectRatio,
-                                            contentDescription = null,
-                                            tint = PlayerAccent,
-                                            modifier = Modifier.size(14.dp)
-                                        )
-                                    }
-                                )
-                            }
-                        }
-
-                        // Volume + brightness
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(Spacing.md)
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
-                                Icon(
-                                    imageVector = when {
-                                        mediaVolume <= 0f -> Icons.Rounded.VolumeOff
-                                        mediaVolume < 0.5f -> Icons.Rounded.VolumeDown
-                                        else -> Icons.Rounded.VolumeUp
-                                    },
-                                    contentDescription = "Volume",
-                                    tint = Color.White,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                                Slider(
-                                    value = mediaVolume,
-                                    onValueChange = {
-                                        mediaVolume = it
-                                        exoPlayer.volume = it
-                                        MediaPlayerPrefs.setMediaVolume(context, it)
-                                    },
-                                    valueRange = 0f..1f,
-                                    colors = SliderDefaults.colors(
-                                        thumbColor = PlayerAccent,
-                                        activeTrackColor = PlayerAccent,
-                                        inactiveTrackColor = Color.White.copy(alpha = 0.3f)
-                                    ),
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .padding(start = Spacing.xs)
-                                )
-                            }
-                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
-                                Icon(
-                                    Icons.Rounded.Brightness6,
-                                    contentDescription = "Brightness",
-                                    tint = Color.White,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                                Slider(
-                                    value = if (windowBrightness < 0f) 0f else windowBrightness,
-                                    onValueChange = { v ->
-                                        windowBrightness = v
-                                    },
-                                    valueRange = 0f..1f,
-                                    colors = SliderDefaults.colors(
-                                        thumbColor = PlayerAccent,
-                                        activeTrackColor = PlayerAccent,
-                                        inactiveTrackColor = Color.White.copy(alpha = 0.3f)
-                                    ),
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .padding(start = Spacing.xs)
-                                )
-                            }
                         }
                     }
                 }
@@ -1345,12 +789,7 @@ private fun MediaPlayerModalImpl(
             onPick = { label ->
                 val off = label == "Off"
                 currentSubtitleLabel = if (off) null else label
-                applySubtitleByLabel(
-                    exoPlayer,
-                    exoPlayer.currentTracks,
-                    label,
-                    enable = !off
-                )
+                applySubtitleByLabel(exoPlayer, exoPlayer.currentTracks, label, enable = !off)
                 MediaPlayerPrefs.setSubtitleTrack(context, if (off) null else label)
                 showSubtitleSheet = false
             },
@@ -1358,13 +797,6 @@ private fun MediaPlayerModalImpl(
         )
     }
 }
-
-private val PLAYBACK_SPEEDS = listOf(0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 1.75f, 2.0f)
-private val ASPECT_LABELS = mapOf(
-    AspectRatioFrameLayout.RESIZE_MODE_FIT to "Fit",
-    AspectRatioFrameLayout.RESIZE_MODE_FILL to "Fill",
-    AspectRatioFrameLayout.RESIZE_MODE_ZOOM to "Zoom"
-)
 
 private fun formatSpeed(s: Float): String =
     if (s == s.toInt().toFloat()) "${s.toInt()}x" else "${s}x"
@@ -1388,23 +820,12 @@ private fun applySubtitleByLabel(
         }
         if (matchIdx < 0) return
         val group = textGroups[matchIdx].mediaTrackGroup
-        // When the user picked a specific track, force the override so
-        // ExoPlayer doesn't fall back to its own first-track default.
-        // When they picked "Off", disabling the type alone is enough —
-        // an earlier override on a disabled type is never selected, so
-        // we don't have to also clear it.
         builder.setOverrideForType(TrackSelectionOverride(group, 0))
     }
     player.trackSelectionParameters = builder.build()
 }
 
-/**
- * The one circle-button style for every player surface (fullscreen overlay
- * AND portrait controls). Previously each branch hand-rolled its own —
- * black 60% circles over video, white 12% circles in portrait — so toggling
- * fullscreen visibly swapped the button chrome. White-on-translucent reads
- * on both the black canvas and the dimmed video overlay.
- */
+/** One circle-button style for the whole player. */
 @Composable
 private fun PlayerCircleButton(
     icon: ImageVector,
@@ -1436,16 +857,14 @@ private fun PlayerCircleButton(
     }
 }
 
+/** Compact action chip for the bottom row (speed / audio / subtitles). */
 @Composable
-private fun Chip(
+private fun PlayerChip(
     label: String,
     selected: Boolean,
     onClick: () -> Unit,
-    leading: (@Composable () -> Unit)? = null
+    leading: ImageVector
 ) {
-    // White-translucent unselected background: the old black 60% was
-    // invisible on the portrait branch's pure-black canvas. Vertical
-    // padding sized for a >=40dp touch target (11sp label ≈ 16dp line).
     val bg = if (selected) PlayerAccent else Color.White.copy(alpha = 0.10f)
     val fg = if (selected) Color.Black else Color.White
     Row(
@@ -1461,10 +880,20 @@ private fun Chip(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(Spacing.xs)
     ) {
-        if (leading != null) {
-            leading()
-        }
-        Text(text = label, color = fg, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+        Icon(
+            leading,
+            contentDescription = null,
+            tint = fg,
+            modifier = Modifier.size(14.dp)
+        )
+        Text(
+            text = label,
+            color = fg,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
     }
 }
 
@@ -1506,9 +935,6 @@ private fun BottomChoiceSheet(
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier.padding(bottom = Spacing.md)
                 )
-                // Scrollable + height-bounded: an MKV with a dozen subtitle
-                // tracks used to push the unscrollable option list past the
-                // top edge of the screen.
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -1547,7 +973,7 @@ private fun playExternal(context: Context, file: File) {
     try {
         val ext = file.extension.lowercase()
         val mime = when (ext) {
-            "mp3", "m4a", "aac", "wav", "flac", "opus", "ogg" -> "audio/*"
+            in AUDIO_EXTS -> "audio/*"
             "mp4", "mkv", "avi", "mov", "webm", "ts" -> "video/*"
             else -> "*/*"
         }
@@ -1557,7 +983,7 @@ private fun playExternal(context: Context, file: File) {
             flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK
         }
         context.startActivity(Intent.createChooser(intent, "Play with"))
-    } catch (_: Exception) { /* external player unavailable; ignore */ }
+    } catch (_: Exception) { /* external player unavailable */ }
 }
 
 private fun formatDuration(ms: Long): String {
