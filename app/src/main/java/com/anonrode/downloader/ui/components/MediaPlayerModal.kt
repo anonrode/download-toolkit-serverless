@@ -40,6 +40,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Subtitles
+import androidx.compose.material.icons.rounded.AspectRatio
 import androidx.compose.material.icons.rounded.Forward10
 import androidx.compose.material.icons.rounded.Fullscreen
 import androidx.compose.material.icons.rounded.FullscreenExit
@@ -100,6 +101,7 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
 import androidx.media3.session.MediaSession
+import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import com.anonrode.downloader.ui.theme.Spacing
 import com.anonrode.downloader.ui.theme.StatusError
@@ -140,9 +142,10 @@ private val PlayerSurfaceElevated = Color(0xFF181B22)
  * The UI is deliberately basic: one layout for every orientation — black
  * surface, letterboxed video, tap anywhere to toggle controls, auto-hide
  * after 3s. Transport (prev / -10s / play / +10s / next), a seek bar, and
- * three chips: speed (tap to cycle), audio track, subtitles. No PiP, no
- * brightness/volume sliders, no aspect cycling — hardware keys and the
- * system handle those.
+ * four chips: speed (tap to cycle), audio track, subtitles, and a Fit/Crop
+ * display-framing cycle (FIT <-> ZOOM only; FILL would stretch, so it is
+ * never offered). No PiP, no brightness/volume sliders — hardware keys and
+ * the system handle those.
  */
 @OptIn(UnstableApi::class)
 @Composable
@@ -257,6 +260,14 @@ private fun MediaPlayerModalImpl(
     var tracksLoaded by remember { mutableStateOf(false) }
     // Fullscreen: rotate to landscape + hide system bars, YouTube-style.
     var isFullscreen by remember { mutableStateOf(false) }
+    // Display framing cycle: FIT (letterbox, default) <-> ZOOM (center-crop
+    // to fill). Media3's stretch-to-fill mode is deliberately never used —
+    // it distorts the video. Display-only: the file is never re-encoded or
+    // touched.
+    // Session-only, no persistence. AspectRatioFrameLayout re-measures on
+    // every layout pass, so rotation reframes automatically — no cached
+    // dimensions on this side.
+    var resizeMode by remember { mutableStateOf(AspectRatioFrameLayout.RESIZE_MODE_FIT) }
 
     // ---- Player + session: ONE instance for the modal's whole lifetime ----
     val exoPlayer = remember {
@@ -515,9 +526,24 @@ private fun MediaPlayerModalImpl(
                 factory = { viewCtx ->
                     PlayerView(viewCtx).apply {
                         useController = false
+                        // TextureView instead of the default SurfaceView: a
+                        // SurfaceView punches a hole through this Dialog's
+                        // window and its surface sits BEHIND the window, so
+                        // the letterbox area (transparent) let the app UI
+                        // bleed through around the video in fullscreen.
+                        // TextureView renders in the normal view hierarchy
+                        // with no hole-punch, so the black background below
+                        // actually covers the whole modal. Fine here because
+                        // playback is local files only (no DRM).
+                        setUseTextureView(true)
                         player = exoPlayer
                         setBackgroundColor(android.graphics.Color.BLACK)
                     }
+                },
+                update = { view ->
+                    // Live-apply the Fit/Crop cycle; also re-asserted after
+                    // any recomposition so the mode never drifts.
+                    view.resizeMode = resizeMode
                 },
                 modifier = if (isAudio) Modifier.size(1.dp) else Modifier.fillMaxSize()
             )
@@ -753,6 +779,20 @@ private fun MediaPlayerModalImpl(
                                 onClick = { showSubtitleSheet = true },
                                 leading = if (currentSubtitleLabel == null) Icons.Rounded.SubtitlesOff else Icons.Filled.Subtitles
                             )
+                            PlayerChip(
+                                label = if (resizeMode == AspectRatioFrameLayout.RESIZE_MODE_FIT) "Fit" else "Crop",
+                                selected = resizeMode != AspectRatioFrameLayout.RESIZE_MODE_FIT,
+                                onClick = {
+                                    // FIT <-> ZOOM only. Never the stretch-to-fill
+                                    // mode: FILL distorts, ZOOM center-crops.
+                                    resizeMode = if (resizeMode == AspectRatioFrameLayout.RESIZE_MODE_FIT) {
+                                        AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                                    } else {
+                                        AspectRatioFrameLayout.RESIZE_MODE_FIT
+                                    }
+                                },
+                                leading = Icons.Rounded.AspectRatio
+                            )
                         }
                     }
                 }
@@ -857,7 +897,7 @@ private fun PlayerCircleButton(
     }
 }
 
-/** Compact action chip for the bottom row (speed / audio / subtitles). */
+/** Compact action chip for the bottom row (speed / audio / subtitles / fit-crop). */
 @Composable
 private fun PlayerChip(
     label: String,
