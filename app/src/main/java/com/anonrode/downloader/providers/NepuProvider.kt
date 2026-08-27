@@ -17,6 +17,13 @@ object NepuProvider : SiteProvider {
     override val mainUrl: String get() = DynamicRulesManager.getBaseUrl(name)
 
     override suspend fun search(query: String): List<ShowCard> {
+        // OTA pipeline first (JSON API + URL synthesis live in the playbook);
+        // non-empty wins, else the compiled path below runs.
+        DynamicRulesManager.getPipeline(name)?.search?.let { pl ->
+            val results = RulesPipeline.runSearch(name, pl, query)
+            if (results.isNotEmpty()) return results
+        }
+
         val results = mutableListOf<ShowCard>()
         try {
             val encoded = URLEncoder.encode(query, "UTF-8")
@@ -62,6 +69,16 @@ object NepuProvider : SiteProvider {
             url = showUrl,
             site = name
         )
+
+        DynamicRulesManager.getPipeline(name)?.episodes?.let { pl ->
+            val res = RulesPipeline.runEpisodes(name, pl, showUrl)
+            if (res != null && res.episodes.isNotEmpty()) {
+                // The playbook carries no meta for nepu — the show title stays
+                // the compiled TV/Movie default derived from the URL.
+                val card = ShowCard(title = res.metaTitle ?: show.title, url = showUrl, site = name)
+                return ShowDetails(show = card, synopsis = res.metaSynopsis ?: "", episodes = res.episodes)
+            }
+        }
 
         if (showUrl.contains("/tv/")) {
             val episodes = mutableListOf<EpisodeItem>()

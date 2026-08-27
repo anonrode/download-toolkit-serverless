@@ -16,6 +16,14 @@ object NkiriProvider : SiteProvider {
     override val mainUrl: String get() = DynamicRulesManager.getBaseUrl(name)
 
     override suspend fun search(query: String): List<ShowCard> {
+        // OTA pipeline first: a signed playbook can rewrite this site's search
+        // (selectors, mirrors, filters) without an app update. Non-empty wins;
+        // anything less falls through to the compiled path below untouched.
+        DynamicRulesManager.getPipeline(name)?.search?.let { pl ->
+            val results = RulesPipeline.runSearch(name, pl, query)
+            if (results.isNotEmpty()) return results
+        }
+
         val results = mutableListOf<ShowCard>()
         val encoded = URLEncoder.encode(query, "UTF-8")
         // Failover: the original IP (80.82.65.46) is ISP-blocked on some
@@ -77,6 +85,20 @@ object NkiriProvider : SiteProvider {
 
     override suspend fun loadEpisodes(showUrl: String): ShowDetails {
         val cleanUrl = showUrl.substringBefore("?")
+
+        DynamicRulesManager.getPipeline(name)?.episodes?.let { pl ->
+            val res = RulesPipeline.runEpisodes(name, pl, cleanUrl)
+            if (res != null && res.episodes.isNotEmpty()) {
+                val card = ShowCard(
+                    title = res.metaTitle ?: "NKiri Show",
+                    url = cleanUrl,
+                    posterUrl = res.metaPoster ?: "",
+                    site = name
+                )
+                return ShowDetails(show = card, synopsis = res.metaSynopsis ?: "", episodes = res.episodes)
+            }
+        }
+
         val show = ShowCard(title = "NKiri Show", url = cleanUrl, site = name)
         try {
             val html = HttpClient.getText(cleanUrl, referer = "$mainUrl/") ?: return ShowDetails(show = show)

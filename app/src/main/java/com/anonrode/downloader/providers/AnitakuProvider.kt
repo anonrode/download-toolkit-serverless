@@ -22,77 +22,100 @@ object AnitakuProvider : SiteProvider {
     override val name: String = "anitaku"
     override val mainUrl: String get() = DynamicRulesManager.getBaseUrl(name)
 
-    override suspend fun search(query: String): List<ShowCard> = coroutineScope {
-        val endpoints = listOf(
-            "https://gogoanime.or.at/wp-admin/admin-ajax.php" to "https://gogoanime.or.at/",
-            "https://anitaku.com.ro/wp-admin/admin-ajax.php" to "https://anitaku.com.ro/"
-        )
+    override suspend fun search(query: String): List<ShowCard> {
+        // OTA pipeline first (dual admin-ajax POST merge lives in the playbook);
+        // non-empty wins, else the compiled dual-endpoint path below runs.
+        DynamicRulesManager.getPipeline(name)?.search?.let { pl ->
+            val results = RulesPipeline.runSearch(name, pl, query)
+            if (results.isNotEmpty()) return results
+        }
 
-        val cleanQuery = query.replace(Regex("""(?i) (season|series|part|s\d+)\s*\d* """), "").trim()
-        val queryToUse = if (cleanQuery.length >= 2) cleanQuery else query
+        return coroutineScope {
+            val endpoints = listOf(
+                "https://gogoanime.or.at/wp-admin/admin-ajax.php" to "https://gogoanime.or.at/",
+                "https://anitaku.com.ro/wp-admin/admin-ajax.php" to "https://anitaku.com.ro/"
+            )
 
-        val deferreds = endpoints.map { (ajaxUrl, referer) ->
-            async(Dispatchers.IO) {
-                val batch = mutableListOf<ShowCard>()
-                try {
-                    val form = FormBody.Builder()
-                        .add("action", "ts_ac_do_search")
-                        .add("ts_ac_query", queryToUse)
-                        .build()
+            val cleanQuery = query.replace(Regex("""(?i) (season|series|part|s\d+)\s*\d* """), "").trim()
+            val queryToUse = if (cleanQuery.length >= 2) cleanQuery else query
 
-                    val req = Request.Builder()
-                        .url(ajaxUrl)
-                        .header("User-Agent", HttpClient.DEFAULT_UA)
-                        .header("Referer", referer)
-                        .header("X-Requested-With", "XMLHttpRequest")
-                        .post(form)
-                        .build()
+            val deferreds = endpoints.map { (ajaxUrl, referer) ->
+                async(Dispatchers.IO) {
+                    val batch = mutableListOf<ShowCard>()
+                    try {
+                        val form = FormBody.Builder()
+                            .add("action", "ts_ac_do_search")
+                            .add("ts_ac_query", queryToUse)
+                            .build()
 
-                    HttpClient.shared.newCall(req).execute().use { res ->
-                        if (!res.isSuccessful) return@use
-                        val body = res.body?.string() ?: return@use
-                        val json = JSONObject(body)
+                        val req = Request.Builder()
+                            .url(ajaxUrl)
+                            .header("User-Agent", HttpClient.DEFAULT_UA)
+                            .header("Referer", referer)
+                            .header("X-Requested-With", "XMLHttpRequest")
+                            .post(form)
+                            .build()
 
-                        val keys = json.keys()
-                        while (keys.hasNext()) {
-                            val key = keys.next()
-                            val group = json.optJSONArray(key) ?: continue
-                            for (i in 0 until group.length()) {
-                                val block = group.optJSONObject(i) ?: continue
-                                val all = block.optJSONArray("all") ?: continue
-                                for (j in 0 until all.length()) {
-                                    val item = all.getJSONObject(j)
-                                    val link = item.optString("post_link")
-                                    val title = item.optString("post_title")
-                                    val image = item.optString("post_image")
-                                    val sub = item.optString("post_sub")
+                        HttpClient.shared.newCall(req).execute().use { res ->
+                            if (!res.isSuccessful) return@use
+                            val body = res.body?.string() ?: return@use
+                            val json = JSONObject(body)
 
-                                    if (link.isNotBlank() && title.isNotBlank()) {
-                                        batch.add(
-                                            ShowCard(
-                                                title = title,
-                                                url = link,
-                                                posterUrl = image,
-                                                site = name,
-                                                category = "Anime ${if (sub.isNotBlank()) "($sub)" else ""}"
+                            val keys = json.keys()
+                            while (keys.hasNext()) {
+                                val key = keys.next()
+                                val group = json.optJSONArray(key) ?: continue
+                                for (i in 0 until group.length()) {
+                                    val block = group.optJSONObject(i) ?: continue
+                                    val all = block.optJSONArray("all") ?: continue
+                                    for (j in 0 until all.length()) {
+                                        val item = all.getJSONObject(j)
+                                        val link = item.optString("post_link")
+                                        val title = item.optString("post_title")
+                                        val image = item.optString("post_image")
+                                        val sub = item.optString("post_sub")
+
+                                        if (link.isNotBlank() && title.isNotBlank()) {
+                                            batch.add(
+                                                ShowCard(
+                                                    title = title,
+                                                    url = link,
+                                                    posterUrl = image,
+                                                    site = name,
+                                                    category = "Anime ${if (sub.isNotBlank()) "($sub)" else ""}"
+                                                )
                                             )
-                                        )
+                                        }
                                     }
                                 }
                             }
                         }
-                    }
-                } catch (_: Exception) {}
-                batch
+                    } catch (_: Exception) {}
+                    batch
+                }
             }
-        }
 
-        val allResults = deferreds.awaitAll().flatten()
-        allResults.distinctBy { it.url }
+            val allResults = deferreds.awaitAll().flatten()
+            allResults.distinctBy { it.url }
+        }
     }
 
     override suspend fun loadEpisodes(showUrl: String): ShowDetails {
         val show = ShowCard(title = "Anime", url = showUrl, site = name)
+
+        DynamicRulesManager.getPipeline(name)?.episodes?.let { pl ->
+            val res = RulesPipeline.runEpisodes(name, pl, showUrl)
+            if (res != null && res.episodes.isNotEmpty()) {
+                val card = ShowCard(
+                    title = res.metaTitle ?: "Anime",
+                    url = showUrl,
+                    posterUrl = res.metaPoster ?: "",
+                    site = name
+                )
+                return ShowDetails(show = card, synopsis = res.metaSynopsis ?: "", episodes = res.episodes)
+            }
+        }
+
         try {
             val html = HttpClient.getText(showUrl) ?: return ShowDetails(show = show)
             val doc = Jsoup.parse(html, showUrl)
