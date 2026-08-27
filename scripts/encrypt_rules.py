@@ -42,8 +42,8 @@ from cryptography.hazmat.primitives import padding
 
 RULES_KEY = bytes.fromhex("8f3a9c21d4e65b0789a2c4f6d1e3b5a7")   # 16 bytes (unchanged)
 
-# CANONICAL copy lives here (scripts/) — the monolith probe/encrypt_rules.py
-# is a mirror; keep the two in sync.
+# CANONICAL copy lives here (scripts/) and is the one CI imports; there is no
+# longer a probe/ mirror. The app-side counterpart is DynamicRulesManager.kt.
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SERVERLESS = REPO_ROOT
 # Local dev: the keypair lives in ~/anon-serverless-app-maintenance-build/
@@ -65,6 +65,291 @@ MAX_PLAINTEXT_BYTES = 512 * 1024
 MAX_SELECTOR_LEN = 600
 MAX_RULES_ARRAY = 64
 REQUIRED_TOP_KEYS_VERSIONED = ("version",)
+
+# --- step-pipeline vocabulary (must mirror providers/RulesPipeline.kt) ---
+# Closed vocabulary: anything not listed here is refused at validation time,
+# so a typo'd primitive can never ship silently to the app. Adding a new
+# primitive requires updating RulesPipeline.kt, this validator, and the
+# probe harness in the same change.
+PIPELINE_MAX_STEPS = 8
+PIPELINE_MAX_SOURCES = 4
+FIELD_SPEC_PREFIXES = ("literal:", "link:", "selector:", "attr:",
+                       "field:", "var:", "template:")
+LABEL_CHAIN_STRINGS = ("text", "counter")
+LABEL_CHAIN_OBJ_KEYS = ("text", "regexText", "regexUrl", "label")
+
+
+def _check_field_spec(spec, where, problems):
+    """A field spec is a string or an array of alternative strings, each a
+    known primitive (see FIELD_SPEC_PREFIXES / RulesPipeline.kt)."""
+    if isinstance(spec, list):
+        if len(spec) > PIPELINE_MAX_SOURCES * 2:
+            problems.append(f"{where}: at most 8 alternatives")
+            return
+        specs = spec
+    else:
+        specs = [spec]
+    for s in specs:
+        if not isinstance(s, str) or not s or len(s) > MAX_SELECTOR_LEN:
+            problems.append(
+                f"{where}: field spec must be a non-empty string <= {MAX_SELECTOR_LEN}")
+        elif s != "self" and not s.startswith(FIELD_SPEC_PREFIXES):
+            problems.append(
+                f"{where}: unknown field spec {s[:40]!r} (closed vocabulary)")
+
+
+def _check_regex(val, where, problems, max_len=300):
+    import re as _re
+    if not isinstance(val, str) or not val or len(val) > max_len:
+        problems.append(f"{where}: regex must be a non-empty string <= {max_len}")
+        return
+    try:
+        _re.compile(val)
+    except _re.error as e:
+        problems.append(f"{where}: invalid regex: {e}")
+
+
+def _validate_pipeline_items(where, items, problems):
+    if not isinstance(items, dict):
+        problems.append(f"{where}: must be an object")
+        return
+
+    for key in ("urlBlacklist", "urlAllowlist"):
+        arr = items.get(key)
+        if arr is not None:
+            if not isinstance(arr, list) or len(arr) > MAX_RULES_ARRAY:
+                problems.append(f"{where}.{key}: list <= {MAX_RULES_ARRAY}")
+            elif not all(isinstance(x, str) and len(x) <= 200 for x in arr):
+                problems.append(f"{where}.{key}: entries must be short strings")
+
+    if "limit" in items and (not isinstance(items["limit"], int)
+                             or not 1 <= items["limit"] <= 500):
+        problems.append(f"{where}.limit: int in 1..500")
+    if "urlStripQuery" in items and not isinstance(items["urlStripQuery"], bool):
+        problems.append(f"{where}.urlStripQuery: must be a boolean")
+
+    qt = items.get("queryTransform")
+    if qt is not None:
+        if not isinstance(qt, dict):
+            problems.append(f"{where}.queryTransform: must be an object")
+        else:
+            if "stripRegex" in qt:
+                _check_regex(qt["stripRegex"], f"{where}.queryTransform.stripRegex",
+                             problems, max_len=200)
+            if "minLength" in qt and not isinstance(qt["minLength"], int):
+                problems.append(f"{where}.queryTransform.minLength: must be an int")
+
+    for field in ("title", "url", "poster", "year"):
+        if field in items:
+            _check_field_spec(items[field], f"{where}.{field}", problems)
+
+    cat = items.get("category")
+    if cat is not None:
+        if isinstance(cat, str):
+            _check_field_spec(cat, f"{where}.category", problems)
+        elif isinstance(cat, dict):
+            if "keywords" in cat:
+                kws = cat["keywords"]
+                if not isinstance(kws, list) or len(kws) > MAX_RULES_ARRAY:
+                    problems.append(f"{where}.category.keywords: list <= {MAX_RULES_ARRAY}")
+                else:
+                    for i, rule in enumerate(kws):
+                        if (not isinstance(rule, dict)
+                                or not isinstance(rule.get("contains"), list)
+                                or not rule.get("value")):
+                            problems.append(
+                                f"{where}.category.keywords[{i}]: needs contains[] and value")
+        else:
+            problems.append(f"{where}.category: must be a string or object")
+
+    # episode-stage keys
+    if "anchorSelector" in items:
+        sel = items["anchorSelector"]
+        if not isinstance(sel, str) or len(sel) > MAX_SELECTOR_LEN:
+            problems.append(f"{where}.anchorSelector: string <= {MAX_SELECTOR_LEN}")
+    if "hrefRegex" in items:
+        _check_regex(items["hrefRegex"], f"{where}.hrefRegex", problems)
+    if items.get("sortBy", "none") not in ("none", "captures"):
+        problems.append(f"{where}.sortBy: must be none|captures")
+
+    lc = items.get("labelChain")
+    if lc is not None:
+        if not isinstance(lc, list) or len(lc) > PIPELINE_MAX_STEPS:
+            problems.append(f"{where}.labelChain: list <= {PIPELINE_MAX_STEPS}")
+        else:
+            for i, entry in enumerate(lc):
+                ew = f"{where}.labelChain[{i}]"
+                if isinstance(entry, str):
+                    if entry not in LABEL_CHAIN_STRINGS and not entry.startswith("sibling:"):
+                        problems.append(f"{ew}: unknown primitive {entry!r}")
+                elif isinstance(entry, dict):
+                    if not any(k in entry for k in LABEL_CHAIN_OBJ_KEYS):
+                        problems.append(
+                            f"{ew}: needs one of {'|'.join(LABEL_CHAIN_OBJ_KEYS)}")
+                    for rk in ("regexText", "regexUrl"):
+                        if rk in entry:
+                            _check_regex(entry[rk], f"{ew}.{rk}", problems)
+                    if "text" in entry and not isinstance(entry["text"], dict):
+                        problems.append(f"{ew}.text: must be an object")
+                else:
+                    problems.append(f"{ew}: must be a string or object")
+
+    numbering = items.get("numbering")
+    if numbering is not None:
+        if not isinstance(numbering, dict):
+            problems.append(f"{where}.numbering: must be an object")
+        else:
+            chain = numbering.get("chain")
+            if chain is not None:
+                if not isinstance(chain, list) or len(chain) > PIPELINE_MAX_STEPS:
+                    problems.append(f"{where}.numbering.chain: list <= {PIPELINE_MAX_STEPS}")
+                else:
+                    for i, entry in enumerate(chain):
+                        if (not isinstance(entry, dict)
+                                or not any(k in entry for k in ("regexText", "regexUrl"))):
+                            problems.append(
+                                f"{where}.numbering.chain[{i}]: needs regexText|regexUrl")
+                        else:
+                            for rk in ("regexText", "regexUrl"):
+                                if rk in entry:
+                                    _check_regex(entry[rk],
+                                                 f"{where}.numbering.chain[{i}].{rk}",
+                                                 problems)
+
+    fb = items.get("fallbackSingle")
+    if fb is not None:
+        if not isinstance(fb, dict) or not fb.get("title"):
+            problems.append(f"{where}.fallbackSingle: object with 'title' required")
+        else:
+            when = fb.get("when", "always")
+            if when != "always" and not (isinstance(when, str)
+                                         and when.startswith("hasElement:")):
+                problems.append(f"{where}.fallbackSingle.when: always|hasElement:<css>")
+
+    meta = items.get("meta")
+    if meta is not None:
+        if not isinstance(meta, dict):
+            problems.append(f"{where}.meta: must be an object")
+        else:
+            for field in ("title", "poster", "synopsis"):
+                if field in meta:
+                    _check_field_spec(meta[field], f"{where}.meta.{field}", problems)
+            tc = meta.get("titleCleanup")
+            if tc is not None:
+                if not isinstance(tc, list) or len(tc) > PIPELINE_MAX_STEPS:
+                    problems.append(f"{where}.meta.titleCleanup: list <= {PIPELINE_MAX_STEPS}")
+                else:
+                    for i, op in enumerate(tc):
+                        if op != "trim" and not (
+                                isinstance(op, dict)
+                                and any(k in op for k in ("removePrefix", "substringBefore"))):
+                            problems.append(
+                                f"{where}.meta.titleCleanup[{i}]: "
+                                "trim | removePrefix | substringBefore")
+
+    vars_ = items.get("vars")
+    if vars_ is not None:
+        if not isinstance(vars_, dict):
+            problems.append(f"{where}.vars: must be an object")
+        else:
+            for vk, vv in vars_.items():
+                _check_field_spec(vv, f"{where}.vars.{vk}", problems)
+
+    defaults = items.get("defaults")
+    if defaults is not None:
+        if not isinstance(defaults, dict):
+            problems.append(f"{where}.defaults: must be an object")
+        elif not all(isinstance(v, str) for v in defaults.values()):
+            problems.append(f"{where}.defaults: values must be strings")
+
+
+def _validate_pipeline(where, pl, problems):
+    if not isinstance(pl, dict):
+        problems.append(f"{where}: must be an object")
+        return
+    steps = pl.get("steps")
+    if not isinstance(steps, list) or not 1 <= len(steps) <= PIPELINE_MAX_STEPS:
+        problems.append(f"{where}.steps: must be a list of 1-{PIPELINE_MAX_STEPS} steps")
+        return
+    for i, step in enumerate(steps):
+        w = f"{where}.steps[{i}]"
+        if not isinstance(step, dict):
+            problems.append(f"{w}: must be an object")
+            continue
+        if step.get("mode", "single") not in ("single", "failover", "merge"):
+            problems.append(f"{w}.mode: must be single|failover|merge")
+        if step.get("as", "html") not in ("html", "json", "rss"):
+            problems.append(f"{w}.as: must be html|json|rss")
+
+        sources = step.get("sources")
+        if not isinstance(sources, list) or not 1 <= len(sources) <= PIPELINE_MAX_SOURCES:
+            problems.append(
+                f"{w}.sources: must be a list of 1-{PIPELINE_MAX_SOURCES} sources")
+            continue
+        for j, src in enumerate(sources):
+            sw = f"{w}.sources[{j}]"
+            if not isinstance(src, dict) or not src.get("url"):
+                problems.append(f"{sw}: object with non-empty 'url' required")
+                continue
+            if not isinstance(src["url"], str) or len(src["url"]) > MAX_SELECTOR_LEN:
+                problems.append(f"{sw}.url: string <= {MAX_SELECTOR_LEN}")
+            if src.get("method", "GET") not in ("GET", "POST"):
+                problems.append(f"{sw}.method: must be GET|POST")
+            headers = src.get("headers") or {}
+            if not isinstance(headers, dict):
+                problems.append(f"{sw}.headers: must be an object")
+            else:
+                for hk, hv in headers.items():
+                    if not isinstance(hv, str) or len(hv) > MAX_SELECTOR_LEN:
+                        problems.append(f"{sw}.headers.{hk}: string <= {MAX_SELECTOR_LEN}")
+            form = src.get("form") or {}
+            if not isinstance(form, dict):
+                problems.append(f"{sw}.form: must be an object")
+            else:
+                for fk, fv in form.items():
+                    if not isinstance(fv, str) or len(fv) > MAX_SELECTOR_LEN:
+                        problems.append(f"{sw}.form.{fk}: string <= {MAX_SELECTOR_LEN}")
+
+        bind = step.get("bind")
+        if bind is not None:
+            if not isinstance(bind, dict):
+                problems.append(f"{w}.bind: must be an object")
+            else:
+                for bk, bv in bind.items():
+                    if (not isinstance(bv, dict)
+                            or not any(k in bv for k in ("regex", "json", "selector"))):
+                        problems.append(f"{w}.bind.{bk}: needs regex|json|selector")
+
+        if "items" in step:
+            _validate_pipeline_items(f"{w}.items", step["items"], problems)
+
+
+def validate_pipelines(obj) -> list:
+    """Deep validation of the declarative step-pipeline key. Mirrors the
+    parse-time bounds in PipelineModels.kt and the closed vocabulary in
+    RulesPipeline.kt — a payload that fails here can never be emitted."""
+    problems = []
+    pipelines = obj.get("pipelines")
+    if pipelines is None:
+        return problems
+    if not isinstance(pipelines, dict):
+        return ["pipelines must be an object"]
+    for site, pl in pipelines.items():
+        where = f"pipelines.{site}"
+        if not isinstance(pl, dict):
+            problems.append(f"{where}: must be an object")
+            continue
+        if pl.get("schema") != 1:
+            problems.append(f"{where}: schema must be 1 (unknown versions are refused)")
+            continue
+        known = {"schema", "search", "episodes"}
+        for key in pl.keys():
+            if key not in known:
+                problems.append(f"{where}: unknown key '{key}'")
+        for stage in ("search", "episodes"):
+            if stage in pl:
+                _validate_pipeline(f"{where}.{stage}", pl[stage], problems)
+    return problems
 
 
 def verify_envelope(text: str, pub_b64: str = OTA_PUB_B64) -> bool:
@@ -167,9 +452,15 @@ def validate_schema(plain: bytes) -> list:
                        "directMediaExtensions", "dynamic_providers", "lockerHosts",
                        "hostPolicies", "searchStrategies", "urlTemplates",
                        "knownDead", "tokenTtlMinutes", "validation",
-                       "minAppVersion"):
+                       "minAppVersion", "pipelines"):
             problems.append(f"unknown top-level field '{key}' (add it to the "
                             "allow-list in encrypt_rules.py AND DynamicRulesManager)")
+
+    mav = obj.get("minAppVersion")
+    if mav is not None and (not isinstance(mav, int) or isinstance(mav, bool) or mav <= 0):
+        problems.append("minAppVersion must be a positive integer")
+
+    problems.extend(validate_pipelines(obj))
     return problems
 
 

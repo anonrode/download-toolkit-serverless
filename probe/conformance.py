@@ -33,6 +33,8 @@ from urllib.parse import quote, urljoin, urlparse
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
 import encrypt_rules as ota  # noqa: E402  (canonical pipeline module)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import pipeline_mirror as pm  # noqa: E402  (app-executor mirror for `pipelines`)
 
 from curl_cffi import requests as creq  # noqa: E402
 
@@ -132,6 +134,24 @@ class Paced:
                          headers={"Referer": referer} if referer else None)
             body = r.content[:PAGE_CAP]
             return r.status_code, body
+        except Exception as e:
+            return -1, str(e).encode()[:200]
+
+    def post_form(self, url, form, referer=None, headers=None):
+        """Form-urlencoded POST (admin-ajax style searches). Same pacing,
+        timeout and body cap as get()."""
+        host = url.split("/")[2] if "://" in url else url
+        wait = PACE_S - (time.time() - self.last.get(host, 0))
+        if wait > 0:
+            time.sleep(wait)
+        self.last[host] = time.time()
+        try:
+            h = dict(headers or {})
+            if referer:
+                h["Referer"] = referer
+            r = creq.post(url, data=form, impersonate="chrome", timeout=TIMEOUT,
+                          allow_redirects=True, headers=h or None)
+            return r.status_code, r.content[:PAGE_CAP]
         except Exception as e:
             return -1, str(e).encode()[:200]
 
@@ -517,8 +537,56 @@ def run_strategy_chain(s, rules, site, query):
     return None, None
 
 
+def run_site_pipeline(s, rules, site, pipeline, out_path):
+    """Rules-driven stages for sites on the declarative step-pipeline
+    schema: stages 1-2 execute the playbook's search/episodes pipelines
+    exactly as the app would (pipeline_mirror), then stages 3-4 run on
+    whatever those produced (direct-pass on the card URLs, locker
+    discovery on the episode page). Sites with pipelines no longer rely
+    on generic ?s= guessing."""
+    q = SEARCH_QUERIES.get(site, ["movie"])[0]
+
+    cards = pm.run_pipeline_search(s, rules, site, pipeline.get("search") or {}, q)
+    search_ok = len(cards) > 0
+    search_detail = f"pipeline: {len(cards)} cards"
+
+    ep_ok, ep_detail, ep_body = None, "skipped", None
+    show_url = cards[0]["url"] if cards else None
+    if show_url and pipeline.get("episodes"):
+        eps, ep_body = pm.run_pipeline_episodes(
+            s, rules, site, pipeline["episodes"], show_url)
+        ep_ok = len(eps) > 0
+        ep_detail = f"pipeline: {len(eps)} episodes from {show_url}"
+
+    hrefs = [c["url"] for c in cards][:50]
+    dp_ok, dp_detail = stage_direct_pass(rules, hrefs if search_ok else [])
+
+    ld_ok, ld_detail = None, "no page fetched"
+    if ep_body:
+        ld_ok, ld_detail = stage_locker_discovery(rules, site, ep_body, show_url or "")
+
+    records = []
+    for name, okv, detail in (("search", search_ok, search_detail),
+                              ("episodes", ep_ok, ep_detail),
+                              ("direct_pass", dp_ok, dp_detail),
+                              ("locker_discovery", ld_ok, ld_detail)):
+        records.append({"site": site, "stage": name,
+                        "pass": bool(okv) if okv is not None else None,
+                        "detail": detail, "via": "pipeline"})
+    with open(out_path, "a", encoding="utf-8") as f:
+        for r in records:
+            f.write(json.dumps(r) + "\n")
+    return records
+
+
 def run_site(site, rules, titles, shows_cap, out_path):
     s = Paced()
+    # Sites with a declarative step pipeline are verified through it —
+    # the same execution path the app uses (rules-driven, not guessed).
+    pipeline = rules.get("pipelines", {}).get(site)
+    if isinstance(pipeline, dict) and pipeline.get("schema") == 1:
+        return run_site_pipeline(s, rules, site, pipeline, out_path)
+
     records = []
     q = SEARCH_QUERIES.get(site, ["movie"])[0]
     search_ok, search_detail = stage_search(s, rules, site, q)

@@ -73,6 +73,9 @@ import requests
 from requests.exceptions import RequestException
 from bs4 import BeautifulSoup
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import pipeline_mirror as pm  # noqa: E402  (app-executor mirror for `pipelines`)
+
 # ----- Constants (hard rules from the brief) -----
 PACE_S = 0.150                 # 150 ms minimum per-host delay
 TIMEOUT_S = 20                 # 20 s per-request timeout
@@ -85,9 +88,10 @@ UA = ("AnonDownloader-Conformance/1.0 "
       "Python-requests")
 
 # All 11 sites the app supports. The 6 rules-driven sites drive search via
-# scraper_rules.json["sites"][<site>]; the 5 parity-driven sites have a
-# custom search flow (mostly apibay JSON for torrents, ?s= for the others).
-# Both flavours are exercised here.
+# scraper_rules.json["sites"][<site>]; nkiri/dramakey/anitaku/nepu run their
+# search + episode navigation through the declarative "pipelines" key (the
+# same executor the app uses — see probe/pipeline_mirror.py); torrents stays
+# parity-driven (apibay JSON). All flavours are exercised here.
 ALL_SITES = [
     "pluto", "9jarocks", "naijavault", "asianc", "dramarain", "naijaprey",
     "nkiri", "dramakey", "anitaku", "nepu", "torrents",
@@ -120,9 +124,9 @@ MAGNET_SITES = {"torrents"}
 # Parity-driven sites use Kotlin resolver algorithms that we cannot run
 # from a plain Python cross-check (JS unpackers, wasm, AES chains, etc.).
 # For these sites, stages 3 (crack) and 4 (1KB probe) are intentionally
-# N/A — we can only verify that the search endpoint and the show page
-# still load and expose some structure. The JVM unit tests are the right
-# place to verify the actual resolver code.
+# N/A — stages 1-2 verify navigation only (via the playbook's pipelines
+# for the four migrated sites). The JVM unit tests are the right place to
+# verify the actual resolver code.
 PARITY_SITES = {"nkiri", "dramakey", "anitaku", "nepu"}
 
 # Known media file extensions and locker host seeds. The "known" set
@@ -345,6 +349,37 @@ class Paced:
             return r.status_code, body, meta
         except RequestException as e:
             return -1, str(e).encode()[:200], {
+                "status": -1, "error": str(e)[:160],
+                "latency_ms": int((time.time() - t0) * 1000), "host": host,
+            }
+
+    def post_form(self, url: str, form: dict, referer: Optional[str] = None,
+                  headers: Optional[dict] = None) -> tuple:
+        """Form-urlencoded POST (admin-ajax style searches). Same pacing,
+        robots gate, timeout and PAGE_CAP as get()."""
+        host = urllib.parse.urlparse(url).hostname or ""
+        if not self._robots_allows(url):
+            return -2, b"", {"reason": "robots_disallow", "host": host}
+        self._pace(host)
+        h = dict(headers or {})
+        if referer:
+            h["Referer"] = referer
+        t0 = time.time()
+        try:
+            r = self.session.post(url, data=form, headers=h,
+                                  timeout=self.timeout, allow_redirects=True)
+            body = r.content[:PAGE_CAP]
+            meta = {
+                "status": r.status_code,
+                "content_type": (r.headers.get("Content-Type") or "").lower(),
+                "bytes_received": len(r.content),
+                "latency_ms": int((time.time() - t0) * 1000),
+                "final_url": r.url,
+                "host": host,
+            }
+            return r.status_code, body, meta
+        except RequestException as e:
+            return -1, b"", {
                 "status": -1, "error": str(e)[:160],
                 "latency_ms": int((time.time() - t0) * 1000), "host": host,
             }
@@ -921,7 +956,70 @@ def stage_probe(s: Paced, rules: dict, site: str, resolved, resolved_kind,
 
 # ----- Top-level per-site runner -----
 
+def run_site_pipeline(s: Paced, rules: dict, site: str, pipeline: dict,
+                      out: list) -> dict:
+    """Rules-driven stages 1-2 for sites on the declarative step-pipeline
+    schema: executes the playbook's own search/episodes pipelines via
+    pipeline_mirror (same semantics as the app's RulesPipeline.kt), so a
+    selector or endpoint that decays in the payload is caught here instead
+    of reaching users. Stages 3-4 stay N/A — resolvers are compiled code
+    verified by JVM unit tests (same treatment as the other parity sites).
+    """
+    queries = QUERIES.get(site, ["movie"])
+
+    passed = False
+    first_q = queries[0] if queries else "-"
+    cards = []
+    for q in queries:
+        found = pm.run_pipeline_search(s, rules, site,
+                                       pipeline.get("search") or {}, q)
+        if found:
+            passed, first_q, cards = True, q, found
+            out.append({"site": site, "stage": "search", "pass": True,
+                        "query": q, "url": "pipeline", "http_status": 200,
+                        "cards": len(found), "via": "pipeline", "error": ""})
+            break
+        out.append({"site": site, "stage": "search", "pass": False,
+                    "query": q, "url": "pipeline", "http_status": None,
+                    "via": "pipeline", "error": "pipeline_no_results"})
+    s1 = {"pass": passed, "query": first_q, "url": "-"}
+
+    show_url = cards[0]["url"] if cards else None
+    s2 = {"pass": None, "error": "no show URL (search failed)"}
+    if show_url and pipeline.get("episodes"):
+        eps, _body = pm.run_pipeline_episodes(
+            s, rules, site, pipeline["episodes"], show_url)
+        s2 = {"site": site, "stage": "episodes", "pass": len(eps) > 0,
+              "url": show_url, "episode_count": len(eps), "via": "pipeline",
+              "error": "" if eps else "pipeline found no episodes"}
+        out.append(s2)
+    elif show_url:
+        s2 = {"pass": None, "error": "no episodes pipeline declared"}
+
+    s3 = stage_crack(s, rules, site, show_url, None, out)
+    s4 = stage_probe(s, rules, site, None, None, out)
+
+    def _ok(rec):
+        return rec.get("pass") is not False
+    overall_pass = _ok(s1) and _ok(s2) and _ok(s3) and _ok(s4)
+    return {
+        "site": site,
+        "search": {"pass": s1.get("pass")},
+        "episodes": {"pass": s2.get("pass")},
+        "crack": {"pass": s3.get("pass")},
+        "probe": {"pass": s4.get("pass")},
+        "overall": overall_pass,
+        "via": "pipeline",
+    }
+
+
 def run_site(s: Paced, rules: dict, site: str, out: list) -> dict:
+    # Sites with a declarative step pipeline are verified through it —
+    # the same execution path the app uses (rules-driven, not guessed).
+    pipeline = rules.get("pipelines", {}).get(site)
+    if isinstance(pipeline, dict) and pipeline.get("schema") == 1:
+        return run_site_pipeline(s, rules, site, pipeline, out)
+
     consecutive_fails = [0]
     queries = QUERIES.get(site, ["movie"])
     base = rules.get("domains", {}).get(site, "")
