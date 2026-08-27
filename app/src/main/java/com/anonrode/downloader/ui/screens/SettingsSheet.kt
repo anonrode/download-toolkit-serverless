@@ -110,6 +110,37 @@ internal class SettingsState(
         debugLog = debugLogging,
         logRetention = logRetention
     )
+
+    /** Instant-apply: every control persists the moment the user changes it —
+     *  there is no "Save Preferences" gate anymore. Routes the full snapshot
+     *  through the engine's tested saveAllSettings path (SharedPreferences
+     *  .apply() is async, so this never blocks the UI thread). Sliders call
+     *  this from onValueChangeFinished so a drag writes once, on release. */
+    fun persist() {
+        val s = snapshot()
+        viewModel.saveSettings(
+            maxConcurrent = s.maxConcurrent,
+            parallelSockets = s.parallelSockets,
+            quality = s.quality,
+            autoOrganize = s.autoOrganize,
+            storageGuard = s.storageGuard,
+            wifiOnlyTorrents = s.wifiOnlyTorrents,
+            instantSocial = s.instantSocial,
+            showPosters = s.showPosters,
+            stallTimeout = s.stallTimeout,
+            magnetRetries = s.magnetRetries,
+            ytdlpRetries = s.ytdlpRetries,
+            hlsFragments = s.hlsFragments,
+            speedLimit = s.speedLimit,
+            peers = s.peers,
+            privacyMode = s.privacyMode,
+            wifiAll = s.wifiAll,
+            clipboard = s.clipboard,
+            notifications = s.notifications,
+            debugLog = s.debugLog,
+            logRetention = s.logRetention
+        )
+    }
 }
 
 internal data class SettingsStateSnapshot(
@@ -202,7 +233,7 @@ fun SettingsSheet(
             )
             Spacer(modifier = Modifier.height(Spacing.lg))
 
-            SettingsGeneralSection(state = state, viewModel = viewModel)
+            SettingsGeneralSection(state = state)
             Spacer(modifier = Modifier.height(Spacing.lg))
 
             SettingsEngineSection(state = state)
@@ -228,12 +259,9 @@ fun SettingsSheet(
 
             SettingsDiagnosticsSection(state = state)
             Spacer(modifier = Modifier.height(Spacing.xl))
-
-            SavePreferencesButton(
-                state = state,
-                viewModel = viewModel,
-                onSaved = onDismiss
-            )
+            // No "Save Preferences" button: every control above persists the
+            // moment it changes (SettingsState.persist), so there is nothing
+            // left to apply on the way out.
         }
     }
 }
@@ -321,7 +349,7 @@ fun SettingsScreen(
                     Spacer(modifier = Modifier.height(Spacing.lg))
                 }
                 item {
-                    SettingsGeneralSection(state = state, viewModel = viewModel)
+                    SettingsGeneralSection(state = state)
                     Spacer(modifier = Modifier.height(Spacing.lg))
                 }
                 item {
@@ -353,13 +381,8 @@ fun SettingsScreen(
                 item {
                     SettingsDiagnosticsSection(state = state)
                     Spacer(modifier = Modifier.height(Spacing.xl))
-                }
-                item {
-                    SavePreferencesButton(
-                        state = state,
-                        viewModel = viewModel,
-                        onSaved = onBack
-                    )
+                    // No Save button: every control instant-persists via
+                    // SettingsState.persist (see the sheet host above).
                 }
             }
         }
@@ -577,8 +600,7 @@ internal fun SettingsAppearanceSection(
 
 @Composable
 internal fun SettingsGeneralSection(
-    state: SettingsState,
-    viewModel: MainViewModel
+    state: SettingsState
 ) {
     SettingsCategoryHeader(title = "General & Automation")
     SettingsCard {
@@ -587,7 +609,7 @@ internal fun SettingsGeneralSection(
             title = "Auto-Organize Folders",
             subtitle = "Creates /Download/Anon/<ShowName>/ structure",
             checked = state.autoOrganize,
-            onCheckedChange = { state.autoOrganize = it }
+            onCheckedChange = { state.autoOrganize = it; state.persist() }
         )
 
         HorizontalDivider(color = BorderHairline, modifier = Modifier.padding(horizontal = Spacing.md))
@@ -597,7 +619,7 @@ internal fun SettingsGeneralSection(
             title = "Instant Social Download",
             subtitle = "1-tap download when shared from Instagram/TikTok",
             checked = state.instantSocial,
-            onCheckedChange = { state.instantSocial = it }
+            onCheckedChange = { state.instantSocial = it; state.persist() }
         )
 
         HorizontalDivider(color = BorderHairline, modifier = Modifier.padding(horizontal = Spacing.md))
@@ -609,9 +631,9 @@ internal fun SettingsGeneralSection(
             checked = state.showPosters,
             onCheckedChange = {
                 state.showPosters = it
-                // Applied immediately (its own persisted setter), so the
-                // next search reflects it without waiting for Save.
-                viewModel.engine.setShowPosters(it)
+                // Instant-apply: persisted + live in one write, so the next
+                // search reflects it immediately.
+                state.persist()
             }
         )
     }
@@ -641,6 +663,7 @@ internal fun SettingsEngineSection(state: SettingsState) {
             Slider(
                 value = state.sockets.toFloat(),
                 onValueChange = { state.sockets = it.toInt() },
+                onValueChangeFinished = { state.persist() },
                 valueRange = 1f..16f,
                 steps = 15,
                 thumb = { SettingsSliderThumb() },
@@ -674,6 +697,7 @@ internal fun SettingsEngineSection(state: SettingsState) {
             Slider(
                 value = state.maxConcurrent.toFloat(),
                 onValueChange = { state.maxConcurrent = it.toInt() },
+                onValueChangeFinished = { state.persist() },
                 valueRange = 1f..5f,
                 steps = 3,
                 thumb = { SettingsSliderThumb() },
@@ -707,6 +731,7 @@ internal fun SettingsEngineSection(state: SettingsState) {
             Slider(
                 value = state.storageGuard,
                 onValueChange = { state.storageGuard = it },
+                onValueChangeFinished = { state.persist() },
                 valueRange = 0.5f..5.0f,
                 steps = 9,
                 thumb = { SettingsSliderThumb() },
@@ -725,7 +750,7 @@ internal fun SettingsEngineSection(state: SettingsState) {
             title = "Download Torrents Only on Wi-Fi",
             subtitle = "Protects cellular mobile data balance",
             checked = state.wifiOnlyTorrents,
-            onCheckedChange = { state.wifiOnlyTorrents = it }
+            onCheckedChange = { state.wifiOnlyTorrents = it; state.persist() }
         )
 
         HorizontalDivider(color = BorderHairline, modifier = Modifier.padding(horizontal = Spacing.md))
@@ -735,7 +760,7 @@ internal fun SettingsEngineSection(state: SettingsState) {
             title = "Download Only on Wi-Fi (All)",
             subtitle = "Gates every download to Wi-Fi, not just torrents",
             checked = state.wifiOnlyAll,
-            onCheckedChange = { state.wifiOnlyAll = it }
+            onCheckedChange = { state.wifiOnlyAll = it; state.persist() }
         )
     }
 }
@@ -764,7 +789,12 @@ internal fun SettingsMediaSection(state: SettingsState) {
                     val isSel = state.quality == q
                     FilterChip(
                         selected = isSel,
-                        onClick = { state.quality = q },
+                        onClick = {
+                            state.quality = q
+                            // Instant-apply: the very next download picks up
+                            // the new resolution without a Save tap.
+                            state.persist()
+                        },
                         label = { Text(q, fontSize = 12.sp, fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal) },
                         colors = FilterChipDefaults.filterChipColors(
                             selectedContainerColor = AccentPrimary,
@@ -912,7 +942,7 @@ internal fun SettingsNetworkSection(state: SettingsState) {
             title = "Auto-Detect Clipboard Links",
             subtitle = "Shows a snippet when a URL or magnet is copied",
             checked = state.clipboardDetect,
-            onCheckedChange = { state.clipboardDetect = it }
+            onCheckedChange = { state.clipboardDetect = it; state.persist() }
         )
 
         HorizontalDivider(color = BorderHairline, modifier = Modifier.padding(horizontal = Spacing.md))
@@ -922,7 +952,7 @@ internal fun SettingsNetworkSection(state: SettingsState) {
             title = "Completion Notifications",
             subtitle = "Post a notification when a download finishes",
             checked = state.completionNotifications,
-            onCheckedChange = { state.completionNotifications = it }
+            onCheckedChange = { state.completionNotifications = it; state.persist() }
         )
 
         HorizontalDivider(color = BorderHairline, modifier = Modifier.padding(horizontal = Spacing.md))
@@ -946,6 +976,7 @@ internal fun SettingsNetworkSection(state: SettingsState) {
             Slider(
                 value = state.speedLimit.toFloat(),
                 onValueChange = { state.speedLimit = it.toInt() },
+                onValueChangeFinished = { state.persist() },
                 valueRange = 0f..50000f,
                 steps = 19,
                 thumb = { SettingsSliderThumb() },
@@ -982,6 +1013,7 @@ internal fun SettingsTorrentsSection(state: SettingsState) {
             Slider(
                 value = if (state.torrentPeers == -1) 0f else state.torrentPeers.toFloat(),
                 onValueChange = { state.torrentPeers = if (it <= 0f) -1 else it.toInt() },
+                onValueChangeFinished = { state.persist() },
                 valueRange = 0f..500f,
                 steps = 9,
                 thumb = { SettingsSliderThumb() },
@@ -1000,7 +1032,7 @@ internal fun SettingsTorrentsSection(state: SettingsState) {
             title = "Torrent Privacy Mode",
             subtitle = "Hides you from peer discovery (DHT/PEX/LPD off), encrypts peer links, upload ~0. Trackers only — some dead swarms won't start",
             checked = state.torrentPrivacy,
-            onCheckedChange = { state.torrentPrivacy = it }
+            onCheckedChange = { state.torrentPrivacy = it; state.persist() }
         )
 
         HorizontalDivider(color = BorderHairline, modifier = Modifier.padding(horizontal = Spacing.md))
@@ -1024,6 +1056,7 @@ internal fun SettingsTorrentsSection(state: SettingsState) {
             Slider(
                 value = state.stallTimeout.toFloat(),
                 onValueChange = { state.stallTimeout = it.toInt() },
+                onValueChangeFinished = { state.persist() },
                 valueRange = 15f..300f,
                 steps = 18,
                 thumb = { SettingsSliderThumb() },
@@ -1058,6 +1091,7 @@ internal fun SettingsTorrentsSection(state: SettingsState) {
             Slider(
                 value = state.magnetRetries.toFloat(),
                 onValueChange = { state.magnetRetries = it.toInt() },
+                onValueChangeFinished = { state.persist() },
                 valueRange = 1f..10f,
                 steps = 8,
                 thumb = { SettingsSliderThumb() },
@@ -1071,6 +1105,7 @@ internal fun SettingsTorrentsSection(state: SettingsState) {
             Slider(
                 value = state.ytdlpRetries.toFloat(),
                 onValueChange = { state.ytdlpRetries = it.toInt() },
+                onValueChangeFinished = { state.persist() },
                 valueRange = 1f..10f,
                 steps = 8,
                 thumb = { SettingsSliderThumb() },
@@ -1103,6 +1138,7 @@ internal fun SettingsTorrentsSection(state: SettingsState) {
             Slider(
                 value = state.hlsFragments.toFloat(),
                 onValueChange = { state.hlsFragments = it.toInt() },
+                onValueChangeFinished = { state.persist() },
                 valueRange = 1f..16f,
                 steps = 14,
                 thumb = { SettingsSliderThumb() },
@@ -1140,6 +1176,7 @@ internal fun SettingsDiagnosticsSection(state: SettingsState) {
             Slider(
                 value = state.logRetention.toFloat(),
                 onValueChange = { state.logRetention = it.toInt().coerceIn(1, 30) },
+                onValueChangeFinished = { state.persist() },
                 valueRange = 1f..30f,
                 steps = 29,
                 thumb = { SettingsSliderThumb() },
@@ -1202,49 +1239,6 @@ internal fun SettingsDiagnosticsSection(state: SettingsState) {
             }
             Text("SHARE", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AccentPrimary)
         }
-    }
-}
-
-@Composable
-private fun SavePreferencesButton(
-    state: SettingsState,
-    viewModel: MainViewModel,
-    onSaved: () -> Unit
-) {
-    val context = LocalContext.current
-    Button(
-        onClick = {
-            val s = state.snapshot()
-            viewModel.saveSettings(
-                maxConcurrent = s.maxConcurrent,
-                parallelSockets = s.parallelSockets,
-                quality = s.quality,
-                autoOrganize = s.autoOrganize,
-                storageGuard = s.storageGuard,
-                wifiOnlyTorrents = s.wifiOnlyTorrents,
-                instantSocial = s.instantSocial,
-                showPosters = s.showPosters,
-                stallTimeout = s.stallTimeout,
-                magnetRetries = s.magnetRetries,
-                ytdlpRetries = s.ytdlpRetries,
-                hlsFragments = s.hlsFragments,
-                speedLimit = s.speedLimit,
-                peers = s.peers,
-                privacyMode = s.privacyMode,
-                wifiAll = s.wifiAll,
-                clipboard = s.clipboard,
-                notifications = s.notifications,
-                debugLog = s.debugLog,
-                logRetention = s.logRetention
-            )
-            Toast.makeText(context, "Settings saved successfully", Toast.LENGTH_SHORT).show()
-            onSaved()
-        },
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(Radius.md),
-        colors = ButtonDefaults.buttonColors(containerColor = AccentPrimary, contentColor = BackgroundDark)
-    ) {
-        Text("Save Preferences", fontWeight = FontWeight.Bold)
     }
 }
 
