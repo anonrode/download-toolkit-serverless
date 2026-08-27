@@ -28,6 +28,10 @@ import java.util.Locale
  * channel: anything that outgrows this vocabulary stays in the compiled
  * provider fallback every migrated site keeps.
  *
+ * Templates are pure substitution: {base} {query} (URL-encoded) {queryRaw}
+ * (unencoded — for POST form bodies, which encode themselves) {url}
+ * (episodes stage: the show URL) and any {var} bound by an earlier step.
+ *
  * Contract with providers: [runSearch] returns [] and [runEpisodes] returns
  * null on any failure — the caller then runs its compiled path. A pipeline
  * that produces an EMPTY result also falls through (non-empty wins), so a
@@ -63,7 +67,10 @@ object RulesPipeline {
         val vars = mutableMapOf(
             "base" to base,
             "url" to "",
-            "query" to URLEncoder.encode(effectiveQuery, "UTF-8")
+            "query" to URLEncoder.encode(effectiveQuery, "UTF-8"),
+            // Unencoded form for POST bodies: FormBody percent-encodes its
+            // values itself, so feeding it {query} would double-encode.
+            "queryRaw" to effectiveQuery
         )
 
         var cards = emptyList<ShowCard>()
