@@ -804,12 +804,14 @@ object RulesPipeline {
     /** Dot-path lookup inside one JSON item with `|` fallbacks and an optional
      *  `:before(<char>)` cut (e.g. `release_date|first_air_date:before(-)` → year). */
     internal fun jsonField(item: JSONObject, path: String): String? {
-        for (alt in path.split('|')) {
-            val cutIdx = alt.indexOf(":before(")
-            val fieldPath = if (cutIdx >= 0) alt.substring(0, cutIdx) else alt
-            val cutChar = if (cutIdx >= 0) alt.substring(cutIdx + 8).removeSuffix(")").takeIf { it.length == 1 } else null
+        // :before(<char>) applies to the WHOLE fallback chain, whichever
+        // alternative hits — parsing it per-alt would leave early hits uncut.
+        val cutIdx = path.indexOf(":before(")
+        val cutChar = if (cutIdx >= 0) path.substring(cutIdx + 8).removeSuffix(")").takeIf { it.length == 1 } else null
+        val chain = if (cutIdx >= 0) path.substring(0, cutIdx) else path
+        for (alt in chain.split('|')) {
             var node: Any? = item
-            for (seg in fieldPath.split('.')) {
+            for (seg in alt.split('.')) {
                 node = (node as? JSONObject)?.opt(seg)
             }
             if (node == null || node == JSONObject.NULL) continue
