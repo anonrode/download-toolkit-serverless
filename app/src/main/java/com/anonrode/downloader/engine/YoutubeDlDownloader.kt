@@ -133,6 +133,12 @@ object YoutubeDlDownloader {
             )
         }
 
+        // The yt-dlp/ffmpeg runtime initializes in the app's background
+        // bootstrap (AnonApp.appScope): a yt-dlp task enqueued before that
+        // finishes would otherwise burn its first attempt on an uninitialized
+        // runtime. Magnets above run aria2c directly and don't need it.
+        com.anonrode.downloader.AnonApp.ensureReady()
+
         val request = YoutubeDLRequest(inputUrl).apply {
             if (hlsMasterFile != null) {
                 // The input is our own rewritten playlist file in the app cache.
@@ -654,7 +660,13 @@ object YoutubeDlDownloader {
                         if (fb != null) {
                             val pct = fb.groupValues[1].toLongOrNull() ?: 0L
                             val spd = parseSpeedString(fb.groupValues[2])
-                            onProgress(pct, 100L, spd, 0L)
+                            // total=0 on purpose: a percentage carries no byte
+                            // information, and emitting a synthetic total=100
+                            // here overwrote the real multi-GB total in the
+                            // repository — corrupting the size display and
+                            // making the engine's "transfer complete" check
+                            // (fileSize >= totalBytes) vacuously true.
+                            onProgress(pct, 0L, spd, 0L)
                         }
                     }
                     line = reader.readLine()

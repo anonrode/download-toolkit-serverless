@@ -90,7 +90,12 @@ class DownloadRepository {
                     // while actually transferring — writing them on a PAUSED or
                     // COMPLETED task would re-stamp a stale "0.5 MB/s".
                     val finalDl = if (downloaded > 0) maxOf(it.downloadedBytes, downloaded) else it.downloadedBytes
-                    val finalTot = if (total > 0) total else it.totalBytes
+                    // Monotonic total for the same reason: a backend that emits
+                    // a synthetic or degraded total late in a transfer (e.g. a
+                    // percent-only fallback line) must not overwrite the real
+                    // content length — the completion tiers compare file size
+                    // against it.
+                    val finalTot = if (total > it.totalBytes) total else it.totalBytes
                     val transferring = it.status == TaskStatus.DOWNLOADING
                     it.copy(
                         downloadedBytes = finalDl,

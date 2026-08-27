@@ -104,6 +104,18 @@ object StreamValidator {
             }
         }
 
+        if (status >= 400 && status != 416) {
+            // The doc contract: reject HTTP >= 400 (except 416). Previously
+            // these responses fell through with an empty head and passed as
+            // "looks downloadable", so dead/expired links spent a task slot
+            // and extra probe traffic before failing in the backend.
+            val reason = "Server rejected the link (HTTP $status) — it is dead or expired"
+            PipelineJournal.hop("", "validate", url, ok = false,
+                ms = System.currentTimeMillis() - start,
+                detail = "HTTP $status")
+            return reason
+        }
+
         if (status == 416 || head.isEmpty()) {
             // Can't inspect (range refused / empty body) -> don't guess.
             return null
