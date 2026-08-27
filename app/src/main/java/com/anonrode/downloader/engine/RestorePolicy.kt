@@ -20,6 +20,11 @@ import com.anonrode.downloader.data.models.TaskStatus
  * survive a restart as QUEUED — the network observer's first emission
  * (processQueue within ~32ms of app open) would otherwise auto-start it and
  * drain data while the user is in another app (user-reported v3.0.4).
+ *
+ * userPaused is deliberately untouched here: copy() carries it through every
+ * branch, so a task the user paused before the app died is still user-paused
+ * after restore — and every auto-resume filter checks the flag, making a
+ * user pause immune to ANY requeue path regardless of errorMessage state.
  */
 internal fun parkForRestore(task: DownloadTask): DownloadTask = when (task.status) {
     TaskStatus.DOWNLOADING, TaskStatus.RESOLVING, TaskStatus.VALIDATING, TaskStatus.QUEUED ->

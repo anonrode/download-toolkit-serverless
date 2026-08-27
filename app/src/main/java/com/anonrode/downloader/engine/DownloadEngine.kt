@@ -116,13 +116,16 @@ class DownloadEngine(
                         activeJobs.keys.toList().forEach { id -> pauseForNetwork(id) }
                     }
                     lastNetworkTag = net.networkTag
-                    // Auto-resume tasks parked by a connectivity drop
+                    // Auto-resume tasks parked by a connectivity drop.
+                    // userPaused tasks are excluded everywhere in this
+                    // collector: a pause the user asked for must never be
+                    // undone by a network event.
                     repository.tasks.value
-                        .filter { it.status == TaskStatus.PAUSED && it.errorMessage == NETWORK_PAUSE_MESSAGE }
+                        .filter { it.status == TaskStatus.PAUSED && !it.userPaused && it.errorMessage == NETWORK_PAUSE_MESSAGE }
                         .forEach { repository.update(it.id) { t -> t.copy(status = TaskStatus.QUEUED, errorMessage = null) } }
                     // Wi-Fi-gated torrents resume only once an actual Wi-Fi network is back
                     repository.tasks.value
-                        .filter { it.status == TaskStatus.PAUSED && it.errorMessage?.startsWith("Waiting for Wi-Fi") == true && net.isWifi }
+                        .filter { it.status == TaskStatus.PAUSED && !it.userPaused && it.errorMessage?.startsWith("Waiting for Wi-Fi") == true && net.isWifi }
                         .forEach { repository.update(it.id) { t -> t.copy(status = TaskStatus.QUEUED, errorMessage = null) } }
                     processQueue()
                 } else {
@@ -143,7 +146,7 @@ class DownloadEngine(
                 delay(10_000)
                 if (!checkStorageAvailable()) continue
                 val parked = repository.tasks.value.filter {
-                    it.status == TaskStatus.PAUSED && it.errorMessage?.startsWith("Storage limit reached") == true
+                    it.status == TaskStatus.PAUSED && !it.userPaused && it.errorMessage?.startsWith("Storage limit reached") == true
                 }
                 if (parked.isNotEmpty()) {
                     parked.forEach { repository.update(it.id) { t -> t.copy(status = TaskStatus.QUEUED, errorMessage = null) } }
@@ -160,7 +163,7 @@ class DownloadEngine(
             while (true) {
                 delay(10_000)
                 val parked = repository.tasks.value.filter {
-                    it.status == TaskStatus.PAUSED && it.errorMessage?.startsWith(PARKED_HOST_MESSAGE) == true
+                    it.status == TaskStatus.PAUSED && !it.userPaused && it.errorMessage?.startsWith(PARKED_HOST_MESSAGE) == true
                 }
                 if (parked.isEmpty()) continue
                 var requeued = false
@@ -372,12 +375,16 @@ class DownloadEngine(
         // cross-talk rule); the stragglers then die on their read timeout.
         if (activeJobs.isEmpty()) HttpClient.cancelInFlight()
         com.anonrode.downloader.util.DebugLog.user("pause $taskId")
-        // Clear the errorMessage: a stale NETWORK_PAUSE_MESSAGE from an earlier
-        // network blip would otherwise make the network observer's reconnect
-        // handler re-queue this task, causing the user's pause to look like a
-        // restart (live-verified in app-2026-08-6.txt: pause at 13:08:35.604
-        // followed by ENGINE start at 13:08:36.017 — 413ms later).
-        repository.update(taskId) { it.copy(status = TaskStatus.PAUSED, speedBytesPerSec = 0.0, errorMessage = null) }
+        // userPaused=true is the authoritative "the user asked for this pause"
+        // mark: every auto-resume path (network reconnect, storage self-heal,
+        // host cooldown) refuses to re-queue a task carrying it, so the pause
+        // survives flaky networks AND full app restarts until an explicit
+        // resume. errorMessage is cleared as a second layer — a stale
+        // NETWORK_PAUSE_MESSAGE from an earlier blip must not outlive the
+        // user's pause and let the reconnect handler re-queue the task (the
+        // marker overwrite race that resurrected a paused download ~3s after
+        // pause, live-verified in app-2026-08-27.txt).
+        repository.update(taskId) { it.copy(status = TaskStatus.PAUSED, speedBytesPerSec = 0.0, errorMessage = null, userPaused = true) }
         updateServiceState(force = true)
         processQueue()
     }
@@ -392,7 +399,18 @@ class DownloadEngine(
         // Same in-flight sweep as pause(): a network park mid-resolve must
         // not leave blocking HTTP draining data until its read timeout.
         if (activeJobs.isEmpty()) HttpClient.cancelInFlight()
-        repository.update(taskId) { it.copy(status = TaskStatus.PAUSED, speedBytesPerSec = 0.0, errorMessage = NETWORK_PAUSE_MESSAGE) }
+        // Atomic re-check inside the StateFlow transform: the find()/status
+        // guard above is a non-atomic snapshot, and on a flaky network a
+        // disconnect-triggered park races a user pause() — its marker write
+        // could land AFTER pause() had cleared errorMessage and set
+        // userPaused, leaving NETWORK_PAUSE_MESSAGE behind so the next
+        // reconnect re-queued the task the user just paused. Inside the
+        // transform the check is CAS-atomic against every other repository
+        // write: a user-paused or already-parked task makes it a no-op.
+        repository.update(taskId) { t ->
+            if (t.userPaused || (t.status != TaskStatus.DOWNLOADING && t.status != TaskStatus.RESOLVING)) t
+            else t.copy(status = TaskStatus.PAUSED, speedBytesPerSec = 0.0, errorMessage = NETWORK_PAUSE_MESSAGE)
+        }
         updateServiceState(force = true)
     }
 
@@ -440,7 +458,10 @@ class DownloadEngine(
         // backoff (consumed in startTask). Bounded so stale ids cannot grow.
         if (retryBypassTasks.size >= 16) retryBypassTasks.clear()
         retryBypassTasks.add(taskId)
-        repository.update(taskId) { it.copy(status = TaskStatus.QUEUED, errorMessage = null) }
+        // Explicit resume/retry clears the user-pause mark — this is the ONLY
+        // path allowed to undo a user pause (UI resume button and the
+        // notification retry action both funnel through here).
+        repository.update(taskId) { it.copy(status = TaskStatus.QUEUED, errorMessage = null, userPaused = false) }
         processQueue()
     }
 
