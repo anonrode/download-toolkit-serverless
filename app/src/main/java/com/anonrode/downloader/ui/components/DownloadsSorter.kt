@@ -61,6 +61,9 @@ object DownloadsSorter {
 
     private val STATUS_ORDER = listOf(
         TaskStatus.DOWNLOADING,
+        TaskStatus.RESOLVING,
+        TaskStatus.QUEUED,
+        TaskStatus.VALIDATING,
         TaskStatus.PAUSED,
         TaskStatus.FAILED,
         TaskStatus.COMPLETED
@@ -70,6 +73,9 @@ object DownloadsSorter {
 
     private val STATUS_HEADER: Map<TaskStatus, String> = mapOf(
         TaskStatus.DOWNLOADING to "DOWNLOADING",
+        TaskStatus.RESOLVING to "RESOLVING",
+        TaskStatus.QUEUED to "QUEUED",
+        TaskStatus.VALIDATING to "VALIDATING",
         TaskStatus.PAUSED to "PAUSED",
         TaskStatus.FAILED to "FAILED",
         TaskStatus.COMPLETED to "DONE"
