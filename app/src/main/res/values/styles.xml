@@ -1,15 +1,43 @@
 <?xml version="1.0" encoding="utf-8"?>
-<resources>
+<resources xmlns:tools="http://schemas.android.com/tools">
     <style name="Theme.AnonDownloader" parent="android:Theme.Material.NoActionBar">
         <item name="android:statusBarColor">#00000000</item>
-        <item name="android:navigationBarColor">#FF000000</item>
+        <!-- Transparent, NOT opaque black: the app runs edge-to-edge, so an
+             opaque navigationBarColor paints a solid strip over the content —
+             a visible seam across the gesture area whenever the content
+             behind it isn't exactly #FF000000 (the light theme, cards, etc.).
+             Transparent lets the app's own background run behind the pill. -->
+        <item name="android:navigationBarColor">#00000000</item>
         <item name="android:windowBackground">#FF000000</item>
+        <!-- The app draws its own background behind both bars and picks icon
+             colors itself (enableEdgeToEdge / syncSystemBars); the system's
+             automatic contrast scrim would otherwise lay a translucent gray
+             band over the nav area on API 29+. -->
+        <item name="android:enforceNavigationBarContrast" tools:targetApi="q">false</item>
     </style>
 
     <style name="Theme.AnonDownloader.Splash" parent="Theme.SplashScreen">
         <item name="windowSplashScreenBackground">@color/splash_background</item>
         <item name="windowSplashScreenAnimatedIcon">@drawable/ic_launcher_foreground</item>
         <item name="postSplashScreenTheme">@style/Theme.AnonDownloader</item>
+        <!-- On API 31+ the library's Theme.SplashScreen resolves to
+             DeviceDefault.DayNight carrying ONLY the windowSplashScreen*
+             attributes — no windowBackground, no bar colors, no bar
+             appearance. On a light-mode device that inherits a LIGHT window
+             background and light bar appearance, which drew a pale strip
+             under the black splash at startup: the faint horizontal line
+             around the (dark) gesture pill. Pin the splash window to
+             full-bleed black with transparent bars and light icons/pill,
+             regardless of the device's day/night mode. On API <31 the
+             compat windowBackground was already exactly this color drawable
+             (the icon comes from the library's overlay view), so this
+             override is equivalent there. -->
+        <item name="android:windowBackground">@color/splash_background</item>
+        <item name="android:windowDrawsSystemBarBackgrounds">true</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar" tools:targetApi="o_mr1">false</item>
     </style>
 
     <style name="Theme.AnonDownloader.Dialog" parent="android:Theme.Material.NoActionBar">
