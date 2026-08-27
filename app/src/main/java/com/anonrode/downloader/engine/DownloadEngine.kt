@@ -1675,6 +1675,11 @@ class DownloadEngine(
                             isExtractorTask = false,
                             audioOnly = task.audioOnly,
                             onProgress = { dl, tot, spd, eta ->
+                                if (dl > 0 && repository.find(task.id)?.status == TaskStatus.RESOLVING) {
+                                    repository.update(task.id) { t ->
+                                        if (t.status == TaskStatus.RESOLVING) t.copy(status = TaskStatus.DOWNLOADING) else t
+                                    }
+                                }
                                 repository.updateProgress(
                                     taskId = task.id,
                                     downloaded = dl,
@@ -1772,6 +1777,11 @@ class DownloadEngine(
                         isExtractorTask = isExtractor,
                         audioOnly = task.audioOnly,
                         onProgress = { dl, tot, spd, eta ->
+                            if (dl > 0 && repository.find(task.id)?.status == TaskStatus.RESOLVING) {
+                                repository.update(task.id) { t ->
+                                    if (t.status == TaskStatus.RESOLVING) t.copy(status = TaskStatus.DOWNLOADING) else t
+                                }
+                            }
                             repository.updateProgress(
                                 taskId = task.id,
                                 downloaded = dl,
