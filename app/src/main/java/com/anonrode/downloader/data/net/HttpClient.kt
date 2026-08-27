@@ -5,6 +5,7 @@ import okhttp3.Cookie
 import okhttp3.CookieJar
 import okhttp3.HttpUrl
 import okhttp3.OkHttpClient
+import okhttp3.Protocol
 import okhttp3.Request
 import okhttp3.Response
 import java.util.Collections
@@ -157,6 +158,14 @@ object HttpClient {
         .build()
 
     val downloadClient: OkHttpClient = shared.newBuilder()
+        // HTTP/1.1 only: with the default HTTP_2 ALPN, OkHttp coalesces every
+        // concurrent Range request to one host onto a SINGLE TCP connection —
+        // silently defeating Turbo's multi-socket throttle bypass and making
+        // the whole transfer ramp on one connection's slow start (part of the
+        // user-visible 100KB → 3MB crawl). N sockets must mean N real
+        // connections; aria2c behaves the same (no h2). Page/resolver traffic
+        // on [shared] keeps HTTP/2.
+        .protocols(listOf(Protocol.HTTP_1_1))
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .writeTimeout(15, TimeUnit.SECONDS)

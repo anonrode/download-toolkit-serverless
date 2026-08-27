@@ -535,14 +535,20 @@ class TurboChunk(val start: Long, val end: Long, @Volatile var current: Long)
 /**
  * Thread-safe aggregate speed meter utilizing Exponential Moving Average (EMA).
  *
- * Uses alpha = 0.25 across 250ms measurement samples to eliminate TCP burst jitter
- * while faithfully tracking true transfer throughput.
+ * Samples at a 250ms cadence. The first ~1 second uses a heavy alpha (fast
+ * acquisition) so the readout tracks the real transfer ramp: TCP slow start
+ * and fresh sockets make the first windows genuinely slow, and a light EMA
+ * from sample one made the displayed speed chase the true speed for ~2.5s —
+ * user-visible as "100KB → 400KB → 3MB" long after the transfer was already
+ * at full speed. After acquisition it settles to alpha = 0.25 to smooth
+ * TCP burst jitter.
  */
 class SpeedMeter(initialBytes: Long = 0L) {
     private var lastBytes = initialBytes
     private var lastTime = System.currentTimeMillis()
     private var emaSpeed = 0.0
     private var initialized = false
+    private var sampleCount = 0
 
     @Synchronized
     fun sample(totalBytes: Long): Long {
@@ -551,11 +557,12 @@ class SpeedMeter(initialBytes: Long = 0L) {
         if (dt >= 250) {
             val delta = (totalBytes - lastBytes).coerceAtLeast(0L)
             val instantBps = (delta * 1000.0) / dt
+            sampleCount++
             if (!initialized) {
                 emaSpeed = instantBps
                 initialized = true
             } else {
-                val alpha = 0.25
+                val alpha = if (sampleCount <= FAST_ACQUIRE_SAMPLES) 0.6 else 0.25
                 emaSpeed = (alpha * instantBps) + ((1.0 - alpha) * emaSpeed)
             }
             lastBytes = totalBytes
@@ -566,4 +573,9 @@ class SpeedMeter(initialBytes: Long = 0L) {
 
     @Synchronized
     fun getSpeed(): Long = emaSpeed.toLong().coerceAtLeast(0L)
+
+    private companion object {
+        /** Samples 2..5 (roughly the first second) run in fast-acquire mode. */
+        const val FAST_ACQUIRE_SAMPLES = 5
+    }
 }
