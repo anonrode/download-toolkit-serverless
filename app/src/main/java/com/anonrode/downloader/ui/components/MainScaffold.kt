@@ -59,7 +59,8 @@ object MainTab {
  *    handler is disabled so a back press there exits the app as before.
  *  - The active Downloads-badge count comes straight from
  *    [MainViewModel.engine] via [downloadsStats], recomputed on every
- *    recomposition so it tracks in-flight + paused tasks live.
+ *    recomposition so it tracks transferring tasks live (paused tasks
+ *    are parked, not active, and stay off the badge).
  *  - Theme is unchanged: the bottom bar uses `MaterialTheme.colorScheme.surface`
  *    for its background, which the existing `AnonDownloaderTheme` already
  *    maps cleanly in both light and dark.
