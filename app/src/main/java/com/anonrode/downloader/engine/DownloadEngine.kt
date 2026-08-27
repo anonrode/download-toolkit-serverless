@@ -286,6 +286,12 @@ class DownloadEngine(
             .apply()
     }
 
+    // Dedupe + filename uniquification + add must be ONE atomic unit: two
+    // near-simultaneous enqueues of the same URL (double-tap, share intent +
+    // clipboard detect) could otherwise both pass the check-then-act gap and
+    // queue two tasks writing one .part file.
+    private val enqueueLock = Any()
+
     fun enqueue(
         showTitle: String,
         episodeNum: Int,
@@ -298,48 +304,54 @@ class DownloadEngine(
         site: String = "",
         quality: String? = null
     ): String {
-        val taskId = UUID.randomUUID().toString()
         val downloadFolder = getDownloadDirectory(showTitle, createDirs = false)
 
-        // Dedupe: never queue a second task for the same source URL while one
-        // is already active or paused. Two tasks sharing a filePath write the
-        // same .part concurrently and corrupt the output.
-        val active = setOf(TaskStatus.QUEUED, TaskStatus.RESOLVING, TaskStatus.DOWNLOADING, TaskStatus.VALIDATING, TaskStatus.PAUSED)
-        repository.snapshot().firstOrNull { it.sourceUrl == sourceUrl && it.status in active }?.let { return it.id }
+        val taskId = synchronized(enqueueLock) {
+            // Dedupe: never queue a second task for the same source URL while one
+            // is already active or paused. Two tasks sharing a filePath write the
+            // same .part concurrently and corrupt the output.
+            val active = setOf(TaskStatus.QUEUED, TaskStatus.RESOLVING, TaskStatus.DOWNLOADING, TaskStatus.VALIDATING, TaskStatus.PAUSED)
+            val existing = repository.snapshot().firstOrNull { it.sourceUrl == sourceUrl && it.status in active }
+            if (existing != null) {
+                existing.id
+            } else {
+                val cleanTitle = sanitizeComponent(episodeTitle, 80)
+                val ext = if (audioOnly) "mp3" else if (backend.contains("yt") || !isDirect) "mp4" else "mkv"
 
-        val cleanTitle = sanitizeComponent(episodeTitle, 80)
-        val ext = if (audioOnly) "mp3" else if (backend.contains("yt") || !isDirect) "mp4" else "mkv"
+                // Uniquify the target filename so two different sources with the same
+                // title (e.g. same episode from two sites) never write one filePath.
+                var targetFile = File(downloadFolder, "$cleanTitle.$ext")
+                var counter = 2
+                while (repository.snapshot().any { it.filePath == targetFile.absolutePath }) {
+                    targetFile = File(downloadFolder, "$cleanTitle-$counter.$ext")
+                    counter++
+                }
 
-        // Uniquify the target filename so two different sources with the same
-        // title (e.g. same episode from two sites) never write one filePath.
-        var targetFile = File(downloadFolder, "$cleanTitle.$ext")
-        var counter = 2
-        while (repository.snapshot().any { it.filePath == targetFile.absolutePath }) {
-            targetFile = File(downloadFolder, "$cleanTitle-$counter.$ext")
-            counter++
+                val task = DownloadTask(
+                    id = UUID.randomUUID().toString(),
+                    showTitle = showTitle,
+                    episodeNum = episodeNum,
+                    episodeTitle = episodeTitle,
+                    directUrl = sourceUrl,
+                    sourceUrl = sourceUrl,
+                    filePath = targetFile.absolutePath,
+                    status = TaskStatus.QUEUED,
+                    downloadedBytes = 0L,
+                    totalBytes = 0L,
+                    speedBytesPerSec = 0.0,
+                    etaSeconds = 0L,
+                    backend = backend,
+                    parallelSockets = parallelSockets,
+                    site = site,
+                    audioOnly = audioOnly,
+                    quality = quality
+                )
+
+                repository.addFirst(task)
+                task.id
+            }
         }
 
-        val task = DownloadTask(
-            id = taskId,
-            showTitle = showTitle,
-            episodeNum = episodeNum,
-            episodeTitle = episodeTitle,
-            directUrl = sourceUrl,
-            sourceUrl = sourceUrl,
-            filePath = targetFile.absolutePath,
-            status = TaskStatus.QUEUED,
-            downloadedBytes = 0L,
-            totalBytes = 0L,
-            speedBytesPerSec = 0.0,
-            etaSeconds = 0L,
-            backend = backend,
-            parallelSockets = parallelSockets,
-            site = site,
-            audioOnly = audioOnly,
-            quality = quality
-        )
-
-        repository.addFirst(task)
         processQueue()
         return taskId
     }
@@ -353,6 +365,12 @@ class DownloadEngine(
         // without these, a paused task kept draining mobile data until the app
         // was killed (user-reported).
         TurboDownloader.cancelTask(taskId)
+        // A task paused mid-RESOLVING/mid-probe still has blocking HTTP
+        // registered in HttpClient.inFlightCalls that coroutine cancellation
+        // cannot interrupt. Sweep exactly like cancel() when it is safe —
+        // with other tasks running their requests must stay untouched (the
+        // cross-talk rule); the stragglers then die on their read timeout.
+        if (activeJobs.isEmpty()) HttpClient.cancelInFlight()
         com.anonrode.downloader.util.DebugLog.user("pause $taskId")
         // Clear the errorMessage: a stale NETWORK_PAUSE_MESSAGE from an earlier
         // network blip would otherwise make the network observer's reconnect
@@ -371,6 +389,9 @@ class DownloadEngine(
         activeJobs.remove(taskId)
         YoutubeDlDownloader.killProcess(taskId)
         TurboDownloader.cancelTask(taskId)
+        // Same in-flight sweep as pause(): a network park mid-resolve must
+        // not leave blocking HTTP draining data until its read timeout.
+        if (activeJobs.isEmpty()) HttpClient.cancelInFlight()
         repository.update(taskId) { it.copy(status = TaskStatus.PAUSED, speedBytesPerSec = 0.0, errorMessage = NETWORK_PAUSE_MESSAGE) }
         updateServiceState(force = true)
     }
@@ -705,40 +726,49 @@ class DownloadEngine(
         val net = networkObserver.getCurrentStatus()
         if (!net.isConnected) return
 
-        val currentTasks = tasks.value
-        val activeCount = currentTasks.count {
-            it.status == TaskStatus.DOWNLOADING || it.status == TaskStatus.RESOLVING || it.status == TaskStatus.VALIDATING
-        }
-
-        if (activeCount >= maxConcurrentDownloads) return
-
-        val nextTask = currentTasks.firstOrNull { it.status == TaskStatus.QUEUED } ?: return
-
-        if (!checkStorageAvailable()) {
-            // Park every queued task, not just the head, so the whole queue drains to PAUSED
-            // in one pass instead of stalling on a single task per processQueue call.
-            currentTasks.filter { it.status == TaskStatus.QUEUED }.forEach { queued ->
-                repository.update(queued.id) { t -> t.copy(status = TaskStatus.PAUSED, errorMessage = "Storage limit reached (< ${storageGuardGb}GB free)") }
+        // Fill EVERY free slot in one pass, not just one: the reconnect /
+        // storage-self-heal / cooldown loops re-queue many parked tasks and
+        // then call processQueue() exactly once, so single-step starts left
+        // maxConcurrentDownloads-1 slots empty until the next completion.
+        while (true) {
+            val currentTasks = tasks.value
+            val activeCount = currentTasks.count {
+                it.status == TaskStatus.DOWNLOADING || it.status == TaskStatus.RESOLVING || it.status == TaskStatus.VALIDATING
             }
-            return
-        }
 
-        if (wifiOnlyTorrents && !net.isWifi && nextTask.directUrl.startsWith("magnet:")) {
-            repository.update(nextTask.id) { it.copy(status = TaskStatus.PAUSED, errorMessage = "Waiting for Wi-Fi (Torrents Wi-Fi Only enabled)") }
-            return
-        }
-        // Wi-Fi-only for ALL downloads (not just torrents)
-        if (wifiOnlyAll && !net.isWifi) {
-            repository.update(nextTask.id) { it.copy(status = TaskStatus.PAUSED, errorMessage = "Waiting for Wi-Fi (Wi-Fi Only enabled)") }
-            return
-        }
+            if (activeCount >= maxConcurrentDownloads) return
 
-        val isDirect = isDirectMediaUrl(nextTask.directUrl) && !isKnownLockerHost(nextTask.directUrl)
-        val initialStatus = if (isDirect) TaskStatus.DOWNLOADING else TaskStatus.RESOLVING
-        repository.update(nextTask.id) { it.copy(status = initialStatus) }
-        updateServiceState(force = true)
+            val nextTask = currentTasks.firstOrNull { it.status == TaskStatus.QUEUED } ?: return
 
-        startTask(nextTask)
+            if (!checkStorageAvailable()) {
+                // Park every queued task, not just the head, so the whole queue drains to PAUSED
+                // in one pass instead of stalling on a single task per processQueue call.
+                currentTasks.filter { it.status == TaskStatus.QUEUED }.forEach { queued ->
+                    repository.update(queued.id) { t -> t.copy(status = TaskStatus.PAUSED, errorMessage = "Storage limit reached (< ${storageGuardGb}GB free)") }
+                }
+                return
+            }
+
+            if (wifiOnlyTorrents && !net.isWifi && nextTask.directUrl.startsWith("magnet:")) {
+                repository.update(nextTask.id) { it.copy(status = TaskStatus.PAUSED, errorMessage = "Waiting for Wi-Fi (Torrents Wi-Fi Only enabled)") }
+                return
+            }
+            // Wi-Fi-only for ALL downloads (not just torrents)
+            if (wifiOnlyAll && !net.isWifi) {
+                repository.update(nextTask.id) { it.copy(status = TaskStatus.PAUSED, errorMessage = "Waiting for Wi-Fi (Wi-Fi Only enabled)") }
+                return
+            }
+
+            val isDirect = isDirectMediaUrl(nextTask.directUrl) && !isKnownLockerHost(nextTask.directUrl)
+            val initialStatus = if (isDirect) TaskStatus.DOWNLOADING else TaskStatus.RESOLVING
+            repository.update(nextTask.id) { it.copy(status = initialStatus) }
+            updateServiceState(force = true)
+
+            startTask(nextTask)
+            // Loop on: the status flip above is synchronous on the StateFlow,
+            // so the next iteration counts this task as active and picks the
+            // following QUEUED one until all slots are full.
+        }
     }
 
     /**
@@ -1602,21 +1632,30 @@ class DownloadEngine(
 
                     if (producedFile == null && coroutineContext.isActive) {
                         // Turbo → aria2c resume handoff: hand over the longest contiguous
-                        // prefix so the fallback continues instead of restarting. Only when
-                        // the output name matches what yt-dlp's aria2c will write, and never
-                        // over an existing partial (which may carry its own .aria2 resume state).
-                        // The sidecar is deleted with the rename: it describes the .part file,
-                        // which no longer exists once the prefix becomes the aria2c target.
+                        // prefix so the fallback continues instead of restarting. yt-dlp's
+                        // aria2c is fed "-o stem.%(ext)s" where ext comes from the URL, so
+                        // the prefix must be renamed to the URL-extension name — the task's
+                        // filePath extension (always .mkv for direct downloads) can differ
+                        // (.mp4 URLs are common), and handing over under the wrong name
+                        // made aria2c restart from zero while orphaning the .part. Never
+                        // hand over onto an existing file (which may carry its own .aria2
+                        // resume state). The sidecar is deleted with the rename: it
+                        // describes the .part file, which no longer exists once the prefix
+                        // becomes the aria2c target.
                         try {
-                            val urlExt = streamUrl.substringBefore('?').substringBefore('#').substringAfterLast('.', "")
-                            if (urlExt.isNotBlank() && urlExt.equals(File(task.filePath).extension, ignoreCase = true) && !dest.exists()) {
-                                val partFile = File(dest.absolutePath + ".part")
-                                val prefix = TurboState(File(dest.absolutePath + ".turbo")).contiguousPrefixBytes()
-                                if (prefix != null && prefix > 0 && prefix <= partFile.length() && partFile.exists()) {
-                                    RandomAccessFile(partFile, "rw").use { it.setLength(prefix) }
-                                    if (partFile.renameTo(dest)) {
-                                        TurboState(File(dest.absolutePath + ".turbo")).delete()
-                                        android.util.Log.w("AnonDownload", "Handed ${prefix / 1024 / 1024} MiB prefix to aria2c for resume")
+                            val urlExt = streamUrl.substringBefore('?').substringBefore('#')
+                                .substringAfterLast('/').substringAfterLast('.', "")
+                            if (urlExt.isNotBlank() && urlExt.length <= 5 && urlExt.all { it.isLetterOrDigit() }) {
+                                val handoffTarget = File(targetFolder, "${File(task.filePath).nameWithoutExtension}.$urlExt")
+                                if (!handoffTarget.exists() && !File(handoffTarget.absolutePath + ".aria2").exists()) {
+                                    val partFile = File(dest.absolutePath + ".part")
+                                    val prefix = TurboState(File(dest.absolutePath + ".turbo")).contiguousPrefixBytes()
+                                    if (prefix != null && prefix > 0 && partFile.exists() && prefix <= partFile.length()) {
+                                        RandomAccessFile(partFile, "rw").use { it.setLength(prefix) }
+                                        if (partFile.renameTo(handoffTarget)) {
+                                            TurboState(File(dest.absolutePath + ".turbo")).delete()
+                                            android.util.Log.w("AnonDownload", "Handed ${prefix / 1024 / 1024} MiB prefix to aria2c for resume as ${handoffTarget.name}")
+                                        }
                                     }
                                 }
                             }
@@ -1659,36 +1698,53 @@ class DownloadEngine(
                     // Turbo's piece map. Only when nothing else produced a file yet.
                     if (producedFile == null && coroutineContext.isActive) {
                         try {
-                            val turboState = TurboState(File(dest.absolutePath + ".turbo"))
-                            val partFile = File(dest.absolutePath + ".part")
-                            var resumable = partFile.exists() && partFile.length() > 0 &&
-                                turboState.contiguousPrefixBytes() != null
-                            if (!resumable) {
-                                val control = File(dest.absolutePath + ".aria2")
+                            // The fallback wrote "stem.%(ext)s" with the URL's extension,
+                            // which can differ from the task's .mkv target name — look
+                            // for resumable state under both names.
+                            fun tryMakeResumable(base: File): Boolean {
+                                val turboState = TurboState(File(base.absolutePath + ".turbo"))
+                                val partFile = File(base.absolutePath + ".part")
+                                if (partFile.exists() && partFile.length() > 0 &&
+                                    turboState.contiguousPrefixBytes() != null) {
+                                    return true
+                                }
+                                val control = File(base.absolutePath + ".aria2")
                                 val parsed = if (control.exists()) Aria2Control.parse(control) else null
-                                if (parsed != null && dest.exists() && dest.length() > 0) {
-                                    val hadPart = partFile.exists()
-                                    if (hadPart) partFile.delete()
-                                    if (dest.renameTo(partFile)) {
-                                        turboState.commit(parsed.pieces, parsed.fileLength, force = true)
-                                        control.delete()
-                                        resumable = true
-                                    } else if (hadPart) {
+                                if (parsed == null || !base.exists() || base.length() <= 0) return false
+                                val hadPart = partFile.exists()
+                                if (hadPart) partFile.delete()
+                                return if (base.renameTo(partFile)) {
+                                    turboState.commit(parsed.pieces, parsed.fileLength, force = true)
+                                    control.delete()
+                                    true
+                                } else {
+                                    if (hadPart) {
                                         // The sidecar describes the deleted .part: without it,
                                         // the map must not survive or the next run would skip
                                         // bytes that are not actually on disk.
                                         turboState.delete()
                                     }
+                                    false
                                 }
                             }
-                            if (resumable) {
+
+                            val baseCandidates = mutableListOf(dest)
+                            val rescueExt = streamUrl.substringBefore('?').substringBefore('#')
+                                .substringAfterLast('/').substringAfterLast('.', "")
+                            if (rescueExt.isNotBlank() && rescueExt.length <= 5 && rescueExt.all { it.isLetterOrDigit() }) {
+                                val alt = File(targetFolder, "${File(task.filePath).nameWithoutExtension}.$rescueExt")
+                                if (alt.absolutePath != dest.absolutePath) baseCandidates.add(alt)
+                            }
+                            val resumeBase = baseCandidates.firstOrNull { tryMakeResumable(it) }
+
+                            if (resumeBase != null) {
                                 android.util.Log.w("AnonDownload", "Resuming partial download with Turbo")
                                 val rescueHdrs = mutableMapOf("User-Agent" to HttpClient.DEFAULT_UA)
                                 val rescueReferer = getRefererForUrl(streamUrl)
                                 if (rescueReferer.isNotBlank()) rescueHdrs["Referer"] = rescueReferer
                                 turboResult = TurboDownloader.download(
                                     url = streamUrl,
-                                    dest = dest,
+                                    dest = resumeBase,
                                     headers = rescueHdrs,
                                     configuredSockets = effectiveSockets,
                                     onProgress = progressCb,
@@ -1883,6 +1939,16 @@ class DownloadEngine(
                         File(producedFile.absolutePath + ".turbo").delete()
                         File(producedFile.absolutePath + ".part").delete()
                         File(producedFile.absolutePath + ".aria2").delete()
+                        // Backends can produce a file whose name differs from the
+                        // task's target (aria2c writes the URL's extension, e.g.
+                        // .mp4, while the task targets .mkv) — without this the
+                        // original target's sidecars are orphaned forever.
+                        if (producedFile.absolutePath != task.filePath) {
+                            File(task.filePath + ".turbo").delete()
+                            File(task.filePath + ".part").delete()
+                            File(task.filePath + ".aria2").delete()
+                            File(task.filePath + ".ytdl").delete()
+                        }
                     } catch (_: Throwable) {}
 
                     try {
@@ -1997,5 +2063,13 @@ class DownloadEngine(
         }
 
         activeJobs[task.id] = job
+        // A fast-failing job can finish BEFORE this registration lands: its
+        // finally-guard then saw no entry and could not remove itself, so the
+        // line above would leave a dead job in activeJobs — a stale key that
+        // suppresses the activeJobs.isEmpty()/none{} cancel-sweep heuristics.
+        // Conditional remove: never clobbers a newer job for the same task.
+        if (!job.isActive) {
+            activeJobs.remove(task.id, job)
+        }
     }
 }
