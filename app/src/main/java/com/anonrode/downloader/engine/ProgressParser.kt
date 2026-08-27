@@ -6,7 +6,12 @@ import kotlin.math.max
 data class ProgressTick(
     val downloadedBytes: Long,
     val totalBytes: Long,
-    val speedBytesPerSec: Double
+    val speedBytesPerSec: Double,
+    // ETA carried by the line itself ("MM:SS" / "H:MM:SS"). -1 when the line
+    // has none — the caller then falls back to the library's eta or derives
+    // one from speed. yt-dlp's own ETA is more accurate than the derived one
+    // for HLS (it accounts for segment counts, not just current speed).
+    val etaSeconds: Long = -1
 )
 
 // aria2c with a known total: [#123456 45MiB/65MiB(69%) CN:4 DL:3.8MiB ETA:5s]
@@ -26,8 +31,11 @@ private val ARIA_NO_TOTAL_REGEX = Regex(
 )
 
 // yt-dlp format: [download]  45.2% of ~65.00MiB at 4.20MiB/s ETA 00:08
+// Total / speed / ETA each tolerate "Unknown" (HLS early ticks emit
+// "of ~Unknown at Unknown ETA Unknown") so whatever fields ARE filled
+// still land instead of the whole line being dropped.
 private val YTDL_REGEX = Regex(
-    """([\d.]+)%\s+of\s+~?([\d.]+[KMGT]?i?B).*?at\s+([\d.]+[KMGT]?i?B/s)""",
+    """([\d.]+)%\s+of\s+~?([\d.]+[KMGT]?i?B|Unknown).*?at\s+([\d.]+[KMGT]?i?B/s|Unknown)(?:.*?ETA\s+(\d+):(\d+))?""",
     RegexOption.IGNORE_CASE
 )
 
@@ -61,6 +69,7 @@ internal fun parseProgressTick(line: String?, libraryProgress: Float, lastDl: Lo
     var dlBytes = lastDl
     var totBytes = lastTot
     var spdBps = 0.0
+    var etaSecs = -1L
     var parsed = false
 
     if (!line.isNullOrBlank()) {
@@ -85,9 +94,19 @@ internal fun parseProgressTick(line: String?, libraryProgress: Float, lastDl: Lo
                 if (ytdlMatch != null) {
                     parsed = true
                     val pct = ytdlMatch.groupValues[1].toDoubleOrNull() ?: libraryProgress.toDouble()
-                    totBytes = parseByteString(ytdlMatch.groupValues[2])
-                    dlBytes = if (totBytes > 0) (totBytes * (pct / 100.0)).toLong() else 0L
+                    val totStr = ytdlMatch.groupValues[2]
+                    // "Unknown" totals (HLS before the variant is measured)
+                    // carry no byte math — keep the last known bytes instead
+                    // of zeroing them, but still take the speed + ETA.
+                    if (!totStr.equals("Unknown", ignoreCase = true)) {
+                        val tot = parseByteString(totStr)
+                        if (tot > 0) {
+                            totBytes = tot
+                            dlBytes = (tot * (pct / 100.0)).toLong()
+                        }
+                    }
                     spdBps = parseSpeedString(ytdlMatch.groupValues[3])
+                    etaSecs = parseEtaString("${ytdlMatch.groupValues[4]}:${ytdlMatch.groupValues[5]}")
                 } else {
                     // --progress-template @@DLP@@ format: pipe-separated
                     // fields.  field 1 = percent string ("45.2%"), 2 = speed
@@ -101,6 +120,7 @@ internal fun parseProgressTick(line: String?, libraryProgress: Float, lastDl: Lo
                         parsed = true
                         val pctStr = tmpl.groupValues[1].trim()
                         val spdStr = tmpl.groupValues[2].trim()
+                        val etaStr = tmpl.groupValues[3].trim()
                         val fiStr = tmpl.groupValues[4].trim()
                         val fcStr = tmpl.groupValues[5].trim()
                         val dlStr = tmpl.groupValues[6].trim()
@@ -108,6 +128,9 @@ internal fun parseProgressTick(line: String?, libraryProgress: Float, lastDl: Lo
                         val estStr = tmpl.groupValues[8].trim()
                         // Speed always parseable when present.
                         spdBps = parseSpeedString(spdStr)
+                        // ETA ("00:30", "1:02:03", or "Unknown"/"NA" when
+                        // yt-dlp can't estimate yet — HLS early ticks).
+                        etaSecs = parseEtaString(etaStr)
                         // Downloaded bytes: prefer the explicit byte string
                         // (most reliable for HLS where the percent lags
                         // reality by one tick); fall back to percent*total
@@ -184,7 +207,20 @@ internal fun parseProgressTick(line: String?, libraryProgress: Float, lastDl: Lo
 
     val safeTot = if (totBytes > 0) max(lastTot, totBytes) else lastTot
     val safeDl = max(lastDl, dlBytes)
-    return ProgressTick(safeDl, safeTot, spdBps)
+    return ProgressTick(safeDl, safeTot, spdBps, etaSecs)
+}
+
+/** "MM:SS" / "H:MM:SS" -> seconds; -1 for "Unknown", "NA", "" or garbage. */
+internal fun parseEtaString(str: String): Long {
+    val clean = str.trim()
+    if (clean.isEmpty() || clean.equals("NA", ignoreCase = true) || clean.equals("Unknown", ignoreCase = true)) return -1L
+    var seconds = 0L
+    for (part in clean.split(':')) {
+        val v = part.trim().toLongOrNull() ?: return -1L
+        if (v < 0) return -1L
+        seconds = seconds * 60 + v
+    }
+    return seconds
 }
 
 internal fun parseByteString(str: String): Long {
