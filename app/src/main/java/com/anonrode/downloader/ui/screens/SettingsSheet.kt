@@ -1194,13 +1194,35 @@ internal fun SettingsDiagnosticsSection(state: SettingsState) {
             modifier = Modifier
                 .fillMaxWidth()
                 .clickable {
-                    val file = com.anonrode.downloader.util.DebugLog.currentLogFile()
-                    if (file == null || !file.exists()) {
+                    // Share the WHOLE retention window, not just today's file —
+                    // sharing only today made the log look like it auto-cleared
+                    // every 24h (user-reported). Oldest first, with a header per
+                    // day file so a reader can tell them apart.
+                    val files = com.anonrode.downloader.util.DebugLog.retainedLogFiles()
+                    if (files.isEmpty()) {
                         Toast.makeText(context, "No activity log yet", Toast.LENGTH_SHORT).show()
                     } else {
                         try {
-                            val raw = file.readText()
-                            val redacted = raw.replace(
+                            // Keep the share bounded: on heavy logging days drop
+                            // the OLDEST files until the total fits (recent
+                            // entries matter most for diagnosis).
+                            val cap = 8L * 1024 * 1024
+                            var total = files.sumOf { it.length() }
+                            var from = 0
+                            while (from < files.size - 1 && total > cap) {
+                                total -= files[from].length()
+                                from++
+                            }
+                            val combined = StringBuilder()
+                            if (from > 0) {
+                                combined.append("(oldest ").append(from)
+                                    .append(" log files omitted to keep the share under 8 MB)\n\n")
+                            }
+                            for (f in files.subList(from, files.size)) {
+                                combined.append("===== ").append(f.name).append(" =====\n")
+                                combined.append(f.readText()).append('\n')
+                            }
+                            val redacted = combined.toString().replace(
                                 Regex("""[?&](token|download_token|pt|expiry|expires)=[^\s&]+""")
                             ) { match ->
                                 "${match.value.substringBefore('=')}=***REDACTED***"
