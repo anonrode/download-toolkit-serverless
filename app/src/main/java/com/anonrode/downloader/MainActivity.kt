@@ -3,6 +3,8 @@ package com.anonrode.downloader
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.res.Configuration
+import android.graphics.drawable.ColorDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -15,21 +17,26 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.*
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
+import androidx.core.view.WindowCompat
 import com.anonrode.downloader.ui.components.MainScaffold
 import com.anonrode.downloader.ui.components.MainTab
 import com.anonrode.downloader.ui.screens.SocialModal
 import com.anonrode.downloader.ui.screens.SplashContent
 import com.anonrode.downloader.ui.theme.AccentPrimary
 import com.anonrode.downloader.ui.theme.AnonDownloaderTheme
+import com.anonrode.downloader.ui.theme.DarkAnonColors
+import com.anonrode.downloader.ui.theme.LightAnonColors
 import com.anonrode.downloader.ui.theme.SurfaceCard
 import com.anonrode.downloader.ui.theme.TextMuted
 import com.anonrode.downloader.ui.theme.TextPrimary
@@ -47,12 +54,15 @@ class MainActivity : ComponentActivity() {
         } catch (_: Throwable) {}
 
         super.onCreate(savedInstanceState)
-        // Cold-start: pick the icon tint that matches the persisted theme so
+        // Cold-start: fit the window edge-to-edge exactly ONCE, with the bar
+        // icon tint and window background matched to the persisted theme so
         // the first frame already has the right system-bar contrast. Without
         // this, light mode launches with white-on-near-white status icons
-        // (invisible) until the SideEffect below re-runs on the first
-        // composition. The `dark()` overload is the no-arg fallback
-        // `enableEdgeToEdge()` already uses.
+        // (invisible) until the first composition. This must stay the ONLY
+        // enableEdgeToEdge call: re-invoking it re-fits the window and
+        // re-dispatches window insets, which flashed a light band across the
+        // top on theme flips. Later theme switches run only the lightweight
+        // SideEffect sync below (bar icon appearance + window background).
         val coldPrefs = getSharedPreferences("downloader_settings", android.content.Context.MODE_PRIVATE)
         val coldTheme = coldPrefs.getString("pref_theme_mode", "dark") ?: "dark"
         applyEdgeToEdge(coldTheme)
@@ -75,18 +85,30 @@ class MainActivity : ComponentActivity() {
         setContent {
             var themeMode by remember { mutableStateOf(initialThemeMode) }
 
-            // Re-apply edge-to-edge whenever the user toggles the theme. The
-            // no-arg overload of enableEdgeToEdge() inspects the SYSTEM theme
-            // (not ours), so light mode would keep dark icons on a near-white
-            // background. `SystemBarStyle.light` flips the icons dark for
-            // light theme; `dark` keeps them light. Both styles use a fully
-            // transparent scrim so the app's surface bleeds through.
-            // Keyed LaunchedEffect (not SideEffect): this now runs on first
-            // composition and on theme flips only, instead of re-invoking
-            // enableEdgeToEdge after EVERY recomposition of this scope —
-            // each call re-dispatches window insets and added a subtle hitch
-            // whenever top-level state changed.
-            LaunchedEffect(themeMode) { applyEdgeToEdge(themeMode) }
+            // Resolve the effective theme for the system bars and window
+            // background. "system" follows the device night mode, mirroring
+            // AnonDownloaderTheme's own resolution below, so Auto gets the
+            // right bar contrast and background on light AND dark devices.
+            val isDark = when (themeMode.lowercase()) {
+                "light" -> false
+                "system" -> isSystemInDarkTheme()
+                else -> true
+            }
+
+            // Theme-flip sync: flip ONLY the bar icon appearance and swap the
+            // window background — never re-invoke enableEdgeToEdge, which
+            // re-fits the window (setDecorFitsSystemWindows) and re-dispatches
+            // window insets. That re-fit, landing a frame late via the old
+            // LaunchedEffect, is what flashed the light band across the top
+            // while Compose content was still on the previous theme's frame.
+            // SideEffect (not LaunchedEffect): it runs after this scope
+            // recomposes successfully and BEFORE the frame is dispatched, so
+            // the bar appearance and window background land in the SAME frame
+            // as the Compose color swap. This scope only recomposes when
+            // themeMode changes (or the device night mode changes in Auto),
+            // so the sync is effectively keyed on the resolved theme and
+            // never re-fits the window on unrelated recompositions.
+            SideEffect { syncSystemBars(isDark) }
 
             AnonDownloaderTheme(themeMode = themeMode) {
                 val socialTarget by activeSocialTarget
@@ -267,16 +289,33 @@ class MainActivity : ComponentActivity() {
 }
 
 /**
- * Re-applies the activity's edge-to-edge system-bar styling to match the
- * app's current theme. The no-arg `enableEdgeToEdge()` is theme-agnostic
- * (it inspects the system theme, not ours) and produces invisible status
- * icons when light mode is active on a near-white app background. This
- * helper is called from `onCreate` (cold start) and from a Compose
- * `SideEffect` keyed on `themeMode` (every toggle), so the bars always
- * match the surface underneath.
+ * Applies the activity's edge-to-edge system-bar styling to match the app's
+ * theme, and points the window background at the resolved theme's color.
+ * Invoked exactly ONCE, from `onCreate` (cold start), so the first frame
+ * already has the right bar contrast. Theme switches after that use
+ * [syncSystemBars] instead: re-invoking `enableEdgeToEdge` on every toggle
+ * re-fits the window and re-dispatches window insets, which flashed a light
+ * band across the top of the screen mid-transition.
+ *
+ * `"system"` resolves through the device's current night mode instead of
+ * assuming dark, so Auto on a light device gets dark status icons and the
+ * light window background (the old assume-dark path left the icons
+ * invisible there).
  */
 private fun MainActivity.applyEdgeToEdge(themeMode: String) {
-    val style = if (themeMode.equals("light", ignoreCase = true)) {
+    val isDark = when (themeMode.lowercase()) {
+        "light" -> false
+        "system" -> (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
+            Configuration.UI_MODE_NIGHT_YES
+        // Dark theme (or unknown): matches the no-arg `enableEdgeToEdge()`
+        // behavior the app had before, so dark mode is unchanged.
+        else -> true
+    }
+    val style = if (isDark) {
+        // Dark theme: light icons on a transparent bar (the app's black
+        // surface bleeds through).
+        SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
+    } else {
         // Light theme: dark icons on a transparent bar (the app's near-white
         // surface bleeds through). `light(scrim, darkScrim)` both transparent
         // because the app surface is always a clean light color and the OS
@@ -285,11 +324,40 @@ private fun MainActivity.applyEdgeToEdge(themeMode: String) {
             android.graphics.Color.TRANSPARENT,
             android.graphics.Color.TRANSPARENT
         )
-    } else {
-        // Dark theme (or unknown): light icons on a transparent bar. Matches
-        // the no-arg `enableEdgeToEdge()` behavior the app had before this
-        // change, so dark mode is unchanged for existing users.
-        SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
     }
     enableEdgeToEdge(statusBarStyle = style, navigationBarStyle = style)
+    // Match the window background too, so even frames drawn before the first
+    // composition (e.g. splash dismissal) show the resolved theme's color
+    // instead of the XML default black.
+    setWindowBackground(isDark)
+}
+
+/**
+ * Lightweight theme-flip sync: flips ONLY the bar icon appearance and swaps
+ * the window background. Unlike `enableEdgeToEdge` it never re-fits the
+ * window (`setDecorFitsSystemWindows`) and never re-dispatches window
+ * insets, so nothing shifts or flashes while the Compose theme changes.
+ * Invoked from a `SideEffect` in `setContent`, which runs after a
+ * successful recomposition and before the frame is dispatched — so the bar
+ * appearance and window background change land in the same frame as the
+ * Compose color swap.
+ */
+private fun MainActivity.syncSystemBars(isDark: Boolean) {
+    val insetsController = WindowCompat.getInsetsController(window, window.decorView)
+    // "Light appearance" makes the OS draw DARK bar icons (light theme);
+    // without it the icons stay light (dark theme).
+    insetsController.isAppearanceLightStatusBars = !isDark
+    insetsController.isAppearanceLightNavigationBars = !isDark
+    setWindowBackground(isDark)
+}
+
+/**
+ * Points the window background at the TARGET theme's background color so any
+ * region exposed mid-transition (the system-bar band, over-scroll, etc.)
+ * shows the theme the app is switching TO, never the one it is leaving.
+ */
+private fun MainActivity.setWindowBackground(isDark: Boolean) {
+    window.setBackgroundDrawable(
+        ColorDrawable((if (isDark) DarkAnonColors else LightAnonColors).background.toArgb())
+    )
 }
