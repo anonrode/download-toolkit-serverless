@@ -66,12 +66,21 @@ fun DownloadsScreen(
     var sortMode by remember { mutableStateOf(initialSort) }
     var sortMenuOpen by remember { mutableStateOf(false) }
 
-    // The Next/Previous queue the modal steps through: every COMPLETED task
-    // whose filePath still exists, in the same order they appear on the
-    // Downloads screen. Recomputed whenever the task list changes so a newly
-    // completed download joins the queue and a deleted one drops out.
-    val completedQueuePaths = remember(tasks) {
-        tasks.filter { it.status == TaskStatus.COMPLETED && File(it.filePath).exists() }
+    // The Next/Previous queue the player steps through: every COMPLETED
+    // task's path, in screen order. Keyed on a cheap structural signature
+    // (the paths themselves) instead of the task list, because the list
+    // re-emits on every progress tick while the completed set only changes
+    // when a download finishes or is deleted. No File.exists() here — that
+    // was disk I/O on the main thread on EVERY tick; the player now skips
+    // missing peers itself when stepping.
+    val completedSig = remember(tasks) {
+        buildString {
+            tasks.forEach { if (it.status == TaskStatus.COMPLETED) append(it.filePath).append('\n') }
+        }
+    }
+    val completedQueuePaths = remember(completedSig) {
+        viewModel.engine.tasks.value
+            .filter { it.status == TaskStatus.COMPLETED }
             .map { it.filePath }
     }
 
@@ -82,7 +91,12 @@ fun DownloadsScreen(
                 title = task.episodeTitle,
                 queuePeerPaths = completedQueuePaths,
                 onPlayFile = { path ->
-                    activePlaybackTask = tasks.firstOrNull { it.filePath == path }
+                    // Read the freshest snapshot (NOT the composed `tasks`,
+                    // which can lag) and never null the state on a miss —
+                    // a miss used to close the player mid-Next.
+                    viewModel.engine.tasks.value
+                        .firstOrNull { it.filePath == path }
+                        ?.let { activePlaybackTask = it }
                 }
             ),
             onDismiss = { activePlaybackTask = null }
@@ -93,21 +107,29 @@ fun DownloadsScreen(
     // in engine.tasks (newer = tail) as a proxy for recency. The data class
     // has no enqueue timestamp; this preserves the visual grouping without
     // touching the model.
-    val groups = remember(tasks, sortMode) {
-        if (tasks.isEmpty()) emptyList()
+    //
+    // Keyed on a structural signature (id:status per row) rather than the
+    // task list itself: progress ticks mutate downloadedBytes constantly but
+    // never the structure, so the sort + grouping no longer re-runs several
+    // times per second during downloads.
+    val structureSig = remember(tasks) {
+        buildString { tasks.forEach { append(it.id).append(':').append(it.status.name).append('|') } }
+    }
+    val groups = remember(structureSig, sortMode) {
+        val snapshot = viewModel.engine.tasks.value
+        if (snapshot.isEmpty()) emptyList()
         else {
-            // Re-seed age overrides on every recomposition: ids in the
-            // current list get age = position, ids no longer present are
-            // dropped by the next clear.
+            // Re-seed age overrides whenever the structure actually changes;
+            // ids no longer present are dropped by the next clear.
             DownloadsSorter.clearAgeOverrides()
-            tasks.forEachIndexed { index, task ->
+            snapshot.forEachIndexed { index, task ->
                 // 14 days for the oldest entry, 0 for the newest, 1-day
                 // increments in between. Buckets fall out of those values
                 // without any clock dependency.
-                val daysAgo = ((tasks.size - 1 - index).toLong()).coerceAtLeast(0L)
+                val daysAgo = ((snapshot.size - 1 - index).toLong()).coerceAtLeast(0L)
                 DownloadsSorter.setAgeOverride(task.id, daysAgo)
             }
-            DownloadsSorter.sortDownloads(tasks, sortMode)
+            DownloadsSorter.sortDownloads(snapshot, sortMode)
         }
     }
 
