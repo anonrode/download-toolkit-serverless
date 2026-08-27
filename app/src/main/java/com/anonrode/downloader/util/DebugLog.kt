@@ -32,8 +32,13 @@ object DebugLog {
     @Volatile
     private var logDir: File? = null
 
-    private val dayFormat = SimpleDateFormat("yyyy-MM-dd", Locale.US)
-    private val timeFormat = SimpleDateFormat("MM-dd HH:mm:ss.SSS", Locale.US)
+    // SimpleDateFormat is NOT thread-safe (format() mutates an internal
+    // Calendar): log() formats on the CALLER's thread while dozens of IO
+    // threads log concurrently, which can throw ArrayIndexOutOfBoundsException
+    // mid-format and corrupt the line. One instance per thread instead of one
+    // shared instance.
+    private val dayFormat = ThreadLocal.withInitial { SimpleDateFormat("yyyy-MM-dd", Locale.US) }
+    private val timeFormat = ThreadLocal.withInitial { SimpleDateFormat("MM-dd HH:mm:ss.SSS", Locale.US) }
 
     private const val MAX_FILE_BYTES = 8L * 1024 * 1024
 
@@ -66,7 +71,7 @@ object DebugLog {
     /** Absolute path of today's log file. */
     fun currentLogFile(): File? {
         val dir = logDir ?: return null
-        return File(dir, "app-${dayFormat.format(Date())}.txt")
+        return File(dir, "app-${dayFormat.get().format(Date())}.txt")
     }
 
     fun allLogFiles(): List<File> {
@@ -124,7 +129,7 @@ object DebugLog {
      */
     fun crashLog(throwable: Throwable) {
         val dir = logDir ?: return
-        val line = "${timeFormat.format(Date())} [ERROR] CRASH ${throwable.javaClass.name}: ${throwable.message}\n" +
+        val line = "${timeFormat.get().format(Date())} [ERROR] CRASH ${throwable.javaClass.name}: ${throwable.message}\n" +
             throwable.stackTraceToString().take(2000) + "\n"
         try {
             val f = targetFile(dir)
@@ -137,7 +142,7 @@ object DebugLog {
     private fun log(category: String, msg: String) {
         if (!enabled) return
         val dir = logDir ?: return
-        val line = "${timeFormat.format(Date())} [$category] $msg\n"
+        val line = "${timeFormat.get().format(Date())} [$category] $msg\n"
         writer.execute {
             try {
                 val f = targetFile(dir)
@@ -149,7 +154,7 @@ object DebugLog {
     }
 
     private fun targetFile(dir: File): File {
-        var f = File(dir, "app-${dayFormat.format(Date())}.txt")
+        var f = File(dir, "app-${dayFormat.get().format(Date())}.txt")
         // Roll within a day if a single file grows past the cap.
         if (f.length() > MAX_FILE_BYTES) {
             var roll = 1

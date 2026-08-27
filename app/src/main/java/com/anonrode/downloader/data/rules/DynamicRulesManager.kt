@@ -117,19 +117,26 @@ object DynamicRulesManager {
         ".mp4", ".mkv", ".webm", ".avi", ".ts", ".m3u8", ".m4v", ".mp3", ".zip", ".rar", "-mp4", "-mkv"
     )
 
-    private val activeDomains = mutableMapOf<String, String>().apply { putAll(defaultDomains) }
-    private val activeMirrors = mutableMapOf<String, List<String>>()
-    private val activeSiteConfigs = mutableMapOf<String, SiteRuleConfig>()
-    private val activeResolverConfigs = mutableMapOf<String, JSONObject>()
-    private val activeMediaExtensions = mutableListOf<String>().apply { addAll(defaultMediaExtensions) }
-    private val dynamicProviders = mutableListOf<GenericDeclarativeProvider>()
+    // Rule state is published as immutable snapshots behind @Volatile refs.
+    // parseRulesJson builds fresh collections and swaps them in one go, so a
+    // reader (resolveReferer on an active download thread, getBaseUrl in a
+    // provider search) can never observe a half-applied playbook or hit a
+    // ConcurrentModificationException while an OTA sync is parsing.
+    @Volatile private var activeDomains: Map<String, String> = defaultDomains
+    @Volatile private var activeMirrors: Map<String, List<String>> = emptyMap()
+    @Volatile private var activeSiteConfigs: Map<String, SiteRuleConfig> = emptyMap()
+    @Volatile private var activeResolverConfigs: Map<String, JSONObject> = emptyMap()
+    @Volatile private var activeMediaExtensions: List<String> = defaultMediaExtensions
+    @Volatile private var dynamicProviders: List<GenericDeclarativeProvider> = emptyList()
 
     // Playbook v2 state
-    private val activeHostPolicies = mutableListOf<HostPolicyRule>()
-    private val activeUrlTemplates = mutableMapOf<String, String>()
-    private val activeKnownDead = mutableListOf<String>()
-    private val activeLockerHosts = mutableListOf<String>()
-    private val activeSearchStrategies = mutableMapOf<String, List<JSONObject>>()
+    @Volatile private var activeHostPolicies: List<HostPolicyRule> = emptyList()
+    @Volatile private var activeUrlTemplates: Map<String, String> = emptyMap()
+    @Volatile private var activeKnownDead: List<String> = emptyList()
+    @Volatile private var activeLockerHosts: List<String> = emptyList()
+    @Volatile private var activeSearchStrategies: Map<String, List<JSONObject>> = emptyMap()
+
+    @Volatile
     var tokenTtlMinutes: Long = 10
         private set
 
@@ -323,29 +330,30 @@ object DynamicRulesManager {
         }
     }
 
-    /** Returns false when the payload is malformed; bundled defaults stay active.
+    /** Returns false when the payload is malformed; the previously active
+     *  rules (bundled defaults on first run) stay in place untouched.
      *  internal so JVM unit tests can exercise the full parse path. */
     internal fun parseRulesJson(jsonStr: String): Boolean {
-        // Clear ALL playbook-driven state BEFORE parsing, so a failure
-        // anywhere below leaves a fully-default state instead of a
-        // half-applied playbook. Every getter already falls back to its
-        // bundled default when its collection is empty.
-        activeDomains.clear()
-        activeMirrors.clear()
-        activeSiteConfigs.clear()
-        activeResolverConfigs.clear()
-        activeMediaExtensions.clear()
-        activeHostPolicies.clear()
-        activeUrlTemplates.clear()
-        activeKnownDead.clear()
-        activeLockerHosts.clear()
-        activeSearchStrategies.clear()
-        dynamicProviders.clear()
-        tokenTtlMinutes = 10
+        // Build-then-swap: every collection is populated locally and the
+        // whole state is published at the end. Readers never observe a
+        // half-applied playbook, a parse failure leaves the previous state
+        // intact (the old clear-then-fill left an EMPTY state on failure),
+        // and no live collection is mutated while download threads iterate
+        // it mid-sync.
+        val domains = mutableMapOf<String, String>()
+        val mirrors = mutableMapOf<String, List<String>>()
+        val siteConfigs = mutableMapOf<String, SiteRuleConfig>()
+        val resolverConfigs = mutableMapOf<String, JSONObject>()
+        val mediaExts = mutableListOf<String>()
+        val hostPolicies = mutableListOf<HostPolicyRule>()
+        val urlTemplates = mutableMapOf<String, String>()
+        val knownDead = mutableListOf<String>()
+        val lockerHosts = mutableListOf<String>()
+        val searchStrategies = mutableMapOf<String, List<JSONObject>>()
+        val dynProviders = mutableListOf<GenericDeclarativeProvider>()
         return try {
             val obj = JSONObject(jsonStr)
             val ver = obj.optString("version", "2026.08.22.1")
-            _version.value = ver
 
             val domainsObj = obj.optJSONObject("domains")
             if (domainsObj != null) {
@@ -354,7 +362,7 @@ object DynamicRulesManager {
                     val k = keys.next()
                     val url = domainsObj.optString(k)
                     if (url.isNotBlank()) {
-                        activeDomains[k.lowercase()] = url
+                        domains[k.lowercase()] = url
                     }
                 }
             }
@@ -371,7 +379,7 @@ object DynamicRulesManager {
                             val m = arr.optString(i)
                             if (m.isNotBlank()) list.add(m)
                         }
-                        activeMirrors[k.lowercase()] = list
+                        mirrors[k.lowercase()] = list
                     }
                 }
             }
@@ -399,7 +407,7 @@ object DynamicRulesManager {
                             }
                         }
 
-                        activeSiteConfigs[k.lowercase()] = SiteRuleConfig(
+                        siteConfigs[k.lowercase()] = SiteRuleConfig(
                             searchPattern = sObj.optString("searchPattern"),
                             searchType = sObj.optString("searchType", "html"),
                             cardSelector = sObj.optString("cardSelector"),
@@ -422,7 +430,7 @@ object DynamicRulesManager {
                     val k = keys.next()
                     val rObj = resolversObj.optJSONObject(k)
                     if (rObj != null) {
-                        activeResolverConfigs[k.lowercase()] = rObj
+                        resolverConfigs[k.lowercase()] = rObj
                     }
                 }
             }
@@ -431,7 +439,7 @@ object DynamicRulesManager {
             if (mediaExtArr != null && mediaExtArr.length() > 0) {
                 for (idx in 0 until mediaExtArr.length()) {
                     val ext = mediaExtArr.optString(idx)
-                    if (ext.isNotBlank()) activeMediaExtensions.add(ext)
+                    if (ext.isNotBlank()) mediaExts.add(ext)
                 }
             }
 
@@ -443,7 +451,7 @@ object DynamicRulesManager {
                     val p = hpArr.optJSONObject(i) ?: continue
                     val m = p.optString("match")
                     if (m.isBlank()) continue
-                    activeHostPolicies.add(
+                    hostPolicies.add(
                         HostPolicyRule(m.lowercase(), p.optString("referer"), p.optString("ua"))
                     )
                 }
@@ -455,7 +463,7 @@ object DynamicRulesManager {
                 while (keys.hasNext()) {
                     val k = keys.next()
                     val tpl = utObj.optString(k)
-                    if (tpl.isNotBlank()) activeUrlTemplates[k.lowercase()] = tpl
+                    if (tpl.isNotBlank()) urlTemplates[k.lowercase()] = tpl
                 }
             }
 
@@ -463,7 +471,7 @@ object DynamicRulesManager {
             if (kdArr != null) {
                 for (i in 0 until kdArr.length()) {
                     val h = kdArr.optString(i)
-                    if (h.isNotBlank()) activeKnownDead.add(h.lowercase())
+                    if (h.isNotBlank()) knownDead.add(h.lowercase())
                 }
             }
 
@@ -474,11 +482,11 @@ object DynamicRulesManager {
             if (lhArr != null) {
                 for (i in 0 until lhArr.length()) {
                     val h = lhArr.optString(i)
-                    if (h.isNotBlank()) activeLockerHosts.add(h.lowercase())
+                    if (h.isNotBlank()) lockerHosts.add(h.lowercase())
                 }
             }
 
-            tokenTtlMinutes = obj.optLong("tokenTtlMinutes", 10L).coerceIn(1L, 240L)
+            val ttl = obj.optLong("tokenTtlMinutes", 10L).coerceIn(1L, 240L)
 
             // Ordered search strategy chains: when a site's primary search
             // breaks (dramarain ?s= lesson), OTA adds fallback strategies as
@@ -493,7 +501,7 @@ object DynamicRulesManager {
                     for (i in 0 until arr.length()) {
                         arr.optJSONObject(i)?.let { list.add(it) }
                     }
-                    if (list.isNotEmpty()) activeSearchStrategies[k.lowercase()] = list
+                    if (list.isNotEmpty()) searchStrategies[k.lowercase()] = list
                 }
             }
 
@@ -515,9 +523,25 @@ object DynamicRulesManager {
                         posterSelector = item.optString("poster_selector", "img"),
                         episodeLinkSelector = item.optString("episode_link_selector", "a[href*='download']")
                     )
-                    dynamicProviders.add(GenericDeclarativeProvider(cfg))
+                    dynProviders.add(GenericDeclarativeProvider(cfg))
                 }
             }
+
+            // Atomic publish — readers see either the old playbook or the new
+            // one, never a mix.
+            activeDomains = domains
+            activeMirrors = mirrors
+            activeSiteConfigs = siteConfigs
+            activeResolverConfigs = resolverConfigs
+            activeMediaExtensions = mediaExts.ifEmpty { defaultMediaExtensions }
+            activeHostPolicies = hostPolicies
+            activeUrlTemplates = urlTemplates
+            activeKnownDead = knownDead
+            activeLockerHosts = lockerHosts
+            activeSearchStrategies = searchStrategies
+            dynamicProviders = dynProviders
+            tokenTtlMinutes = ttl
+            _version.value = ver
             true
         } catch (_: Exception) {
             false
