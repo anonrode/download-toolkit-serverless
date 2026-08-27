@@ -391,6 +391,60 @@ object HttpClient {
     }
 
     /**
+     * POST with a form-urlencoded body, mirroring [getText]: same 3MB body
+     * cap, same lastFailure journaling, same tag tracking (search-tagged
+     * calls stay cancellable as a group). Used by the rules pipeline for
+     * sites whose search is an admin-ajax style POST.
+     */
+    fun postForm(url: String, form: Map<String, String>, referer: String? = null, headers: Map<String, String> = emptyMap(), tag: String? = null): String? {
+        return try {
+            val body = okhttp3.FormBody.Builder().apply {
+                form.forEach { (k, v) -> add(k, v) }
+            }.build()
+            val reqBuilder = Request.Builder()
+                .url(safeUrl(url))
+                .post(body)
+                .header("User-Agent", DEFAULT_UA)
+                .header("Accept", "*/*")
+                .header("Accept-Language", "en-US,en;q=0.9")
+            if (!referer.isNullOrBlank()) {
+                reqBuilder.header("Referer", referer)
+            }
+            headers.forEach { (k, v) -> reqBuilder.header(k, v) }
+
+            val call = shared.newCall(reqBuilder.build())
+            inFlightCalls.add(call)
+            if (tag != null) {
+                taggedCalls.computeIfAbsent(tag) { java.util.concurrent.CopyOnWriteArrayList() }.add(call)
+            }
+            val started = System.currentTimeMillis()
+            try {
+                call.execute().use { res ->
+                    com.anonrode.downloader.util.DebugLog.net(
+                        "POST ${safeUrl(url)} -> ${res.code} in ${System.currentTimeMillis() - started}ms"
+                    )
+                    if (res.isSuccessful) {
+                        cappedText(res)
+                    } else {
+                        lastFailure = "HTTP ${res.code} for ${url.take(120)}"
+                        Log.w("HttpClient", lastFailure!!)
+                        null
+                    }
+                }
+            } finally {
+                inFlightCalls.remove(call)
+                if (tag != null) {
+                    taggedCalls[tag]?.remove(call)
+                }
+            }
+        } catch (e: Exception) {
+            lastFailure = "${e.javaClass.simpleName}: ${e.message} for ${url.take(120)}"
+            Log.w("HttpClient", lastFailure!!)
+            null
+        }
+    }
+
+    /**
      * Reachability probe: request headers only (no body read) with a hard call
      * timeout, and report whether the server answered. Used by the HLS
      * pre-flight so a dead segment CDN fails a task in seconds instead of

@@ -219,6 +219,86 @@ class DynamicRulesManagerTest {
         assertEquals("", DynamicRulesManager.getUrlTemplate("nkiri"))
         assertEquals(15L * 60_000L, DynamicRulesManager.getTokenTtlMs())
     }
+
+    // ---------------- declarative step pipelines ----------------
+
+    @Test
+    fun pipelines_parseAndExposePerSite() {
+        val ok = DynamicRulesManager.parseRulesJson(
+            """
+            {
+              "version": "test.pipelines",
+              "pipelines": {
+                "nkiri": {
+                  "schema": 1,
+                  "search": {
+                    "steps": [
+                      {
+                        "sources": [{"url": "{base}/?s={query}", "method": "GET"}],
+                        "mode": "failover",
+                        "as": "html",
+                        "items": {"cardSelector": "article", "title": "self", "url": "self"}
+                      }
+                    ]
+                  }
+                },
+                "broken": {"schema": 1, "search": {"steps": []}},
+                "future": {"schema": 2, "search": {"steps": [{"sources": [{"url": "http://x"}]}]}}
+              }
+            }
+            """.trimIndent()
+        )
+        assertTrue(ok)
+        val nkiri = DynamicRulesManager.getPipeline("nkiri")
+        assertNotNull(nkiri)
+        assertNotNull(nkiri!!.search)
+        assertNull(nkiri.episodes)
+        // malformed (empty steps) and unknown-schema entries are skipped, not fatal
+        assertNull(DynamicRulesManager.getPipeline("broken"))
+        assertNull(DynamicRulesManager.getPipeline("future"))
+        assertNull(DynamicRulesManager.getPipeline("unknownsite"))
+    }
+
+    @Test
+    fun pipelines_malformedEntryDoesNotFailPayload() {
+        val ok = DynamicRulesManager.parseRulesJson(
+            """
+            {
+              "version": "test.pipelines.malformed",
+              "domains": {"nkiri": "https://thenkiri.com"},
+              "pipelines": {"nkiri": "not an object"}
+            }
+            """.trimIndent()
+        )
+        assertTrue(ok)
+        assertEquals("test.pipelines.malformed", DynamicRulesManager.version.value)
+        assertNull(DynamicRulesManager.getPipeline("nkiri"))
+        // the rest of the payload still applied
+        assertEquals("https://thenkiri.com", DynamicRulesManager.getBaseUrl("nkiri"))
+    }
+
+    @Test
+    fun minAppVersion_rejectsPayloadRequiringNewerApp() {
+        // establish the state the rejection must preserve
+        DynamicRulesManager.parseRulesJson(
+            """{"version":"test.pre.minapp","domains":{"nkiri":"https://kept.example"}}"""
+        )
+        val rejected = DynamicRulesManager.parseRulesJson(
+            """{"version":"test.minapp","minAppVersion":999999,"domains":{"nkiri":"https://changed.example"}}"""
+        )
+        assertFalse(rejected)
+        assertEquals("test.pre.minapp", DynamicRulesManager.version.value)
+        assertEquals("https://kept.example", DynamicRulesManager.getBaseUrl("nkiri"))
+    }
+
+    @Test
+    fun minAppVersion_acceptsPayloadAtOrBelowCurrentVersion() {
+        val ok = DynamicRulesManager.parseRulesJson(
+            """{"version":"test.minapp.ok","minAppVersion":1,"domains":{"nkiri":"https://ok.example"}}"""
+        )
+        assertTrue(ok)
+        assertEquals("https://ok.example", DynamicRulesManager.getBaseUrl("nkiri"))
+    }
 }
 
 private fun hexToBytesTest(hex: String): ByteArray =

@@ -136,6 +136,11 @@ object DynamicRulesManager {
     @Volatile private var activeLockerHosts: List<String> = emptyList()
     @Volatile private var activeSearchStrategies: Map<String, List<JSONObject>> = emptyMap()
 
+    // Declarative step pipelines: search/episode navigation as OTA data
+    // (see PipelineModels.kt). Sites whose provider reads a pipeline here
+    // keep their compiled code as per-call fallback.
+    @Volatile private var activePipelines: Map<String, SitePipeline> = emptyMap()
+
     @Volatile
     var tokenTtlMinutes: Long = 10
         private set
@@ -217,6 +222,12 @@ object DynamicRulesManager {
      *  slugGuess), empty when the playbook declares none. */
     fun getSearchStrategies(site: String): List<JSONObject> =
         activeSearchStrategies[site.lowercase()] ?: emptyList()
+
+    /** Declarative step pipeline for a site's search/episodes, or null when
+     *  the playbook declares none (or the entry used an unknown schema
+     *  version and was ignored). Callers fall back to compiled logic. */
+    fun getPipeline(site: String): SitePipeline? =
+        activePipelines[site.lowercase()]
 
     suspend fun syncFromGitHub(context: Context): Pair<Boolean, String> = withContext(Dispatchers.IO) {
         try {
@@ -354,6 +365,19 @@ object DynamicRulesManager {
         return try {
             val obj = JSONObject(jsonStr)
             val ver = obj.optString("version", "2026.08.22.1")
+
+            // Fleet guard: a payload that declares it needs a newer app is
+            // rejected wholesale and the previous state stays — an older
+            // client can't run whatever the payload assumes. Purely additive
+            // payloads leave minAppVersion unset so the installed fleet keeps
+            // receiving domain/selector updates.
+            val minApp = obj.optInt("minAppVersion", 0)
+            if (minApp > 0 && minApp > com.anonrode.downloader.BuildConfig.VERSION_CODE) {
+                com.anonrode.downloader.util.DebugLog.error(
+                    "OTA rules REJECTED: payload requires app v$minApp, this is ${com.anonrode.downloader.BuildConfig.VERSION_CODE} — keeping previous rules"
+                )
+                return false
+            }
 
             val domainsObj = obj.optJSONObject("domains")
             if (domainsObj != null) {
@@ -505,6 +529,30 @@ object DynamicRulesManager {
                 }
             }
 
+            // Declarative step pipelines (search/episode navigation as data).
+            // Lenient per site: a malformed entry or an unknown schema version
+            // is skipped and journaled, never fatal — that site's compiled
+            // provider fallback covers it, and the rest of the payload still
+            // applies. (Contrast with dynamic_providers below, which throws
+            // on a bad entry and fails the whole parse.)
+            val pipelines = mutableMapOf<String, SitePipeline>()
+            val pipelinesObj = obj.optJSONObject("pipelines")
+            if (pipelinesObj != null) {
+                val keys = pipelinesObj.keys()
+                while (keys.hasNext()) {
+                    val k = keys.next()
+                    val pObj = pipelinesObj.optJSONObject(k) ?: continue
+                    val parsed = parseSitePipeline(pObj)
+                    if (parsed != null) {
+                        pipelines[k.lowercase()] = parsed
+                    } else {
+                        com.anonrode.downloader.util.DebugLog.error(
+                            "OTA rules: skipping pipeline for \"$k\" (malformed or unknown schema)"
+                        )
+                    }
+                }
+            }
+
             // Parse any dynamic new providers added remotely
             val dynamicList = obj.optJSONArray("dynamic_providers")
             if (dynamicList != null) {
@@ -539,6 +587,7 @@ object DynamicRulesManager {
             activeKnownDead = knownDead
             activeLockerHosts = lockerHosts
             activeSearchStrategies = searchStrategies
+            activePipelines = pipelines
             dynamicProviders = dynProviders
             tokenTtlMinutes = ttl
             _version.value = ver
