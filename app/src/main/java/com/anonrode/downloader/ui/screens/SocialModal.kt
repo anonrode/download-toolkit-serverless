@@ -22,6 +22,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.anonrode.downloader.ui.components.QualityChipRow
 import com.anonrode.downloader.ui.theme.*
 import com.anonrode.downloader.viewmodel.MainViewModel
 
@@ -211,31 +212,11 @@ fun SocialModal(
             if (!audioOnly) {
                 Spacer(modifier = Modifier.height(Spacing.sm))
                 // Quality Chips
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(Spacing.xs)
-                ) {
-                    listOf("480p", "720p", "1080p", "Best").forEach { q ->
-                        val isSel = selectedQuality.equals(q, ignoreCase = true)
-                        Box(
-                            modifier = Modifier
-                                .weight(1f)
-                                .clip(RoundedCornerShape(Radius.sm))
-                                .background(if (isSel) AccentViolet else SurfaceCard)
-                                .border(1.dp, if (isSel) AccentViolet else BorderHairline, RoundedCornerShape(Radius.sm))
-                                .clickable { selectedQuality = q }
-                                .padding(vertical = Spacing.sm),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = q,
-                                fontSize = 12.sp,
-                                fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal,
-                                color = if (isSel) Color.White else TextSecondary
-                            )
-                        }
-                    }
-                }
+                QualityChipRow(
+                    options = listOf("480p", "720p", "1080p", "Best"),
+                    selected = selectedQuality,
+                    onSelect = { selectedQuality = it }
+                )
             }
 
             Spacer(modifier = Modifier.height(Spacing.sm))

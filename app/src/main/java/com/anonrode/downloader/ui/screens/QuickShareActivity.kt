@@ -46,6 +46,7 @@ import androidx.core.content.ContextCompat
 import com.anonrode.downloader.AnonApp
 import com.anonrode.downloader.data.router.ParsedUrl
 import com.anonrode.downloader.data.router.UrlRouter
+import com.anonrode.downloader.ui.components.QualityChipRow
 import com.anonrode.downloader.ui.theme.*
 
 class QuickShareActivity : ComponentActivity() {
@@ -305,7 +306,7 @@ fun QuickShareCard(
                 modifier = Modifier
                     .padding(bottom = Spacing.md)
                     .size(width = 36.dp, height = 4.dp)
-                    .clip(RoundedCornerShape(2.dp))
+                    .clip(CircleShape)
                     .background(BorderHairline)
                     .align(Alignment.CenterHorizontally)
             )
@@ -486,38 +487,11 @@ fun QuickShareCard(
                     Spacer(modifier = Modifier.height(Spacing.lg))
                     SectionLabel(text = "Quality")
                     Spacer(modifier = Modifier.height(Spacing.sm))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(Spacing.sm)
-                    ) {
-                        listOf("480p", "720p", "1080p", "Best").forEach { q ->
-                            val isSelected = selectedQuality.equals(q, ignoreCase = true)
-                            Box(
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .height(48.dp)
-                                    .clip(RoundedCornerShape(Radius.md))
-                                    .background(
-                                        if (isSelected) AccentViolet else SurfaceCard,
-                                        RoundedCornerShape(Radius.md)
-                                    )
-                                    .border(
-                                        width = 1.dp,
-                                        color = if (isSelected) AccentViolet else BorderHairline,
-                                        shape = RoundedCornerShape(Radius.md)
-                                    )
-                                    .clickable { selectedQuality = q },
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    text = q,
-                                    fontSize = 14.sp,
-                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                                    color = if (isSelected) Color.White else TextSecondary
-                                )
-                            }
-                        }
-                    }
+                    QualityChipRow(
+                        options = listOf("480p", "720p", "1080p", "Best"),
+                        selected = selectedQuality,
+                        onSelect = { selectedQuality = it }
+                    )
                 }
             }
 
@@ -587,7 +561,7 @@ fun QuickShareCard(
                         .weight(1.4f)
                         .height(52.dp),
                     shape = RoundedCornerShape(Radius.md),
-                    colors = ButtonDefaults.buttonColors(containerColor = AccentViolet)
+                    colors = ButtonDefaults.buttonColors(containerColor = AccentPrimary, contentColor = BackgroundDark)
                 ) {
                     Icon(Icons.Rounded.Download, null, modifier = Modifier.size(18.dp))
                     Spacer(modifier = Modifier.width(Spacing.sm))

@@ -14,7 +14,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.rounded.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -174,98 +173,6 @@ private fun rememberSettingsState(
     SettingsState(initialThemeMode = initialThemeMode, viewModel = viewModel)
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun SettingsSheet(
-    viewModel: MainViewModel,
-    themeMode: String = "dark",
-    onThemeChanged: (String) -> Unit = {},
-    onDismiss: () -> Unit
-) {
-    val uiState by viewModel.uiState.collectAsState()
-    val state = rememberSettingsState(viewModel, themeMode)
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-
-    val rulesVersion by DynamicRulesManager.version.collectAsState()
-
-    // Live storage figures: the ViewModel only refreshes at app start, so
-    // re-read free/total storage each time the sheet opens.
-    LaunchedEffect(Unit) {
-        viewModel.refreshStorageInfo()
-    }
-
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        containerColor = SurfaceElevated,
-        contentColor = TextPrimary,
-        shape = RoundedCornerShape(topStart = Radius.xl, topEnd = Radius.xl),
-        dragHandle = {
-            Box(
-                modifier = Modifier
-                    .padding(top = Spacing.md)
-                    .size(width = 36.dp, height = 4.dp)
-                    .clip(CircleShape)
-                    .background(BorderHairline)
-            )
-        }
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = Spacing.lg)
-                .padding(bottom = Spacing.xxl)
-                .verticalScroll(rememberScrollState())
-        ) {
-            SettingsHeader(onClose = onDismiss)
-            Spacer(modifier = Modifier.height(Spacing.md))
-
-            SettingsSelfHealingSection(
-                state = state,
-                rulesVersion = rulesVersion,
-                scope = scope
-            )
-            Spacer(modifier = Modifier.height(Spacing.lg))
-
-            SettingsAppearanceSection(
-                state = state,
-                onThemeChanged = onThemeChanged
-            )
-            Spacer(modifier = Modifier.height(Spacing.lg))
-
-            SettingsGeneralSection(state = state)
-            Spacer(modifier = Modifier.height(Spacing.lg))
-
-            SettingsEngineSection(state = state)
-            Spacer(modifier = Modifier.height(Spacing.lg))
-
-            SettingsMediaSection(state = state)
-            Spacer(modifier = Modifier.height(Spacing.lg))
-
-            SettingsAboutSection(
-                state = state,
-                uiState = uiState,
-                viewModel = viewModel,
-                scope = scope,
-                onDismiss = onDismiss
-            )
-            Spacer(modifier = Modifier.height(Spacing.xl))
-
-            SettingsNetworkSection(state = state)
-            Spacer(modifier = Modifier.height(Spacing.lg))
-
-            SettingsTorrentsSection(state = state)
-            Spacer(modifier = Modifier.height(Spacing.lg))
-
-            SettingsDiagnosticsSection(state = state)
-            Spacer(modifier = Modifier.height(Spacing.xl))
-            // No "Save Preferences" button: every control above persists the
-            // moment it changes (SettingsState.persist), so there is nothing
-            // left to apply on the way out.
-        }
-    }
-}
-
 /** Tabbed host.  Same content as the sheet, just without the bottom-sheet
  *  chrome so the user can navigate to it from the bottom nav.  Uses a
  *  LazyColumn so off-screen categories do not compose at all — the structural
@@ -392,53 +299,6 @@ fun SettingsScreen(
 // ============================================================
 //                     SECTION COMPOSABLES
 // ============================================================
-
-@Composable
-private fun SettingsHeader(onClose: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = Spacing.sm),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Icon(
-                imageVector = Icons.Rounded.Settings,
-                contentDescription = null,
-                tint = AccentPrimary,
-                modifier = Modifier.size(24.dp)
-            )
-            Spacer(modifier = Modifier.width(Spacing.sm))
-            Text(
-                text = "Settings",
-                fontSize = 20.sp,
-                fontWeight = FontWeight.Black,
-                color = TextPrimary
-            )
-        }
-
-        IconButton(
-            onClick = onClose,
-            modifier = Modifier.size(48.dp)
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(32.dp)
-                    .clip(CircleShape)
-                    .background(SurfaceCard),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Close,
-                    contentDescription = "Close",
-                    tint = TextSecondary,
-                    modifier = Modifier.size(16.dp)
-                )
-            }
-        }
-    }
-}
 
 @Composable
 internal fun SettingsSelfHealingSection(
@@ -874,7 +734,7 @@ internal fun SettingsAboutSection(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(Radius.xs))
                                 .clickable { UpdateChecker.openInBrowser(context, checkState.url) }
-                                .padding(horizontal = Spacing.xs, vertical = 4.dp)
+                                .padding(horizontal = Spacing.sm, vertical = Spacing.md)
                         )
                     }
                     UpdateUiState.UpToDate -> {
@@ -892,7 +752,7 @@ internal fun SettingsAboutSection(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(Radius.xs))
                                 .clickable { runUpdateCheck() }
-                                .padding(horizontal = Spacing.xs, vertical = 4.dp)
+                                .padding(horizontal = Spacing.sm, vertical = Spacing.md)
                         )
                     }
                     UpdateUiState.Idle -> {
@@ -904,7 +764,7 @@ internal fun SettingsAboutSection(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(Radius.xs))
                                 .clickable { runUpdateCheck() }
-                                .padding(horizontal = Spacing.xs, vertical = 4.dp)
+                                .padding(horizontal = Spacing.sm, vertical = Spacing.md)
                         )
                     }
                 }
@@ -926,7 +786,7 @@ internal fun SettingsAboutSection(
                     modifier = Modifier
                         .clip(RoundedCornerShape(Radius.xs))
                         .clickable { UpdateChecker.openInBrowser(context, UpdateChecker.RELEASES_PAGE) }
-                        .padding(horizontal = Spacing.xs, vertical = 4.dp)
+                        .padding(horizontal = Spacing.sm, vertical = Spacing.md)
                 )
             }
         )

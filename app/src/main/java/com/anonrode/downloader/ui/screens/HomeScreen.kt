@@ -187,7 +187,7 @@ fun HomeScreen(
                             Text(
                                 text = "Search series, anime, movies, torrents...",
                                 color = TextMuted,
-                                fontSize = 13.5.sp,
+                                fontSize = 14.sp,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )
@@ -491,7 +491,7 @@ fun ShowCardItem(
             Text(
                 text = show.title,
                 color = TextPrimary,
-                fontSize = 15.5.sp,
+                fontSize = 16.sp,
                 fontWeight = FontWeight.SemiBold,
                 lineHeight = 21.sp,
                 maxLines = 2,
@@ -590,12 +590,12 @@ private fun CardBadge(text: String, accent: Boolean) {
             .clip(RoundedCornerShape(Radius.sm))
             .background(SurfaceElevated)
             .border(1.dp, BorderHairline, RoundedCornerShape(Radius.sm))
-            .padding(horizontal = 8.dp, vertical = 4.dp)
+            .padding(horizontal = Spacing.sm, vertical = Spacing.xs)
     ) {
         Text(
             text = text,
             color = if (accent) AccentPrimary else TextSecondary,
-            fontSize = 10.5.sp,
+            fontSize = 11.sp,
             fontWeight = FontWeight.Bold,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis

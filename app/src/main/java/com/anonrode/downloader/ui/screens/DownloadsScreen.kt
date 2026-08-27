@@ -309,7 +309,7 @@ private fun StatChip(label: String, value: Int, accentError: Boolean = false) {
             .clip(RoundedCornerShape(Radius.xs))
             .background(SurfaceElevated)
             .border(1.dp, BorderHairline, RoundedCornerShape(Radius.xs))
-            .padding(horizontal = Spacing.sm, vertical = 4.dp)
+            .padding(horizontal = Spacing.sm, vertical = Spacing.xs)
     ) {
         Text(
             text = value.toString(),
@@ -418,7 +418,7 @@ fun DownloadCard(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(Radius.xs))
                                 .background(SurfaceElevated)
-                                .padding(horizontal = Spacing.sm, vertical = 2.dp)
+                                .padding(horizontal = Spacing.sm, vertical = Spacing.xxs)
                         ) {
                             Text(text = extText, color = TextPrimary, fontSize = 9.sp, fontWeight = FontWeight.Bold)
                         }
@@ -431,7 +431,7 @@ fun DownloadCard(
                                 modifier = Modifier
                                     .clip(RoundedCornerShape(Radius.xs))
                                     .background(SurfaceElevated)
-                                    .padding(horizontal = Spacing.sm, vertical = 2.dp)
+                                    .padding(horizontal = Spacing.sm, vertical = Spacing.xxs)
                             ) {
                                 Text(text = qualityLabel, color = TextSecondary, fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
                             }
@@ -715,7 +715,7 @@ fun StatusBadge(status: TaskStatus) {
         modifier = Modifier
             .clip(RoundedCornerShape(Radius.full))
             .background(bg)
-            .padding(horizontal = Spacing.sm, vertical = 2.dp)
+            .padding(horizontal = Spacing.sm, vertical = Spacing.xxs)
     ) {
         Text(text = text, color = fg, fontSize = 10.sp, fontWeight = FontWeight.Bold)
     }
