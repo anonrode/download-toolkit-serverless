@@ -48,9 +48,14 @@ object ProviderRegistry {
         val now = System.currentTimeMillis()
         val cached = searchCache[cacheKey]
 
-        // If cached within the last 4 minutes, emit instantly (0ms response time!)
+        // If cached within the last 4 minutes, serve it and skip the live
+        // crawl entirely — the old code emitted the cache but STILL fetched
+        // every provider page, so the TTL bought a faster first paint while
+        // burning the same mobile data as no cache at all. Stale entries
+        // below still get the stale-while-revalidate treatment.
         if (cached != null && (now - cached.first) < 240_000L && cached.second.isNotEmpty()) {
             send(cached.second)
+            return@channelFlow
         }
 
         val currentProviders = allProviders
