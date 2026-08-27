@@ -35,6 +35,11 @@ class DownloadEngine(
     // manual-retry tokens, consumed (read-and-remove) at the start of the next
     // startTask so a cooling-down host still gets the user's explicit attempt.
     private val retryBypassTasks = ConcurrentHashMap.newKeySet<String>()
+    // Task ids cancelled via cancel() (as opposed to paused). Set BEFORE the
+    // job is cancelled so the job's CancellationException handler can tell a
+    // full cancel from a pause without racing repository.remove — only a full
+    // cancel may kill global in-flight HTTP.
+    private val fullyCancelledIds = ConcurrentHashMap.newKeySet<String>()
 
     var maxConcurrentDownloads: Int = 3
     var parallelSocketsPerFile: Int = 16
@@ -372,11 +377,21 @@ class DownloadEngine(
 
     fun cancel(taskId: String) {
         val task = repository.find(taskId)
+        // Mark full-cancel intent BEFORE the job cancellation: the job's
+        // CancellationException handler kills this task's in-flight resolver
+        // HTTP based on this mark. Doing it here (instead of a global
+        // cancelInFlight in this method) keeps OTHER tasks' in-flight
+        // requests untouched — the cross-talk bug.
+        if (activeJobs.containsKey(taskId)) fullyCancelledIds.add(taskId)
         activeJobs[taskId]?.cancel()
         activeJobs.remove(taskId)
         YoutubeDlDownloader.killProcess(taskId)
         TurboDownloader.cancelTask(taskId)
-        HttpClient.cancelInFlight()
+        // Kill this task's own in-flight resolver HTTP immediately when it is
+        // safe: with no other running task there is nothing to cross-talk
+        // into. Otherwise the job's cancellation handler sweeps once this
+        // task's current blocking call unwinds (bounded by the read timeout).
+        if (activeJobs.isEmpty()) HttpClient.cancelInFlight()
         com.anonrode.downloader.util.DebugLog.user("cancel $taskId")
         if (task != null) {
             // Remove every partial artifact so cancelled downloads cannot leave orphaned files.
@@ -1934,12 +1949,18 @@ class DownloadEngine(
                 // from the queue processor or scope shutdown).
                 YoutubeDlDownloader.killProcess(task.id)
                 TurboDownloader.cancelTask(task.id)
-                // Only cancel global in-flight HTTP when the task was fully removed (cancel),
-                // not when the user paused or the network parked it — pause()/pauseForNetwork
-                // already killed the specific backends, and a global cancelInFlight would kill
-                // OTHER tasks' in-flight requests — the cross-talk bug.
-                if (repository.find(task.id) == null) {
-                    HttpClient.cancelInFlight()
+                // Only cancel global in-flight HTTP for a FULL cancel (marked
+                // in fullyCancelledIds before the job was cancelled), not when
+                // the user paused or the network parked the task — pause()/
+                // pauseForNetwork already killed the specific backends, and a
+                // global cancelInFlight would kill OTHER tasks' in-flight
+                // requests — the cross-talk bug. The repository check stays
+                // as a safety net for removals that bypassed cancel(). Even
+                // then, only sweep when no other task is running.
+                if (fullyCancelledIds.remove(task.id) || repository.find(task.id) == null) {
+                    if (activeJobs.keys.none { it != task.id }) {
+                        HttpClient.cancelInFlight()
+                    }
                 }
                 // A pause landing during VALIDATING (after the first
                 // ensureActive passed but before the terminal write) leaves the
