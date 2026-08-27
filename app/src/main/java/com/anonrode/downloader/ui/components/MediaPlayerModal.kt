@@ -328,10 +328,24 @@ private fun MediaPlayerModalImpl(
     // File switch: point the SAME player at the new item. PlayerView never
     // detaches, so Next/Previous is a seamless in-place swap. Per-file UI
     // state resets here so nothing leaks across files.
+    var lastLoadedPath by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(mediaItem) {
-        exoPlayer.setMediaItem(mediaItem)
+        // The player still holds the PREVIOUS item at this point, so its
+        // position/duration are the leaving file's — persist them before the
+        // swap overwrites them.
+        val leaving = lastLoadedPath
+        if (leaving != null && leaving != ctx.filePath) {
+            runCatching {
+                PlaybackPositions.save(context, leaving, exoPlayer.currentPosition, exoPlayer.duration)
+            }
+        }
+        // Resume where the user left off the last time this file was open;
+        // 0 = start fresh (no saved position, or watched to the end).
+        val resumeMs = PlaybackPositions.get(context, ctx.filePath)?.positionMs ?: 0L
+        if (resumeMs > 0) exoPlayer.setMediaItem(mediaItem, resumeMs) else exoPlayer.setMediaItem(mediaItem)
         exoPlayer.prepare()
-        currentPosition = 0L
+        lastLoadedPath = ctx.filePath
+        currentPosition = resumeMs
         duration = 0L
         isPlaying = true
         tracksLoaded = false
@@ -355,6 +369,9 @@ private fun MediaPlayerModalImpl(
                         duration = exoPlayer.duration.coerceAtLeast(0L)
                     }
                     Player.STATE_ENDED -> {
+                        // Watched to the end: drop the saved position so a
+                        // reopen starts from the beginning.
+                        PlaybackPositions.clear(context, currentCtx.filePath)
                         // Auto-advance to the next playable peer; missing
                         // files are skipped. At the true end the player just
                         // sits — no dismiss, the user can replay or close.
@@ -416,12 +433,18 @@ private fun MediaPlayerModalImpl(
 
     // Progress polling — ExoPlayer has no Compose-friendly state Flow.
     LaunchedEffect(exoPlayer) {
+        var saveTick = 0
         while (true) {
             try {
                 if (exoPlayer.isPlaying) {
                     currentPosition = exoPlayer.currentPosition.coerceAtLeast(0L)
                     val d = exoPlayer.duration
                     if (d > 0) duration = d
+                    // Persist the position every ~5s of playback so a crash
+                    // or app kill loses at most a few seconds of progress.
+                    if (++saveTick % 10 == 0) {
+                        PlaybackPositions.save(context, currentCtx.filePath, currentPosition, duration)
+                    }
                 }
             } catch (_: Exception) { /* race during teardown */ }
             delay(500)
@@ -459,10 +482,22 @@ private fun MediaPlayerModalImpl(
     // lifecycle is destroyed. The player is never released mid-life (file
     // switches reuse it), so there is no released-player race anywhere.
     DisposableEffect(lifecycleOwner, exoPlayer) {
+        // Persist the position before any teardown: currentPosition throws
+        // once the player is released, and a kill right after backgrounding
+        // must not lose the last watched minute.
+        val savePosition = {
+            runCatching {
+                PlaybackPositions.save(context, currentCtx.filePath, exoPlayer.currentPosition, exoPlayer.duration)
+            }
+        }
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
-                Lifecycle.Event.ON_STOP -> exoPlayer.pause()
+                Lifecycle.Event.ON_STOP -> {
+                    exoPlayer.pause()
+                    savePosition()
+                }
                 Lifecycle.Event.ON_DESTROY -> {
+                    savePosition()
                     try { exoPlayer.release() } catch (_: Exception) {}
                     try { mediaSession.release() } catch (_: Exception) {}
                 }
@@ -472,6 +507,7 @@ private fun MediaPlayerModalImpl(
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose {
             lifecycleOwner.lifecycle.removeObserver(observer)
+            savePosition()
             try { exoPlayer.release() } catch (_: Exception) {}
             try { mediaSession.release() } catch (_: Exception) {}
         }
