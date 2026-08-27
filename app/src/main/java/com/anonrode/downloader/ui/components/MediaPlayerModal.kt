@@ -103,6 +103,7 @@ import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
 import androidx.media3.session.MediaSession
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
+import com.anonrode.downloader.R
 import com.anonrode.downloader.ui.theme.Spacing
 import com.anonrode.downloader.ui.theme.StatusError
 import kotlinx.coroutines.delay
@@ -560,18 +561,20 @@ private fun MediaPlayerModalImpl(
             // Compose side can change.
             AndroidView(
                 factory = { viewCtx ->
-                    PlayerView(viewCtx).apply {
+                    // media3-ui has no programmatic setter for surface_type —
+                    // it is only read from XML at construction — so the view
+                    // comes from a layout resource pinned to TextureView
+                    // instead of the default SurfaceView: a SurfaceView
+                    // punches a hole through this Dialog's window and its
+                    // surface sits BEHIND the window, so the letterbox area
+                    // (transparent) let the app UI bleed through around the
+                    // video in fullscreen. TextureView renders in the normal
+                    // view hierarchy with no hole-punch, so the black
+                    // background below actually covers the whole modal. Fine
+                    // here because playback is local files only (no DRM).
+                    (android.view.LayoutInflater.from(viewCtx)
+                        .inflate(R.layout.player_modal_texture_view, null) as PlayerView).apply {
                         useController = false
-                        // TextureView instead of the default SurfaceView: a
-                        // SurfaceView punches a hole through this Dialog's
-                        // window and its surface sits BEHIND the window, so
-                        // the letterbox area (transparent) let the app UI
-                        // bleed through around the video in fullscreen.
-                        // TextureView renders in the normal view hierarchy
-                        // with no hole-punch, so the black background below
-                        // actually covers the whole modal. Fine here because
-                        // playback is local files only (no DRM).
-                        setUseTextureView(true)
                         player = exoPlayer
                         setBackgroundColor(android.graphics.Color.BLACK)
                     }
