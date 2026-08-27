@@ -272,13 +272,34 @@ object YoutubeDlDownloader {
 
             try {
                 YoutubeDL.getInstance().execute(request, taskId) { progress, etaInSeconds, line ->
-                    if (progress >= 0f) {
-                        // All line parsing, library fallback and monotonic
-                        // clamping live in parseProgressTick (fixture-tested).
-                        val tick = parseProgressTick(line, progress, lastDl, lastTot)
+                    // Parse EVERY stdout line. The library only moves its own
+                    // `progress` float when its narrow regexes match —
+                    // "[download] X.X% ... ETA MM:SS" (a numeric ETA is
+                    // required) or aria2c's "(NN%)" summary — and HLS ticks
+                    // report "ETA Unknown" while fragments are still being
+                    // measured. The float then stays at its -1 initial, and
+                    // the old `if (progress >= 0f)` gate silently dropped the
+                    // structured @@DLP@@ lines: the card froze on "Starting…"
+                    // and jumped straight to DONE. parseProgressTick is a
+                    // no-op on lines it doesn't understand, so feeding it
+                    // everything is safe.
+                    val tick = parseProgressTick(line, progress, lastDl, lastTot)
+                    // Change-detect so the hundreds of non-progress lines
+                    // ([info], [Merger], destination notices) never spam the
+                    // UI flow with no-op updates.
+                    if (tick.downloadedBytes != lastDl || tick.totalBytes != lastTot || tick.speedBytesPerSec > 0.0) {
                         lastDl = tick.downloadedBytes
                         lastTot = tick.totalBytes
-                        val eta = if (etaInSeconds > 0) etaInSeconds else 0L
+                        val eta = when {
+                            tick.etaSeconds > 0 -> tick.etaSeconds
+                            etaInSeconds > 0 -> etaInSeconds
+                            // yt-dlp said nothing, but speed + total are known:
+                            // derive it so the card reads like the aria2c CDN
+                            // path does (parity with the magnet loop).
+                            tick.speedBytesPerSec > 0.0 && lastTot > lastDl ->
+                                ((lastTot - lastDl) / tick.speedBytesPerSec).toLong()
+                            else -> 0L
+                        }
                         onProgress(lastDl, lastTot, tick.speedBytesPerSec, eta)
                     }
                 }

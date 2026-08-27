@@ -226,4 +226,62 @@ class ProgressParserTest {
         assertEquals((25.0 * 1024 * 1024).toLong(), t.downloadedBytes)
         assertEquals(100L * 1024 * 1024, t.totalBytes)
     }
+
+    // ETA extraction: the downloader prefers the line's own ETA over the
+    // library's (which only fills for "[download] ... ETA MM:SS" lines),
+    // and derives one from speed when neither exists.
+    @Test
+    fun ytdlNativeLineCarriesEta() {
+        val t = parseProgressTick("[download]  45.2% of ~65.00MiB at 4.20MiB/s ETA 00:08", 0f, 0L, 0L)
+        assertEquals(8L, t.etaSeconds)
+    }
+
+    @Test
+    fun ytdlNativeLineUnknownEtaStillParses() {
+        // The HLS early-tick shape: total + ETA still unknown. Percent /
+        // speed must still land (the old gate dropped these entirely when
+        // the library float was still -1).
+        val t = parseProgressTick("[download]   2.5% of ~Unknown at 1.50MiB/s ETA Unknown", 0f, 0L, 0L)
+        assertEquals(-1L, t.etaSeconds)
+        assertEquals(1.5 * 1024 * 1024, t.speedBytesPerSec, 1.0)
+    }
+
+    @Test
+    fun ytdlTemplateEtaParsed() {
+        val t = parseProgressTick(
+            "download:@@DLP@@ 15.0%|5.00MiB/s|00:30|45|296|45.5MiB|300.0MiB|298.0MiB",
+            0f, 0L, 0L
+        )
+        assertEquals(30L, t.etaSeconds)
+    }
+
+    @Test
+    fun ytdlTemplateLongEtaParsed() {
+        val t = parseProgressTick(
+            "download:@@DLP@@ 15.0%|5.00MiB/s|1:02:03|45|296|45.5MiB|300.0MiB|298.0MiB",
+            0f, 0L, 0L
+        )
+        assertEquals(3723L, t.etaSeconds)
+    }
+
+    @Test
+    fun ytdlTemplateEtaUnknownIsNegative() {
+        val t = parseProgressTick(
+            "download:@@DLP@@ 3.0%|2.00MiB/s|Unknown|2|296|1.0MiB|NA|NA",
+            0f, 0L, 0L
+        )
+        assertEquals(-1L, t.etaSeconds)
+    }
+
+    @Test
+    fun etaStringFormats() {
+        assertEquals(30L, parseEtaString("00:30"))
+        assertEquals(8L, parseEtaString("00:08"))
+        assertEquals(3723L, parseEtaString("1:02:03"))
+        assertEquals(-1L, parseEtaString("Unknown"))
+        assertEquals(-1L, parseEtaString("NA"))
+        assertEquals(-1L, parseEtaString(""))
+        assertEquals(-1L, parseEtaString(":"))
+        assertEquals(-1L, parseEtaString("garbage"))
+    }
 }
