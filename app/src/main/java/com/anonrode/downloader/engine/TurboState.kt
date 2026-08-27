@@ -55,7 +55,12 @@ class TurboState(private val file: File) {
             val lines = file.readLines().filter { it.isNotBlank() }
             if (lines.isEmpty()) return null
             val header = lines.first().removePrefix("total=").toLongOrNull() ?: return null
-            if (total > 0 && header != total && kotlin.math.abs(header - total) > 1024) return null
+            // Exact match only: a reused plan whose last piece ends at
+            // headerTotal-1 leaves bytes [headerTotal, total) undownloaded,
+            // and the success checks still pass — up to 1 KiB of silent
+            // zero-fill at the tail of a "finished" file. A size shift means
+            // the remote file changed; restart rather than corrupt.
+            if (total > 0 && header != total) return null
             val chunks = lines.drop(1).mapNotNull { line ->
                 val p = line.split(":")
                 if (p.size != 3) return@mapNotNull null

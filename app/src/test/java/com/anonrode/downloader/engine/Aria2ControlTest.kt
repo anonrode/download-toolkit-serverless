@@ -8,8 +8,9 @@ import java.io.ByteArrayOutputStream
 
 /**
  * JVM tests for the aria2c control-file parser. Control files are built by
- * hand following aria2's serialization (magic "aria2", version 1, big-endian),
- * so the parser is verified without needing the native binary.
+ * hand following aria2's real V1 serialization (DefaultBtProgressInfoFile.cc:
+ * big-endian, NO magic, one piece space per download), so the parser is
+ * verified without needing the native binary.
  */
 class Aria2ControlTest {
 
@@ -18,9 +19,7 @@ class Aria2ControlTest {
         // 10-byte file, 4-byte pieces -> pieces 0-3, 4-7, 8-9.
         // Bitfield 0b10100000 (MSB-first): pieces 0 and 2 complete.
         val data = controlFile(
-            fileCount = 1,
-            path = "movie.mp4",
-            fileLength = 10,
+            totalLength = 10L,
             pieceLength = 4,
             bitfield = byteArrayOf(0b1010_0000.toByte())
         )
@@ -36,13 +35,12 @@ class Aria2ControlTest {
 
     @Test
     fun acceptsZeroBitfieldAsNoCoverage() {
-        // A control file written before any piece finished has no bitfield.
+        // A control file written before any piece finished still carries a
+        // full-length bitfield — all zeros, no coverage.
         val data = controlFile(
-            fileCount = 1,
-            path = "movie.mp4",
-            fileLength = 10,
+            totalLength = 10L,
             pieceLength = 4,
-            bitfield = ByteArray(0)
+            bitfield = byteArrayOf(0x00)
         )
         val parsed = Aria2Control.parse(data)
         assertNotNull(parsed)
@@ -51,18 +49,39 @@ class Aria2ControlTest {
     }
 
     @Test
+    fun skipsInFlightPieceRecords() {
+        // Real control files append one record per in-flight piece
+        // (index, length, 16KiB-block bitfield). The parser must walk past
+        // them and treat an in-flight piece as NOT complete — Turbo restarts
+        // it from its start offset.
+        val data = controlFile(
+            totalLength = 10L,
+            pieceLength = 4,
+            bitfield = byteArrayOf(0b1000_0000.toByte()),
+            inFlight = listOf(Triple(1, 4, byteArrayOf(0b1100_0000.toByte())))
+        )
+        val parsed = Aria2Control.parse(data)
+        assertNotNull(parsed)
+        assertEquals(3, parsed!!.pieces.size)
+        assertEquals(4L, parsed.pieces[0].current)  // bit set -> complete
+        assertEquals(4L, parsed.pieces[1].current)  // in-flight -> restart from start
+        assertEquals(8L, parsed.pieces[2].current)
+    }
+
+    @Test
     fun rejectsGarbage() {
         assertNull(Aria2Control.parse("not an aria2 file".toByteArray()))
         assertNull(Aria2Control.parse(byteArrayOf(1, 2, 3)))
         assertNull(Aria2Control.parse(ByteArray(0)))
+        // The old parser expected a literal "aria2" magic that does not exist
+        // in aria2's real format — those bytes must still be rejected.
+        assertNull(Aria2Control.parse("aria2".toByteArray(Charsets.US_ASCII)))
     }
 
     @Test
     fun rejectsTruncatedControlFile() {
         val good = controlFile(
-            fileCount = 1,
-            path = "movie.mp4",
-            fileLength = 10,
+            totalLength = 10L,
             pieceLength = 4,
             bitfield = byteArrayOf(0x01)
         )
@@ -70,39 +89,55 @@ class Aria2ControlTest {
     }
 
     @Test
-    fun rejectsMultiFileTorrentControlFile() {
-        // Multi-file control files (torrents) are not convertible to one map.
+    fun rejectsTorrentControlFile() {
+        // BitTorrent control files (extension flag 0x1 + 20-byte info hash)
+        // span the peer protocol's piece space and are not convertible.
         val data = controlFile(
-            fileCount = 2,
-            path = "movie.mp4",
-            fileLength = 10,
+            totalLength = 10L,
             pieceLength = 4,
-            bitfield = byteArrayOf(0x01)
+            bitfield = byteArrayOf(0x01),
+            extension = 1,
+            infoHash = ByteArray(20) { it.toByte() }
+        )
+        assertNull(Aria2Control.parse(data))
+    }
+
+    @Test
+    fun rejectsWrongBitfieldLength() {
+        // aria2 validates bitfieldLength against the piece math; a mismatch
+        // means a corrupt file and must not be trusted.
+        val data = controlFile(
+            totalLength = 10L,
+            pieceLength = 4,
+            bitfield = byteArrayOf(0x01, 0x02) // 2 bytes where 1 is expected
         )
         assertNull(Aria2Control.parse(data))
     }
 
     private fun controlFile(
-        fileCount: Int,
-        path: String,
-        fileLength: Long,
+        totalLength: Long,
         pieceLength: Int,
-        bitfield: ByteArray
+        bitfield: ByteArray,
+        extension: Int = 0,
+        infoHash: ByteArray? = null,
+        inFlight: List<Triple<Int, Int, ByteArray>> = emptyList()
     ): ByteArray {
         val buf = ByteArrayOutputStream()
-        buf.write("aria2".toByteArray(Charsets.US_ASCII))
-        buf.write(0x01) // format version 1
-        buf.write(0)    // extension count
-        buf.write((fileCount ushr 8) and 0xFF)
-        buf.write(fileCount and 0xFF)
-        repeat(fileCount) {
-            val pathBytes = path.toByteArray(Charsets.UTF_8)
-            writeInt32(buf, pathBytes.size)
-            buf.write(pathBytes)
-            writeInt64(buf, fileLength)
-            writeInt32(buf, pieceLength)
-            writeInt32(buf, bitfield.size)
-            buf.write(bitfield)
+        buf.write(0x00); buf.write(0x01)        // VERSION 1 (no magic)
+        writeInt32(buf, extension)              // EXTENSION flags
+        writeInt32(buf, infoHash?.size ?: 0)    // infoHashLength
+        if (infoHash != null) buf.write(infoHash)
+        writeInt32(buf, pieceLength)
+        writeInt64(buf, totalLength)
+        writeInt64(buf, 0L)                     // uploadLength (0 for HTTP)
+        writeInt32(buf, bitfield.size)
+        buf.write(bitfield)
+        writeInt32(buf, inFlight.size)
+        for ((index, length, blocks) in inFlight) {
+            writeInt32(buf, index)
+            writeInt32(buf, length)
+            writeInt32(buf, blocks.size)
+            buf.write(blocks)
         }
         return buf.toByteArray()
     }
