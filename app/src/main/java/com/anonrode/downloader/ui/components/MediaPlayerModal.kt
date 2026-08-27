@@ -28,6 +28,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -37,8 +38,10 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.GraphicEq
@@ -272,6 +275,10 @@ private fun MediaPlayerModalImpl(
         val act = activity ?: return@LaunchedEffect
         val insetsController = WindowCompat.getInsetsController(act.window, act.window.decorView)
         if (isFullscreen) {
+            // Entering fullscreen from the portrait layout: make sure the
+            // overlay controls are visible (portrait mode never uses them,
+            // so showControls may be stale-false).
+            showControls = true
             act.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
             insetsController.systemBarsBehavior =
                 WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
@@ -361,6 +368,18 @@ private fun MediaPlayerModalImpl(
     LaunchedEffect(ctx.filePath, mediaItem) {
         exoPlayer.setMediaItem(mediaItem)
         exoPlayer.prepare()
+        // Fresh per-file state: a Next/Previous switch reuses this same
+        // modal composition (the parent just points ctx.filePath at the
+        // peer), so stale position/duration/track state from the previous
+        // file must not leak into the new one.
+        currentPosition = 0L
+        duration = 0L
+        isPlaying = true
+        tracksLoaded = false
+        playerError = null
+        audioTrackLabels = emptyList()
+        currentAudioLabel = null
+        subtitleOptions = emptyList()
         currentSubtitleLabel = initialSubtitle
     }
 
@@ -382,11 +401,12 @@ private fun MediaPlayerModalImpl(
                         // Auto-advance to the next peer in the queue if there
                         // is one. If we're at the end, the modal just sits
                         // and the user can replay, close, or restart manually.
+                        // No onDismiss here — the parent swaps the file in
+                        // place (dismissing would close the player).
                         val idx = ctx.queuePeerPaths.indexOf(ctx.filePath)
                         val nextIdx = idx + 1
                         if (idx >= 0 && nextIdx < ctx.queuePeerPaths.size) {
                             ctx.onPlayFile(ctx.queuePeerPaths[nextIdx])
-                            onDismiss()
                         }
                     }
                 }
@@ -532,22 +552,24 @@ private fun MediaPlayerModalImpl(
         }
     }
 
-    // Navigation helpers: step to the next/prev file in the queue, calling
-    // the parent so it can update activePlaybackTask. The modal then
-    // dismisses itself; the parent re-opens it via state change.
+    // Navigation helpers: step to the next/prev file in the queue by asking
+    // the parent to point its active playback task at the peer. The modal
+    // must NOT dismiss afterwards: the parent's onDismiss nulls the same
+    // state onPlayFile just wrote, so dismiss-then-reopen never reopened —
+    // Next/Previous simply exited the video (user-reported). Instead the
+    // parent recomposes this modal with the new ctx.filePath and the
+    // remember(ctx.filePath) player swaps in place.
     val playNext: () -> Unit = {
         val idx = ctx.queuePeerPaths.indexOf(ctx.filePath)
         val nextIdx = idx + 1
         if (idx >= 0 && nextIdx < ctx.queuePeerPaths.size) {
             ctx.onPlayFile(ctx.queuePeerPaths[nextIdx])
-            onDismiss()
         }
     }
     val playPrev: () -> Unit = {
         val idx = ctx.queuePeerPaths.indexOf(ctx.filePath)
         if (idx > 0) {
             ctx.onPlayFile(ctx.queuePeerPaths[idx - 1])
-            onDismiss()
         }
     }
 
@@ -609,6 +631,22 @@ private fun MediaPlayerModalImpl(
                 }
             }
 
+            // Player error banner — only shown if the listener caught a
+            // recoverable-but-non-fatal error before we routed to the
+            // external player.
+            playerError?.let { err ->
+                Text(
+                    text = "Player error: $err",
+                    color = StatusError,
+                    fontSize = 11.sp,
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .statusBarsPadding()
+                        .padding(top = Spacing.xxxl)
+                )
+            }
+
+            if (isAudio || isFullscreen) {
             // ExoPlayer render surface. PlayerView owns the SurfaceView and
             // exposes resizeMode for Fit / Fill / Zoom; we suppress its
             // default controller so our Compose overlay is the only UI.
@@ -626,21 +664,6 @@ private fun MediaPlayerModalImpl(
                 },
                 modifier = if (isAudio) Modifier.size(1.dp) else Modifier.fillMaxSize()
             )
-
-            // Player error banner — only shown if the listener caught a
-            // recoverable-but-non-fatal error before we routed to the
-            // external player.
-            playerError?.let { err ->
-                Text(
-                    text = "Player error: $err",
-                    color = StatusError,
-                    fontSize = 11.sp,
-                    modifier = Modifier
-                        .align(Alignment.TopCenter)
-                        .statusBarsPadding()
-                        .padding(top = Spacing.xxxl)
-                )
-            }
 
             // Animated Overlay Controls
             AnimatedVisibility(
@@ -943,6 +966,385 @@ private fun MediaPlayerModalImpl(
                         Spacer(modifier = Modifier.height(Spacing.sm))
 
                         // Volume + brightness sliders side-by-side.
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(Spacing.md)
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                                Icon(
+                                    imageVector = when {
+                                        mediaVolume <= 0f -> Icons.Rounded.VolumeOff
+                                        mediaVolume < 0.5f -> Icons.Rounded.VolumeDown
+                                        else -> Icons.Rounded.VolumeUp
+                                    },
+                                    contentDescription = "Volume",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Slider(
+                                    value = mediaVolume,
+                                    onValueChange = {
+                                        mediaVolume = it
+                                        exoPlayer.volume = it
+                                        MediaPlayerPrefs.setMediaVolume(context, it)
+                                    },
+                                    valueRange = 0f..1f,
+                                    colors = SliderDefaults.colors(
+                                        thumbColor = AccentPrimary,
+                                        activeTrackColor = AccentPrimary,
+                                        inactiveTrackColor = Color.White.copy(alpha = 0.3f)
+                                    ),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .padding(start = Spacing.xs)
+                                )
+                            }
+                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                                Icon(
+                                    Icons.Rounded.Brightness6,
+                                    contentDescription = "Brightness",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Slider(
+                                    value = if (windowBrightness < 0f) 0f else windowBrightness,
+                                    onValueChange = { v ->
+                                        windowBrightness = v
+                                    },
+                                    valueRange = 0f..1f,
+                                    colors = SliderDefaults.colors(
+                                        thumbColor = AccentPrimary,
+                                        activeTrackColor = AccentPrimary,
+                                        inactiveTrackColor = Color.White.copy(alpha = 0.3f)
+                                    ),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .padding(start = Spacing.xs)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+            } else {
+                // Portrait video layout: the picture sits in a 16:9 panel at
+                // the top (tap to play/pause) and every control lives below
+                // it, always visible — the overlay-on-letterbox design was
+                // unusable in portrait (user-reported). Fullscreen and audio
+                // keep the overlay experience above.
+                Column(modifier = Modifier.fillMaxSize()) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .statusBarsPadding()
+                            .clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null
+                            ) {
+                                if (exoPlayer.isPlaying) exoPlayer.pause() else exoPlayer.play()
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        AndroidView(
+                            factory = { viewCtx ->
+                                PlayerView(viewCtx).apply {
+                                    useController = false
+                                    player = exoPlayer
+                                    resizeMode = resizeMode
+                                    setBackgroundColor(android.graphics.Color.BLACK)
+                                }
+                            },
+                            update = { view ->
+                                view.resizeMode = resizeMode
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .aspectRatio(16f / 9f)
+                        )
+                    }
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f)
+                            .verticalScroll(rememberScrollState())
+                            .navigationBarsPadding()
+                            .padding(horizontal = Spacing.lg, vertical = Spacing.md),
+                        verticalArrangement = Arrangement.spacedBy(Spacing.md)
+                    ) {
+                        Text(
+                            text = ctx.title,
+                            color = Color.White,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "Video • ${ext.uppercase()}",
+                                color = TextSecondary,
+                                fontSize = 12.sp,
+                                modifier = Modifier.padding(end = Spacing.sm)
+                            )
+                            Row(horizontalArrangement = Arrangement.spacedBy(Spacing.xs)) {
+                                IconButton(
+                                    onClick = { isFullscreen = !isFullscreen },
+                                    modifier = Modifier
+                                        .size(40.dp)
+                                        .background(Color.White.copy(alpha = 0.12f), CircleShape)
+                                ) {
+                                    Icon(
+                                        Icons.Rounded.Fullscreen,
+                                        contentDescription = "Fullscreen",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                    IconButton(
+                                        onClick = {
+                                            activity?.let { act ->
+                                                try {
+                                                    val params = PictureInPictureParams.Builder()
+                                                        .setAspectRatio(Rational(16, 9))
+                                                        .build()
+                                                    act.enterPictureInPictureMode(params)
+                                                } catch (_: Exception) { /* PiP denied; ignore */ }
+                                            }
+                                        },
+                                        modifier = Modifier
+                                            .size(40.dp)
+                                            .background(Color.White.copy(alpha = 0.12f), CircleShape)
+                                    ) {
+                                        Icon(
+                                            Icons.Rounded.PictureInPicture,
+                                            contentDescription = "PiP",
+                                            tint = Color.White,
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                    }
+                                }
+                                IconButton(
+                                    onClick = {
+                                        playExternal(context, file)
+                                        onDismiss()
+                                    },
+                                    modifier = Modifier
+                                        .size(40.dp)
+                                        .background(Color.White.copy(alpha = 0.12f), CircleShape)
+                                ) {
+                                    Icon(
+                                        Icons.Rounded.OpenInNew,
+                                        contentDescription = "External Player",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                                IconButton(
+                                    onClick = onDismiss,
+                                    modifier = Modifier
+                                        .size(40.dp)
+                                        .background(Color.White.copy(alpha = 0.12f), CircleShape)
+                                ) {
+                                    Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White)
+                                }
+                            }
+                        }
+
+                        // Transport
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(Spacing.md, Alignment.CenterHorizontally),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            IconButton(
+                                onClick = playPrev,
+                                enabled = ctx.queuePeerPaths.indexOf(ctx.filePath) > 0,
+                                modifier = Modifier
+                                    .size(44.dp)
+                                    .background(Color.White.copy(alpha = 0.12f), CircleShape)
+                            ) {
+                                Icon(
+                                    Icons.Rounded.SkipPrevious,
+                                    contentDescription = "Previous",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(24.dp)
+                                )
+                            }
+                            IconButton(
+                                onClick = {
+                                    val target = (exoPlayer.currentPosition - 10_000).coerceAtLeast(0)
+                                    exoPlayer.seekTo(target)
+                                    currentPosition = target
+                                },
+                                modifier = Modifier
+                                    .size(48.dp)
+                                    .background(Color.White.copy(alpha = 0.12f), CircleShape)
+                            ) {
+                                Icon(
+                                    Icons.Rounded.Replay10,
+                                    contentDescription = "Rewind 10s",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(28.dp)
+                                )
+                            }
+                            IconButton(
+                                onClick = {
+                                    if (exoPlayer.isPlaying) exoPlayer.pause() else exoPlayer.play()
+                                },
+                                modifier = Modifier
+                                    .size(64.dp)
+                                    .background(AccentPrimary, CircleShape)
+                            ) {
+                                Icon(
+                                    imageVector = if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                                    contentDescription = if (isPlaying) "Pause" else "Play",
+                                    tint = BackgroundDark,
+                                    modifier = Modifier.size(36.dp)
+                                )
+                            }
+                            IconButton(
+                                onClick = {
+                                    val target = (exoPlayer.currentPosition + 10_000).coerceAtMost(exoPlayer.duration)
+                                    exoPlayer.seekTo(target)
+                                    currentPosition = target
+                                },
+                                modifier = Modifier
+                                    .size(48.dp)
+                                    .background(Color.White.copy(alpha = 0.12f), CircleShape)
+                            ) {
+                                Icon(
+                                    Icons.Rounded.Forward10,
+                                    contentDescription = "Forward 10s",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(28.dp)
+                                )
+                            }
+                            IconButton(
+                                onClick = playNext,
+                                enabled = ctx.queuePeerPaths.indexOf(ctx.filePath) in 0 until ctx.queuePeerPaths.lastIndex,
+                                modifier = Modifier
+                                    .size(44.dp)
+                                    .background(Color.White.copy(alpha = 0.12f), CircleShape)
+                            ) {
+                                Icon(
+                                    Icons.Rounded.SkipNext,
+                                    contentDescription = "Next",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(24.dp)
+                                )
+                            }
+                        }
+
+                        // Seek
+                        Column {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(
+                                    text = formatDuration(currentPosition),
+                                    color = Color.White,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Medium
+                                )
+                                Text(
+                                    text = formatDuration(duration),
+                                    color = TextSecondary,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Medium
+                                )
+                            }
+                            Slider(
+                                value = if (duration > 0) (currentPosition.toFloat() / duration.toFloat()).coerceIn(0f, 1f) else 0f,
+                                onValueChange = { frac ->
+                                    val target = (frac * duration).toLong()
+                                    exoPlayer.seekTo(target)
+                                    currentPosition = target
+                                },
+                                colors = SliderDefaults.colors(
+                                    thumbColor = AccentPrimary,
+                                    activeTrackColor = AccentPrimary,
+                                    inactiveTrackColor = Color.White.copy(alpha = 0.3f)
+                                ),
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
+
+                        // Chips: speed / audio / subtitles / aspect
+                        LazyRow(
+                            horizontalArrangement = Arrangement.spacedBy(Spacing.xs),
+                            contentPadding = PaddingValues(horizontal = 0.dp)
+                        ) {
+                            items(PLAYBACK_SPEEDS) { speed ->
+                                Chip(
+                                    label = formatSpeed(speed),
+                                    selected = playbackSpeed == speed,
+                                    onClick = {
+                                        playbackSpeed = speed
+                                        exoPlayer.playbackParameters = PlaybackParameters(speed)
+                                        MediaPlayerPrefs.setPlaybackSpeed(context, speed)
+                                    }
+                                )
+                            }
+                            item {
+                                Chip(
+                                    label = currentAudioLabel ?: "Audio",
+                                    selected = false,
+                                    onClick = { showAudioSheet = true },
+                                    leading = {
+                                        Icon(
+                                            Icons.Filled.GraphicEq,
+                                            contentDescription = null,
+                                            tint = AccentPrimary,
+                                            modifier = Modifier.size(14.dp)
+                                        )
+                                    }
+                                )
+                            }
+                            item {
+                                Chip(
+                                    label = currentSubtitleLabel ?: "Subs",
+                                    selected = currentSubtitleLabel != null,
+                                    onClick = { showSubtitleSheet = true },
+                                    leading = {
+                                        Icon(
+                                            if (currentSubtitleLabel == null) Icons.Rounded.SubtitlesOff else Icons.Filled.Subtitles,
+                                            contentDescription = null,
+                                            tint = AccentPrimary,
+                                            modifier = Modifier.size(14.dp)
+                                        )
+                                    }
+                                )
+                            }
+                            item {
+                                Chip(
+                                    label = ASPECT_LABELS[resizeMode] ?: "Fit",
+                                    selected = false,
+                                    onClick = {
+                                        resizeMode = when (resizeMode) {
+                                            AspectRatioFrameLayout.RESIZE_MODE_FIT -> AspectRatioFrameLayout.RESIZE_MODE_FILL
+                                            AspectRatioFrameLayout.RESIZE_MODE_FILL -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                                            else -> AspectRatioFrameLayout.RESIZE_MODE_FIT
+                                        }
+                                    },
+                                    leading = {
+                                        Icon(
+                                            Icons.Rounded.AspectRatio,
+                                            contentDescription = null,
+                                            tint = AccentPrimary,
+                                            modifier = Modifier.size(14.dp)
+                                        )
+                                    }
+                                )
+                            }
+                        }
+
+                        // Volume + brightness
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(Spacing.md)
