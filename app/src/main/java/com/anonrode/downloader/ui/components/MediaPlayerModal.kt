@@ -2,6 +2,7 @@ package com.anonrode.downloader.ui.components
 
 import android.app.Activity
 import android.app.PictureInPictureParams
+import android.content.pm.ActivityInfo
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
@@ -12,6 +13,9 @@ import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.enableEdgeToEdge
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -42,6 +46,8 @@ import androidx.compose.material.icons.filled.Subtitles
 import androidx.compose.material.icons.rounded.AspectRatio
 import androidx.compose.material.icons.rounded.Brightness6
 import androidx.compose.material.icons.rounded.Forward10
+import androidx.compose.material.icons.rounded.Fullscreen
+import androidx.compose.material.icons.rounded.FullscreenExit
 import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.Pause
@@ -205,6 +211,13 @@ private fun MediaPlayerModalImpl(
             navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
         )
         onDispose {
+            // Leaving the modal: drop any fullscreen rotation and bring the
+            // system bars back so the rest of the app isn't stuck in landscape.
+            activity?.let { act ->
+                act.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+                WindowCompat.getInsetsController(act.window, act.window.decorView)
+                    .show(WindowInsetsCompat.Type.systemBars())
+            }
             val theme = prefs?.getString("pref_theme_mode", "dark") ?: "dark"
             val restoreStyle = if (theme.equals("light", ignoreCase = true)) {
                 SystemBarStyle.light(
@@ -247,6 +260,27 @@ private fun MediaPlayerModalImpl(
     var showSubtitleSheet by remember { mutableStateOf(false) }
     var playerError by remember { mutableStateOf<String?>(null) }
     var tracksLoaded by remember { mutableStateOf(false) }
+    // Fullscreen (landscape) mode: rotates the device and hides the system
+    // bars so the video fills the whole screen, YouTube-style.
+    var isFullscreen by remember { mutableStateOf(false) }
+
+    // Fullscreen toggle: rotate to landscape and hide the status/navigation
+    // bars so the video fills the whole screen; restore both when toggled off.
+    // SENSOR_LANDSCAPE (not USER_LANDSCAPE) so an explicit fullscreen tap works
+    // even when the user has system rotation locked to portrait.
+    LaunchedEffect(isFullscreen, activity) {
+        val act = activity ?: return@LaunchedEffect
+        val insetsController = WindowCompat.getInsetsController(act.window, act.window.decorView)
+        if (isFullscreen) {
+            act.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+            insetsController.systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            insetsController.hide(WindowInsetsCompat.Type.systemBars())
+        } else {
+            act.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+            insetsController.show(WindowInsetsCompat.Type.systemBars())
+        }
+    }
 
     // Track the original window brightness so we can restore it on dismiss
     // rather than leaving the slider's last value applied.
@@ -651,6 +685,21 @@ private fun MediaPlayerModalImpl(
                         )
 
                         Row(horizontalArrangement = Arrangement.spacedBy(Spacing.xs)) {
+                            if (!isAudio) {
+                                IconButton(
+                                    onClick = { isFullscreen = !isFullscreen },
+                                    modifier = Modifier
+                                        .size(40.dp)
+                                        .background(Color.Black.copy(alpha = 0.6f), CircleShape)
+                                ) {
+                                    Icon(
+                                        if (isFullscreen) Icons.Rounded.FullscreenExit else Icons.Rounded.Fullscreen,
+                                        contentDescription = if (isFullscreen) "Exit fullscreen" else "Fullscreen",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                            }
                             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !isAudio) {
                                 IconButton(
                                     onClick = {
