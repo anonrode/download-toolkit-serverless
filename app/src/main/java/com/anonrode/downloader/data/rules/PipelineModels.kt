@@ -34,8 +34,9 @@ import org.json.JSONObject
  * expressions: execution is structurally bounded (max steps/sources enforced
  * at parse time, HttpClient caps apply), so a bad payload can be broken but
  * never hang or drain. Templates are pure substitution: {base} {query}
- * (auto-encoded) {url} (episodes stage: the show URL) and any {var} bound by
- * an earlier step. Adding a new primitive requires updating (1) the executor
+ * (URL-encoded) {queryRaw} (unencoded, for POST form bodies) {url} (episodes
+ * stage: the show URL) and any {var} bound by an earlier step. Adding a new
+ * primitive requires updating (1) the executor
  * RulesPipeline, (2) scripts/encrypt_rules.py validation, (3) the probe
  * harness mirror — otherwise the weirdness stays in the compiled provider
  * fallback, which every migrated provider keeps.

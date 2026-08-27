@@ -423,7 +423,9 @@ def run_pipeline_search(paced, rules, site, pipeline, query):
     bases = _bases_for(rules, site)
     effective = _apply_query_transform(query, pipeline)
     vars_ = {"base": bases[0] if bases else "", "url": "",
-             "query": quote(effective, safe="")}
+             "query": quote(effective, safe=""),
+             # Unencoded for POST form bodies (they encode themselves).
+             "queryRaw": effective}
     cards = []
     for step in pipeline["steps"]:
         found = _run_step(

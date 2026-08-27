@@ -109,7 +109,10 @@ def classify_media(url, known_hosts):
     return "unknown"
 
 SEARCH_QUERIES = {
-    "nkiri": ["vincenzo"], "dramakey": ["vincenzo"], "asianc": ["vincenzo"],
+    "nkiri": ["vincenzo"],
+    # dramakey is a Chinese-drama site: K-drama queries return zero results
+    # (live-verified 2026-08-27), so the fixture uses titles it carries.
+    "dramakey": ["the early spring"], "asianc": ["vincenzo"],
     "anitaku": ["one piece"], "pluto": ["movie"], "dramarain": ["love"],
     "9jarocks": ["movie"], "naijavault": ["movie"], "naijaprey": ["series"],
     "nepu": ["movie"], "torrents": ["ubuntu"],

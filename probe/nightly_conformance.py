@@ -109,7 +109,9 @@ QUERIES = {
     # Parity-driven (Kotlin-only resolver algorithms; Tier 4 can only
     # verify search + episode-list, not the resolver chain itself).
     "nkiri":      ["vincenzo", "goblin", "the heirs", "squid game", "mr robot"],
-    "dramakey":   ["vincenzo", "goblin", "the heirs", "mr queen", "snowdrop"],
+    # dramakey is a Chinese-drama site — K-drama titles return zero results
+    # there (live-verified 2026-08-27), so queries are titles it carries.
+    "dramakey":   ["the early spring", "the road to splendor", "princess", "love", "empress"],
     "anitaku":    ["one piece", "naruto", "bleach", "dragon ball", "jujutsu kaisen"],
     "nepu":       ["inception", "avengers", "the matrix", "interstellar", "spider-man"],
     "torrents":   ["ubuntu", "debian", "big buck bunny", "sintel", "opensuse"],
