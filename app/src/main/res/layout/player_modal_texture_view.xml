@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  PlayerView is inflated from XML because media3-ui gives surface_type no
+  programmatic setter: it is only read from this attribute at construction.
+  texture_view keeps video in the normal view hierarchy (no SurfaceView
+  hole-punch) so the modal's black background covers the letterbox area.
+-->
+<androidx.media3.ui.PlayerView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    app:surface_type="texture_view" />
