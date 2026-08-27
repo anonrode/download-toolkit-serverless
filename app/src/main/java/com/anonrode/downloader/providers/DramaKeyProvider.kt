@@ -5,13 +5,16 @@ import com.anonrode.downloader.data.models.EpisodeItem
 import com.anonrode.downloader.data.models.ShowCard
 import com.anonrode.downloader.data.models.ShowDetails
 import com.anonrode.downloader.data.net.HttpClient
+import com.anonrode.downloader.data.rules.DynamicRulesManager
 import com.anonrode.downloader.resolvers.ResolverRegistry
 import org.jsoup.Jsoup
 import java.net.URLEncoder
 
 object DramaKeyProvider : SiteProvider {
     override val name: String = "dramakey"
-    override val mainUrl: String = "https://dramakey.com"
+    // Domain is OTA-tunable via the playbook's domains entry (bundled default
+    // is the same dramakey.com), so a host move is a rules edit, not a release.
+    override val mainUrl: String get() = DynamicRulesManager.getBaseUrl(name)
 
     // Live-verified 2026-08-24: dramakey.com is a live WordPress site — search
     // (?s=) returns real drama cards and episode pages carry per-episode locker
@@ -21,12 +24,18 @@ object DramaKeyProvider : SiteProvider {
     override val searchEnabled: Boolean get() = true
 
     override suspend fun search(query: String): List<ShowCard> {
+        // OTA pipeline first; non-empty wins, else compiled path below.
+        DynamicRulesManager.getPipeline(name)?.search?.let { pl ->
+            val results = RulesPipeline.runSearch(name, pl, query)
+            if (results.isNotEmpty()) return results
+        }
+
         val results = mutableListOf<ShowCard>()
         try {
             val clean = query.trim()
             if (clean.isBlank()) return results
             val encoded = URLEncoder.encode(clean, "UTF-8")
-            val url = "https://dramakey.com/?s=$encoded"
+            val url = "$mainUrl/?s=$encoded"
             val html = HttpClient.getText(url) ?: return results
             val doc = Jsoup.parse(html, url)
 
@@ -62,6 +71,20 @@ object DramaKeyProvider : SiteProvider {
 
     override suspend fun loadEpisodes(showUrl: String): ShowDetails {
         val show = ShowCard(title = "Asian Drama", url = showUrl, site = name)
+
+        DynamicRulesManager.getPipeline(name)?.episodes?.let { pl ->
+            val res = RulesPipeline.runEpisodes(name, pl, showUrl)
+            if (res != null && res.episodes.isNotEmpty()) {
+                val card = ShowCard(
+                    title = res.metaTitle ?: "Asian Drama",
+                    url = showUrl,
+                    posterUrl = res.metaPoster ?: "",
+                    site = name
+                )
+                return ShowDetails(show = card, synopsis = res.metaSynopsis ?: "", episodes = res.episodes)
+            }
+        }
+
         try {
             val html = HttpClient.getText(showUrl) ?: return ShowDetails(show = show)
             val doc = Jsoup.parse(html, showUrl)
