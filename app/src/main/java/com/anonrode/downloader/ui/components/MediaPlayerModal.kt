@@ -32,6 +32,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -81,10 +82,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -111,13 +114,8 @@ import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
 import androidx.media3.session.MediaSession
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
-import com.anonrode.downloader.ui.theme.AccentPrimary
-import com.anonrode.downloader.ui.theme.BackgroundDark
 import com.anonrode.downloader.ui.theme.Spacing
 import com.anonrode.downloader.ui.theme.StatusError
-import com.anonrode.downloader.ui.theme.SurfaceCard
-import com.anonrode.downloader.ui.theme.SurfaceElevated
-import com.anonrode.downloader.ui.theme.TextSecondary
 import kotlinx.coroutines.delay
 import java.io.File
 
@@ -140,6 +138,18 @@ data class MediaPlayerContext(
 )
 
 private val SIDECAR_SUBTITLE_EXTS = listOf("srt", "vtt")
+
+// The player modal and its picker sheets are a permanently BLACK canvas
+// regardless of the app theme — video players are dark by convention. The
+// theme-aware tokens break on it in Light mode (the theme's accent is
+// near-black navy there: the play button and selected chips camouflage;
+// the theme's surface card is white: picker text turns white-on-white;
+// the theme's background is near-white: icon tints invert). Pin the
+// dark-palette values for this file instead.
+private val PlayerAccent = Color(0xFFFFFFFF)
+private val PlayerTextSecondary = Color(0xFF94A3B8)
+private val PlayerSurface = Color(0xFF101216)
+private val PlayerSurfaceElevated = Color(0xFF181B22)
 
 /**
  * Full-screen in-app video/audio player. Backed by Media3 ExoPlayer with HLS
@@ -603,13 +613,13 @@ private fun MediaPlayerModalImpl(
                     Box(
                         modifier = Modifier
                             .size(120.dp)
-                            .background(SurfaceElevated, CircleShape),
+                            .background(PlayerSurfaceElevated, CircleShape),
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(
                             imageVector = Icons.Rounded.MusicNote,
                             contentDescription = null,
-                            tint = AccentPrimary,
+                            tint = PlayerAccent,
                             modifier = Modifier.size(60.dp)
                         )
                     }
@@ -625,7 +635,7 @@ private fun MediaPlayerModalImpl(
                     )
                     Text(
                         text = "Audio Playback • " + ext.uppercase(),
-                        color = TextSecondary,
+                        color = PlayerTextSecondary,
                         fontSize = 12.sp
                     )
                 }
@@ -686,14 +696,11 @@ private fun MediaPlayerModalImpl(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        IconButton(
-                            onClick = onDismiss,
-                            modifier = Modifier
-                                .size(40.dp)
-                                .background(Color.Black.copy(alpha = 0.6f), CircleShape)
-                        ) {
-                            Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White)
-                        }
+                        PlayerCircleButton(
+                            icon = Icons.Default.Close,
+                            contentDescription = "Close",
+                            onClick = onDismiss
+                        )
 
                         Text(
                             text = ctx.title,
@@ -709,22 +716,16 @@ private fun MediaPlayerModalImpl(
 
                         Row(horizontalArrangement = Arrangement.spacedBy(Spacing.xs)) {
                             if (!isAudio) {
-                                IconButton(
-                                    onClick = { isFullscreen = !isFullscreen },
-                                    modifier = Modifier
-                                        .size(40.dp)
-                                        .background(Color.Black.copy(alpha = 0.6f), CircleShape)
-                                ) {
-                                    Icon(
-                                        if (isFullscreen) Icons.Rounded.FullscreenExit else Icons.Rounded.Fullscreen,
-                                        contentDescription = if (isFullscreen) "Exit fullscreen" else "Fullscreen",
-                                        tint = Color.White,
-                                        modifier = Modifier.size(20.dp)
-                                    )
-                                }
+                                PlayerCircleButton(
+                                    icon = if (isFullscreen) Icons.Rounded.FullscreenExit else Icons.Rounded.Fullscreen,
+                                    contentDescription = if (isFullscreen) "Exit fullscreen" else "Fullscreen",
+                                    onClick = { isFullscreen = !isFullscreen }
+                                )
                             }
                             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !isAudio) {
-                                IconButton(
+                                PlayerCircleButton(
+                                    icon = Icons.Rounded.PictureInPicture,
+                                    contentDescription = "PiP",
                                     onClick = {
                                         activity?.let { act ->
                                             try {
@@ -734,35 +735,17 @@ private fun MediaPlayerModalImpl(
                                                 act.enterPictureInPictureMode(params)
                                             } catch (_: Exception) { /* PiP denied; ignore */ }
                                         }
-                                    },
-                                    modifier = Modifier
-                                        .size(40.dp)
-                                        .background(Color.Black.copy(alpha = 0.6f), CircleShape)
-                                ) {
-                                    Icon(
-                                        Icons.Rounded.PictureInPicture,
-                                        contentDescription = "PiP",
-                                        tint = Color.White,
-                                        modifier = Modifier.size(20.dp)
-                                    )
-                                }
+                                    }
+                                )
                             }
-                            IconButton(
+                            PlayerCircleButton(
+                                icon = Icons.Rounded.OpenInNew,
+                                contentDescription = "External Player",
                                 onClick = {
                                     playExternal(context, file)
                                     onDismiss()
-                                },
-                                modifier = Modifier
-                                    .size(40.dp)
-                                    .background(Color.Black.copy(alpha = 0.6f), CircleShape)
-                            ) {
-                                Icon(
-                                    Icons.Rounded.OpenInNew,
-                                    contentDescription = "External Player",
-                                    tint = Color.White,
-                                    modifier = Modifier.size(20.dp)
-                                )
-                            }
+                                }
+                            )
                         }
                     }
 
@@ -772,83 +755,59 @@ private fun MediaPlayerModalImpl(
                         horizontalArrangement = Arrangement.spacedBy(Spacing.lg),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        IconButton(
+                        PlayerCircleButton(
+                            icon = Icons.Rounded.SkipPrevious,
+                            contentDescription = "Previous",
                             onClick = playPrev,
                             enabled = ctx.queuePeerPaths.indexOf(ctx.filePath) > 0,
-                            modifier = Modifier
-                                .size(44.dp)
-                                .background(Color.Black.copy(alpha = 0.6f), CircleShape)
-                        ) {
-                            Icon(
-                                Icons.Rounded.SkipPrevious,
-                                contentDescription = "Previous",
-                                tint = Color.White,
-                                modifier = Modifier.size(24.dp)
-                            )
-                        }
-                        IconButton(
+                            size = 44.dp,
+                            iconSize = 24.dp
+                        )
+                        PlayerCircleButton(
+                            icon = Icons.Rounded.Replay10,
+                            contentDescription = "Rewind 10s",
                             onClick = {
                                 val target = (exoPlayer.currentPosition - 10_000).coerceAtLeast(0)
                                 exoPlayer.seekTo(target)
                                 currentPosition = target
                             },
-                            modifier = Modifier
-                                .size(48.dp)
-                                .background(Color.Black.copy(alpha = 0.6f), CircleShape)
-                        ) {
-                            Icon(
-                                Icons.Rounded.Replay10,
-                                contentDescription = "Rewind 10s",
-                                tint = Color.White,
-                                modifier = Modifier.size(28.dp)
-                            )
-                        }
+                            size = 48.dp,
+                            iconSize = 28.dp
+                        )
                         IconButton(
                             onClick = {
                                 if (exoPlayer.isPlaying) exoPlayer.pause() else exoPlayer.play()
                             },
                             modifier = Modifier
                                 .size(64.dp)
-                                .background(AccentPrimary, CircleShape)
+                                .background(PlayerAccent, CircleShape)
                         ) {
                             Icon(
                                 imageVector = if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
                                 contentDescription = if (isPlaying) "Pause" else "Play",
-                                tint = BackgroundDark,
+                                tint = Color.Black,
                                 modifier = Modifier.size(36.dp)
                             )
                         }
-                        IconButton(
+                        PlayerCircleButton(
+                            icon = Icons.Rounded.Forward10,
+                            contentDescription = "Forward 10s",
                             onClick = {
                                 val target = (exoPlayer.currentPosition + 10_000).coerceAtMost(exoPlayer.duration)
                                 exoPlayer.seekTo(target)
                                 currentPosition = target
                             },
-                            modifier = Modifier
-                                .size(48.dp)
-                                .background(Color.Black.copy(alpha = 0.6f), CircleShape)
-                        ) {
-                            Icon(
-                                Icons.Rounded.Forward10,
-                                contentDescription = "Forward 10s",
-                                tint = Color.White,
-                                modifier = Modifier.size(28.dp)
-                            )
-                        }
-                        IconButton(
+                            size = 48.dp,
+                            iconSize = 28.dp
+                        )
+                        PlayerCircleButton(
+                            icon = Icons.Rounded.SkipNext,
+                            contentDescription = "Next",
                             onClick = playNext,
                             enabled = ctx.queuePeerPaths.indexOf(ctx.filePath) in 0 until ctx.queuePeerPaths.lastIndex,
-                            modifier = Modifier
-                                .size(44.dp)
-                                .background(Color.Black.copy(alpha = 0.6f), CircleShape)
-                        ) {
-                            Icon(
-                                Icons.Rounded.SkipNext,
-                                contentDescription = "Next",
-                                tint = Color.White,
-                                modifier = Modifier.size(24.dp)
-                            )
-                        }
+                            size = 44.dp,
+                            iconSize = 24.dp
+                        )
                     }
 
                     // ---- Bottom Controls ----
@@ -871,7 +830,7 @@ private fun MediaPlayerModalImpl(
                             )
                             Text(
                                 text = formatDuration(duration),
-                                color = TextSecondary,
+                                color = PlayerTextSecondary,
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.Medium
                             )
@@ -885,8 +844,8 @@ private fun MediaPlayerModalImpl(
                                 currentPosition = target
                             },
                             colors = SliderDefaults.colors(
-                                thumbColor = AccentPrimary,
-                                activeTrackColor = AccentPrimary,
+                                thumbColor = PlayerAccent,
+                                activeTrackColor = PlayerAccent,
                                 inactiveTrackColor = Color.White.copy(alpha = 0.3f)
                             ),
                             modifier = Modifier.fillMaxWidth()
@@ -919,7 +878,7 @@ private fun MediaPlayerModalImpl(
                                         Icon(
                                             Icons.Filled.GraphicEq,
                                             contentDescription = null,
-                                            tint = AccentPrimary,
+                                            tint = PlayerAccent,
                                             modifier = Modifier.size(14.dp)
                                         )
                                     }
@@ -934,7 +893,7 @@ private fun MediaPlayerModalImpl(
                                         Icon(
                                             if (currentSubtitleLabel == null) Icons.Rounded.SubtitlesOff else Icons.Filled.Subtitles,
                                             contentDescription = null,
-                                            tint = AccentPrimary,
+                                            tint = PlayerAccent,
                                             modifier = Modifier.size(14.dp)
                                         )
                                     }
@@ -955,7 +914,7 @@ private fun MediaPlayerModalImpl(
                                         Icon(
                                             Icons.Rounded.AspectRatio,
                                             contentDescription = null,
-                                            tint = AccentPrimary,
+                                            tint = PlayerAccent,
                                             modifier = Modifier.size(14.dp)
                                         )
                                     }
@@ -990,8 +949,8 @@ private fun MediaPlayerModalImpl(
                                     },
                                     valueRange = 0f..1f,
                                     colors = SliderDefaults.colors(
-                                        thumbColor = AccentPrimary,
-                                        activeTrackColor = AccentPrimary,
+                                        thumbColor = PlayerAccent,
+                                        activeTrackColor = PlayerAccent,
                                         inactiveTrackColor = Color.White.copy(alpha = 0.3f)
                                     ),
                                     modifier = Modifier
@@ -1013,8 +972,8 @@ private fun MediaPlayerModalImpl(
                                     },
                                     valueRange = 0f..1f,
                                     colors = SliderDefaults.colors(
-                                        thumbColor = AccentPrimary,
-                                        activeTrackColor = AccentPrimary,
+                                        thumbColor = PlayerAccent,
+                                        activeTrackColor = PlayerAccent,
                                         inactiveTrackColor = Color.White.copy(alpha = 0.3f)
                                     ),
                                     modifier = Modifier
@@ -1086,26 +1045,20 @@ private fun MediaPlayerModalImpl(
                         ) {
                             Text(
                                 text = "Video • ${ext.uppercase()}",
-                                color = TextSecondary,
+                                color = PlayerTextSecondary,
                                 fontSize = 12.sp,
                                 modifier = Modifier.padding(end = Spacing.sm)
                             )
                             Row(horizontalArrangement = Arrangement.spacedBy(Spacing.xs)) {
-                                IconButton(
-                                    onClick = { isFullscreen = !isFullscreen },
-                                    modifier = Modifier
-                                        .size(40.dp)
-                                        .background(Color.White.copy(alpha = 0.12f), CircleShape)
-                                ) {
-                                    Icon(
-                                        Icons.Rounded.Fullscreen,
-                                        contentDescription = "Fullscreen",
-                                        tint = Color.White,
-                                        modifier = Modifier.size(20.dp)
-                                    )
-                                }
+                                PlayerCircleButton(
+                                    icon = Icons.Rounded.Fullscreen,
+                                    contentDescription = "Fullscreen",
+                                    onClick = { isFullscreen = !isFullscreen }
+                                )
                                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                                    IconButton(
+                                    PlayerCircleButton(
+                                        icon = Icons.Rounded.PictureInPicture,
+                                        contentDescription = "PiP",
                                         onClick = {
                                             activity?.let { act ->
                                                 try {
@@ -1115,43 +1068,22 @@ private fun MediaPlayerModalImpl(
                                                     act.enterPictureInPictureMode(params)
                                                 } catch (_: Exception) { /* PiP denied; ignore */ }
                                             }
-                                        },
-                                        modifier = Modifier
-                                            .size(40.dp)
-                                            .background(Color.White.copy(alpha = 0.12f), CircleShape)
-                                    ) {
-                                        Icon(
-                                            Icons.Rounded.PictureInPicture,
-                                            contentDescription = "PiP",
-                                            tint = Color.White,
-                                            modifier = Modifier.size(20.dp)
-                                        )
-                                    }
+                                        }
+                                    )
                                 }
-                                IconButton(
+                                PlayerCircleButton(
+                                    icon = Icons.Rounded.OpenInNew,
+                                    contentDescription = "External Player",
                                     onClick = {
                                         playExternal(context, file)
                                         onDismiss()
-                                    },
-                                    modifier = Modifier
-                                        .size(40.dp)
-                                        .background(Color.White.copy(alpha = 0.12f), CircleShape)
-                                ) {
-                                    Icon(
-                                        Icons.Rounded.OpenInNew,
-                                        contentDescription = "External Player",
-                                        tint = Color.White,
-                                        modifier = Modifier.size(20.dp)
-                                    )
-                                }
-                                IconButton(
-                                    onClick = onDismiss,
-                                    modifier = Modifier
-                                        .size(40.dp)
-                                        .background(Color.White.copy(alpha = 0.12f), CircleShape)
-                                ) {
-                                    Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White)
-                                }
+                                    }
+                                )
+                                PlayerCircleButton(
+                                    icon = Icons.Default.Close,
+                                    contentDescription = "Close",
+                                    onClick = onDismiss
+                                )
                             }
                         }
 
@@ -1161,83 +1093,59 @@ private fun MediaPlayerModalImpl(
                             horizontalArrangement = Arrangement.spacedBy(Spacing.md, Alignment.CenterHorizontally),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            IconButton(
+                            PlayerCircleButton(
+                                icon = Icons.Rounded.SkipPrevious,
+                                contentDescription = "Previous",
                                 onClick = playPrev,
                                 enabled = ctx.queuePeerPaths.indexOf(ctx.filePath) > 0,
-                                modifier = Modifier
-                                    .size(44.dp)
-                                    .background(Color.White.copy(alpha = 0.12f), CircleShape)
-                            ) {
-                                Icon(
-                                    Icons.Rounded.SkipPrevious,
-                                    contentDescription = "Previous",
-                                    tint = Color.White,
-                                    modifier = Modifier.size(24.dp)
-                                )
-                            }
-                            IconButton(
+                                size = 44.dp,
+                                iconSize = 24.dp
+                            )
+                            PlayerCircleButton(
+                                icon = Icons.Rounded.Replay10,
+                                contentDescription = "Rewind 10s",
                                 onClick = {
                                     val target = (exoPlayer.currentPosition - 10_000).coerceAtLeast(0)
                                     exoPlayer.seekTo(target)
                                     currentPosition = target
                                 },
-                                modifier = Modifier
-                                    .size(48.dp)
-                                    .background(Color.White.copy(alpha = 0.12f), CircleShape)
-                            ) {
-                                Icon(
-                                    Icons.Rounded.Replay10,
-                                    contentDescription = "Rewind 10s",
-                                    tint = Color.White,
-                                    modifier = Modifier.size(28.dp)
-                                )
-                            }
+                                size = 48.dp,
+                                iconSize = 28.dp
+                            )
                             IconButton(
                                 onClick = {
                                     if (exoPlayer.isPlaying) exoPlayer.pause() else exoPlayer.play()
                                 },
                                 modifier = Modifier
                                     .size(64.dp)
-                                    .background(AccentPrimary, CircleShape)
+                                    .background(PlayerAccent, CircleShape)
                             ) {
                                 Icon(
                                     imageVector = if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
                                     contentDescription = if (isPlaying) "Pause" else "Play",
-                                    tint = BackgroundDark,
+                                    tint = Color.Black,
                                     modifier = Modifier.size(36.dp)
                                 )
                             }
-                            IconButton(
+                            PlayerCircleButton(
+                                icon = Icons.Rounded.Forward10,
+                                contentDescription = "Forward 10s",
                                 onClick = {
                                     val target = (exoPlayer.currentPosition + 10_000).coerceAtMost(exoPlayer.duration)
                                     exoPlayer.seekTo(target)
                                     currentPosition = target
                                 },
-                                modifier = Modifier
-                                    .size(48.dp)
-                                    .background(Color.White.copy(alpha = 0.12f), CircleShape)
-                            ) {
-                                Icon(
-                                    Icons.Rounded.Forward10,
-                                    contentDescription = "Forward 10s",
-                                    tint = Color.White,
-                                    modifier = Modifier.size(28.dp)
-                                )
-                            }
-                            IconButton(
+                                size = 48.dp,
+                                iconSize = 28.dp
+                            )
+                            PlayerCircleButton(
+                                icon = Icons.Rounded.SkipNext,
+                                contentDescription = "Next",
                                 onClick = playNext,
                                 enabled = ctx.queuePeerPaths.indexOf(ctx.filePath) in 0 until ctx.queuePeerPaths.lastIndex,
-                                modifier = Modifier
-                                    .size(44.dp)
-                                    .background(Color.White.copy(alpha = 0.12f), CircleShape)
-                            ) {
-                                Icon(
-                                    Icons.Rounded.SkipNext,
-                                    contentDescription = "Next",
-                                    tint = Color.White,
-                                    modifier = Modifier.size(24.dp)
-                                )
-                            }
+                                size = 44.dp,
+                                iconSize = 24.dp
+                            )
                         }
 
                         // Seek
@@ -1254,7 +1162,7 @@ private fun MediaPlayerModalImpl(
                                 )
                                 Text(
                                     text = formatDuration(duration),
-                                    color = TextSecondary,
+                                    color = PlayerTextSecondary,
                                     fontSize = 12.sp,
                                     fontWeight = FontWeight.Medium
                                 )
@@ -1267,8 +1175,8 @@ private fun MediaPlayerModalImpl(
                                     currentPosition = target
                                 },
                                 colors = SliderDefaults.colors(
-                                    thumbColor = AccentPrimary,
-                                    activeTrackColor = AccentPrimary,
+                                    thumbColor = PlayerAccent,
+                                    activeTrackColor = PlayerAccent,
                                     inactiveTrackColor = Color.White.copy(alpha = 0.3f)
                                 ),
                                 modifier = Modifier.fillMaxWidth()
@@ -1300,7 +1208,7 @@ private fun MediaPlayerModalImpl(
                                         Icon(
                                             Icons.Filled.GraphicEq,
                                             contentDescription = null,
-                                            tint = AccentPrimary,
+                                            tint = PlayerAccent,
                                             modifier = Modifier.size(14.dp)
                                         )
                                     }
@@ -1315,7 +1223,7 @@ private fun MediaPlayerModalImpl(
                                         Icon(
                                             if (currentSubtitleLabel == null) Icons.Rounded.SubtitlesOff else Icons.Filled.Subtitles,
                                             contentDescription = null,
-                                            tint = AccentPrimary,
+                                            tint = PlayerAccent,
                                             modifier = Modifier.size(14.dp)
                                         )
                                     }
@@ -1336,7 +1244,7 @@ private fun MediaPlayerModalImpl(
                                         Icon(
                                             Icons.Rounded.AspectRatio,
                                             contentDescription = null,
-                                            tint = AccentPrimary,
+                                            tint = PlayerAccent,
                                             modifier = Modifier.size(14.dp)
                                         )
                                     }
@@ -1369,8 +1277,8 @@ private fun MediaPlayerModalImpl(
                                     },
                                     valueRange = 0f..1f,
                                     colors = SliderDefaults.colors(
-                                        thumbColor = AccentPrimary,
-                                        activeTrackColor = AccentPrimary,
+                                        thumbColor = PlayerAccent,
+                                        activeTrackColor = PlayerAccent,
                                         inactiveTrackColor = Color.White.copy(alpha = 0.3f)
                                     ),
                                     modifier = Modifier
@@ -1392,8 +1300,8 @@ private fun MediaPlayerModalImpl(
                                     },
                                     valueRange = 0f..1f,
                                     colors = SliderDefaults.colors(
-                                        thumbColor = AccentPrimary,
-                                        activeTrackColor = AccentPrimary,
+                                        thumbColor = PlayerAccent,
+                                        activeTrackColor = PlayerAccent,
                                         inactiveTrackColor = Color.White.copy(alpha = 0.3f)
                                     ),
                                     modifier = Modifier
@@ -1490,6 +1398,44 @@ private fun applySubtitleByLabel(
     player.trackSelectionParameters = builder.build()
 }
 
+/**
+ * The one circle-button style for every player surface (fullscreen overlay
+ * AND portrait controls). Previously each branch hand-rolled its own —
+ * black 60% circles over video, white 12% circles in portrait — so toggling
+ * fullscreen visibly swapped the button chrome. White-on-translucent reads
+ * on both the black canvas and the dimmed video overlay.
+ */
+@Composable
+private fun PlayerCircleButton(
+    icon: ImageVector,
+    contentDescription: String,
+    onClick: () -> Unit,
+    enabled: Boolean = true,
+    size: Dp = 40.dp,
+    iconSize: Dp = 20.dp
+) {
+    Box(
+        modifier = Modifier
+            .size(size)
+            .clip(CircleShape)
+            .background(Color.White.copy(alpha = 0.12f))
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                enabled = enabled,
+                onClick = onClick
+            ),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(
+            icon,
+            contentDescription = contentDescription,
+            tint = Color.White.copy(alpha = if (enabled) 1f else 0.35f),
+            modifier = Modifier.size(iconSize)
+        )
+    }
+}
+
 @Composable
 private fun Chip(
     label: String,
@@ -1497,8 +1443,11 @@ private fun Chip(
     onClick: () -> Unit,
     leading: (@Composable () -> Unit)? = null
 ) {
-    val bg = if (selected) AccentPrimary else Color.Black.copy(alpha = 0.6f)
-    val fg = if (selected) BackgroundDark else Color.White
+    // White-translucent unselected background: the old black 60% was
+    // invisible on the portrait branch's pure-black canvas. Vertical
+    // padding sized for a >=40dp touch target (11sp label ≈ 16dp line).
+    val bg = if (selected) PlayerAccent else Color.White.copy(alpha = 0.10f)
+    val fg = if (selected) Color.Black else Color.White
     Row(
         modifier = Modifier
             .clip(RoundedCornerShape(50))
@@ -1508,9 +1457,9 @@ private fun Chip(
                 indication = null,
                 onClick = onClick
             )
-            .padding(horizontal = Spacing.md, vertical = 6.dp),
+            .padding(horizontal = Spacing.md, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(4.dp)
+        horizontalArrangement = Arrangement.spacedBy(Spacing.xs)
     ) {
         if (leading != null) {
             leading()
@@ -1547,7 +1496,7 @@ private fun BottomChoiceSheet(
                     .fillMaxWidth()
                     .navigationBarsPadding()
                     .clip(RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp))
-                    .background(SurfaceCard)
+                    .background(PlayerSurface)
                     .padding(Spacing.lg)
             ) {
                 Text(
@@ -1557,26 +1506,36 @@ private fun BottomChoiceSheet(
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier.padding(bottom = Spacing.md)
                 )
-                options.forEach { opt ->
-                    val isSelected = opt == selected
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(if (isSelected) SurfaceElevated else Color.Transparent)
-                            .clickable(
-                                interactionSource = remember { MutableInteractionSource() },
-                                indication = null,
-                                onClick = { onPick(opt) }
+                // Scrollable + height-bounded: an MKV with a dozen subtitle
+                // tracks used to push the unscrollable option list past the
+                // top edge of the screen.
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 360.dp)
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    options.forEach { opt ->
+                        val isSelected = opt == selected
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(if (isSelected) PlayerSurfaceElevated else Color.Transparent)
+                                .clickable(
+                                    interactionSource = remember { MutableInteractionSource() },
+                                    indication = null,
+                                    onClick = { onPick(opt) }
+                                )
+                                .padding(horizontal = Spacing.md, vertical = Spacing.md),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = opt,
+                                color = if (isSelected) PlayerAccent else Color.White,
+                                fontSize = 14.sp
                             )
-                            .padding(horizontal = Spacing.md, vertical = Spacing.sm),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = opt,
-                            color = if (isSelected) AccentPrimary else Color.White,
-                            fontSize = 14.sp
-                        )
+                        }
                     }
                 }
             }
