@@ -75,6 +75,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -83,6 +84,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.window.DialogWindowProvider
 import androidx.core.content.FileProvider
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -143,10 +145,9 @@ private val PlayerSurfaceElevated = Color(0xFF181B22)
  * The UI is deliberately basic: one layout for every orientation — black
  * surface, letterboxed video, tap anywhere to toggle controls, auto-hide
  * after 3s. Transport (prev / -10s / play / +10s / next), a seek bar, and
- * four chips: speed (tap to cycle), audio track, subtitles, and a Fit/Crop
- * display-framing cycle (FIT <-> ZOOM only; FILL would stretch, so it is
- * never offered). No PiP, no brightness/volume sliders — hardware keys and
- * the system handle those.
+ * four chips: speed (tap to cycle), audio track, subtitles, and a
+ * display-framing cycle (Fit -> Crop -> Stretch). No PiP, no
+ * brightness/volume sliders — hardware keys and the system handle those.
  */
 @OptIn(UnstableApi::class)
 @Composable
@@ -261,9 +262,9 @@ private fun MediaPlayerModalImpl(
     var tracksLoaded by remember { mutableStateOf(false) }
     // Fullscreen: rotate to landscape + hide system bars, YouTube-style.
     var isFullscreen by remember { mutableStateOf(false) }
-    // Display framing cycle: FIT (letterbox, default) <-> ZOOM (center-crop
-    // to fill). Media3's stretch-to-fill mode is deliberately never used —
-    // it distorts the video. Display-only: the file is never re-encoded or
+    // Display framing cycle: FIT (letterbox, default) -> ZOOM (center-crop
+    // to fill) -> STRETCH (FILL — distorts the aspect to fill the frame)
+    // -> back to FIT. Display-only: the file is never re-encoded or
     // touched.
     // Session-only, no persistence. AspectRatioFrameLayout re-measures on
     // every layout pass, so rotation reframes automatically — no cached
@@ -545,6 +546,30 @@ private fun MediaPlayerModalImpl(
             dismissOnClickOutside = false
         )
     ) {
+        // This Dialog is its OWN window. Edge-to-edge fitting and bar hiding
+        // applied to the activity's window never reach it, so the dialog
+        // stayed inset inside the system bars and the app UI behind (white
+        // in light theme) showed through at the edges. Take the dialog's
+        // window (exposed by the dialog's root layout) and make IT
+        // edge-to-edge + immersive: content draws behind the bars, and the
+        // bars hide while the player is up — a swipe from an edge reveals
+        // them transiently. The window dies with the dialog, so there is
+        // nothing to restore here; the activity-side restore above covers
+        // the window that survives.
+        val dialogWindow = (LocalView.current as? DialogWindowProvider)?.window
+        DisposableEffect(dialogWindow) {
+            dialogWindow?.let { win ->
+                WindowCompat.setDecorFitsSystemWindows(win, false)
+                win.statusBarColor = android.graphics.Color.TRANSPARENT
+                win.navigationBarColor = android.graphics.Color.TRANSPARENT
+                val controller = WindowInsetsControllerCompat(win, win.decorView)
+                controller.systemBarsBehavior =
+                    WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                controller.hide(WindowInsetsCompat.Type.systemBars())
+            }
+            onDispose {}
+        }
+
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -819,15 +844,23 @@ private fun MediaPlayerModalImpl(
                                 leading = if (currentSubtitleLabel == null) Icons.Rounded.SubtitlesOff else Icons.Filled.Subtitles
                             )
                             PlayerChip(
-                                label = if (resizeMode == AspectRatioFrameLayout.RESIZE_MODE_FIT) "Fit" else "Crop",
+                                label = when (resizeMode) {
+                                    AspectRatioFrameLayout.RESIZE_MODE_ZOOM -> "Crop"
+                                    AspectRatioFrameLayout.RESIZE_MODE_FILL -> "Stretch"
+                                    else -> "Fit"
+                                },
                                 selected = resizeMode != AspectRatioFrameLayout.RESIZE_MODE_FIT,
                                 onClick = {
-                                    // FIT <-> ZOOM only. Never the stretch-to-fill
-                                    // mode: FILL distorts, ZOOM center-crops.
-                                    resizeMode = if (resizeMode == AspectRatioFrameLayout.RESIZE_MODE_FIT) {
-                                        AspectRatioFrameLayout.RESIZE_MODE_ZOOM
-                                    } else {
-                                        AspectRatioFrameLayout.RESIZE_MODE_FIT
+                                    // Fit -> Crop -> Stretch -> Fit. Stretch is
+                                    // Media3's FILL mode: it distorts the aspect
+                                    // ratio to fill the frame — offered because
+                                    // sometimes filling the screen beats black
+                                    // bars. Display-only: the file is never
+                                    // re-encoded or touched.
+                                    resizeMode = when (resizeMode) {
+                                        AspectRatioFrameLayout.RESIZE_MODE_FIT -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                                        AspectRatioFrameLayout.RESIZE_MODE_ZOOM -> AspectRatioFrameLayout.RESIZE_MODE_FILL
+                                        else -> AspectRatioFrameLayout.RESIZE_MODE_FIT
                                     }
                                 },
                                 leading = Icons.Rounded.AspectRatio
