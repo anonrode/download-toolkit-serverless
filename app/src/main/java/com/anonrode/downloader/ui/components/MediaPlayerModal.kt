@@ -30,7 +30,6 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -547,27 +546,55 @@ private fun MediaPlayerModalImpl(
         )
     ) {
         // This Dialog is its OWN window. Edge-to-edge fitting and bar hiding
-        // applied to the activity's window never reach it, so the dialog
-        // stayed inset inside the system bars and the app UI behind (white
-        // in light theme) showed through at the edges. Take the dialog's
-        // window (exposed by the dialog's root layout) and make IT
-        // edge-to-edge + immersive: content draws behind the bars, and the
-        // bars hide while the player is up — a swipe from an edge reveals
-        // them transiently. The window dies with the dialog, so there is
-        // nothing to restore here; the activity-side restore above covers
-        // the window that survives.
+        // applied to the activity's window never reach it: Compose Dialogs
+        // are normally sized to the activity's CONTENT area (below the
+        // status bar) and the activity's status + nav bars are painted ON
+        // TOP of the dialog, so even with setDecorFitsSystemWindows(false)
+        // the activity's bars stay visible — they are not part of the
+        // dialog's window at all. Take the dialog's window (exposed by the
+        // dialog's root layout) and: (1) force it to MATCH_PARENT with
+        // FLAG_LAYOUT_NO_LIMITS so it extends UNDER the activity's bars
+        // edge-to-edge, (2) pin the bar colors to BLACK on the dialog
+        // window so the API 30+ contrast scrim doesn't paint a translucent
+        // gray over our canvas, (3) hide the system bars while the player
+        // is up — a swipe from an edge reveals them transiently. The
+        // activity-side enableEdgeToEdge call above hides the ACTIVITY's
+        // bars; this block hides the DIALOG's bars. Both layers need to
+        // agree for the player to be truly fullscreen.
         val dialogWindow = (LocalView.current as? DialogWindowProvider)?.window
         DisposableEffect(dialogWindow) {
             dialogWindow?.let { win ->
+                val lp = win.attributes
+                lp.width = android.view.WindowManager.LayoutParams.MATCH_PARENT
+                lp.height = android.view.WindowManager.LayoutParams.MATCH_PARENT
+                lp.flags = lp.flags or
+                    android.view.WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                    android.view.WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS
+                win.attributes = lp
                 WindowCompat.setDecorFitsSystemWindows(win, false)
-                win.statusBarColor = android.graphics.Color.TRANSPARENT
-                win.navigationBarColor = android.graphics.Color.TRANSPARENT
+                // Pin the dialog's own bar fill to black so the OS never
+                // paints a contrast scrim over it (TRANSPARENT triggers the
+                // scrim on API 30+ when the underlying content is light).
+                win.statusBarColor = android.graphics.Color.BLACK
+                win.navigationBarColor = android.graphics.Color.BLACK
                 val controller = WindowInsetsControllerCompat(win, win.decorView)
                 controller.systemBarsBehavior =
                     WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
                 controller.hide(WindowInsetsCompat.Type.systemBars())
             }
-            onDispose {}
+            onDispose {
+                // Release FLAG_LAYOUT_NO_LIMITS so the dialog's window
+                // returns to its default sizing the next time one is
+                // created. Bar visibility is restored by the activity-side
+                // enableEdgeToEdge call in onDispose of the outer
+                // DisposableEffect (lines above this block).
+                dialogWindow?.let { win ->
+                    val lp = win.attributes
+                    lp.flags = lp.flags and
+                        android.view.WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS.inv()
+                    win.attributes = lp
+                }
+            }
         }
 
         Box(
@@ -655,7 +682,6 @@ private fun MediaPlayerModalImpl(
                     fontSize = 11.sp,
                     modifier = Modifier
                         .align(Alignment.TopCenter)
-                        .statusBarsPadding()
                         .padding(top = Spacing.xxxl)
                 )
             }
@@ -672,11 +698,16 @@ private fun MediaPlayerModalImpl(
                         .background(Color.Black.copy(alpha = 0.45f))
                 ) {
                     // ---- Top bar: close | title | fullscreen, external ----
+                    // The dialog extends behind the system bars and the bars
+                    // are hidden (BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE), so a
+                    // fixed top inset is the predictable thing — statusBarsPadding
+                    // would jump when the user swipes to reveal the bars and
+                    // would also push the row under the camera notch on devices
+                    // that have one.
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .statusBarsPadding()
-                            .padding(horizontal = Spacing.md, vertical = Spacing.sm),
+                            .padding(start = Spacing.md, end = Spacing.md, top = 24.dp, bottom = Spacing.sm),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         PlayerCircleButton(
@@ -775,12 +806,14 @@ private fun MediaPlayerModalImpl(
                     }
 
                     // ---- Bottom: seek, then speed / audio / subtitles ----
+                    // Symmetric to the top row: fixed bottom inset instead of
+                    // navigationBarsPadding, so the layout doesn't jump when
+                    // the user swipes the bars into view.
                     Column(
                         modifier = Modifier
                             .align(Alignment.BottomCenter)
                             .fillMaxWidth()
-                            .navigationBarsPadding()
-                            .padding(horizontal = Spacing.lg, vertical = Spacing.md)
+                            .padding(horizontal = Spacing.lg, top = Spacing.md, bottom = 24.dp)
                     ) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
