@@ -133,6 +133,17 @@ fun DownloadsScreen(
         }
     }
 
+    // The sort above is keyed on structure (ids + statuses) so it doesn't
+    // re-run on every progress tick — but that also freezes the task OBJECTS
+    // captured in the snapshot, so cards would render stale byte counts
+    // between structural changes (the "notification moves, app doesn't"
+    // bug). Remap the grouped ids onto the freshest objects each
+    // composition: O(n) map, no re-sort, no age-override churn.
+    val tasksById = remember(tasks) { tasks.associateBy { it.id } }
+    val liveGroups = remember(groups, tasks) {
+        groups.map { (header, items) -> header to items.mapNotNull { tasksById[it.id] } }
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -241,7 +252,7 @@ fun DownloadsScreen(
                 verticalArrangement = Arrangement.spacedBy(Spacing.md),
                 modifier = Modifier.fillMaxSize()
             ) {
-                groups.forEach { (header, items) ->
+                liveGroups.forEach { (header, items) ->
                     item(key = "h-$header") {
                         Text(
                             text = "$header · ${items.size}",
