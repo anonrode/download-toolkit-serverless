@@ -172,8 +172,10 @@ class MainActivity : ComponentActivity() {
                 // on first frame (never seen on fast devices), so hold a designed
                 // Compose splash for a brief beat before revealing the app. Kept
                 // short on purpose — a long hold read as a slow response when
-                // tapping the app icon.
-                var showSplash by remember { mutableStateOf(true) }
+                // tapping the app icon. Cold start only: on a config-change
+                // recreation (savedInstanceState != null) the splash would
+                // flash over the live UI for half a second.
+                var showSplash by remember { mutableStateOf(savedInstanceState == null) }
                 LaunchedEffect(Unit) {
                     kotlinx.coroutines.delay(500)
                     showSplash = false
@@ -188,6 +190,22 @@ class MainActivity : ComponentActivity() {
                     initialTab = initialTab,
                     themeMode = themeMode,
                     onThemeChanged = { newMode ->
+                        // Point the window background at the TARGET theme's
+                        // color BEFORE the Compose color swap. The swap is a
+                        // full-tree recomposition (the palette is a static
+                        // CompositionLocal and all three tabs stay composed),
+                        // which can drop frames on slow devices; landing the
+                        // background first means any pixel exposed mid-switch
+                        // (system-bar regions, a late content frame) is
+                        // already the color we are switching TO, so a flash
+                        // of the leaving theme is impossible. The content is
+                        // opaque and full-bleed, so the early background is
+                        // invisible until the content itself flips. Bar ICON
+                        // appearance deliberately still flips with the
+                        // content in the SideEffect below — early-flipping it
+                        // would hide the icons against the old theme for a
+                        // frame.
+                        setWindowBackground(resolveIsDark(newMode))
                         themeMode = newMode
                         prefs.edit().putString("pref_theme_mode", newMode).apply()
                     },
@@ -289,6 +307,23 @@ class MainActivity : ComponentActivity() {
 }
 
 /**
+ * Resolves a theme-mode string to the effective dark state outside of
+ * composition (click handlers, cold start). "system" reads the device's
+ * current night mode instead of assuming dark, so Auto on a light device
+ * gets dark status icons and the light window background. Inside
+ * composition the setContent scope uses `isSystemInDarkTheme()` instead so
+ * Auto reacts to night-mode changes; the two agree by construction.
+ * Dark (or unknown) matches the no-arg `enableEdgeToEdge()` behavior the
+ * app always had.
+ */
+private fun MainActivity.resolveIsDark(themeMode: String): Boolean = when (themeMode.lowercase()) {
+    "light" -> false
+    "system" -> (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
+        Configuration.UI_MODE_NIGHT_YES
+    else -> true
+}
+
+/**
  * Applies the activity's edge-to-edge system-bar styling to match the app's
  * theme, and points the window background at the resolved theme's color.
  * Invoked exactly ONCE, from `onCreate` (cold start), so the first frame
@@ -296,21 +331,9 @@ class MainActivity : ComponentActivity() {
  * [syncSystemBars] instead: re-invoking `enableEdgeToEdge` on every toggle
  * re-fits the window and re-dispatches window insets, which flashed a light
  * band across the top of the screen mid-transition.
- *
- * `"system"` resolves through the device's current night mode instead of
- * assuming dark, so Auto on a light device gets dark status icons and the
- * light window background (the old assume-dark path left the icons
- * invisible there).
  */
 private fun MainActivity.applyEdgeToEdge(themeMode: String) {
-    val isDark = when (themeMode.lowercase()) {
-        "light" -> false
-        "system" -> (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
-            Configuration.UI_MODE_NIGHT_YES
-        // Dark theme (or unknown): matches the no-arg `enableEdgeToEdge()`
-        // behavior the app had before, so dark mode is unchanged.
-        else -> true
-    }
+    val isDark = resolveIsDark(themeMode)
     val style = if (isDark) {
         // Dark theme: light icons on a transparent bar (the app's black
         // surface bleeds through).
