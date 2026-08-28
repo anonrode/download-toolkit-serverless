@@ -813,7 +813,7 @@ private fun MediaPlayerModalImpl(
                         modifier = Modifier
                             .align(Alignment.BottomCenter)
                             .fillMaxWidth()
-                            .padding(horizontal = Spacing.lg, top = Spacing.md, bottom = 24.dp)
+                            .padding(start = Spacing.lg, end = Spacing.lg, top = Spacing.md, bottom = 24.dp)
                     ) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
