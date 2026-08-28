@@ -84,6 +84,14 @@ class DownloadRepository {
         _tasks.update { list ->
             list.map {
                 if (it.id == taskId) {
+                    // First bytes landing flips RESOLVING -> DOWNLOADING here, in
+                    // the SAME atomic write as the progress: some backends (Turbo
+                    // direct downloads) report progress with no separate status
+                    // event, so without this the card sits at "Resolving" with no
+                    // bar while the notification already shows live percent.
+                    val status = if (it.status == TaskStatus.RESOLVING && downloaded > 0) {
+                        TaskStatus.DOWNLOADING
+                    } else it.status
                     // Monotonic downloaded bytes: a late telemetry tick racing the
                     // COMPLETED write (or a stale tick after pause) must never
                     // regress the recorded size. Speed/ETA are only meaningful
@@ -96,8 +104,9 @@ class DownloadRepository {
                     // content length — the completion tiers compare file size
                     // against it.
                     val finalTot = if (total > it.totalBytes) total else it.totalBytes
-                    val transferring = it.status == TaskStatus.DOWNLOADING
+                    val transferring = status == TaskStatus.DOWNLOADING
                     it.copy(
+                        status = status,
                         downloadedBytes = finalDl,
                         totalBytes = finalTot,
                         speedBytesPerSec = if (transferring) speed else 0.0,
