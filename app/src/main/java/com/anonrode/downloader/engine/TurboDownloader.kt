@@ -184,23 +184,39 @@ object TurboDownloader {
             val ok = segmented(safe, partFile, headers, total, sockets, state, failureStatus, failureMessage, onProgress, effectiveClient, taskId)
             if (ok) {
                 state.delete()
-                atomicMove(partFile, dest)
-                TurboResult.Success(dest, dest.length(), true)
+                if (moveVerified(partFile, dest, total)) TurboResult.Success(dest, dest.length(), true)
+                else failure(failureStatus, failureMessage)
             } else if (!partFile.exists() || partFile.length() == 0L) {
                 state.delete()
                 if (single(safe, partFile, headers, total, failureStatus, failureMessage, onProgress, effectiveClient, taskId)) {
-                    atomicMove(partFile, dest)
-                    TurboResult.Success(dest, dest.length(), false)
+                    if (moveVerified(partFile, dest, total)) TurboResult.Success(dest, dest.length(), false)
+                    else failure(failureStatus, failureMessage)
                 } else failure(failureStatus, failureMessage)
             } else failure(failureStatus, failureMessage)
         } else {
             state.delete()
             if (single(safe, partFile, headers, total, failureStatus, failureMessage, onProgress, effectiveClient, taskId)) {
                 state.delete()
-                atomicMove(partFile, dest)
-                TurboResult.Success(dest, dest.length(), false)
+                if (moveVerified(partFile, dest, total)) TurboResult.Success(dest, dest.length(), false)
+                else failure(failureStatus, failureMessage)
             } else failure(failureStatus, failureMessage)
         }
+    }
+
+    /**
+     * Move the verified .part to its final name and PROVE the move landed.
+     * [atomicMove]'s return value used to be ignored, so a failed rename
+     * (and a copy fallback killed mid-way, e.g. by disk-full) still reported
+     * Success — handing the engine a missing or truncated file that the
+     * structure tier could bless (faststart MP4 keeps its moov atom at the
+     * head, so a truncated file scans as "structured"). With the length
+     * known (Content-Length from the probe), only a byte-exact dest counts;
+     * with no known length, existence is all the evidence there is.
+     */
+    private fun moveVerified(partFile: File, dest: File, total: Long): Boolean {
+        if (!atomicMove(partFile, dest)) return false
+        if (!dest.exists()) return false
+        return total <= 0L || dest.length() == total
     }
 
     /** Builds a Failure outcome, rethrowing cancellation so a paused job never looks like a server error. */

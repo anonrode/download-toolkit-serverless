@@ -49,6 +49,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // Last query+filter actually launched; an identical search while it is
     // still running is a duplicate keystroke, not a new request.
     private var lastSearchKey: String? = null
+    // The query whose results are currently in uiState.searchResults (set when
+    // a search actually launches). Lets search() drop the PREVIOUS query's
+    // cards the moment a different query starts, so they can never be tapped
+    // under the new query while the new crawl runs — the same contract
+    // onFilterSelected already applies to filter switches. Without this, a
+    // slow or failed crawl leaves the old query's results on screen and
+    // neither the loading branch (results non-empty) nor the "No results"
+    // branch in HomeScreen can ever replace them.
+    private var resultsForQuery: String? = null
 
     // ---- settings-save coalescing -------------------------------------------
     //
@@ -136,6 +145,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         } else if (q.isBlank()) {
             searchJob?.cancel()
+            // Same rule as search(): the dead coroutine stops instantly, but
+            // its blocking search HTTP keeps draining until it finishes.
+            // Killing the tagged calls keeps a cleared search from trailing.
+            com.anonrode.downloader.data.net.HttpClient.cancelTagged("search")
             _uiState.update { it.copy(isSearching = false, searchResults = emptyList(), searchError = null) }
         }
     }
@@ -217,6 +230,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val key = "${q.lowercase()}::${_uiState.value.selectedFilter}"
         if (searchJob?.isActive == true && lastSearchKey == key) return
         lastSearchKey = key
+        // A genuinely NEW query must not keep displaying the previous query's
+        // cards while it crawls (the filter path already enforces this — see
+        // onFilterSelected). Without the clear, a slow or failed crawl leaves
+        // the old query's results on screen under the new query — the
+        // "searched a movie, got the last search's series results" report —
+        // and HomeScreen's loading branch (which requires empty results) and
+        // its "No results" branch can never replace them.
+        val lcq = q.lowercase()
+        if (resultsForQuery != lcq) {
+            _uiState.update { it.copy(searchResults = emptyList()) }
+        }
+        resultsForQuery = lcq
         com.anonrode.downloader.util.DebugLog.user("search \"$q\" filter=${_uiState.value.selectedFilter}")
 
         debounceJob?.cancel()

@@ -107,6 +107,16 @@ object ProviderRegistry {
             send(cached.second)
             return@channelFlow
         }
+        // Stale-cache sweep: any OTHER query's cached results for this filter
+        // are obsolete the moment this crawl starts, otherwise a failed/empty
+        // crawl below emits NOTHING and the stale query's results stay on
+        // screen (the "previous search bleeding into the next" report).
+        if (searchCache.size > 64) {
+            val cutoff = now - 240_000L
+            searchCache.entries.removeIf { it.value.first < cutoff }
+        }
+        val staleKeys = searchCache.keys.filter { it.endsWith("::${siteFilter ?: "all"}") && it != cacheKey }
+        for (sk in staleKeys) searchCache.remove(sk)
 
         val currentProviders = allProviders
         val targets = if (!siteFilter.isNullOrBlank() && siteFilter != "all") {
@@ -142,6 +152,14 @@ object ProviderRegistry {
             searchCache[cacheKey] = Pair(now, finalRanked)
             send(finalRanked)
         } else if (cached == null || cached.second.isEmpty()) {
+            send(emptyList())
+        }
+        // Dead-end guard: when the crawl came up empty and a DIFFERENT query's
+        // stale results for this filter were still cached, emit an explicit
+        // empty list. Without this the collector never fires, isSearching
+        // clears to "done", and the previous query's cards stay on screen and
+        // tappable under the new query.
+        if (accumulated.isEmpty() && staleKeys.isNotEmpty()) {
             send(emptyList())
         }
     }.flowOn(Dispatchers.IO)

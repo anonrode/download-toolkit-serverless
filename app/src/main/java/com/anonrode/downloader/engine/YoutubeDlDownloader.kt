@@ -354,9 +354,16 @@ object YoutubeDlDownloader {
             // so exclude the shards; when only shards exist the attempt
             // counts as failed and the next one re-runs the merge.
             val formatShard = Regex("""\.f\d+\.[A-Za-z0-9]{2,5}$""")
+            // Same guard the magnet path applies below (aria2c contract): a
+            // sibling .aria2 control file means the data file is still
+            // PARTIAL — the external libaria2c downloader only removes it on
+            // successful completion. Without this, an attempt that exits 0
+            // while a straggler range request died could hand the engine a
+            // truncated file that the structure tier then blesses.
             fun isFinal(f: File) = (f.length() > 0 || f.isDirectory) &&
                 !f.name.endsWith(".aria2") && !f.name.endsWith(".part") && !f.name.endsWith(".ytdl") &&
-                !formatShard.containsMatchIn(f.name)
+                !formatShard.containsMatchIn(f.name) &&
+                !(f.isFile && File(f.absolutePath + ".aria2").exists())
 
             val candidates = outDir.listFiles { f -> isFinal(f) }?.toList() ?: emptyList()
 
