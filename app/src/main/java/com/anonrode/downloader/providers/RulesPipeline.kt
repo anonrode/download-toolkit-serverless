@@ -89,6 +89,9 @@ object RulesPipeline {
     // -------------------------------------------------------------- episodes
 
     suspend fun runEpisodes(site: String, pipeline: Pipeline, showUrl: String): PipelineEpisodes? {
+        // A blank show URL (e.g. a junk card with no href) renders every {url}
+        // template to "" — bail before running a pipeline that cannot succeed.
+        if (showUrl.isBlank()) return null
         return try {
             runEpisodesInner(site, pipeline, showUrl)
         } catch (e: Exception) {
@@ -190,7 +193,10 @@ object RulesPipeline {
     ): StepOutcome? {
         val url = renderTemplate(source.url, vars) { name -> vars[name] }
         if (url.isNullOrBlank() || !url.startsWith("http")) {
-            DebugLog.error("$site pipeline $stage: unresolvable source url \"${source.url}\"")
+            // Expected when a site has no base configured (empty {base}) or a
+            // step template references a var this stage never receives — every
+            // search for such sites would otherwise spam ERROR.
+            DebugLog.trace("$site pipeline $stage: unresolvable source url \"${source.url}\"")
             return null
         }
         val referer = source.headers.entries
@@ -511,13 +517,23 @@ object RulesPipeline {
             }
         }
 
+        // ---- numbering
+        val numbering = items.optJSONObject("numbering")
+        val numChain = numbering?.optJSONArray("chain")
+        val sortByNumber = numbering != null && numbering.optBoolean("sortByNumber", false)
+
         // ---- filters + dedupe
         val allowlist = jsonStringList(items.optJSONArray("urlAllowlist"))
         val blacklist = jsonStringList(items.optJSONArray("urlBlacklist"))
         val dedupeByCaptures = hrefRegexStr.isNotBlank()
         val seenUrls = mutableSetOf<String>()
         val seenCaptures = mutableSetOf<List<String>>()
-        val kept = mutableListOf<AnchorCtx>()
+        // Filename/heading numbering and combined-post expansion are repairs
+        // for positional pipelines (nkiri-class list pages): a site with an
+        // explicit numbering chain or a captures regex already defines its own
+        // episode numbers and gets none of the heuristics.
+        val heuristicNums = numChain == null && !dedupeByCaptures
+        val kept = mutableListOf<Pair<AnchorCtx, List<Int>>>()
         for (ctx in anchors) {
             val href = ctx.href
             if (href.isBlank() || href == showUrl) continue
@@ -526,18 +542,17 @@ object RulesPipeline {
             if (showUrl.startsWith(href)) continue
             if (blacklist.any { href.contains(it, ignoreCase = true) }) continue
             if (allowlist.isNotEmpty() && allowlist.none { href.contains(it, ignoreCase = true) }) continue
+            val nums = if (heuristicNums) anchorEpisodeNums(ctx) else emptyList()
             if (dedupeByCaptures) {
                 if (!seenCaptures.add(ctx.captures)) continue
+            } else if (nums.size > 1) {
+                // Combined post: several real episodes share one anchor, so
+                // the URL-dedupe must not collapse them into one card.
             } else {
                 if (!seenUrls.add(href)) continue
             }
-            kept.add(ctx)
+            kept.add(ctx to nums)
         }
-
-        // ---- numbering
-        val numbering = items.optJSONObject("numbering")
-        val numChain = numbering?.optJSONArray("chain")
-        val sortByNumber = numbering != null && numbering.optBoolean("sortByNumber", false)
 
         fun deriveNum(ctx: AnchorCtx, position: Int): Int {
             if (numChain != null) {
@@ -569,16 +584,34 @@ object RulesPipeline {
             return "Episode $num"
         }
 
-        var built = kept.mapIndexed { idx, ctx ->
-            val num = deriveNum(ctx, idx + 1)
-            EpisodeItem(title = labelFor(ctx, num), url = ctx.href, episodeNum = num, site = site)
+        // Combined posts expand into one EpisodeItem per real episode (same
+        // anchor URL reused — never an invented one). A positional number only
+        // applies when the anchor carries no episode tokens; positional count
+        // walks over already-numbered items so the two ranges cannot collide.
+        val builtList = mutableListOf<EpisodeItem>()
+        var positional = 0
+        kept.forEach { (ctx, nums) ->
+            if (nums.isEmpty()) {
+                positional += 1
+                val num = deriveNum(ctx, positional)
+                builtList.add(EpisodeItem(title = labelFor(ctx, num), url = ctx.href, episodeNum = num, site = site))
+            } else {
+                // An expanded post's heading/label describes the whole post
+                // ("Episode 17 & 18"); only the counter gives each expanded
+                // item its own correct title.
+                nums.forEach { n ->
+                    val title = if (nums.size > 1) "Episode $n" else labelFor(ctx, n)
+                    builtList.add(EpisodeItem(title = title, url = ctx.href, episodeNum = n, site = site))
+                }
+            }
         }
+        var built: List<EpisodeItem> = builtList
 
         // ---- ordering
         val sortBy = items.optString("sortBy", "none")
         if (sortBy == "captures") {
             built = kept
-                .mapIndexed { idx, ctx -> idx to ctx }
+                .mapIndexed { idx, (anchorCtx, _) -> idx to anchorCtx }
                 .sortedWith(
                     compareBy(
                         { numericCapture(it.second.captures, 0) },
@@ -631,6 +664,45 @@ object RulesPipeline {
 
     private fun numericCapture(captures: List<String>, idx: Int): Int =
         captures.getOrNull(idx)?.toIntOrNull() ?: Int.MAX_VALUE
+
+    /**
+     * Episode numbers an anchor itself declares, in document order — the
+     * nkiri-class list pages name their locker files "…E17…", "S01E19…", so
+     * the number comes off the link instead of the link's position (the
+     * Alchemy of Souls skips). Returns every distinct number found so a
+     * combined post ("Episode 17 & 18" behind one anchor) expands into one
+     * item per real episode; empty means "no self-declared number, fall back
+     * to position". Patterns hit the URL first (locker filenames carry the
+     * true number) and then the heading/anchor text.
+     */
+    private val ANCHOR_NUM_PATTERNS = listOf(
+        Regex("""(?i)\bs(\d+)e(\d+)\b"""),
+        Regex("""(?i)(?<![a-z0-9])e(?:p)?[\s._-]*(\d{1,4})(?![a-z0-9])""")
+    )
+
+    private fun anchorEpisodeNums(ctx: AnchorCtx): List<Int> {
+        val numbers = mutableListOf<Int>()
+        for (target in listOf(ctx.href, ctx.text)) {
+            if (target.isBlank()) continue
+            for (re in ANCHOR_NUM_PATTERNS) {
+                for (m in re.findAll(target)) {
+                    val groups = m.groupValues.drop(1).filter { it.isNotBlank() }
+                    val seasonEp = if (groups.size >= 2) {
+                        // S01E19 style: season token present. Only trust it as
+                        // an episode number for single-season list pages —
+                        // season 2+ is a different numbering space the site
+                        // pages do not identify, so bail out entirely.
+                        if (groups[0].toIntOrNull() == 1) groups[1].toIntOrNull() else null
+                    } else {
+                        groups.lastOrNull()?.toIntOrNull()
+                    }
+                    val n = seasonEp
+                    if (n != null && n in 1..2000) numbers.add(n)
+                }
+            }
+        }
+        return numbers.distinct()
+    }
 
     /** Evaluates one labelChain entry; null means "no hit, try next". */
     private fun evalLabelEntry(entry: Any?, ctx: AnchorCtx, num: Int): String? {

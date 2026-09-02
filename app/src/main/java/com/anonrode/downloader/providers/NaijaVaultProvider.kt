@@ -77,6 +77,60 @@ object NaijaVaultProvider : SiteProvider {
                 ?: ""
             val synopsis = doc.selectFirst(".entry-content p")?.text()?.trim() ?: ""
 
+            // MOVIE-PAGE GUARD (live-verified 2026-09, My Name Is Khan). A
+            // movie post's <article> carries category-download-movies-* and
+            // exactly ONE download path: <a id="download-button"
+            // href="https://www.lulacloud.com/d/..."><b>DOWNLOAD MOVIE</b></a>
+            // — a cross-host gateway the OTA episodeSelector (a[href*='/dl-'],
+            // a[href*='.mkv'], ...) never matches (0 selector hits across 90
+            // anchors on that page), so the episode sweep instead scraped the
+            // sidebar ("found 54 episodes" incl. 'Reacher Season 4' plus a
+            // junk task at the bare homepage that cycled backoff forever).
+            // Series posts carry category-tv and N "EPISODE NN" buttons on
+            // same-host /dl-* links — they fail both checks here and keep the
+            // episode-list path below.
+            val dlButtons = doc.select("a#download-button")
+            // "EPISODE NN" buttons always mean a series (posts can carry a
+            // movie category alongside Series — live: 'Hello Future Me' is
+            // Nollywood + Series), so they veto the movie path entirely.
+            val episodeLabeled = dlButtons.any { it.text().contains("EPISODE", ignoreCase = true) }
+            val isMoviePage = !episodeLabeled && (
+                doc.selectFirst("article[class*=category-download-movies]") != null ||
+                (dlButtons.size == 1 && dlButtons.first().text().contains("MOVIE", ignoreCase = true))
+                )
+            if (isMoviePage) {
+                val button = dlButtons.firstOrNull()
+                val movieHref = button?.attr("abs:href").orEmpty().ifBlank {
+                    button?.attr("href")?.let { HttpClient.safeResolveUri(showUrl, it) }.orEmpty()
+                }.ifBlank {
+                    // No literal button (theme variant): any known locker
+                    // link on the page is the movie's download.
+                    doc.select("a[href]").firstOrNull { a ->
+                        val h = a.attr("abs:href").ifBlank { a.attr("href") }
+                        com.anonrode.downloader.resolvers.LockerRegistry.isKnownMedia(h)
+                    }?.attr("abs:href").orEmpty()
+                }
+                if (movieHref.isNotBlank()) {
+                    val label = button?.text()?.trim().orEmpty()
+                    com.anonrode.downloader.util.DebugLog.resolve("naijavault movie page: single download $movieHref")
+                    return ShowDetails(
+                        show = ShowCard(title = title, url = showUrl, posterUrl = poster, site = name),
+                        synopsis = synopsis,
+                        episodes = listOf(
+                            EpisodeItem(
+                                title = if (label.isNotBlank() && !label.equals("Download", ignoreCase = true)) label else "Download 1",
+                                url = movieHref,
+                                episodeNum = 1,
+                                site = name
+                            )
+                        )
+                    )
+                }
+                // Movie page with no usable link: fall through to the sweep
+                // (its same-site filter below keeps it junk-free) instead of
+                // returning empty on a guard false-positive.
+            }
+
             val episodes = mutableListOf<EpisodeItem>()
             val seen = mutableSetOf<String>()
             // OTA episodeSelector wins when the playbook declares one: it
@@ -98,11 +152,39 @@ object NaijaVaultProvider : SiteProvider {
             // episodes (user-reported).
             val otaSel = DynamicRulesManager.getSiteConfig(name)
                 ?.episodeSelector?.takeIf { it.isNotBlank() }
+            // Same-site junk guard: on this site the only same-host download
+            // links are /dl-* episode gateways (series) and /cdn/ streams.
+            // Every other same-host href — the bare homepage, /category/,
+            // /tag/, /season-list/, sibling post slugs like
+            // '/reacher-season-4/' — is nav or sidebar/related-post junk
+            // that LockerRegistry's showLike heuristic ("season" in the
+            // slug) used to bless as Unknown media, yielding 54 junk
+            // "episodes" on a movie page; one junk task even pointed at the
+            // bare homepage and cycled resolver backoff forever. Host is
+            // derived from the page itself so OTA base-url swaps keep it
+            // working; cross-host lockers are untouched.
+            val siteHost = try { URI(showUrl).host?.lowercase() } catch (_: Exception) { null }
+            val mediaExtRegex = Regex("\\.(mkv|mp4|webm|avi|m3u8|zip|rar)$")
+            fun isJunkSameSite(href: String): Boolean {
+                if (siteHost == null) return false
+                val uri = try { URI(href) } catch (_: Exception) { return false }
+                val host = uri.host?.lowercase() ?: return false
+                if (host != siteHost && !host.endsWith(".$siteHost") && !siteHost.endsWith(".$host")) return false
+                val path = (uri.path ?: "").lowercase()
+                if (path.isBlank() || path == "/" || path.startsWith("/category/") ||
+                    path.startsWith("/tag/") || path.startsWith("/season-list") ||
+                    path.startsWith("/series-list") || path.contains("/page/")) return true
+                // Any remaining same-site path is a sibling post page
+                // (sidebar/related junk) unless it is a download gateway or
+                // a real media file.
+                return !(path.startsWith("/dl-") || path.contains("/cdn/") ||
+                    mediaExtRegex.containsMatchIn(path))
+            }
             val links: List<org.jsoup.nodes.Element> = if (otaSel != null) {
                 val ota = doc.select(otaSel)
                 val knownElsewhere = doc.select("a[href]").filter { a ->
                     val h = a.attr("abs:href").ifBlank { a.attr("href") }
-                    com.anonrode.downloader.resolvers.LockerRegistry.isKnownMedia(h)
+                    !isJunkSameSite(h) && com.anonrode.downloader.resolvers.LockerRegistry.isKnownMedia(h)
                 }
                 (ota + knownElsewhere).distinctBy { it.attr("abs:href").ifBlank { it.attr("href") } }
             } else {
@@ -120,6 +202,11 @@ object NaijaVaultProvider : SiteProvider {
                 if (href.isBlank() || href in seen) continue
                 // Skip social/navigation links
                 if (lowerHref.contains("telegram") || lowerHref.contains("facebook") || lowerHref.contains("twitter") || lowerHref.contains("whatsapp")) continue
+                // Never treat the site's own homepage/category/tag/nav pages
+                // as downloadable episodes (bug: a bare homepage URL spawned
+                // a download task that failed "resolver chain EMPTY" and
+                // cycled backoff forever).
+                if (isJunkSameSite(href)) continue
 
                 // Direct-media detection: the site rotates download hosts
                 // (filevault, streamsss, streamwish, downloadwella, ...).
@@ -168,6 +255,7 @@ object NaijaVaultProvider : SiteProvider {
                 while (rawHrefs.find()) {
                     val u = rawHrefs.group().replace("&amp;", "&").trimEnd('.', ',', ')', ']')
                     if (u.isBlank() || u in rawSeen || u in seen) continue
+                    if (isJunkSameSite(u)) continue
                     rawSeen.add(u)
                     episodes.add(
                         EpisodeItem(

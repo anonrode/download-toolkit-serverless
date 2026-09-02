@@ -5,6 +5,8 @@ import com.anonrode.downloader.data.rules.DynamicRulesManager
 import com.anonrode.downloader.data.models.ShowCard
 import com.anonrode.downloader.pipeline.PipelineJournal
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import org.jsoup.Jsoup
 import java.net.URLEncoder
@@ -123,18 +125,34 @@ val a = if (item.tagName() == "a") item
             (0 until arr.length()).map { arr.optString(it) }
         } ?: listOf("")
         for (country in countries) {
-            for (suffix in suffixes) {
-                val url = mainUrl.trimEnd('/') + pattern
-                    .replace("{country}", country)
-                    .replace("{slug}", slug).replace("{suffix}", suffix)
-                val code = HttpClient.probe(url, timeoutMs = 8_000L, tag = "search-strategy")
-                if (code) {
-                    // Slug exists: return it as a single strong candidate.
-                    return@withContext listOf(ShowCard(
-                        title = query.trim().replaceFirstChar { it.uppercase() },
-                        url = url, posterUrl = "", site = siteName, category = ""
-                    ))
+            // Probe every suffix for this country CONCURRENTLY. The sequential
+            // walk cost one full probe timeout per miss — 7 dramarain suffixes
+            // of 404s = ~56s added to every search for a title the site doesn't
+            // have. One parallel round caps the miss at a single probe
+            // timeout. Awaiting in list order keeps suffix priority ("" before
+            // "-korean-drama" etc.); the finally cancels the losers so a hit
+            // isn't held hostage by straggler probes.
+            val hit = coroutineScope {
+                val defs = suffixes.map { suffix ->
+                    async {
+                        val url = mainUrl.trimEnd('/') + pattern
+                            .replace("{country}", country)
+                            .replace("{slug}", slug).replace("{suffix}", suffix)
+                        if (HttpClient.probe(url, timeoutMs = 8_000L, tag = "search-strategy")) url else null
+                    }
                 }
+                try {
+                    defs.firstOrNull { it.await() != null }?.await()
+                } finally {
+                    defs.forEach { it.cancel() }
+                }
+            }
+            if (hit != null) {
+                // Slug exists: return it as a single strong candidate.
+                return@withContext listOf(ShowCard(
+                    title = query.trim().replaceFirstChar { it.uppercase() },
+                    url = hit, posterUrl = "", site = siteName, category = ""
+                ))
             }
         }
         emptyList()

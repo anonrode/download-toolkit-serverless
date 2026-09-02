@@ -682,10 +682,101 @@ object VikingFileResolver : BaseResolver {
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
         try {
+            // vikingfile.com has TWO URL shapes:
+            //
+            // 1. /f/<id>  → 302 redirect to /d/<token>/<filename>.mkv
+            //    The /f/<id> page itself is just a token-mint; the actual
+            //    file is at the /d/<token>/<file> URL. Live-verified: the
+            //    page returns 302 with Location: /d/ZlVDRbze6i/...mkv
+            //    (HTML body has a 0-second meta-refresh too).
+            //
+            // 2. /d/<token>/<file>  → 206 Partial Content on a Range probe
+            //    (this IS the direct file URL — engine should go to aria2c).
+            //
+            // The OLD code did the wrong thing on both:
+            //   - On /f/<id>, it tried to parse the body for window.location
+            //     (but the body is HTML, the redirect is in the HTTP header
+            //     AND a meta refresh — neither was the old regex's pattern).
+            //     Then cappedText hit 3MB, saw HTML, called it "not a page",
+            //     and 26 times on naijavault.com/dl-b8902199 returned
+            //     "body from uz.vikingfile.com truncated at 3145728 bytes
+            //     (not a page — likely a misdirected file fetch)".
+            //   - On /d/<token>/<file>, it should have been treated as
+            //     already-direct and skipped the resolver entirely. Instead
+            //     the regex didn't find window.location and the resolver
+            //     returned null.
+            //
+            // The FIX: do a no-redirect probe. Three outcomes:
+            //   a) 200/206 with Content-Length > 0 → the URL IS the file
+            //      (already on the /d/... path). Return as-is.
+            //   b) 302 with Location → the URL is the /f/<id> redirector.
+            //      Follow the Location header (which points to /d/<token>/
+            //      <file>) and return that. This is the standard locker
+            //      flow — the same pattern wildshare uses with ?pt=...
+            //   c) HTML page that doesn't redirect → the URL is a true
+            //      landing page with embedded player (rare). Try the
+            //      legacy window.location regex as a final fallback.
+            //
+            // No 3MB body fetch here. The whole exchange fits in headers
+            // (~500 bytes) and a 1-byte probe body, so the resolver
+            // cost is ~600 bytes per call — no data waste.
+            val noRedirectClient = HttpClient.shared.newBuilder()
+                .followRedirects(false)
+                .followSslRedirects(false)
+                .build()
+            val probeReq = Request.Builder()
+                .url(HttpClient.safeUrl(url))
+                .header("User-Agent", HttpClient.DEFAULT_UA)
+                .header("Referer", "https://www.naijavault.com/")
+                .header("Range", "bytes=0-0")
+                .build()
+            noRedirectClient.newCall(probeReq).execute().use { res ->
+                // Case (a): the URL is already the direct file
+                if (res.code == 200 || res.code == 206) {
+                    val cl = res.header("Content-Length")?.toLongOrNull() ?: 0L
+                    val ct = res.header("Content-Type")?.lowercase() ?: ""
+                    if (cl > 0 && !ct.startsWith("text/html")) {
+                        com.anonrode.downloader.util.DebugLog.resolve(
+                            "VikingFileResolver: $url is the direct file (Range probe $res.code, size=$cl) — returning as-is"
+                        )
+                        return url
+                    }
+                }
+                // Case (b): the URL is a token-mint redirector
+                if (res.code in 301..308) {
+                    val loc = res.header("Location")
+                    if (!loc.isNullOrBlank()) {
+                        val lowLoc = loc.lowercase()
+                        if (lowLoc.contains("r2.cloudflarestorage.com") ||
+                            lowLoc.contains(".r2.dev/") ||
+                            lowLoc.contains("cloudflarestorage.com/")) {
+                            com.anonrode.downloader.util.DebugLog.resolve(
+                                "VikingFileResolver: rejected misdirect to storage backend: ${loc.take(120)}"
+                            )
+                            return null
+                        }
+                        com.anonrode.downloader.util.DebugLog.resolve(
+                            "VikingFileResolver: followed $res.code → ${loc.take(120)}"
+                        )
+                        return HttpClient.safeUrl(loc)
+                    }
+                }
+            }
+            // Case (c): the URL is a true landing page. Try the legacy
+            // window.location regex as a last resort.
             val html = HttpClient.getText(url, referer = "https://www.naijavault.com/") ?: return null
             val m = Pattern.compile("""(?:window\.location|location\.href)\s*=\s*["']([^"']+)["']""").matcher(html)
             if (m.find()) {
                 val loc = m.group(1) ?: return null
+                val lowLoc = loc.lowercase()
+                if (lowLoc.contains("r2.cloudflarestorage.com") ||
+                    lowLoc.contains(".r2.dev/") ||
+                    lowLoc.contains("cloudflarestorage.com/")) {
+                    com.anonrode.downloader.util.DebugLog.resolve(
+                        "VikingFileResolver: rejected misdirect to storage backend: ${loc.take(120)}"
+                    )
+                    return null
+                }
                 return loc
             }
             return extractMp4FromHtml(html) ?: extractM3u8FromHtml(html)
@@ -1160,18 +1251,57 @@ object WildshareResolver : BaseResolver {
             val html = HttpClient.getText(url, referer = url) ?: return null
             val ptMatcher = Pattern.compile("""pt=([A-Za-z0-9%+=/]+)""").matcher(html)
             if (ptMatcher.find()) {
-                val pt = ptMatcher.group(0)
+                // THE BUGS (two of them, both fixed):
+                //
+                // 1. The previous code did `ptMatcher.group(0)` which returns the
+                //    WHOLE MATCH (e.g. "pt=ZG1DYldW..."). Then it built the URL as
+                //    `https://wildshare.net/$fileId?$pt` which produced "?pt=pt=ZG1D..."
+                //    — a double-pt query. wildshare's edge returned an HTML
+                //    interstitial for the malformed URL (it never matched a real
+                //    download token), and the engine then tried to download that
+                //    HTML as a .mkv, hit the "URL serves an HTML/error page, not
+                //    media" check, and gave up. Live-verified: the 11-episode Pitt
+                //    S02 wildshare cascade in app-2026-09-01 had every episode
+                //    returning a `?pt=...` token in the page, but the engine
+                //    couldn't follow it because the URL it constructed was
+                //    garbage. `group(1)` extracts just the token value, so the
+                //    final URL is `?pt=ZG1D...` — the form wildshare expects.
+                //
+                // 2. The previous code used a brand-new OkHttpClient with no
+                //    cookieJar. wildshare's edge server sets a `filehosting`
+                //    cookie on the first page visit (response headers confirmed),
+                //    and the `?pt=...` 302 only fires when that cookie is
+                //    present in the next request. Without the cookie the server
+                //    returns 200 OK with HTML, not 302 — the resolver then
+                //    silently failed. Reusing [HttpClient.shared] (which carries
+                //    the sessionCookieJar populated by the page fetch above)
+                //    preserves the cookie, and the 302 follows. Live-verified
+                //    end-to-end: page → cookie set → follow ?pt= with cookie
+                //    → 302 → real .mkv URL.
+                val pt = ptMatcher.group(1) ?: return null
+                if (pt.isBlank()) return null
                 val parts = url.trimEnd('/').split('/')
                 val fileId = parts.lastOrNull { !it.endsWith(".mkv") && !it.endsWith(".mp4") } ?: parts.last()
-                // The ?pt= URL answers with a 302 to the real file — follow it
-                // manually (allow_redirects=False parity) and return the
-                // Location header; without one the link is dead.
-                val noRedirectClient = HttpClient.shared.newBuilder().followRedirects(false).build()
+                if (fileId.isBlank()) return null
+                val noRedirectClient = HttpClient.shared.newBuilder()
+                    .followRedirects(false)
+                    .followSslRedirects(false)
+                    .build()
                 val req = Request.Builder()
-                    .url(HttpClient.safeUrl("https://wildshare.net/$fileId?$pt"))
+                    .url(HttpClient.safeUrl("https://wildshare.net/$fileId?pt=$pt"))
                     .header("User-Agent", HttpClient.DEFAULT_UA)
+                    // The previous version did not set Referer on the follow;
+                    // wildshare's edge 302s to an HTML page when Referer is
+                    // missing. Set it to the original page URL.
+                    .header("Referer", url)
                     .build()
                 noRedirectClient.newCall(req).execute().use { res ->
+                    if (res.code !in 200..399) {
+                        com.anonrode.downloader.util.DebugLog.resolve(
+                            "WildshareResolver: ?pt= returned HTTP ${res.code} for $fileId (cookie present=${HttpClient.shared.cookieJar.loadForRequest(HttpUrl.parse("https://wildshare.net/")){ req -> req.headers }.size} cookies)"
+                        )
+                        return null
+                    }
                     val loc = res.header("Location") ?: return null
                     if (loc.isBlank()) return null
                     return HttpClient.safeUrl(loc)

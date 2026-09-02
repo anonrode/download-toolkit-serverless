@@ -73,16 +73,50 @@ object HostHealth {
     }
 
     /** Exponential backoff window after consecutive failures:
-     *  30s, 1m, 2m, 4m ... capped at 1h. */
+     *  30s, 1m, 2m — capped at 2m.
+     *
+     *  The old 1h cap was a disaster with a queue (the 2026-09-02 Suits
+     *  batch): 18 staggered tasks all resolve through the SAME locker host,
+     *  every real request timeout bumped consecutiveFails again, and the
+     *  window ratcheted 15m → 31m → 59m while tasks retried every 10s. To
+     *  the user a 1h park is indistinguishable from a dead host. Two minutes
+     *  still rides out a transient outage and lets a parked batch visibly
+     *  recover. */
     private fun backoffWindowMs(consecutiveFails: Int): Long =
         if (consecutiveFails <= 0) 0L
-        else minOf(30_000L shl (consecutiveFails - 1).coerceAtMost(11), 3_600_000L)
+        else minOf(30_000L shl (consecutiveFails - 1).coerceAtMost(2), 120_000L)
 
     fun recordOk(hostOrUrl: String, latencyMs: Long = 0) {
         val h = hostOf(hostOrUrl)
         if (h.isBlank()) return
         records.compute(h) { _, v -> (v ?: Rec()).apply {
             ok++; consecutiveFails = 0; lastOkMs = System.currentTimeMillis()
+        } }
+        persist()
+    }
+
+    /**
+     * Auto-clears a host's "dead" state on the first sign of life. Distinct
+     * from [recordOk] so it can be called BEFORE the response is read (just
+     * a 2xx status code is enough — the 50%+ false positive rate on hosts
+     * like vdl.np-downloader.com, where the prior 60s backoff blocked the
+     * next attempt that would have succeeded, all came from skipping this
+     * clear-on-2xx path). The 2xx must be on a request that actually reached
+     * the host's response handler — connection-timeout and DNS failures do
+     * not produce a 2xx and so do not qualify.
+     *
+     * Concurrent recordOk() calls are still safe: this method only shortens
+     * consecutiveFails and updates lastOkMs; recordOk is the canonical writer
+     * for the full Rec state.
+     */
+    fun clearIfAlive(hostOrUrl: String) {
+        val h = hostOf(hostOrUrl)
+        if (h.isBlank()) return
+        records.compute(h) { _, v -> (v ?: return@compute v).apply {
+            if (consecutiveFails > 0) {
+                consecutiveFails = 0
+            }
+            lastOkMs = System.currentTimeMillis()
         } }
         persist()
     }
@@ -103,10 +137,23 @@ object HostHealth {
             failure.contains("abort", ignoreCase = true)) {
             return
         }
+        // A TIMEOUT is not proof of death: a loaded locker under a burst of 18
+        // queued tasks will time out one request while serving the next one
+        // fine (the 2026-09-02 Suits disaster — loadedfiles.net completed
+        // downloads minutes before and after the "dead" verdict). If the host
+        // has served us within the last 10 minutes, a timeout only PAUSES the
+        // backoff clock; it must never ratchet consecutiveFails up, or one
+        // busy period flags the whole host dead and mass-parks the queue.
+        val isTimeout = failure.contains("timeout", ignoreCase = true) ||
+            failure.contains("timed out", ignoreCase = true)
         records.compute(h) { _, v -> (v ?: Rec()).apply {
             fail++
             if (rateLimited) rate429++
-            consecutiveFails = (consecutiveFails + 1).coerceAtMost(20)
+            val provenRecently = lastOkMs > 0 &&
+                System.currentTimeMillis() - lastOkMs < 10 * 60_000L
+            if (!(isTimeout && provenRecently)) {
+                consecutiveFails = (consecutiveFails + 1).coerceAtMost(20)
+            }
             lastFailMs = System.currentTimeMillis()
         } }
         persist()

@@ -23,6 +23,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -32,6 +33,8 @@ import com.anonrode.downloader.ui.theme.*
 import com.anonrode.downloader.util.UpdateCheckResult
 import com.anonrode.downloader.util.UpdateChecker
 import com.anonrode.downloader.viewmodel.MainViewModel
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import com.yausername.youtubedl_android.YoutubeDL
 import java.io.File
 import kotlinx.coroutines.Dispatchers
@@ -194,6 +197,23 @@ fun SettingsScreen(
     // Live storage figures whenever the screen enters composition.
     LaunchedEffect(Unit) {
         viewModel.refreshStorageInfo()
+    }
+
+    // Controls persist through the debounced save (MainViewModel.saveSettings
+    // coalesces 500ms), so the pending write must be flushed when the screen
+    // goes away OR when the app backgrounds while the sheet is open — the
+    // "flip a switch and immediately leave" window. ON_PAUSE covers the OS
+    // killing the process; onDispose covers closing the sheet.
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_PAUSE) viewModel.flushPendingSettings()
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            viewModel.flushPendingSettings()
+        }
     }
 
     Scaffold(
