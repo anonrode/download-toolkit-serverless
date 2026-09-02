@@ -19,11 +19,10 @@ object DownloadsSorter {
     val ALL_MODES = listOf(SORT_DATE, SORT_LIBRARY, SORT_STATUS, SORT_SIZE)
 
     fun ageInDays(task: DownloadTask): Long {
-        // DownloadTask has no enqueue timestamp on the data class (and the
-        // spec forbids extending the model), so the production UI passes a
-        // precomputed age via [setAgeOverride].  Tests register deterministic
-        // ages; the live caller (MainScaffold) derives age from the position
-        // in engine.tasks (newer entries appear at the tail).
+        // The production UI passes a precomputed age via [setAgeOverride]
+        // (real clock age from task.createdAt, with list-position fallback
+        // for pre-upgrade tasks). Tests register deterministic ages; empty
+        // overrides in production default to 0 (TODAY bucket).
         TASK_AGE_OVERRIDES[task.id]?.let { return it }
         return 0L
     }

@@ -26,6 +26,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -65,6 +66,8 @@ fun DownloadsScreen(
     }
     var sortMode by remember { mutableStateOf(initialSort) }
     var sortMenuOpen by remember { mutableStateOf(false) }
+    // Destructive bulk action: "Cancel all" wipes partial files, so it asks first.
+    var confirmCancelAll by remember { mutableStateOf(false) }
 
     // The Next/Previous queue the player steps through: every COMPLETED
     // task's path, in screen order. Keyed on a cheap structural signature
@@ -103,10 +106,45 @@ fun DownloadsScreen(
         )
     }
 
-    // Build age-override map so "Date added" groups use the task's position
-    // in engine.tasks (newer = tail) as a proxy for recency. The data class
-    // has no enqueue timestamp; this preserves the visual grouping without
-    // touching the model.
+    // "Cancel all" is destructive (partial files are wiped), so it confirms
+    // first — the only bulk action that does.
+    if (confirmCancelAll) {
+        AlertDialog(
+            onDismissRequest = { confirmCancelAll = false },
+            shape = RoundedCornerShape(Radius.lg),
+            containerColor = SurfaceCard,
+            titleContentColor = TextPrimary,
+            textContentColor = TextSecondary,
+            title = { Text("Cancel all downloads?") },
+            text = {
+                Text(
+                    "Every queued, running and paused download will be stopped and " +
+                        "its partial files removed. This cannot be undone.",
+                    color = TextSecondary,
+                    fontSize = 13.sp
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        confirmCancelAll = false
+                        viewModel.engine.cancelAll()
+                    }
+                ) { Text("Cancel all", color = StatusError) }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmCancelAll = false }) {
+                    Text("Keep downloads", color = TextSecondary)
+                }
+            }
+        )
+    }
+
+    // Build age-override map so "Date added" groups use the task's real
+    // enqueue timestamp (task.createdAt, set by the engine at enqueue).
+    // Tasks persisted by older builds carry createdAt == 0; for those the
+    // position in engine.tasks stands in — the repository seeds via
+    // addFirst, so index 0 is the newest entry.
     //
     // Keyed on a structural signature (id:status per row) rather than the
     // task list itself: progress ticks mutate downloadedBytes constantly but
@@ -122,11 +160,16 @@ fun DownloadsScreen(
             // Re-seed age overrides whenever the structure actually changes;
             // ids no longer present are dropped by the next clear.
             DownloadsSorter.clearAgeOverrides()
+            val nowMs = System.currentTimeMillis()
             snapshot.forEachIndexed { index, task ->
-                // 14 days for the oldest entry, 0 for the newest, 1-day
-                // increments in between. Buckets fall out of those values
-                // without any clock dependency.
-                val daysAgo = ((snapshot.size - 1 - index).toLong()).coerceAtLeast(0L)
+                // Real clock age in whole days since enqueue; the positional
+                // fallback keeps ordering sane for pre-upgrade tasks. The
+                // TODAY/YESTERDAY/THIS WEEK buckets fall out of those values.
+                val daysAgo = if (task.createdAt > 0L) {
+                    ((nowMs - task.createdAt) / 86_400_000L).coerceAtLeast(0L)
+                } else {
+                    index.toLong()
+                }
                 DownloadsSorter.setAgeOverride(task.id, daysAgo)
             }
             DownloadsSorter.sortDownloads(snapshot, sortMode)
@@ -224,6 +267,56 @@ fun DownloadsScreen(
             }
         }
 
+        // Bulk actions: pause/resume/cancel every task, the header-row idiom
+        // the activity log asked for (users were hand-tapping card after
+        // card). Chips only appear when they have something to act on.
+        if (tasks.isNotEmpty()) {
+            val hasPausable = tasks.any {
+                it.status == TaskStatus.DOWNLOADING || it.status == TaskStatus.RESOLVING ||
+                    it.status == TaskStatus.VALIDATING || it.status == TaskStatus.QUEUED
+            }
+            val hasPaused = tasks.any { it.status == TaskStatus.PAUSED }
+            val hasCancellable = tasks.any {
+                it.status == TaskStatus.QUEUED || it.status == TaskStatus.DOWNLOADING ||
+                    it.status == TaskStatus.RESOLVING || it.status == TaskStatus.VALIDATING ||
+                    it.status == TaskStatus.PAUSED
+            }
+            if (hasPausable || hasPaused || hasCancellable) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = Spacing.xs),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (hasPausable) {
+                        BulkActionChip(
+                            label = "Pause all",
+                            icon = Icons.Rounded.Pause,
+                            onClick = { viewModel.engine.pauseAll() }
+                        )
+                        Spacer(modifier = Modifier.width(Spacing.sm))
+                    }
+                    if (hasPaused) {
+                        BulkActionChip(
+                            label = "Resume all",
+                            icon = Icons.Rounded.PlayArrow,
+                            onClick = { viewModel.engine.resumeAll() }
+                        )
+                        Spacer(modifier = Modifier.width(Spacing.sm))
+                    }
+                    if (hasCancellable) {
+                        BulkActionChip(
+                            label = "Cancel all",
+                            icon = Icons.Rounded.Close,
+                            accent = StatusError,
+                            onClick = { confirmCancelAll = true }
+                        )
+                    }
+                }
+            }
+        }
+
         // Stats strip: only on the populated state; the empty state has
         // its own centred message instead.
         if (tasks.isNotEmpty()) {
@@ -309,6 +402,33 @@ private fun SortChip(label: String, onClick: () -> Unit) {
             color = TextSecondary,
             fontSize = 11.sp,
             fontWeight = FontWeight.Bold
+        )
+    }
+}
+
+@Composable
+private fun BulkActionChip(label: String, icon: ImageVector, accent: Color = AccentPrimary, onClick: () -> Unit) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .clip(RoundedCornerShape(Radius.full))
+            .background(SurfaceCard)
+            .border(1.dp, BorderHairline, RoundedCornerShape(Radius.full))
+            .clickable(onClick = onClick)
+            .padding(horizontal = Spacing.md, vertical = Spacing.xs)
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = accent,
+            modifier = Modifier.size(14.dp)
+        )
+        Spacer(modifier = Modifier.width(Spacing.xs))
+        Text(
+            text = label,
+            color = accent,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.SemiBold
         )
     }
 }

@@ -50,6 +50,77 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // still running is a duplicate keystroke, not a new request.
     private var lastSearchKey: String? = null
 
+    // ---- settings-save coalescing -------------------------------------------
+    //
+    // Every toggle/slider in the settings sheet called saveSettings →
+    // engine.saveAllSettings, which rewrites ALL prefs and reconfigures log
+    // retention each time. The activity log showed 14 full saves in 8 seconds
+    // while the user flipped a few switches. The latest snapshot is held here
+    // and flushed once, 500ms after the last change; explicit flushes on
+    // ON_PAUSE/dispose cover the "flip switch, immediately background/close
+    // the app" window. Persistence format and keys are unchanged.
+    private data class SettingsSnapshot(
+        val maxConcurrent: Int,
+        val parallelSockets: Int,
+        val quality: String,
+        val autoOrganize: Boolean,
+        val storageGuard: Double,
+        val wifiOnlyTorrents: Boolean,
+        val instantSocial: Boolean,
+        val showPosters: Boolean,
+        val stallTimeout: Int,
+        val magnetRetries: Int,
+        val ytdlpRetries: Int,
+        val hlsFragments: Int,
+        val speedLimit: Int,
+        val peers: Int,
+        val privacyMode: Boolean,
+        val wifiAll: Boolean,
+        val clipboard: Boolean,
+        val notifications: Boolean,
+        val debugLog: Boolean,
+        val logRetention: Int
+    )
+
+    private var pendingSettings: SettingsSnapshot? = null
+    private var settingsSaveJob: Job? = null
+
+    /** Writes the held snapshot to the engine NOW (on the caller's thread —
+     *  the engine's save is SharedPreferences apply(), safe off Main too, and
+     *  callers here are Main). Safe to call repeatedly; no-op when nothing
+     *  is pending. */
+    fun flushPendingSettings() {
+        settingsSaveJob?.cancel()
+        settingsSaveJob = null
+        val snapshot = pendingSettings ?: return
+        pendingSettings = null
+        engine.saveAllSettings(
+            maxConcurrent = snapshot.maxConcurrent,
+            parallelSockets = snapshot.parallelSockets,
+            quality = snapshot.quality,
+            autoOrganize = snapshot.autoOrganize,
+            storageGuard = snapshot.storageGuard,
+            wifiOnlyTorrents = snapshot.wifiOnlyTorrents,
+            instantSocial = snapshot.instantSocial,
+            showPosters = snapshot.showPosters,
+            stallTimeout = snapshot.stallTimeout,
+            magnetRetries = snapshot.magnetRetries,
+            ytdlpRetries = snapshot.ytdlpRetries,
+            hlsFragments = snapshot.hlsFragments,
+            speedLimit = snapshot.speedLimit,
+            peers = snapshot.peers,
+            privacyMode = snapshot.privacyMode,
+            wifiAll = snapshot.wifiAll,
+            clipboard = snapshot.clipboard,
+            notifications = snapshot.notifications,
+            debugLog = snapshot.debugLog,
+            logRetention = snapshot.logRetention
+        )
+        com.anonrode.downloader.util.DebugLog.user(
+            "settings saved (sockets=${snapshot.parallelSockets} quality=${snapshot.quality} stall=${snapshot.stallTimeout}s hls=${snapshot.hlsFragments} peers=${snapshot.peers} speedLimit=${snapshot.speedLimit})"
+        )
+    }
+
     init {
         refreshStorageInfo()
     }
@@ -283,7 +354,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         debugLog: Boolean = false,
         logRetention: Int = 7
     ) {
-        engine.saveAllSettings(
+        // Coalesce: hold the latest snapshot and flush once 500ms after the
+        // last change (see the SettingsSnapshot note above). No persistence
+        // format change — engine.saveAllSettings signature untouched.
+        pendingSettings = SettingsSnapshot(
             maxConcurrent = maxConcurrent,
             parallelSockets = parallelSockets,
             quality = quality,
@@ -305,9 +379,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             debugLog = debugLog,
             logRetention = logRetention
         )
-        com.anonrode.downloader.util.DebugLog.user(
-            "settings saved (sockets=$parallelSockets quality=$quality stall=${stallTimeout}s hls=$hlsFragments peers=$peers speedLimit=$speedLimit)"
-        )
+        settingsSaveJob?.cancel()
+        settingsSaveJob = viewModelScope.launch {
+            kotlinx.coroutines.delay(500)
+            flushPendingSettings()
+        }
     }
 
     /** Re-reads free/total storage so the Settings sheet shows live values

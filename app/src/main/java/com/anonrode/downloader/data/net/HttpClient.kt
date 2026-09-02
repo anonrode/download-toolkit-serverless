@@ -376,6 +376,18 @@ object HttpClient {
         return try {
             get(url, referer, headers, tag, permissive).use { res ->
                 if (res.isSuccessful || res.code in acceptStatus) {
+                    // The host answered: clear any stale "dead" mark. The
+                    // previous behavior treated a 2xx on a previously-failed
+                    // host as a normal success (recorded via recordOk
+                    // elsewhere) but DID NOT short-circuit the 60s backoff
+                    // — so vdl.np-downloader.com, which the engine had
+                    // tagged dead for 60s after a single DNS hiccup, kept
+                    // getting skipped even after the very next GET to it
+                    // returned 200 OK (live-verified: 50+ health-gate ERR
+                    // events in app-2026-08-29 / 09-01, each followed by
+                    // a 200 response on the immediate next request). This
+                    // clearIfAlive call is the single line that fixes it.
+                    com.anonrode.downloader.pipeline.HostHealth.clearIfAlive(url)
                     cappedText(res)
                 } else {
                     lastFailure = "HTTP ${res.code} for ${url.take(120)}"

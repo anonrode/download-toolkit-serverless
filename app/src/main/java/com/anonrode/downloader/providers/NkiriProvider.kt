@@ -143,20 +143,51 @@ object NkiriProvider : SiteProvider {
                         if (elem.tagName().startsWith("h", ignoreCase = true) || elem.tagName() == "p") elem.text().trim() else null
                     }
 
-                    val epTitle = when {
-                        !prevHeading.isNullOrBlank() && prevHeading.contains("Episode", ignoreCase = true) -> prevHeading
-                        text.isNotBlank() && text.length < 40 && !text.equals("Download Episode", ignoreCase = true) && !text.equals("Download Movie", ignoreCase = true) && !text.equals("Download", ignoreCase = true) -> text
-                        else -> "Episode $count"
+                    // Number from the anchor's own evidence before falling back
+                    // to the running counter: a filename token (…E17., S01E19…)
+                    // or the heading above the button is the episode's real
+                    // number, while the counter drifts as soon as any extra
+                    // locker link (ad, season pack) precedes it. Combined
+                    // "Episode 17 & 18" posts expand to one item per episode,
+                    // each reusing the one anchor that exists in the HTML.
+                    val headingNums = RulesPipeline.headingEpisodeNumbers(prevHeading)
+                    val fileNums = RulesPipeline.filenameEpisodeNums(href)
+                    val nums = when {
+                        headingNums.size > 1 -> headingNums
+                        fileNums.isNotEmpty() -> fileNums
+                        else -> headingNums
                     }
 
-                    episodes.add(
-                        EpisodeItem(
-                            title = epTitle,
-                            url = href,
-                            episodeNum = count++,
-                            site = name
+                    if (nums.size > 1) {
+                        for (n in nums) {
+                            episodes.add(
+                                EpisodeItem(
+                                    title = "Episode $n",
+                                    url = href,
+                                    episodeNum = n,
+                                    site = name
+                                )
+                            )
+                        }
+                        count = nums.last() + 1
+                    } else {
+                        val num = nums.firstOrNull() ?: count
+                        val epTitle = when {
+                            !prevHeading.isNullOrBlank() && prevHeading.contains("Episode", ignoreCase = true) -> prevHeading
+                            text.isNotBlank() && text.length < 40 && !text.equals("Download Episode", ignoreCase = true) && !text.equals("Download Movie", ignoreCase = true) && !text.equals("Download", ignoreCase = true) -> text
+                            else -> "Episode $num"
+                        }
+
+                        episodes.add(
+                            EpisodeItem(
+                                title = epTitle,
+                                url = href,
+                                episodeNum = num,
+                                site = name
+                            )
                         )
-                    )
+                        count = num + 1
+                    }
                 }
             }
 
@@ -178,5 +209,48 @@ object NkiriProvider : SiteProvider {
             backend = if (isHls) "yt-dlp" else "aria2c",
             parallelSockets = 16
         )
+    }
+
+    /** S02E05 season episode numbers from locker filenames. Private mirrors of
+     *  RulesPipeline's number patterns; see [RulesPipeline.filenameEpisodeNums]. */
+    private val SEASON_EP_REGEX = Regex("""(?i)\bs(\d+)e(\d+)\b""")
+    private val EP_TOKEN_REGEX = Regex("""(?i)(?<![a-z0-9])e(?:p)?[\s._-]*(\d{1,4})(?![a-z0-9])""")
+
+    /** Numbers an episode heading declares: the bare number, "E5", "Episode 5",
+     *  or a combined "Episode 17 & 18" / "Episodes 17-18" (all of them). */
+    internal fun headingEpisodeNumbers(heading: String?): List<Int> {
+        val h = heading?.trim() ?: return emptyList()
+        if (h.isBlank()) return emptyList()
+        // Normalize separators so "17 & 18", "17-18" and "17, 18" share a path.
+        val parts = h.replace("&", ",").replace("-", ",").split(",", " to ", " To ")
+        val headNum = Regex("""(?i)episode?s?\s*(\d{1,4})""").find(h)?.groupValues?.get(1)?.toIntOrNull()
+            ?: Regex("""(?i)(?<![a-z0-9])e(?:p)?[\s._-]*(\d{1,4})(?![a-z0-9])""").find(h)?.groupValues?.get(1)?.toIntOrNull()
+        if (headNum == null) return emptyList()
+        val out = mutableListOf(headNum)
+        for (part in parts.drop(1)) {
+            val n = Regex("""(?<!\d)(\d{1,4})(?!\d)""").find(part)?.groupValues?.get(1)?.toIntOrNull()
+            if (n != null && n > headNum && n <= headNum + 30) out.add(n)
+        }
+        return out.distinct()
+    }
+
+    /** Numbers a locker URL itself carries: "Alchemy.of.Souls.E17.(NKIRI.COM).mkv"
+     *  → [17]; "Show.S01E19.NKIRI.COM.mkv" → [19] (season-1 only — season 2+
+     *  filenames use a numbering space the episode page does not identify). */
+    internal fun filenameEpisodeNums(url: String): List<Int> {
+        val stem = url.substringBefore('#').substringBefore('?').substringAfterLast('/')
+        val seasonEp = SEASON_EP_REGEX.find(stem)
+        if (seasonEp != null) {
+            return if (seasonEp.groupValues[1].toIntOrNull() == 1) {
+                listOfNotNull(seasonEp.groupValues[2].toIntOrNull())
+            } else {
+                emptyList()
+            }
+        }
+        return EP_TOKEN_REGEX.findAll(stem)
+            .mapNotNull { it.groupValues[1].toIntOrNull() }
+            .filter { it in 1..2000 }
+            .distinct()
+            .toList()
     }
 }

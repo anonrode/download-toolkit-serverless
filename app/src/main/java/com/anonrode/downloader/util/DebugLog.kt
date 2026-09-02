@@ -22,7 +22,8 @@ import java.util.concurrent.Executors
  *    retention window (default 7, see [configureRetention]) are deleted.
  *  - Categories tag each line so a shared log can be filtered visually:
  *    USER (what the user did), ENGINE (state machine), RESOLVE (cracking),
- *    NET (every HTTP request), BACKEND (yt-dlp/aria2c/Turbo), ERROR.
+ *    NET (every HTTP request), BACKEND (yt-dlp/aria2c/Turbo), ERROR, and
+ *    TRACE (expected-noise diagnostics, written only in verbose mode).
  */
 object DebugLog {
     @Volatile
@@ -45,6 +46,15 @@ object DebugLog {
     /** User-configurable retention (Settings > Diagnostics); default 7 days. */
     @Volatile
     private var keepDays: Int = 7
+
+    /** Gate for [trace] — expected-noise lines stay out of shared logs
+     *  unless explicitly turned on for a debugging session. */
+    @Volatile
+    private var verbose: Boolean = false
+
+    fun setVerbose(on: Boolean) {
+        verbose = on
+    }
 
     private val writer = Executors.newSingleThreadExecutor { r ->
         Thread(r, "ActivityLog").apply { isDaemon = true }
@@ -117,6 +127,13 @@ object DebugLog {
 
     /** Errors and failures with their reason. */
     fun error(msg: String) = log("ERROR", msg)
+
+    /** Expected-noise diagnostics (template fallbacks, skipped steps):
+     *  only written when verbose logging is on, so they can't drown real
+     *  errors in the shared log. */
+    fun trace(msg: String) {
+        if (verbose) log("TRACE", msg)
+    }
 
     /** Legacy entry point kept for existing callers. */
     fun write(msg: String) = engine(msg)

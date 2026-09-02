@@ -139,14 +139,30 @@ object YoutubeDlDownloader {
         // runtime. Magnets above run aria2c directly and don't need it.
         com.anonrode.downloader.AnonApp.ensureReady()
 
+        // Extractor tasks (social/YouTube, where yt-dlp picks its own output
+        // name) write into a PRIVATE workdir instead of the shared target
+        // folder. Two YouTube jobs downloading into Social/YouTube/ at the
+        // same time used to count each other's .part files in the engine's
+        // disk-progress scan (task 2's first sample read 33 MB at t+2s — task
+        // 1's bytes), which then fired phantom watchdog kills
+        // (window=-145334KiB) the moment the sibling completed and renamed
+        // its parts away. The produced artifact is moved to the real target
+        // folder after a successful run; the engine's computeDiskBytes scans
+        // the workdir while it exists.
+        val outDir = if (isExtractorTask) File(targetDir, ".work-$taskId").apply { mkdirs() } else targetDir
+
         val request = YoutubeDLRequest(inputUrl).apply {
             if (hlsMasterFile != null) {
                 // The input is our own rewritten playlist file in the app cache.
                 addOption("--enable-file-urls")
             }
             if (isExtractorTask) {
-                // True Monolith Metadata Naming Template with user-configured quality
-                val outTemplate = File(targetDir, "%(uploader,creator,channel)s - %(title).80s [%(id)s].%(ext)s").absolutePath
+                // True Monolith Metadata Naming Template with user-configured quality.
+                // Title-only: the old "%(uploader)s - %(title)s" template doubled
+                // the channel name (YouTube titles already carry it) and produced
+                // "NA - …" garbage when the uploader field was missing (generic
+                // extractor on a locker URL, app-2026-09-01 Lanterns job).
+                val outTemplate = File(outDir, "%(title).100s [%(id)s].%(ext)s").absolutePath
                 addOption("-o", outTemplate)
                 if (audioOnly) {
                     addOption("-f", "bestaudio/best")
@@ -177,7 +193,7 @@ object YoutubeDlDownloader {
                 if (speedLimitKbs > 0) addOption("--limit-rate", "${speedLimitKbs}K")
             } else if (isM3u8) {
                 // HLS m3u8 stream variant selection with multi-fragment parallel downloading
-                val stem = File(targetDir, preferredFilename.substringBeforeLast('.')).absolutePath
+                val stem = File(outDir, preferredFilename.substringBeforeLast('.')).absolutePath
                 addOption("-o", "$stem.%(ext)s")
                 addOption("-f", "bestvideo[height<=$height]+bestaudio/best[height<=$height]/best")
                 addOption("-S", "height~$height,+size,+br")
@@ -197,7 +213,7 @@ object YoutubeDlDownloader {
                 if (speedLimitKbs > 0) addOption("--limit-rate", "${speedLimitKbs}K")
             } else {
                 // Direct CDN HTTP multi-socket via aria2c
-                val stem = File(targetDir, preferredFilename.substringBeforeLast('.')).absolutePath
+                val stem = File(outDir, preferredFilename.substringBeforeLast('.')).absolutePath
                 addOption("-o", "$stem.%(ext)s")
                 addOption("--downloader", "libaria2c.so")
                 val conns = parallelSockets.coerceIn(4, 16)
@@ -218,6 +234,15 @@ object YoutubeDlDownloader {
             addOption("--no-mtime")
             addOption("--no-warnings")
             addOption("--no-check-certificate")
+            // --no-restrict-filenames: yt-dlp refuses "unusual" extensions like
+            // .mkv by default ("The extracted extension ('matroska') is unusual
+            // and will be skipped for safety reasons" — fired 8 times on
+            // naijavault→vikingfile .mkv URLs in app-2026-08-29 / 09-01, all
+            // returning 0 bytes after the engine had already burned 3-6 minutes
+            // cracking the locker URL). Disabling is safe: we always write to
+            // our own sanitized path, never to a location derived from the
+            // remote filename.
+            addOption("--no-restrict-filenames")
             addOption("--newline")
             addOption("--progress")
             // Refuse outside config files: a stray yt-dlp.conf could override
@@ -265,7 +290,7 @@ object YoutubeDlDownloader {
             }
         }
 
-        val before = targetDir.listFiles()?.map { it.absolutePath }?.toSet() ?: emptySet()
+        val before = outDir.listFiles()?.map { it.absolutePath }?.toSet() ?: emptySet()
         val stem = preferredFilename.substringBeforeLast('.')
 
         val errors = StringBuilder()
@@ -320,10 +345,20 @@ object YoutubeDlDownloader {
                 return null
             }
 
+            // yt-dlp's pre-merge format shards ("Title [id].f135.mp4" = the
+            // video-only stream, ".f140.m4a" = audio-only) must never be
+            // accepted as the produced artifact: the watchdog once killed a
+            // task mid-merge (app-2026-08-31 07:13) and attempt 2 picked up
+            // the leftover .f135.mp4 — the user got a 138 MiB file with NO
+            // audio track. A merged output never carries the .f<NNN> infix,
+            // so exclude the shards; when only shards exist the attempt
+            // counts as failed and the next one re-runs the merge.
+            val formatShard = Regex("""\.f\d+\.[A-Za-z0-9]{2,5}$""")
             fun isFinal(f: File) = (f.length() > 0 || f.isDirectory) &&
-                !f.name.endsWith(".aria2") && !f.name.endsWith(".part") && !f.name.endsWith(".ytdl")
+                !f.name.endsWith(".aria2") && !f.name.endsWith(".part") && !f.name.endsWith(".ytdl") &&
+                !formatShard.containsMatchIn(f.name)
 
-            val candidates = targetDir.listFiles { f -> isFinal(f) }?.toList() ?: emptyList()
+            val candidates = outDir.listFiles { f -> isFinal(f) }?.toList() ?: emptyList()
 
             val fresh = candidates.filter { it.absolutePath !in before }
             return fresh.firstOrNull { it.nameWithoutExtension == stem || it.name.startsWith("$stem.") }
@@ -332,7 +367,7 @@ object YoutubeDlDownloader {
                 // Multi-file downloads (season packs) land as a NEW directory
                 // whose File.length() is ~0 — when no file matched, take the
                 // most-recently-created directory as the produced artifact.
-                ?: targetDir.listFiles { f -> f.isDirectory && f.absolutePath !in before }?.maxByOrNull { it.lastModified() }
+                ?: outDir.listFiles { f -> f.isDirectory && f.absolutePath !in before }?.maxByOrNull { it.lastModified() }
         }
 
         // Same-engine retry with resume: yt-dlp's .part (native) and aria2c's
@@ -356,6 +391,34 @@ object YoutubeDlDownloader {
         if (produced == null && errors.isNotBlank()) {
             com.anonrode.downloader.util.DebugLog.error("task=$taskId yt-dlp failed after $attempts attempt(s): ${errors.toString().take(300)}")
             throw Exception("yt-dlp failed after $attempts attempt(s): ${errors.toString().trim()}")
+        }
+        // Move the artifact out of the private workdir into the user-visible
+        // target folder. renameTo within the same volume is free; copy+delete
+        // only as a cross-volume fallback. The workdir is removed when empty
+        // so a folder of one-shot YouTube jobs doesn't accumulate dot-dirs.
+        if (produced != null && outDir != targetDir) {
+            var dest = File(targetDir, produced.name)
+            var n = 1
+            while (dest.exists()) {
+                dest = File(targetDir, "${produced.nameWithoutExtension} ($n).${produced.extension}")
+                n++
+            }
+            val movedOk = if (produced.isDirectory) produced.renameTo(dest)
+            else {
+                if (produced.renameTo(dest)) true
+                else {
+                    try {
+                        produced.copyTo(dest, overwrite = true)
+                        produced.delete()
+                        true
+                    } catch (_: Exception) { false }
+                }
+            }
+            if (movedOk) produced = dest
+            else com.anonrode.downloader.util.DebugLog.backend(
+                "task=$taskId yt-dlp artifact left in workdir (move failed): ${produced.absolutePath}"
+            )
+            outDir.listFiles()?.takeIf { it.isEmpty() }?.let { outDir.delete() }
         }
         return produced
     }

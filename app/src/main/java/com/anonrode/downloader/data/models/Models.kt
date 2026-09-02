@@ -87,5 +87,10 @@ data class DownloadTask(
      *  fully verified (e.g. no recognizable container signature but the
      *  platform decoder accepted it, or size fell short of the HLS
      *  estimate). Null = verified clean. */
-    val validationNote: String? = null
+    val validationNote: String? = null,
+    /** Epoch ms when the task was enqueued. Powers the "Date added" sort
+     *  buckets with real clock ages. 0 = task persisted by an older build —
+     *  the UI falls back to list-position age for those (the list is
+     *  newest-first, so position still orders them correctly). */
+    val createdAt: Long = 0L
 )

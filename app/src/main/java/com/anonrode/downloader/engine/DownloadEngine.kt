@@ -41,6 +41,24 @@ class DownloadEngine(
     // cancel may kill global in-flight HTTP.
     private val fullyCancelledIds = ConcurrentHashMap.newKeySet<String>()
 
+    // Park-cycle counter per task: how many times the cooldown parking path
+    // has parked this task. Past MAX_PARK_CYCLES the task is FAILED instead of
+    // parked again — a queue must never orbit a dead host forever. In-memory
+    // like the cooldown loop itself: an app restart leaves parked tasks PAUSED
+    // for manual resume, which is intended.
+    private val parkCycleCounts = ConcurrentHashMap<String, Int>()
+
+    // When a task was FIRST parked by the host-backoff path (epoch ms).
+    // Powers the parked-lifetime give-up in the cooldown loop: measured from
+    // the first park so repeated re-parks cannot reset the clock forever.
+    private val parkedAtStamp = ConcurrentHashMap<String, Long>()
+
+    // Cross-provider failover bookkeeping per task: the set of provider sites
+    // already tried for this task (original site + every failover target), so
+    // the failover loop walks NEW sites only and cannot ping-pong between two
+    // equally dead providers.
+    private val failoverSites = ConcurrentHashMap<String, MutableSet<String>>()
+
     var maxConcurrentDownloads: Int = 3
     var parallelSocketsPerFile: Int = 16
     var defaultQuality: String = "720p"
@@ -159,6 +177,15 @@ class DownloadEngine(
         // nothing else resumes it (the network collector only matches network
         // messages). In-memory only: an app restart leaves it PAUSED for a
         // manual resume (DownloadRepository restore), which is intended.
+        //
+        // Give-up cap: a task parked for longer than PARKED_LIFETIME_MS total
+        // (measured from its parkedAt timestamp) is FAILED instead of bounced
+        // forever — the Suits batch spent 90 minutes orbiting a host that was
+        // never coming back. Manual retry always restarts it cleanly.
+        //
+        // Trickle requeue: when MANY tasks are parked on the same host, requeue
+        // at most a few per tick. Releasing all 18 at once recreates the exact
+        // request storm that triggered the backoff in the first place.
         engineScope.launch {
             while (true) {
                 delay(10_000)
@@ -166,14 +193,35 @@ class DownloadEngine(
                     it.status == TaskStatus.PAUSED && !it.userPaused && it.errorMessage?.startsWith(PARKED_HOST_MESSAGE) == true
                 }
                 if (parked.isEmpty()) continue
-                var requeued = false
+                var requeued = 0
+                var anyRequeued = false
                 parked.forEach { t ->
+                    val parkedAt = parkedAtStamp[t.id] ?: 0L
+                    if (parkedAt > 0L && System.currentTimeMillis() - parkedAt > PARKED_LIFETIME_MS) {
+                        parkedAtStamp.remove(t.id)
+                        failoverSites.remove(t.id)
+                        parkCycleCounts.remove(t.id)
+                        val msg = "Download server stayed unreachable for 30+ minutes — gave up. Tap retry once the site is back."
+                        repository.update(t.id) { it.copy(status = TaskStatus.FAILED, errorMessage = msg, speedBytesPerSec = 0.0) }
+                        com.anonrode.downloader.util.DebugLog.user("park give-up task=${t.id}")
+                        try {
+                            com.anonrode.downloader.service.DownloadService.notifyFailed(
+                                context, t.id, t.episodeTitle, msg
+                            )
+                        } catch (_: Exception) {}
+                        return@forEach
+                    }
                     if (com.anonrode.downloader.pipeline.HostHealth.isUsable(t.directUrl)) {
+                        // Max 2 requeues per 10s tick: a 18-task batch comes
+                        // back over ~90s instead of one thundering herd.
+                        if (requeued >= 2) return@forEach
+                        requeued++
+                        parkedAtStamp.remove(t.id)
                         repository.update(t.id) { task -> task.copy(status = TaskStatus.QUEUED, errorMessage = null) }
-                        requeued = true
+                        anyRequeued = true
                     }
                 }
-                if (requeued) processQueue()
+                if (anyRequeued) processQueue()
             }
         }
     }
@@ -265,6 +313,11 @@ class DownloadEngine(
         this.logRetentionDays = logRetention.coerceIn(1, 90)
         com.anonrode.downloader.util.DebugLog.configureRetention(this.logRetentionDays)
 
+        // A lower limit preempts running tasks NOW (demote back to queue);
+        // a higher limit just fills the new slots. This is the only place the
+        // user-facing limit change lands, so preemption lives here.
+        enforceConcurrencyLimit()
+
         context.getSharedPreferences("downloader_settings", Context.MODE_PRIVATE).edit()
             .putInt("pref_max_downloads", maxConcurrent)
             .putInt("pref_parallel_sockets", parallelSockets)
@@ -347,7 +400,8 @@ class DownloadEngine(
                     parallelSockets = parallelSockets,
                     site = site,
                     audioOnly = audioOnly,
-                    quality = quality
+                    quality = quality,
+                    createdAt = System.currentTimeMillis()
                 )
 
                 repository.addFirst(task)
@@ -385,6 +439,46 @@ class DownloadEngine(
         // marker overwrite race that resurrected a paused download ~3s after
         // pause, live-verified in app-2026-08-27.txt).
         repository.update(taskId) { it.copy(status = TaskStatus.PAUSED, speedBytesPerSec = 0.0, errorMessage = null, userPaused = true) }
+        updateServiceState(force = true)
+        processQueue()
+    }
+
+    /**
+     * Concurrency preemption: applied when maxConcurrentDownloads CHANGES.
+     * Lowering the limit takes effect IMMEDIATELY — running tasks beyond the
+     * new limit are demoted back to QUEUED (killing their backends exactly
+     * like pause does) and auto-resume when slots free up. The old behavior
+     * (limit only gates NEW starts) is what let the user watch 2-3 downloads
+     * run after setting the limit to 1 — the log-14 concurrency complaint.
+     * Raising the limit just fills the new slots via processQueue.
+     *
+     * Demotion writes QUEUED, never PAUSED, so the task flows back through
+     * the queue in order; the job's CancellationException rescue only rewrites
+     * PAUSED over DOWNLOADING/RESOLVING/VALIDATING statuses, and repository
+     * updates are atomic per write, so a rescue racing this demotion can never
+     * strand the task in a stuck state: either the rescue lands first (PAUSED,
+     * overwritten by this QUEUED) or this lands first (QUEUED, rescue no-ops).
+     */
+    private fun enforceConcurrencyLimit() {
+        val actives = repository.tasks.value.filter {
+            it.status == TaskStatus.DOWNLOADING || it.status == TaskStatus.RESOLVING || it.status == TaskStatus.VALIDATING
+        }
+        if (actives.size <= maxConcurrentDownloads) {
+            processQueue()
+            return
+        }
+        // Keep the FIRST tasks in list order (the ones the user queued first);
+        // demote the rest back to the queue head order.
+        actives.drop(maxConcurrentDownloads).forEach { t ->
+            com.anonrode.downloader.util.DebugLog.user(
+                "concurrency limit now $maxConcurrentDownloads — demoting task=${t.id} (${t.episodeTitle.take(40)}) back to queue"
+            )
+            activeJobs[t.id]?.cancel()
+            activeJobs.remove(t.id)
+            YoutubeDlDownloader.killProcess(t.id)
+            TurboDownloader.cancelTask(t.id)
+            repository.update(t.id) { it.copy(status = TaskStatus.QUEUED, speedBytesPerSec = 0.0, errorMessage = null) }
+        }
         updateServiceState(force = true)
         processQueue()
     }
@@ -462,7 +556,208 @@ class DownloadEngine(
         // path allowed to undo a user pause (UI resume button and the
         // notification retry action both funnel through here).
         repository.update(taskId) { it.copy(status = TaskStatus.QUEUED, errorMessage = null, userPaused = false) }
+        // A manual retry is a fresh start: previous park cycles and failover
+        // history no longer apply to the user's explicit second chance.
+        parkCycleCounts.remove(taskId)
+        parkedAtStamp.remove(taskId)
+        failoverSites.remove(taskId)
         processQueue()
+    }
+
+    /**
+     * Cross-provider auto-failover: the task's source site could not serve the
+     * title (resolver chain empty, gateway dead, or resolution timed out).
+     * Search the OTHER providers for the same title and rewrite this task onto
+     * a working site's source, then requeue it — the user tapped a download
+     * and should GET the download, not a lesson about which site is broken.
+     *
+     * Bounds: every site already tried for this task is excluded, so the loop
+     * always walks new ground and cannot ping-pong between dead providers;
+     * a task may be failed over at most 3 times, then it fails with an honest
+     * error. In-memory only, like the park-cycle counter.
+     *
+     * Series are matched per-episode (loadEpisodes on the candidate show, pick
+     * the episode with the same number) so a Suits episode lands on the same
+     * episode, not a random one. Movies take the matched show card directly.
+     *
+     * Returns true when the task was re-pointed at a new source and requeued —
+     * the caller must then EXIT its coroutine (the task no longer belongs to
+     * this job); false means "no alternative found", and the caller proceeds
+     * with the normal park/fail path.
+     */
+    private suspend fun attemptCrossProviderFailover(task: DownloadTask): Boolean {
+        if (task.site.isBlank()) return false
+        if (task.directUrl.startsWith("magnet:", ignoreCase = true)) return false
+        val tried = failoverSites.getOrPut(task.id) { ConcurrentHashMap.newKeySet() }
+        if (!tried.add(task.site)) return false // already failed over FROM this site once
+        if (tried.size > 3) {
+            failoverSites.remove(task.id)
+            return false
+        }
+        val query = task.showTitle.ifBlank { task.episodeTitle }
+        if (query.isBlank()) return false
+
+        com.anonrode.downloader.util.DebugLog.resolve(
+            "task=${task.id} failover: '${task.site}' cannot serve \"$query\" — searching other providers"
+        )
+
+        // Search every other provider in parallel, each bounded; skip hosts
+        // currently in backoff so a failover never lands on another dead site.
+        // The whole search is bounded too — a failover must never pin a task
+        // in RESOLVING for minutes on a batch queue.
+        val candidates = kotlinx.coroutines.withTimeoutOrNull(25_000L) {
+            coroutineScope {
+                ProviderRegistry.allProviders
+                    .filter { !it.name.equals(task.site, ignoreCase = true) && it.searchEnabled }
+                    .map { provider ->
+                        async(Dispatchers.IO) {
+                            try {
+                                withTimeoutOrNull(20_000L) { provider.search(query) } ?: emptyList()
+                            } catch (_: Exception) {
+                                emptyList()
+                            }
+                        }
+                    }
+                    .awaitAll()
+                    .flatten()
+            }
+        } ?: emptyList()
+
+        // A season declared in the title ("Suits S02", "Season 2") MUST match
+        // on the candidate, or the episode lookup could grab S01E10 for a
+        // S02E10 request — a silent WRONG download is worse than a failed one.
+        val seasonNum = Regex("(?:s|season)[\\s._-]?0*(\\d{1,2})\\b")
+            .find(query.lowercase())?.groupValues?.get(1)?.toIntOrNull()
+
+        val normQuery = normalizeTitleQuery(query)
+        val ranked = candidates
+            .asSequence()
+            .filter { card ->
+                card.url.isNotBlank() &&
+                    !card.site.equals(task.site, ignoreCase = true) &&
+                    com.anonrode.downloader.pipeline.HostHealth.isUsable(card.url) &&
+                    titleMatches(query, card.title) &&
+                    seasonConsistent(query, card.title, seasonNum)
+            }
+            // Exact title match first, then a provider whose host has proven
+            // itself in the ledger, then everything else.
+            .sortedWith(
+                compareByDescending<com.anonrode.downloader.data.models.ShowCard> { normalizeTitleQuery(it.title) == normQuery }
+                    .thenByDescending { com.anonrode.downloader.pipeline.HostHealth.hasProvenLocker(it.url) }
+            )
+            .toList()
+
+        // Hard deadline for the whole failover (episode lookups included).
+        val failoverDeadline = System.currentTimeMillis() + 60_000L
+        for (card in ranked) {
+            if (System.currentTimeMillis() > failoverDeadline) break
+            val newUrl: String? = if (task.episodeNum > 0) {
+                // Series: match the exact episode on the candidate show page.
+                // A candidate with no matching episode number is SKIPPED, not
+                // coerced — an episode-less or wrong-show match must never be
+                // downloaded as this episode.
+                try {
+                    val details = kotlinx.coroutines.withTimeoutOrNull(20_000L) {
+                        ProviderRegistry.loadEpisodes(card)
+                    } ?: continue
+                    val episode = details.episodes.firstOrNull { it.episodeNum == task.episodeNum } ?: continue
+                    if (!com.anonrode.downloader.pipeline.HostHealth.isUsable(episode.url)) continue
+                    episode.url
+                } catch (_: Exception) {
+                    continue
+                }
+            } else {
+                card.url
+            }
+            if (newUrl.isNullOrBlank()) continue
+
+            com.anonrode.downloader.util.DebugLog.user(
+                "task=${task.id} failover: switching source ${task.site} -> ${card.site} for \"$query\"" +
+                    (if (task.episodeNum > 0) " (episode ${task.episodeNum})" else "")
+            )
+            failoverSites[task.id] = tried // keep the tried-set for the next cycle
+            // A different site serves a DIFFERENT file: any partial left by the
+            // old source must be deleted, or the download backend would resume
+            // the old bytes at the old offset into the new file (silent
+            // corruption). Counters reset with it.
+            try {
+                File(task.filePath + ".part").delete()
+                File(task.filePath + ".ytdl").delete()
+                File(task.filePath + ".aria2").delete()
+                File(task.filePath + ".turbo").delete()
+                File(File(task.filePath).parentFile, ".work-" + task.id).deleteRecursively()
+            } catch (_: Throwable) {}
+            repository.update(task.id) {
+                it.copy(
+                    sourceUrl = newUrl,
+                    directUrl = newUrl,
+                    site = card.site,
+                    quality = null,
+                    status = TaskStatus.QUEUED,
+                    errorMessage = null,
+                    speedBytesPerSec = 0.0,
+                    downloadedBytes = 0L,
+                    totalBytes = 0L
+                )
+            }
+            return true
+        }
+
+        // Nothing usable anywhere: leave the tried-set in place so the NEXT
+        // failure of this task fails over again from its current site if a
+        // manual retry re-points it, but don't loop here.
+        com.anonrode.downloader.util.DebugLog.resolve(
+            "task=${task.id} failover: no other provider could serve \"$query\""
+        )
+        return false
+    }
+
+    /** Lowercase and strip everything but letters/digits — the loose title
+     *  comparison used by failover matching ("Sholay (1975)" vs "sholay"). */
+    private fun normalizeTitleQuery(q: String): String =
+        q.lowercase().filter { it.isLetterOrDigit() }
+
+    // Words too common to help tell two titles apart; dropped by
+    // [titleMatches] so "My Name is Khan" doesn't demand the word "is".
+    // Site-noise words ("indian movie", "hindi", "web-dl", "480p"…) are
+    // appended by scrapers, not part of the title — demanding them makes
+    // failover reject the exact movie it's looking for (naijavault's
+    // "My Name Is Khan 2010 Indian Movie" vs pluto's
+    // "My Name Is Khan 2010 Hindi" — same film).
+    private val TITLE_STOPWORDS = setOf(
+        "the", "a", "an", "is", "of", "and", "to", "in", "on", "le", "la", "de",
+        "movie", "film", "series", "complete", "season", "episode", "download",
+        "full", "hd", "hindi", "english", "dubbed", "subbed", "korean", "chinese",
+        "drama", "web", "dl", "webdl", "bluray", "brrip", "dvdrip", "hevc", "x264",
+        "x265", "aac", "480p", "720p", "1080p", "2160p", "4k"
+    )
+
+    /** True when the candidate title covers the query: every meaningful word
+     *  of the query must appear in the normalized candidate. Pure numbers
+     *  (years like "1975") are ignored — our own titles carry years that
+     *  candidate listings often omit. */
+    private fun titleMatches(query: String, candidate: String): Boolean {
+        val normCard = normalizeTitleQuery(candidate)
+        if (normCard.isBlank()) return false
+        val words = Regex("[a-z0-9]+").findAll(query.lowercase())
+            .map { it.value }
+            .filter { it.length >= 2 && !TITLE_STOPWORDS.contains(it) && !it.all { c -> c.isDigit() } }
+            .toList()
+        if (words.isEmpty()) return false
+        return words.all { normCard.contains(it) }
+    }
+
+    /** Season guard for failover: when the task title declares a season
+     *  ("Suits S02", "Alchemy of Souls Season 2"), the candidate must declare
+     *  the SAME season. Candidates that declare a different season are
+     *  rejected; candidates with no season marker pass (the episode-number
+     *  match inside the provider's episode list is the second guard). */
+    private fun seasonConsistent(query: String, candidate: String, seasonNum: Int?): Boolean {
+        if (seasonNum == null) return true
+        val cardLower = candidate.lowercase()
+        val cardSeason = Regex("(?:s|season)[\\s._-]?0*(\\d{1,2})\\b")
+            .find(cardLower)?.groupValues?.get(1)?.toIntOrNull()
+        return cardSeason == null || cardSeason == seasonNum
     }
 
     private fun looksLikeHtml(file: File): Boolean {
@@ -529,10 +824,24 @@ class DownloadEngine(
      * .ytdl partials, and yt-dlp's concurrent fragment files. The UI progress
      * watchdog uses this as the source of truth when backend output parsing
      * reports nothing, and it is what stall detection compares against.
+     *
+     * yt-dlp extractor tasks write into a private per-task workdir
+     * (.work-<taskId> inside the target folder) — see YoutubeDlDownloader.
+     * While that workdir exists it IS the task's footprint and scanning it
+     * keeps sibling jobs in the same folder (two YouTube videos at once,
+     * app-2026-08-31) from counting each other's bytes; once the artifact is
+     * moved back the workdir is deleted, and the task is one tick away from
+     * a terminal status anyway (extractor outputs are named by yt-dlp's
+     * metadata template, not by task.filePath).
      */
     private fun computeDiskBytes(task: DownloadTask): Long {
         return try {
-            val dir = File(task.filePath).parentFile ?: return 0L
+            val targetDir = File(task.filePath).parentFile ?: return 0L
+            val workDir = File(targetDir, ".work-${task.id}")
+            if (workDir.isDirectory) {
+                return workDir.walkTopDown().filter { it.isFile }.sumOf { it.length() }
+            }
+            val dir = targetDir
             val files = dir.listFiles() ?: return 0L
             val base = File(task.filePath).name
             // Segmented Turbo downloads pre-allocate the .part file to its full
@@ -545,14 +854,18 @@ class DownloadEngine(
                 return written + files.sumOf { f ->
                     if (!f.isFile) 0L
                     else if (f.name == base) f.length()
-                    else if (f.name.endsWith(".ytdl")) f.length()
+                    else if (f.name.endsWith(".ytdl") && f.name.startsWith(base)) f.length()
                     else 0L
                 }
             }
             files.sumOf { f ->
                 if (!f.isFile) 0L
+                // Only this task's own outputs: the previous directory-wide
+                // ".part/.ytdl anywhere" rule folded SIBLING tasks' partials
+                // into this task's progress (their .part files live in the
+                // same folder), corrupting the window the watchdog acts on.
                 else if (f.name.startsWith(base) && !f.name.endsWith(".turbo")) f.length()
-                else if (f.name.contains(".part") || f.name.endsWith(".ytdl")) f.length()
+                else if (f.name.endsWith(".ytdl") && f.name.startsWith(base)) f.length()
                 else 0L
             }
         } catch (_: Exception) {
@@ -712,6 +1025,21 @@ class DownloadEngine(
         // auto-retry loop matches this prefix and re-queues the task once the
         // host is usable again.
         private const val PARKED_HOST_MESSAGE = "Download server cooling down"
+
+        // A parked task may cycle QUEUED → RESOLVING → park at most this many
+        // times before it is FAILED outright. Without a cap, a host that never
+        // recovers keeps the batch bouncing every backoff window forever (the
+        // Suits batch churned for 90 minutes on a host that was never coming
+        // back). Generous: at 2 windows each, 6 attempts ≈ 12 minutes of real
+        // chances before the task gives up with an honest error.
+        private const val MAX_PARK_CYCLES = 6
+
+        // How long ONE task may sit parked by the cooldown loop before the
+        // give-up fires it. Measured from the FIRST park (parkedAtStamp uses
+        // putIfAbsent), so repeated re-parks cannot reset the clock: a host
+        // that stays dead for 30 minutes of cycling loses the task with an
+        // honest error instead of holding the queue hostage all afternoon.
+        private const val PARKED_LIFETIME_MS = 30 * 60_000L
     }
 
     private var lastNotificationTime: Long = 0L
@@ -753,9 +1081,20 @@ class DownloadEngine(
         // maxConcurrentDownloads-1 slots empty until the next completion.
         while (true) {
             val currentTasks = tasks.value
-            val activeCount = currentTasks.count {
+            // Two counters, and the LIMIT uses the LARGER of the two:
+            //  - status count: what the repository claims (DOWNLOADING/RESOLVING/VALIDATING)
+            //  - live-job count: coroutines actually running in activeJobs
+            // The status count alone missed tasks whose status was written by a
+            // path outside this scheduler (watchdog restart, post-pause zombie
+            // writes) — the live-job count alone misses a task between its
+            // status flip and its job registration. Taking the max closes the
+            // window both ways: this is THE concurrency choke-point, and no
+            // other code may start a backend outside it.
+            val statusActive = currentTasks.count {
                 it.status == TaskStatus.DOWNLOADING || it.status == TaskStatus.RESOLVING || it.status == TaskStatus.VALIDATING
             }
+            val jobActive = activeJobs.values.count { it.isActive }
+            val activeCount = maxOf(statusActive, jobActive)
 
             if (activeCount >= maxConcurrentDownloads) return
 
@@ -825,6 +1164,19 @@ class DownloadEngine(
         // (fsmc02.downloadwella.com served nkiri's real .mkv — live-verified), so
         // isKnownLockerHost must not reject them; it only exists to stop an
         // UNRESOLVED locker page from being treated as a direct file.
+        //
+        // The poison list is INTENTIONALLY NOT consulted here. A URL that
+        // returned HTML once may serve the real .mkv a second later — token
+        // rotation, edge node assignment, and the server's anti-abuse cooldown
+        // all clear in seconds-to-minutes, and a downloader that gives up
+        // after one HTML response on a token-bearing URL would lose every
+        // locker download the moment a single edge node happens to be rate-
+        // limited. The 11-episode wildshare cascade in app-2026-09-01 fired
+        // because the engine REJECTED wildshare after one HTML page; the right
+        // fix is to retry the source page for a fresh token, not blacklist
+        // the host. Poison is therefore consulted only by the download path
+        // (to keep a known-bad URL out of the bytes-on-disk fetch), never by
+        // the resolver path.
         fun accept(out: String?): Boolean {
             if (out.isNullOrBlank()) return false
             if (out != permUrl) return true
@@ -1224,10 +1576,21 @@ class DownloadEngine(
                         }
                     } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
                         com.anonrode.downloader.util.DebugLog.error("task=${task.id} resolution timed out after ${RESOLVE_TIMEOUT_MS / 1000}s")
+                        // A site that cannot answer within the ceiling is dead
+                        // to this download — but the title may live on another
+                        // provider. Fail over before reporting failure.
+                        if (attemptCrossProviderFailover(task)) return@launch
                         throw Exception("Link resolution timed out — the site took too long to answer. Retry, or try another server/episode.")
                     }
                     if (!resolved.isNullOrBlank()) {
                         com.anonrode.downloader.util.DebugLog.resolve("task=${task.id} resolved -> ${resolved.take(120)}")
+                        // A successful resolve resets the parking bookkeeping:
+                        // park-cycle counting starts fresh for the NEXT host
+                        // trouble, and the failover tried-set is retired (the
+                        // task found a working source).
+                        parkCycleCounts.remove(task.id)
+                        parkedAtStamp.remove(task.id)
+                        failoverSites.remove(task.id)
                         streamUrl = resolved
                     } else if (isKnownLockerHost(streamUrl) || !isDirectMediaUrl(streamUrl)) {
                         if (task.site.isNotBlank()) {
@@ -1246,6 +1609,14 @@ class DownloadEngine(
                             // audit showed these only as RESOLVE lines (audit
                             // finding: "silent failures, no ERROR line").
                             com.anonrode.downloader.util.DebugLog.error("task=${task.id} could not crack stream link (host=$host) for ${streamUrl.take(120)}")
+                            // Cross-provider auto-failover BEFORE parking or
+                            // failing: if another provider can serve this same
+                            // title, switch the task to that source and requeue.
+                            // This is the "tapped a dead site, downloaded from a
+                            // live one anyway" behavior — a dead chain on one
+                            // site must never kill a download that the app could
+                            // still fetch from another.
+                            if (attemptCrossProviderFailover(task)) return@launch
                             // The locker host itself is in HostHealth backoff:
                             // PARK the task instead of failing it — the
                             // cooldown auto-retry loop re-queues it once the
@@ -1254,6 +1625,17 @@ class DownloadEngine(
                             if (!com.anonrode.downloader.pipeline.HostHealth.isUsable(streamUrl)) {
                                 val mins = maxOf(1L, com.anonrode.downloader.pipeline.HostHealth.remainingBackoffMs(streamUrl) / 60_000L)
                                 com.anonrode.downloader.util.DebugLog.resolve("task=${task.id} host $host in backoff — parking for ~${mins}m")
+                                val cycles = (parkCycleCounts[task.id] ?: 0) + 1
+                                if (cycles > MAX_PARK_CYCLES) {
+                                    parkCycleCounts.remove(task.id)
+                                    failoverSites.remove(task.id)
+                                    throw Exception(
+                                        "$host has been unreachable across $MAX_PARK_CYCLES cooldown cycles — giving up so the queue is not stuck on it. " +
+                                            "Tap retry once the site is back."
+                                    )
+                                }
+                                parkCycleCounts[task.id] = cycles
+                                parkedAtStamp.putIfAbsent(task.id, System.currentTimeMillis())
                                 repository.update(task.id) {
                                     it.copy(
                                         status = TaskStatus.PAUSED,
@@ -1321,6 +1703,7 @@ class DownloadEngine(
                     var lastDisk = 0L
                     var lastParsed = 0L
                     var lastActivity = System.currentTimeMillis()
+                    var lastKillTime = 0L
                     var stallKills = 0
                     // Crawl detection: some HLS CDNs (vidsrc edge nodes) throttle a
                     // connection to ~1 KB/s instead of dying. Bytes still move, so
@@ -1402,6 +1785,22 @@ class DownloadEngine(
                         // Window progress: healthy downloads blow through the floor
                         // in seconds; a crawl never reaches it.
                         val moved = (disk - windowStartDisk) + (parsed - windowStartParsed)
+                        // Merge/rename churn: yt-dlp's ffmpeg pass deletes the
+                        // .fNNN input shards after writing the merged output, so
+                        // a task's own footprint can legitimately DROP mid-run —
+                        // and the backend may also reset its parsed counter on a
+                        // retry. A shrinking total is active file manipulation,
+                        // never a network stall: re-baseline the window instead
+                        // of letting the negative delta read as "throttled"
+                        // (app-2026-08-31 07:13: window=-140231KiB during the
+                        // merge killed a healthy download and the next attempt
+                        // shipped the unmerged video-only shard — a mute video).
+                        if (moved < 0) {
+                            windowStartDisk = disk
+                            windowStartParsed = parsed
+                            windowStartTime = now
+                            lastActivity = now
+                        }
                         val windowSecs = ((now - windowStartTime).coerceAtLeast(500L)) / 1000.0
                         val windowBps = if (windowSecs > 0.0) moved / windowSecs else 0.0
                         if (windowBps > bestWindowBps) bestWindowBps = windowBps
@@ -1431,12 +1830,29 @@ class DownloadEngine(
                         val magnetTask = streamUrl.startsWith("magnet:", ignoreCase = true)
                         val zombie = now - watchdogStart > STALL_TIMEOUT_MS * (if (magnetTask) 20 else 4) &&
                             (totalBytesNow - (startBytes ?: totalBytesNow)) < 1L * 1024 * 1024
-                        // Rate-drop: after a full 30s at under 40% of the task's
-                        // best window speed (when that best was a real burst) the
-                        // CDN is throttling, not the network being slow — kill so
-                        // the wrapper relaunches (fresh token/edge on re-resolve).
+                        // Rate-drop detection (corrected): a throttled-but-alive
+                        // stream (e.g. downloadwella burst then 50KB/s trickle) must
+                        // NOT be killed just because the *current window* is slower
+                        // than the burst peak. The previous rule windowBps <
+                        // bestWindowBps * 0.4 culled healthy 92MB/s downloads the
+                        // moment they dropped to 50KB/s — a server-side throttle
+                        // (or just a slower segment of the file) was indistinguishable
+                        // from a dead connection, and the wrapper's 3-attempt cycle
+                        // never recovered. New rule: kill only when the current
+                        // window is BOTH (a) at least 2x slower than the burst peak
+                        // AND (b) below a sane absolute floor (8 KiB/s for direct
+                        // downloads, 2 KiB/s for HLS — a vidsrc edge that crawls at
+                        // 1-1.8 KiB/s is genuinely alive, not throttling). Anything
+                        // above the absolute floor is "slow but moving" and the
+                        // user explicitly preferred patience over false failures:
+                        // a slow ISP line should not lose a 2 GiB file 90% in.
+                        val FLOOR_DIRECT_BPS = 8L * 1024L
+                        val FLOOR_HLS_BPS = 2L * 1024L
+                        val floorBps = if (isHlsStream) FLOOR_HLS_BPS else FLOOR_DIRECT_BPS
                         val throttled = bestWindowBps >= 1.0 * 1024 * 1024 &&
-                            windowBps < bestWindowBps * 0.4 && windowSecs >= 30
+                            windowBps < bestWindowBps * 0.5 &&
+                            windowBps < floorBps &&
+                            windowSecs >= 30
                         if (zombie) {
                             val zombieMsg = "Download made no meaningful progress (${(now - watchdogStart) / 1000}s, under 1 MiB) — the source server is throttling or unreachable. Try again later."
                             com.anonrode.downloader.util.DebugLog.engine(
@@ -1459,7 +1875,25 @@ class DownloadEngine(
                         // the retry wrapper relaunches it (fresh token/edge on
                         // re-resolve), and eventually FAILED instead of hanging.
                         // Magnets are exempt — peer discovery is legitimately quiet.
-                        if (!magnetTask && (now - lastActivity > STALL_TIMEOUT_MS || crawlStalled || throttled)) {
+                        //
+                        // Correction: prior to this change, the watchdog killed
+                        // after `now - lastActivity > STALL_TIMEOUT_MS` (60s by
+                        // default) even when the wrapper had already started a
+                        // retry attempt that was making fresh progress — a slow
+                        // health probe, a slow token refresh, or a momentary
+                        // DNS hiccup was indistinguishable from a true stall,
+                        // and the kill-then-rerun-then-kill loop could consume 8
+                        // attempts in 4 minutes. The rule now treats a kill as
+                        // definitive: a kill is only allowed if BOTH
+                        //   (a) the stall has been continuous for at least
+                        //       2 * STALL_TIMEOUT_MS, AND
+                        //   (b) the wrapper has not just started a fresh attempt
+                        //       (guards against the wrapper being mid-resolve
+                        //       when the watchdog fires).
+                        // Magnet exemption unchanged.
+                        val attemptBoundary = stallKills * STALL_TIMEOUT_MS * 2
+                        val stalledLong = now - lastActivity > STALL_TIMEOUT_MS
+                        if (!magnetTask && stalledLong && (now - watchdogStart) > attemptBoundary && (stallKills == 0 || now - lastKillTime > STALL_TIMEOUT_MS)) {
                             stallKills++
                             com.anonrode.downloader.util.DebugLog.engine(
                                 "task=${task.id} watchdog kill #$stallKills (idle=${(now - lastActivity) / 1000}s crawl=$crawlStalled throttled=$throttled window=${(moved / 1024).toInt()}KiB best=${(bestWindowBps / 1024).toInt()}KiB/s)"
@@ -1485,9 +1919,20 @@ class DownloadEngine(
                                 break
                             }
                             lastActivity = now
+                            lastKillTime = now
                             windowStartDisk = disk
                             windowStartParsed = parsed
                             windowStartTime = now
+                            // Auto-recovery: the next time this task's wrapper
+                            // re-resolves (e.g. on the yt-dlp-attempt-2 cycle), it
+                            // must NOT hit a still-cooling host and skip silently
+                            // (the 9-attempt downloadwella trap in
+                            // app-2026-08-29 / 09-01). One bypass token per stall
+                            // kill: consumed on the next startTask's first
+                            // resolveStreamUrl. Bounded by retryBypassTasks.size
+                            // guard in retry() — clear() at 16.
+                            if (retryBypassTasks.size >= 16) retryBypassTasks.clear()
+                            retryBypassTasks.add(task.id)
                         }
                     }
                 }
@@ -2092,5 +2537,115 @@ class DownloadEngine(
         if (!job.isActive) {
             activeJobs.remove(task.id, job)
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Bulk queue actions (Pause all / Resume all / Cancel all).
+    //
+    // The activity log showed users hand-tapping pause/cancel on card after
+    // card (13 cancels in 2 seconds) because the queue screen had no bulk
+    // actions. These run the SAME per-task teardown as the single-task
+    // pause()/retry()/cancel() paths above — deliberately line-for-line,
+    // so a bulk action can never diverge from what one card tap does —
+    // with the service-state/processQueue churn batched to once per action
+    // instead of once per task.
+
+    /** Pause every task the user could pause card-by-card: running
+     *  (DOWNLOADING/RESOLVING/VALIDATING) via pause()'s exact teardown, and
+     *  QUEUED via pause()'s status write (a card tap on a queued card does
+     *  the same). QUEUED tasks are included deliberately: each dying job's
+     *  finally-guard calls processQueue(), which would otherwise start the
+     *  queued tasks behind the user's back right after "Pause all".
+     *  userPaused=true marks every one, so no auto-resume path (network
+     *  reconnect, storage self-heal, host cooldown) will touch them. */
+    fun pauseAll() {
+        val pausable = repository.tasks.value.filter {
+            it.status == TaskStatus.DOWNLOADING || it.status == TaskStatus.RESOLVING ||
+                it.status == TaskStatus.VALIDATING || it.status == TaskStatus.QUEUED
+        }
+        if (pausable.isEmpty()) return
+        com.anonrode.downloader.util.DebugLog.user("pause ALL (${pausable.size} tasks)")
+        pausable.forEach { task ->
+            val taskId = task.id
+            // Same teardown as pause() — active jobs are cancelled, backends
+            // killed, blocking HTTP swept once no task is left running.
+            activeJobs[taskId]?.cancel()
+            activeJobs.remove(taskId)
+            YoutubeDlDownloader.killProcess(taskId)
+            TurboDownloader.cancelTask(taskId)
+            com.anonrode.downloader.util.DebugLog.user("pause $taskId")
+            repository.update(taskId) { it.copy(status = TaskStatus.PAUSED, speedBytesPerSec = 0.0, errorMessage = null, userPaused = true) }
+        }
+        // pause() sweeps in-flight HTTP only when the last job is gone; with
+        // everything paused that condition holds by definition.
+        if (activeJobs.isEmpty()) HttpClient.cancelInFlight()
+        // One service/notification update for the whole batch, and NO
+        // processQueue(): "Pause all" means everything stops, so the free
+        // slots must not be refilled from the (now also paused) queue.
+        updateServiceState(force = true)
+    }
+
+    /** Resume every PAUSED task via retry()'s exact path — including the ones
+     *  carrying the userPaused mark: this IS the explicit user resume, the
+     *  one path allowed to clear it. One processQueue() fills the slots. */
+    fun resumeAll() {
+        val paused = repository.tasks.value.filter { it.status == TaskStatus.PAUSED }
+        if (paused.isEmpty()) return
+        com.anonrode.downloader.util.DebugLog.user("resume ALL (${paused.size} tasks)")
+        paused.forEach { task ->
+            val taskId = task.id
+            // Same per-task body as retry(): one host-health bypass each, a
+            // fresh park/failover history, and the userPaused mark cleared.
+            if (retryBypassTasks.size >= 16) retryBypassTasks.clear()
+            retryBypassTasks.add(taskId)
+            repository.update(taskId) { it.copy(status = TaskStatus.QUEUED, errorMessage = null, userPaused = false) }
+            parkCycleCounts.remove(taskId)
+            parkedAtStamp.remove(taskId)
+            failoverSites.remove(taskId)
+        }
+        processQueue()
+        updateServiceState(force = true)
+    }
+
+    /** Cancel every non-terminal task (QUEUED/DOWNLOADING/RESOLVING/VALIDATING/
+     *  PAUSED) via cancel()'s exact teardown. Destructive — the UI confirms
+     *  before calling this. Partial files are removed per task exactly as a
+     *  single cancel does. */
+    fun cancelAll() {
+        val cancellable = repository.tasks.value.filter {
+            it.status == TaskStatus.QUEUED || it.status == TaskStatus.DOWNLOADING ||
+                it.status == TaskStatus.RESOLVING || it.status == TaskStatus.VALIDATING ||
+                it.status == TaskStatus.PAUSED
+        }
+        if (cancellable.isEmpty()) return
+        com.anonrode.downloader.util.DebugLog.user("cancel ALL (${cancellable.size} tasks)")
+        cancellable.forEach { task ->
+            val taskId = task.id
+            // Same teardown as cancel(): mark full-cancel intent BEFORE job
+            // cancellation, kill the backends, remove partial artifacts.
+            if (activeJobs.containsKey(taskId)) fullyCancelledIds.add(taskId)
+            activeJobs[taskId]?.cancel()
+            activeJobs.remove(taskId)
+            YoutubeDlDownloader.killProcess(taskId)
+            TurboDownloader.cancelTask(taskId)
+            com.anonrode.downloader.util.DebugLog.user("cancel $taskId")
+            val live = repository.find(taskId)
+            if (live != null) {
+                try {
+                    val target = File(live.filePath)
+                    target.deleteRecursively()
+                    File(live.filePath + ".part").delete()
+                    File(live.filePath + ".ytdl").delete()
+                    File(live.filePath + ".aria2").delete()
+                    File(live.filePath + ".turbo").delete()
+                } catch (_: Throwable) {}
+            }
+            repository.remove(taskId)
+        }
+        // Every job was cancelled above, so a global in-flight sweep cannot
+        // cross-talk into another task — the condition cancel() relies on.
+        if (activeJobs.isEmpty()) HttpClient.cancelInFlight()
+        updateServiceState(force = true)
+        processQueue()
     }
 }

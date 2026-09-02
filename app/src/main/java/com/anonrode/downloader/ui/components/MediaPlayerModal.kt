@@ -72,6 +72,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.LocalView
@@ -562,7 +563,17 @@ private fun MediaPlayerModalImpl(
         // bars; this block hides the DIALOG's bars. Both layers need to
         // agree for the player to be truly fullscreen.
         val dialogWindow = (LocalView.current as? DialogWindowProvider)?.window
-        DisposableEffect(dialogWindow) {
+        // Re-key on the dialog's Configuration: windows carrying
+        // FLAG_LAYOUT_NO_LIMITS are not re-clamped to the display when the
+        // orientation flips (Fullscreen toggle requests a landscape
+        // round-trip), so after returning to portrait the window keeps its
+        // stale pre-rotation frame — the player renders as a letterboxed
+        // band with the app screen visible around it, and Fit/Crop can't
+        // help because they only rescale video INSIDE the surface.
+        // Re-asserting the layout params forces WindowManager to relayout
+        // the window at the current display metrics.
+        val dialogConfig = LocalConfiguration.current
+        DisposableEffect(dialogWindow, dialogConfig, isFullscreen) {
             dialogWindow?.let { win ->
                 val lp = win.attributes
                 lp.width = android.view.WindowManager.LayoutParams.MATCH_PARENT
@@ -590,6 +601,8 @@ private fun MediaPlayerModalImpl(
                 // DisposableEffect (lines above this block).
                 dialogWindow?.let { win ->
                     val lp = win.attributes
+                    lp.width = android.view.WindowManager.LayoutParams.MATCH_PARENT
+                    lp.height = android.view.WindowManager.LayoutParams.MATCH_PARENT
                     lp.flags = lp.flags and
                         android.view.WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS.inv()
                     win.attributes = lp

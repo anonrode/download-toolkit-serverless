@@ -43,6 +43,56 @@ object ProviderRegistry {
 
     private val searchCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, List<ShowCard>>>()
 
+    // ---- search-result hygiene ----------------------------------------------
+    //
+    // Site search pages (nkiri's WordPress theme especially) embed sponsored
+    // and ad cards: links to sbani.pro, cutt.ly shorteners and friends that
+    // flow straight into the results grid as tappable cards. Two filters:
+    //
+    //  1. JUNK_HOSTS — a hard denylist, no exceptions. Shortener/ad hosts are
+    //     never a legitimate search result.
+    //  2. on-domain suffix rule — for the single-host providers, a card whose
+    //     URL host is not the provider's own base domain (or any of its
+    //     registered mirrors) is junk from the page's ad slots. Per-provider
+    //     opt-in, kept conservative: anitaku legitimately returns results from
+    //     TWO hosts (gogoanime.or.at AND anitaku.com.ro), naijaprey's episode
+    //     drawer leaves its domain entirely (vdl.np-downloader.com,
+    //     wildshare.net), and the OTA-dynamic providers' base URLs are
+    //     data-driven — none of those get the rule.
+    private val JUNK_HOSTS = listOf(
+        "sbani.pro", "cutt.ly", "bit.ly", "tinyurl.com", "t.ly",
+        "shorturl.at", "is.gd", "goo.gl", "rebrand.ly", "tiny.cc"
+    )
+
+    private val ON_DOMAIN_PROVIDERS = setOf("nkiri", "dramakey", "asianc", "pluto", "dramarain", "9jarocks", "naijavault", "nepu")
+
+    private fun isJunkCard(provider: SiteProvider, card: ShowCard): Boolean {
+        val url = card.url
+        // magnet:/anything-not-http never hits site ad slots; leave it alone.
+        if (!url.startsWith("http://", ignoreCase = true) && !url.startsWith("https://", ignoreCase = true)) return false
+        val host = HttpClient.safeHost(url)
+        if (host.isBlank()) return false
+        if (JUNK_HOSTS.any { host.equals(it, ignoreCase = true) || host.endsWith(".$it", ignoreCase = true) }) return true
+        if (provider.name !in ON_DOMAIN_PROVIDERS) return false
+        val allowedHosts = DynamicRulesManager.getBaseUrls(provider.name)
+            .mapNotNull { base -> HttpClient.safeHost(base).takeIf { h -> h.isNotBlank() } }
+        if (allowedHosts.isEmpty()) return false
+        return allowedHosts.none { allowed -> host.equals(allowed, ignoreCase = true) || host.endsWith(".$allowed", ignoreCase = true) }
+    }
+
+    /** Filters one provider's raw results and journals every drop with its
+     *  reason — a silently vanishing card was the old bug; the log must show
+     *  WHY it vanished. */
+    private fun filteredItems(provider: SiteProvider, items: List<ShowCard>): List<ShowCard> {
+        return items.filter { card ->
+            val junk = isJunkCard(provider, card)
+            if (junk) {
+                DebugLog.resolve("dropped junk search card provider=${provider.name} title=\"${card.title.take(60)}\" url=${card.url.take(80)}")
+            }
+            !junk
+        }
+    }
+
     fun searchStreaming(query: String, siteFilter: String? = null): Flow<List<ShowCard>> = channelFlow {
         val cacheKey = "${query.trim().lowercase()}::${siteFilter ?: "all"}"
         val now = System.currentTimeMillis()
@@ -73,7 +123,8 @@ object ProviderRegistry {
             targets.forEach { provider ->
                 launch(Dispatchers.IO) {
                     try {
-                        val items = withTimeoutOrNull(timeoutMs) { provider.search(query) } ?: emptyList()
+                        val raw = withTimeoutOrNull(timeoutMs) { provider.search(query) } ?: emptyList()
+                        val items = filteredItems(provider, raw)
                         if (items.isNotEmpty()) {
                             emitMutex.withLock {
                                 accumulated.addAll(items)
