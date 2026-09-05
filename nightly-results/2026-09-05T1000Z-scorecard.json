@@ -1,0 +1,196 @@
+{
+  "run_id": "2026-09-05T1000Z",
+  "timestamp": "2026-09-05T10:00:40.884578Z",
+  "elapsed_seconds": 29,
+  "summary": {
+    "total_sites": 11,
+    "passed": 4,
+    "failed": 7,
+    "na": 0,
+    "regressions_vs_previous": 0
+  },
+  "sites": {
+    "pluto": {
+      "site": "pluto",
+      "search": {
+        "pass": true
+      },
+      "episodes": {
+        "pass": true
+      },
+      "crack": {
+        "pass": false
+      },
+      "probe": {
+        "pass": null
+      },
+      "overall": false
+    },
+    "9jarocks": {
+      "site": "9jarocks",
+      "search": {
+        "pass": true
+      },
+      "episodes": {
+        "pass": false
+      },
+      "crack": {
+        "pass": false
+      },
+      "probe": {
+        "pass": null
+      },
+      "overall": false
+    },
+    "naijavault": {
+      "site": "naijavault",
+      "search": {
+        "pass": false
+      },
+      "episodes": {
+        "pass": null
+      },
+      "crack": {
+        "pass": null
+      },
+      "probe": {
+        "pass": null
+      },
+      "overall": false
+    },
+    "asianc": {
+      "site": "asianc",
+      "search": {
+        "pass": true
+      },
+      "episodes": {
+        "pass": true
+      },
+      "crack": {
+        "pass": false
+      },
+      "probe": {
+        "pass": null
+      },
+      "overall": false
+    },
+    "dramarain": {
+      "site": "dramarain",
+      "search": {
+        "pass": false
+      },
+      "episodes": {
+        "pass": null
+      },
+      "crack": {
+        "pass": null
+      },
+      "probe": {
+        "pass": null
+      },
+      "overall": false
+    },
+    "naijaprey": {
+      "site": "naijaprey",
+      "search": {
+        "pass": true
+      },
+      "episodes": {
+        "pass": true
+      },
+      "crack": {
+        "pass": true
+      },
+      "probe": {
+        "pass": false
+      },
+      "overall": false
+    },
+    "nkiri": {
+      "site": "nkiri",
+      "search": {
+        "pass": true
+      },
+      "episodes": {
+        "pass": true
+      },
+      "crack": {
+        "pass": null
+      },
+      "probe": {
+        "pass": null
+      },
+      "overall": true,
+      "via": "pipeline"
+    },
+    "dramakey": {
+      "site": "dramakey",
+      "search": {
+        "pass": true
+      },
+      "episodes": {
+        "pass": true
+      },
+      "crack": {
+        "pass": null
+      },
+      "probe": {
+        "pass": null
+      },
+      "overall": true,
+      "via": "pipeline"
+    },
+    "anitaku": {
+      "site": "anitaku",
+      "search": {
+        "pass": true
+      },
+      "episodes": {
+        "pass": true
+      },
+      "crack": {
+        "pass": null
+      },
+      "probe": {
+        "pass": null
+      },
+      "overall": true,
+      "via": "pipeline"
+    },
+    "nepu": {
+      "site": "nepu",
+      "search": {
+        "pass": true
+      },
+      "episodes": {
+        "pass": true
+      },
+      "crack": {
+        "pass": null
+      },
+      "probe": {
+        "pass": null
+      },
+      "overall": true,
+      "via": "pipeline"
+    },
+    "torrents": {
+      "site": "torrents",
+      "search": {
+        "pass": false
+      },
+      "episodes": {
+        "pass": null
+      },
+      "crack": {
+        "pass": null
+      },
+      "probe": {
+        "pass": null
+      },
+      "overall": false
+    }
+  },
+  "regressions": [],
+  "previous_run_id": null
+}
