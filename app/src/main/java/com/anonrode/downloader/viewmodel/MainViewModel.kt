@@ -32,7 +32,13 @@ data class HomeUiState(
     val isEpisodesLoading: Boolean = false,
     val episodesError: String? = null,
     val freeStorageGb: Long = 0L,
-    val totalStorageGb: Long = 0L
+    val totalStorageGb: Long = 0L,
+    // Trending-on-open row (feature request: show what's trending when the
+    // app opens, scrolling left to right). Fetched once per app process; a
+    // failed fetch shows a Retry affordance instead of silently hiding it.
+    val trending: List<ShowCard> = emptyList(),
+    val isTrendingLoading: Boolean = false,
+    val trendingFailed: Boolean = false
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -45,6 +51,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var searchJob: Job? = null
     private var debounceJob: Job? = null
     private var episodesJob: Job? = null
+    private var trendingJob: Job? = null
     private var searchSequence = 0L
     // Last query+filter actually launched; an identical search while it is
     // still running is a duplicate keystroke, not a new request.
@@ -132,6 +139,36 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         refreshStorageInfo()
+        loadTrending()
+    }
+
+    /** One fetch per app process: the row is for the moment of opening, and
+     *  re-fetching on every tab return would burn data for near-identical
+     *  cards. force=true (Retry tap) always re-crawls. */
+    fun loadTrending(force: Boolean = false) {
+        if (trendingJob?.isActive == true) return
+        if (!force && _uiState.value.trending.isNotEmpty()) return
+        trendingJob = viewModelScope.launch {
+            _uiState.update { it.copy(isTrendingLoading = true, trendingFailed = false) }
+            com.anonrode.downloader.util.DebugLog.user("trending: fetch started")
+            try {
+                val items = withContext(Dispatchers.IO) {
+                    com.anonrode.downloader.providers.TrendingFeed.fetch()
+                }
+                _uiState.update {
+                    it.copy(
+                        trending = items,
+                        isTrendingLoading = false,
+                        trendingFailed = items.isEmpty()
+                    )
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                com.anonrode.downloader.util.DebugLog.error("trending: fetch failed ${e.message}")
+                _uiState.update { it.copy(isTrendingLoading = false, trendingFailed = true) }
+            }
+        }
     }
 
     fun onQueryChanged(newQuery: String) {
