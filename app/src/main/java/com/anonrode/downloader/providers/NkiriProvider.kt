@@ -9,6 +9,7 @@ import com.anonrode.downloader.data.net.HttpClient
 import com.anonrode.downloader.resolvers.ResolverRegistry
 import org.jsoup.Jsoup
 import java.net.URI
+import java.net.URLDecoder
 import java.net.URLEncoder
 
 object NkiriProvider : SiteProvider {
@@ -199,8 +200,17 @@ object NkiriProvider : SiteProvider {
     }
 
     override suspend fun resolveEpisode(episodeUrl: String, quality: String): DownloadRecipe {
-        val direct = ResolverRegistry.resolve(episodeUrl, quality) ?: episodeUrl
-        val isSingleSocket = episodeUrl.contains("nkiserv.com") || direct.contains(".m3u8")
+        // nkiri's download-manager buttons now point at /dl/download-<id>/?redirect=
+        // <locker> wrapper pages that answer 404 site-side (live-verified
+        // 2026-09-11: bare path, no-slash, raw and encoded ?redirect=, ?url= —
+        // every variant 404s, with post referer and cookies set). The locker
+        // URL is right there in the redirect= parameter: decode it and resolve
+        // THAT. The sweep already stores these hrefs (the encoded query
+        // contains the locker host, so canResolve matched by substring) — the
+        // resolver just never reached the target behind the dead wrapper.
+        val effective = unwrapDownloadManagerRedirect(episodeUrl)
+        val direct = ResolverRegistry.resolve(effective, quality) ?: effective
+        val isSingleSocket = effective.contains("nkiserv.com") || episodeUrl.contains("nkiserv.com") || direct.contains(".m3u8")
         val isHls = direct.contains(".m3u8") || direct.contains("manifest")
 
         return DownloadRecipe(
@@ -209,6 +219,21 @@ object NkiriProvider : SiteProvider {
             backend = if (isHls) "yt-dlp" else "aria2c",
             parallelSockets = 16
         )
+    }
+
+    /** Unwraps the nkiri download-manager wrapper:
+     *  `.../dl/download-17827/?redirect=https%3A%2F%2Fdownloadwella.com%2F...`
+     *  → `https://downloadwella.com/...`. Returns the input unchanged when the
+     *  parameter is absent or the decoded target isn't an http URL. */
+    private fun unwrapDownloadManagerRedirect(url: String): String {
+        val m = Regex("""/dl/[^?]*\?.*?[?&]redirect=([^&]+)""", RegexOption.IGNORE_CASE).find(url)
+            ?: return url
+        val target = try {
+            URLDecoder.decode(m.groupValues[1], "UTF-8")
+        } catch (_: Exception) {
+            null
+        }
+        return if (!target.isNullOrBlank() && target.startsWith("http", ignoreCase = true)) target else url
     }
 
     /** S02E05 season episode numbers from locker filenames. Private mirrors of
