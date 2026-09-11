@@ -6,8 +6,10 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.PaddingValues
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -402,18 +404,17 @@ fun HomeScreen(
                     Text("No results found for \"${uiState.query}\"", color = TextMuted, fontSize = 14.sp)
                 }
             } else if (uiState.searchResults.isEmpty()) {
-                Box(
-                    modifier = Modifier.fillMaxWidth().weight(1f),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Icon(Icons.Rounded.Search, contentDescription = null, tint = TextMuted, modifier = Modifier.size(48.dp))
-                        Spacer(modifier = Modifier.height(Spacing.md))
-                        Text("Search dramas, anime, torrents or paste a link", color = TextSecondary, fontSize = 14.sp)
-                        Spacer(modifier = Modifier.height(Spacing.xs))
-                        Text("Narrow the hunt with a site filter above", color = TextMuted, fontSize = 12.sp)
-                    }
-                }
+                // Blank-query state: the trending row IS the landing content
+                // (feature request: show what's trending on open, scrolling
+                // left to right, not top to bottom).
+                TrendingSection(
+                    items = uiState.trending,
+                    isLoading = uiState.isTrendingLoading,
+                    failed = uiState.trendingFailed,
+                    showPosters = viewModel.engine.showPostersInResults,
+                    onRetry = { viewModel.loadTrending(force = true) },
+                    onOpen = { viewModel.openEpisodeDrawer(it) }
+                )
             } else {
                 LazyColumn(
                     verticalArrangement = Arrangement.spacedBy(Spacing.md),
@@ -441,6 +442,161 @@ fun HomeScreen(
 
         // Torrent selective-file picker (engine -> IO thread -> this dialog)
         TorrentFilePickerHost()
+    }
+}
+
+/**
+ * Trending-on-open section (feature request): horizontally scrolling poster
+ * row — LEFT TO RIGHT, not a vertical list, per the user's explicit wording.
+ * Occupies the blank-query landing area; hides the moment a search starts.
+ */
+@Composable
+private fun TrendingSection(
+    items: List<ShowCard>,
+    isLoading: Boolean,
+    failed: Boolean,
+    showPosters: Boolean,
+    onRetry: () -> Unit,
+    onOpen: (ShowCard) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .weight(1f)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                Icons.Rounded.LocalFireDepartment,
+                contentDescription = null,
+                tint = AccentPrimary,
+                modifier = Modifier.size(18.dp)
+            )
+            Spacer(modifier = Modifier.width(Spacing.xs))
+            Text(
+                text = "Trending Now",
+                color = TextPrimary,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.weight(1f)
+            )
+            if (failed && items.isEmpty() && !isLoading) {
+                Text(
+                    text = "Retry",
+                    color = AccentPrimary,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(Radius.full))
+                        .clickable { onRetry() }
+                        .padding(horizontal = Spacing.sm, vertical = Spacing.xs)
+                )
+            }
+        }
+        Spacer(modifier = Modifier.height(Spacing.md))
+        when {
+            isLoading && items.isEmpty() -> {
+                Box(
+                    modifier = Modifier.fillMaxWidth().height(210.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        CircularProgressIndicator(color = AccentPrimary, strokeWidth = 2.dp)
+                        Spacer(modifier = Modifier.height(Spacing.md))
+                        Text("Loading trending...", color = TextSecondary, fontSize = 13.sp)
+                    }
+                }
+            }
+            items.isEmpty() -> {
+                Box(
+                    modifier = Modifier.fillMaxWidth().height(210.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text("Trending is unavailable right now", color = TextSecondary, fontSize = 14.sp)
+                        Spacer(modifier = Modifier.height(Spacing.xs))
+                        Text("Tap Retry to load it again", color = TextMuted, fontSize = 12.sp)
+                    }
+                }
+            }
+            else -> {
+                // Horizontal carousel: LazyRow scrolls left↔right by design.
+                LazyRow(
+                    horizontalArrangement = Arrangement.spacedBy(Spacing.md),
+                    contentPadding = PaddingValues(end = Spacing.lg),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    items(items, key = { it.site + "|" + it.url }) { show ->
+                        TrendingCard(
+                            show = show,
+                            showPosters = showPosters,
+                            onClick = { onOpen(show) }
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(Spacing.lg))
+                Text(
+                    text = "Tap a title to pick episodes · or search above",
+                    color = TextMuted,
+                    fontSize = 12.sp
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun TrendingCard(
+    show: ShowCard,
+    showPosters: Boolean,
+    onClick: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .width(124.dp)
+            .clip(RoundedCornerShape(Radius.md))
+            .clickable { onClick() }
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(176.dp)
+                .clip(RoundedCornerShape(Radius.md))
+                .background(tileColor(show.title))
+                .border(1.dp, BorderHairline, RoundedCornerShape(Radius.md))
+        ) {
+            if (showPosters && show.posterUrl.isNotBlank()) {
+                SubcomposeAsyncImage(
+                    model = show.posterUrl,
+                    contentDescription = show.title,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize(),
+                    loading = { InitialGlyph(show.title) },
+                    error = { InitialGlyph(show.title) }
+                )
+            } else {
+                InitialGlyph(show.title)
+            }
+        }
+        Spacer(modifier = Modifier.height(Spacing.xs))
+        Text(
+            text = show.title,
+            color = TextPrimary,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+            lineHeight = 17.sp,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis
+        )
+        Spacer(modifier = Modifier.height(2.dp))
+        Text(
+            text = show.site.uppercase(),
+            color = AccentPrimary,
+            fontSize = 10.sp,
+            fontWeight = FontWeight.Bold
+        )
     }
 }
 
