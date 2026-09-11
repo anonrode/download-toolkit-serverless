@@ -1005,20 +1005,43 @@ object DownloadwellaResolver : BaseResolver {
             // only; the shared client stays strict for everything else.
             val html = HttpClient.getText(url, referer = url, permissive = true) ?: return null
             val doc = Jsoup.parse(html, url)
-            val formEl = doc.selectFirst("form") ?: return null
+            val formEl = doc.selectFirst("form")
 
-            val formAction = formEl.attr("abs:action").ifBlank { url }
+            // Movie pages of this locker family sometimes render with NO form
+            // at all (live-verified 2026-09-11: downloadwella.com/9mktxnflcqtc/
+            // …DC.(THENKIRI.COM).mkv.html?preview has zero <form>/<input>
+            // tags, while series pages carry the classic F1 form). The server
+            // still cracks them when the standard F1 body is POSTed with the
+            // file id taken from the URL's first path segment — so fall back
+            // to the synthetic body instead of returning null; the response
+            // scan below finds the /d/ direct anchor either way.
+            val formAction = formEl?.attr("abs:action").orEmpty().ifBlank { url }
 
             // LIVE (2026-08): the server rejects the POST when method_free is
             // forced to "Free Download" — submit every form input verbatim
             // (including method_free="" as rendered), exactly like a browser.
             val formBuilder = FormBody.Builder()
             var hasInputs = false
-            for (inp in formEl.select("input[name]")) {
-                formBuilder.add(inp.attr("name"), inp.attr("value"))
-                hasInputs = true
+            if (formEl != null) {
+                for (inp in formEl.select("input[name]")) {
+                    formBuilder.add(inp.attr("name"), inp.attr("value"))
+                    hasInputs = true
+                }
             }
-            if (!hasInputs) return null
+            if (!hasInputs) {
+                val fileId = try {
+                    URI(url).path.trim('/').split('/').firstOrNull { it.isNotBlank() }
+                } catch (_: Exception) {
+                    null
+                }
+                if (fileId.isNullOrBlank()) return null
+                formBuilder.add("op", "download2")
+                formBuilder.add("id", fileId)
+                formBuilder.add("rand", "")
+                formBuilder.add("referer", url)
+                formBuilder.add("method_free", "")
+                formBuilder.add("method_premium", "")
+            }
 
             val form = formBuilder.build()
             val req = Request.Builder()
