@@ -611,7 +611,11 @@ object VidsrcResolver : BaseResolver {
             val om = ORIGIN_PATTERN.matcher(streamUrl)
             val origin = if (om.find()) om.group() else return null
             val token = HttpClient.getText("$origin/generate.php")?.trim().orEmpty()
-            if (token.isEmpty()) return streamUrl
+            // Empty means generate.php refused us (rate-limit/window) — the
+            // tokenless master is a guaranteed CDN 401, so fail this candidate
+            // outright and let another mirror win instead of handing the player
+            // a URL it cannot open.
+            if (token.isEmpty()) return null
             return if (streamUrl.contains("__TOKEN__")) streamUrl.replace("__TOKEN__", token)
             else streamUrl + (if (streamUrl.contains("?")) "&" else "?") + "token=$token"
         } catch (_: Exception) {}
