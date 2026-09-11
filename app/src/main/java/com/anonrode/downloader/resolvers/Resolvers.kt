@@ -684,6 +684,42 @@ object VikingFileResolver : BaseResolver {
         return low.contains("vikingfile.com") && !low.endsWith(".mp4") && !low.endsWith(".mkv") && !low.endsWith(".m3u8")
     }
 
+    // The Sep-2 hardening blanket-rejected every redirect whose Location sat
+    // on an R2 storage host, because the original misdirect (an unsigned
+    // storage URL) answered 401 and burned 3MB bodies. vikingfile has since
+    // made the presigned R2 URL the REAL serving path for /d/ links
+    // (live-verified: 302 → R2 → 206 video/matroska, MKV magic), so the
+    // hostname alone is no longer evidence of a misdirect. Decide by
+    // probing, not by name: accept the Location only when it actually
+    // serves media bytes (200/206, non-empty, non-HTML). A 401/HTML target
+    // — the original misdirect — still fails here and is rejected.
+    private fun probeStorageLocation(loc: String): String? {
+        val target = HttpClient.safeUrl(loc)
+        val client = HttpClient.shared.newBuilder()
+            .followRedirects(false)
+            .followSslRedirects(false)
+            .build()
+        val req = Request.Builder()
+            .url(target)
+            .header("User-Agent", HttpClient.DEFAULT_UA)
+            .header("Range", "bytes=0-0")
+            .build()
+        client.newCall(req).execute().use { res ->
+            val cl = res.header("Content-Length")?.toLongOrNull() ?: 0L
+            val ct = res.header("Content-Type")?.lowercase() ?: ""
+            if ((res.code == 200 || res.code == 206) && cl > 0 && !ct.startsWith("text/html")) {
+                com.anonrode.downloader.util.DebugLog.resolve(
+                    "VikingFileResolver: storage Location serves media ($res.code, ct=$ct, size=$cl) — accepting as direct file"
+                )
+                return target
+            }
+            com.anonrode.downloader.util.DebugLog.resolve(
+                "VikingFileResolver: rejected misdirect to storage backend (probe $res.code, ct=$ct, size=$cl): ${loc.take(120)}"
+            )
+            return null
+        }
+    }
+
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
         try {
             // vikingfile.com has TWO URL shapes:
@@ -713,10 +749,11 @@ object VikingFileResolver : BaseResolver {
             // The FIX: do a no-redirect probe. Three outcomes:
             //   a) 200/206 with Content-Length > 0 → the URL IS the file
             //      (already on the /d/... path). Return as-is.
-            //   b) 302 with Location → the URL is the /f/<id> redirector.
-            //      Follow the Location header (which points to /d/<token>/
-            //      <file>) and return that. This is the standard locker
-            //      flow — the same pattern wildshare uses with ?pt=...
+            //   b) 302 with Location → the URL is a token-mint redirector.
+            //      Follow the Location header and return that. Today the
+            //      /d/<token>/<file> hop itself 302s to a PRESIGNED R2 URL
+            //      that serves the bytes — see probeStorageLocation below
+            //      for how a storage Location is accepted vs rejected.
             //   c) HTML page that doesn't redirect → the URL is a true
             //      landing page with embedded player (rare). Try the
             //      legacy window.location regex as a final fallback.
@@ -754,10 +791,7 @@ object VikingFileResolver : BaseResolver {
                         if (lowLoc.contains("r2.cloudflarestorage.com") ||
                             lowLoc.contains(".r2.dev/") ||
                             lowLoc.contains("cloudflarestorage.com/")) {
-                            com.anonrode.downloader.util.DebugLog.resolve(
-                                "VikingFileResolver: rejected misdirect to storage backend: ${loc.take(120)}"
-                            )
-                            return null
+                            return probeStorageLocation(loc)
                         }
                         com.anonrode.downloader.util.DebugLog.resolve(
                             "VikingFileResolver: followed $res.code → ${loc.take(120)}"
