@@ -21,20 +21,34 @@ class DownloadRepository {
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true; isLenient = true }
     private var stateFile: File? = null
+    // Set by initPersistence; used to mirror every persist into public
+    // Documents so the history survives an uninstall (see HistoryBackup).
+    @Volatile private var appContext: android.content.Context? = null
 
     private val _tasks = MutableStateFlow<List<DownloadTask>>(emptyList())
     val tasks: StateFlow<List<DownloadTask>> = _tasks.asStateFlow()
 
-    fun initPersistence(dir: File) {
+    fun initPersistence(dir: File, context: android.content.Context? = null) {
         if (stateFile != null) return
         val f = File(dir, "download_tasks.json")
         stateFile = f
+        appContext = context?.applicationContext
         try {
             if (f.exists()) {
                 val raw = f.readText()
                 if (raw.isNotBlank()) {
                 _tasks.value = json.decodeFromString<List<DownloadTask>>(raw)
                     .map { parkForRestore(it) }
+                }
+            }
+            if (_tasks.value.isEmpty()) {
+                // Fresh install (filesDir wiped, e.g. by an uninstall) but a
+                // Documents mirror exists from before: import it, and the
+                // persist() below re-syncs the private file immediately.
+                val mirrored = appContext?.let { HistoryBackup.load(it) }
+                if (!mirrored.isNullOrBlank()) {
+                    _tasks.value = json.decodeFromString<List<DownloadTask>>(mirrored).map { parkForRestore(it) }
+                    persist()
                 }
             }
         } catch (_: Throwable) {
@@ -54,6 +68,9 @@ class DownloadRepository {
                     val tmp = File(f.parentFile, "${f.name}.tmp")
                     tmp.writeText(encoded)
                     tmp.renameTo(f)
+                    // Mirror only on meaningful writes (this runs on status
+                    // transitions, adds, removes — not per progress tick).
+                    appContext?.let { HistoryBackup.save(it, encoded) }
                 } catch (_: Throwable) {}
             }
         }

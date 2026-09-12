@@ -25,7 +25,7 @@ class AnonApp : Application(), ImageLoaderFactory {
     override fun onCreate() {
         super.onCreate()
         instance = this
-        repository.initPersistence(filesDir)
+        repository.initPersistence(filesDir, this)
         com.anonrode.downloader.util.DebugLog.init(this)
         // Load cached scraper rules (domain fixes / dynamic providers) so a
         // manual sync in Settings survives app restarts.
