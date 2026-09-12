@@ -38,6 +38,28 @@ object TrendingFeed {
         RegexOption.IGNORE_CASE
     )
 
+    // ---- download-link gate -------------------------------------------------
+    // The feeds occasionally carry stub posts — title, poster, no download
+    // links anywhere on the page (live-verified 2026-09-11: nkiri's "DANG!
+    // S01" and "One Night Only (2026)": the rendered post body has zero
+    // locker URLs). Tapping one opens an empty drawer. The body HTML we
+    // already receive (WP-REST content.rendered / RSS content:encoded)
+    // carries those same URLs, so gating on it costs zero extra requests.
+    // The markers mirror the providers' own locker criteria. When NO item
+    // from a site matches — a future locker host this list doesn't know
+    // yet — the ungated list is kept: an all-empty row is worse than a
+    // couple of stub cards.
+    private val DOWNLOAD_MARKERS = listOf(
+        "/dl-", "downloadwella.com", "wetafiles.com", "loadedfiles", "nkiserv.com",
+        "vikingfile", "lulacloud", "waffi", "sdm_downloads", "np-downloader", "wildshare"
+    )
+
+    private fun hasDownloadLink(content: String): Boolean {
+        if (content.isBlank()) return false
+        val low = content.lowercase()
+        return DOWNLOAD_MARKERS.any { low.contains(it) }
+    }
+
     suspend fun fetch(): List<ShowCard> = coroutineScope {
         val perSite = listOf(
             async { withTimeoutOrNull(TIMEOUT_MS) { fetchWpRest("naijavault") } ?: emptyList() },
@@ -79,6 +101,7 @@ object TrendingFeed {
         val url = "$base/wp-json/wp/v2/posts?per_page=$PER_SITE_LIMIT&_embed=1"
         val json = HttpClient.getText(url, referer = "$base/", tag = "trending") ?: return emptyList()
         val out = mutableListOf<ShowCard>()
+        val noLinks = mutableListOf<ShowCard>()
         try {
             val array = org.json.JSONArray(json)
             for (i in 0 until array.length()) {
@@ -94,11 +117,13 @@ object TrendingFeed {
                     }
                 }
                 if (title.isNotBlank() && link.isNotBlank()) {
-                    out.add(ShowCard(title = title, url = link, posterUrl = poster, site = site))
+                    val card = ShowCard(title = title, url = link, posterUrl = poster, site = site)
+                    val content = item.optJSONObject("content")?.optString("rendered") ?: ""
+                    if (hasDownloadLink(content)) out.add(card) else noLinks.add(card)
                 }
             }
         } catch (_: Exception) {}
-        return out
+        return if (out.isEmpty()) noLinks else out
     }
 
     /** WordPress front-page RSS: latest posts, poster scraped from the
@@ -108,6 +133,7 @@ object TrendingFeed {
         if (base.isBlank()) return emptyList()
         val xml = HttpClient.getText("$base/feed/", referer = "$base/", tag = "trending") ?: return emptyList()
         val out = mutableListOf<ShowCard>()
+        val noLinks = mutableListOf<ShowCard>()
         try {
             val doc = Jsoup.parse(xml, "", org.jsoup.parser.Parser.xmlParser())
             for (item in doc.select("item")) {
@@ -121,10 +147,11 @@ object TrendingFeed {
                     RegexOption.IGNORE_CASE
                 ).find(desc)?.groupValues?.get(1) ?: ""
                 if (title.isNotBlank() && link.isNotBlank() && !NAV_GARBAGE.containsMatchIn(link)) {
-                    out.add(ShowCard(title = title, url = link, posterUrl = poster, site = site))
+                    val card = ShowCard(title = title, url = link, posterUrl = poster, site = site)
+                    if (hasDownloadLink(desc)) out.add(card) else noLinks.add(card)
                 }
             }
         } catch (_: Exception) {}
-        return out.take(PER_SITE_LIMIT)
+        return (if (out.isEmpty()) noLinks else out).take(PER_SITE_LIMIT)
     }
 }
