@@ -17,6 +17,7 @@ object RocksProvider : SiteProvider {
 
     override suspend fun search(query: String): List<ShowCard> {
         val results = mutableListOf<ShowCard>()
+        val noLinks = mutableListOf<ShowCard>()
         try {
             val encoded = URLEncoder.encode(query, "UTF-8")
             val rssUrl = "$mainUrl/search/$encoded/feed/rss2/"
@@ -36,21 +37,27 @@ object RocksProvider : SiteProvider {
                     .find(desc)?.groupValues?.get(1) ?: ""
 
                 if (title.isNotBlank() && link.isNotBlank()) {
-                    results.add(
-                        ShowCard(
-                            title = title,
-                            url = link,
-                            posterUrl = poster,
-                            site = name,
-                            category = "Nollywood & Movies"
-                        )
+                    val card = ShowCard(
+                        title = title,
+                        url = link,
+                        posterUrl = poster,
+                        site = name,
+                        category = "Nollywood & Movies"
                     )
+                    // The feed's content:encoded already carries the post body
+                    // with the locker URLs (this provider's own loadEpisodes
+                    // allowlist — loadedfiles/downloadwella/wetafiles/waffi/
+                    // vikingfile/lulacloud — is a subset of the gate markers).
+                    // Zero extra requests; live-verified 2026-09-11: 22/22
+                    // items pass today, the gate only drops future stubs.
+                    if (DownloadLinkGate.hasDownloadLink(desc)) results.add(card) else noLinks.add(card)
                 }
             }
         } catch (_: Exception) {}
 
+        // All-dropped (unknown locker family) -> keep the ungated list.
         // Prioritize full packages / early episodes first
-        return results.sortedBy { card ->
+        return (if (results.isEmpty()) noLinks else results).sortedBy { card ->
             val t = card.title
             when {
                 Regex("""\b(complete|full|season\s*\d+\s*\(episode\s*1\s*-\s*\d+\)|1\s*-\s*\d+)\b""", RegexOption.IGNORE_CASE).containsMatchIn(t) -> 0
