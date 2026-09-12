@@ -7,6 +7,10 @@ import com.anonrode.downloader.data.models.ShowCard
 import com.anonrode.downloader.data.models.ShowDetails
 import com.anonrode.downloader.data.net.HttpClient
 import com.anonrode.downloader.resolvers.ResolverRegistry
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import org.jsoup.Jsoup
 import java.net.URI
 import java.net.URLEncoder
@@ -71,7 +75,24 @@ object DramaRainProvider : SiteProvider {
                 val base = mainUrl.trimEnd('/')
                 val candidateUrls = suffixes.map { "$base/$slug$it/" } + listOf("$base/drama/$slug/")
 
-                for (url in candidateUrls) {
+                // 8 slug candidates per miss, each its own page. The old
+                // loop fetched them SEQUENTIALLY with getText — a dead or
+                // slow host blocks on the shared client's connect/read
+                // timeouts, and the caller's withTimeoutOrNull cannot
+                // interrupt a blocking execute(), so one query could pin
+                // its search worker for tens of seconds (a "search is
+                // slow" report contributor). Two-stage instead: parallel
+                // 3s liveness probes (call-timeout bounded; a 404 costs
+                // one round trip and no body), then page fetches only for
+                // candidates that are alive — in list priority order.
+                val alive = coroutineScope {
+                    candidateUrls.map { url ->
+                        async(Dispatchers.IO) {
+                            if (HttpClient.probe(url, referer = "$mainUrl/", timeoutMs = 3_000L, tag = "search")) url else null
+                        }
+                    }.awaitAll().filterNotNull().toSet()
+                }
+                for (url in candidateUrls.filter { it in alive }) {
                     val directHtml = HttpClient.getText(url, tag = "search") ?: continue
                     val doc = Jsoup.parse(directHtml, url)
                     val title = doc.selectFirst("h1.entry-title, h1")?.text()?.trim() ?: continue
