@@ -465,58 +465,149 @@ fun EpisodeRow(
     onToggle: () -> Unit,
     onDownloadSingle: () -> Unit
 ) {
-    Row(
+    // Feature #26: details preview BEFORE enqueue — an info toggle that shows
+    // which locker will serve this episode and the filename its URL carries,
+    // so a wrong-quality or dead-looking link is visible before a task is
+    // queued. Zero network: every field is parsed from the URL already in
+    // hand — the real resolve still happens exactly once, at engine start.
+    var expanded by remember { mutableStateOf(false) }
+    val (lockerHost, lockerFile) = remember(episode.url) { lockerPreview(episode.url) }
+
+    Column(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(Radius.md))
-            .background(if (isSelected) SurfaceCard else Color.Transparent)
+            .background(if (isSelected || expanded) SurfaceCard else Color.Transparent)
             .border(
                 1.dp,
                 if (isSelected) AccentPrimary.copy(alpha = 0.5f) else BorderHairline.copy(alpha = 0.4f),
                 RoundedCornerShape(Radius.md)
             )
-            .clickable(onClick = onToggle)
-            .padding(horizontal = Spacing.md, vertical = Spacing.sm),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
     ) {
         Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.weight(1f)
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onToggle)
+                .padding(horizontal = Spacing.md, vertical = Spacing.sm),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Checkbox(
-                checked = isSelected,
-                onCheckedChange = { onToggle() },
-                colors = CheckboxDefaults.colors(
-                    checkedColor = AccentPrimary,
-                    uncheckedColor = TextMuted,
-                    checkmarkColor = BackgroundDark
-                ),
-                modifier = Modifier.size(24.dp)
-            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.weight(1f)
+            ) {
+                Checkbox(
+                    checked = isSelected,
+                    onCheckedChange = { onToggle() },
+                    colors = CheckboxDefaults.colors(
+                        checkedColor = AccentPrimary,
+                        uncheckedColor = TextMuted,
+                        checkmarkColor = BackgroundDark
+                    ),
+                    modifier = Modifier.size(24.dp)
+                )
 
-            Spacer(modifier = Modifier.width(Spacing.sm))
+                Spacer(modifier = Modifier.width(Spacing.sm))
 
-            Text(
-                text = episode.title,
-                color = if (isSelected) TextPrimary else TextSecondary,
-                fontSize = 13.sp,
-                fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
+                Text(
+                    text = episode.title,
+                    color = if (isSelected) TextPrimary else TextSecondary,
+                    fontSize = 13.sp,
+                    fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            IconButton(
+                onClick = { expanded = !expanded },
+                modifier = Modifier.size(40.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Info,
+                    contentDescription = "Preview details",
+                    tint = if (expanded) AccentPrimary else TextMuted,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+
+            IconButton(
+                onClick = onDownloadSingle,
+                modifier = Modifier.size(48.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.DownloadForOffline,
+                    contentDescription = "Download Single",
+                    tint = if (isSelected) AccentPrimary else TextMuted,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
         }
 
-        IconButton(
-            onClick = onDownloadSingle,
-            modifier = Modifier.size(48.dp)
-        ) {
-            Icon(
-                imageVector = Icons.Rounded.DownloadForOffline,
-                contentDescription = "Download Single",
-                tint = if (isSelected) AccentPrimary else TextMuted,
-                modifier = Modifier.size(20.dp)
-            )
+        AnimatedVisibility(visible = expanded) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = Spacing.md, end = Spacing.md, bottom = Spacing.sm)
+            ) {
+                Row(horizontalArrangement = Arrangement.spacedBy(Spacing.sm)) {
+                    PreviewChip(label = "locker", value = lockerHost)
+                    if (lockerFile.isNotBlank()) {
+                        PreviewChip(
+                            label = "file",
+                            value = if (lockerFile.length > 34) lockerFile.takeLast(34) else lockerFile,
+                            modifier = Modifier.weight(1f, fill = false)
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = "Queue now, or check this link on a browser first.",
+                    color = TextMuted,
+                    fontSize = 10.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
         }
+    }
+}
+
+/** Parse (host, file name) from a locker URL without touching the network.
+ *  The name comes from the last path segment; query strings (tokens, ?pt=,
+ *  &e=…) are never part of the name. */
+private fun lockerPreview(url: String): Pair<String, String> {
+    val host = try {
+        java.net.URI(url.substringBefore('#')).host ?: "—"
+    } catch (_: Exception) {
+        url.substringAfter("://").substringBefore('/').substringBefore(':').ifBlank { "—" }
+    }
+    val seg = url.substringBefore('?').substringBefore('#').substringAfterLast('/')
+    val name = try {
+        java.net.URLDecoder.decode(seg, "UTF-8")
+    } catch (_: Exception) {
+        seg
+    }
+    return host to name
+}
+
+@Composable
+private fun PreviewChip(label: String, value: String, modifier: Modifier = Modifier) {
+    Row(
+        modifier = modifier
+            .clip(RoundedCornerShape(Radius.sm))
+            .background(BackgroundDark.copy(alpha = 0.5f))
+            .padding(horizontal = Spacing.sm, vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        Text(label.uppercase(), color = TextMuted, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+        Text(
+            value,
+            color = TextSecondary,
+            fontSize = 11.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
     }
 }
