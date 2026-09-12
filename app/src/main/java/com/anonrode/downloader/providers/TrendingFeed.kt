@@ -38,28 +38,6 @@ object TrendingFeed {
         RegexOption.IGNORE_CASE
     )
 
-    // ---- download-link gate -------------------------------------------------
-    // The feeds occasionally carry stub posts — title, poster, no download
-    // links anywhere on the page (live-verified 2026-09-11: nkiri's "DANG!
-    // S01" and "One Night Only (2026)": the rendered post body has zero
-    // locker URLs). Tapping one opens an empty drawer. The body HTML we
-    // already receive (WP-REST content.rendered / RSS content:encoded)
-    // carries those same URLs, so gating on it costs zero extra requests.
-    // The markers mirror the providers' own locker criteria. When NO item
-    // from a site matches — a future locker host this list doesn't know
-    // yet — the ungated list is kept: an all-empty row is worse than a
-    // couple of stub cards.
-    private val DOWNLOAD_MARKERS = listOf(
-        "/dl-", "downloadwella.com", "wetafiles.com", "loadedfiles", "nkiserv.com",
-        "vikingfile", "lulacloud", "waffi", "sdm_downloads", "np-downloader", "wildshare"
-    )
-
-    private fun hasDownloadLink(content: String): Boolean {
-        if (content.isBlank()) return false
-        val low = content.lowercase()
-        return DOWNLOAD_MARKERS.any { low.contains(it) }
-    }
-
     suspend fun fetch(): List<ShowCard> = coroutineScope {
         val perSite = listOf(
             async { withTimeoutOrNull(TIMEOUT_MS) { fetchWpRest("naijavault") } ?: emptyList() },
@@ -119,7 +97,7 @@ object TrendingFeed {
                 if (title.isNotBlank() && link.isNotBlank()) {
                     val card = ShowCard(title = title, url = link, posterUrl = poster, site = site)
                     val content = item.optJSONObject("content")?.optString("rendered") ?: ""
-                    if (hasDownloadLink(content)) out.add(card) else noLinks.add(card)
+                    if (DownloadLinkGate.hasDownloadLink(content)) out.add(card) else noLinks.add(card)
                 }
             }
         } catch (_: Exception) {}
@@ -148,7 +126,7 @@ object TrendingFeed {
                 ).find(desc)?.groupValues?.get(1) ?: ""
                 if (title.isNotBlank() && link.isNotBlank() && !NAV_GARBAGE.containsMatchIn(link)) {
                     val card = ShowCard(title = title, url = link, posterUrl = poster, site = site)
-                    if (hasDownloadLink(desc)) out.add(card) else noLinks.add(card)
+                    if (DownloadLinkGate.hasDownloadLink(desc)) out.add(card) else noLinks.add(card)
                 }
             }
         } catch (_: Exception) {}
