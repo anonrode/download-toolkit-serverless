@@ -19,6 +19,7 @@ object NaijaVaultProvider : SiteProvider {
 
     override suspend fun search(query: String): List<ShowCard> {
         val results = mutableListOf<ShowCard>()
+        val noLinks = mutableListOf<ShowCard>()
         try {
             val encoded = URLEncoder.encode(query, "UTF-8")
             val url = "$mainUrl/wp-json/wp/v2/posts?search=$encoded&_embed=1"
@@ -42,22 +43,31 @@ object NaijaVaultProvider : SiteProvider {
                 }
 
                 if (link.isNotBlank() && title.isNotBlank()) {
-                    results.add(
-                        ShowCard(
-                            title = title,
-                            url = link,
-                            posterUrl = poster,
-                            site = name,
-                            category = "Nollywood & Series"
-                        )
+                    val card = ShowCard(
+                        title = title,
+                        url = link,
+                        posterUrl = poster,
+                        site = name,
+                        category = "Nollywood & Series"
                     )
+                    // Download-link gate (same zero-cost check trending uses):
+                    // this endpoint already returns content.rendered, so the
+                    // check is an in-memory string test on bytes we paid for
+                    // anyway — search stays exactly as fast. It drops posts
+                    // whose body carries no locker link: site-side stubs and
+                    // YouTube-watch embeds (yooyotvlive wrappers) that open
+                    // an empty drawer. If a whole batch misses the markers
+                    // (unknown future locker host) the ungated batch is
+                    // returned — no empty results page ever.
+                    val content = item.optJSONObject("content")?.optString("rendered") ?: ""
+                    if (DownloadLinkGate.hasDownloadLink(content)) results.add(card) else noLinks.add(card)
                 }
             }
         } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) throw e
             // silently ignore others
         }
-        return results
+        return if (results.isEmpty()) noLinks else results
     }
 
     override suspend fun loadEpisodes(showUrl: String): ShowDetails {
