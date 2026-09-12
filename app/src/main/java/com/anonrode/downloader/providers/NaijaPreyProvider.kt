@@ -17,6 +17,7 @@ object NaijaPreyProvider : SiteProvider {
 
     override suspend fun search(query: String): List<ShowCard> {
         val results = mutableListOf<ShowCard>()
+        val noLinks = mutableListOf<ShowCard>()
         try {
             val encoded = URLEncoder.encode(query, "UTF-8")
             val rssUrl = "$mainUrl/search/$encoded/feed/rss2/"
@@ -39,22 +40,28 @@ object NaijaPreyProvider : SiteProvider {
                     // /?$ so real episode posts like /download-episode-1-of-.../ are not dropped.
                     val isNavGarbage = Regex("""/(?:download-(?:movies|series|tv|film|episode)(?:-[a-z0-9]{1,4})?|series-download(?:-v\d+)?|downloader|how-to-download.*)/?$""", RegexOption.IGNORE_CASE)
                     if (isNavGarbage.containsMatchIn(link)) continue
-                    results.add(
-                        ShowCard(
-                            title = title,
-                            url = link,
-                            posterUrl = poster,
-                            site = name,
-                            category = "Nollywood & Series"
-                        )
+                    val card = ShowCard(
+                        title = title,
+                        url = link,
+                        posterUrl = poster,
+                        site = name,
+                        category = "Nollywood & Series"
                     )
+                    // The feed's content:encoded already carries the post body
+                    // with the sdm_download/wildshare link — gating on it costs
+                    // zero extra requests (live-verified 2026-09-11: 5/5 items
+                    // per query pass today; the gate only drops future stub
+                    // posts that publish a title with no link).
+                    if (DownloadLinkGate.hasDownloadLink(desc)) results.add(card) else noLinks.add(card)
                 }
             }
         } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) throw e
             // silently ignore others
         }
-        return results
+        // All-dropped (a locker family the gate doesn't know yet) -> keep the
+        // ungated list: an empty result row is worse than a few stub cards.
+        return if (results.isEmpty()) noLinks else results
     }
 
     override suspend fun loadEpisodes(showUrl: String): ShowDetails {
