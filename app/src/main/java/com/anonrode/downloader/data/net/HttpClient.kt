@@ -71,6 +71,29 @@ object HttpClient {
     }
 
     /**
+     * Value of a stored session cookie by name (most-recent match wins), for
+     * callers that must echo it in a header (Instagram's logged-out GraphQL
+     * rejects a POST whose X-CSRFToken does not equal the csrftoken cookie the
+     * jar auto-sends — see InstagramPhotoMuxer). Purely a read; no new surface
+     * for the resolver plane.
+     */
+    fun cookieValue(name: String, host: String? = null): String? {
+        fun domainMatches(cookieDomain: String, reqHost: String): Boolean {
+            val bare = cookieDomain.removePrefix(".")
+            return reqHost == bare || reqHost.endsWith(".$bare") || reqHost == cookieDomain
+        }
+        synchronized(cookies) {
+            for (i in cookies.indices.reversed()) {
+                val c = cookies[i]
+                if (c.name != name) continue
+                if (host != null && !domainMatches(c.domain, host)) continue
+                return c.value
+            }
+        }
+        return null
+    }
+
+    /**
      * Why the most recent getText() returned null. Every resolver funnels through
      * getText and swallows failures into null, so all 25 of them produce the same
      * opaque "Could not crack stream link". Recording the real cause (HTTP code or

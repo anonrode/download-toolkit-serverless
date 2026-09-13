@@ -395,6 +395,25 @@ object YoutubeDlDownloader {
                 cancellableRetryWait(2_000L * attempts)
             }
         }
+        // IG-1 fallback: an Instagram *photo-with-music* post produces NO video
+        // format, so every yt-dlp attempt above has already failed (fast — the
+        // extractor throws before any bytes move). yt-dlp will never download
+        // this shape (maintainer-declared out-of-scope), so mux cover+audio
+        // with the bundled ffmpeg instead. Strict fallback: only fires once
+        // yt-dlp has failed AND the URL is an Instagram post, so working
+        // videos and every other social site are untouched. A null return (not
+        // a photo+music, IG gated us, or encode failed) falls through to the
+        // original yt-dlp error below.
+        if (produced == null && isExtractorTask && InstagramPhotoMuxer.shortcodeFromUrl(sourceUrl) != null) {
+            com.anonrode.downloader.util.DebugLog.backend("task=$taskId yt-dlp exhausted on an Instagram post URL — trying photo+music muxer")
+            produced = InstagramPhotoMuxer.tryMux(
+                context = context,
+                sourceUrl = sourceUrl,
+                outDir = outDir,
+                taskId = taskId,
+                isCancelled = { !coroutineContext.isActive }
+            )
+        }
         if (produced == null && errors.isNotBlank()) {
             com.anonrode.downloader.util.DebugLog.error("task=$taskId yt-dlp failed after $attempts attempt(s): ${errors.toString().take(300)}")
             throw Exception("yt-dlp failed after $attempts attempt(s): ${errors.toString().trim()}")
