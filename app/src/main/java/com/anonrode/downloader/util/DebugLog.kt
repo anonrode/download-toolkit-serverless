@@ -146,7 +146,25 @@ object DebugLog {
      */
     fun crashLog(throwable: Throwable) {
         val dir = logDir ?: return
+        // The cause chain goes FIRST and is never truncated: the top-level
+        // trace of wrapper errors (ExceptionInInitializerError & friends) runs
+        // 30+ frames, and the old 2000-char cut dropped the "Caused by:" lines
+        // — the ONLY text naming the real root cause. Both v3.1.x regex crashes
+        // were diagnosed blind for exactly this reason.
+        val chain = StringBuilder()
+        run {
+            var c: Throwable? = throwable.cause
+            var depth = 0
+            while (c != null && c !== c.cause && depth < 8) {
+                chain.append("CAUSE ").append(depth + 1).append(": ")
+                    .append(c.javaClass.name).append(": ").append(c.message).append('\n')
+                for (f in c.stackTrace.take(8)) chain.append("    at ").append(f).append('\n')
+                c = c.cause
+                depth++
+            }
+        }
         val line = "${timeFormat.get().format(Date())} [ERROR] CRASH ${throwable.javaClass.name}: ${throwable.message}\n" +
+            chain.toString() +
             throwable.stackTraceToString().take(2000) + "\n"
         try {
             val f = targetFile(dir)
