@@ -691,33 +691,25 @@ object VikingFileResolver : BaseResolver {
     // (live-verified: 302 → R2 → 206 video/matroska, MKV magic), so the
     // hostname alone is no longer evidence of a misdirect. Decide by
     // probing, not by name: accept the Location only when it actually
-    // serves media bytes (200/206, non-empty, non-HTML). A 401/HTML target
+    // serves media bytes (see HttpClient.probeTerminal). A 401/HTML target
     // — the original misdirect — still fails here and is rejected.
+    // (Formerly a hand-copied no-redirect probe; unified onto probeTerminal
+    // so all terminal checks share ONE accept matrix, ONE timeout, and the
+    // cancellable in-flight registry — the old copy was raw execute(): not
+    // cancellable by pause and had no call timeout.)
     private fun probeStorageLocation(loc: String): String? {
         val target = HttpClient.safeUrl(loc)
-        val client = HttpClient.shared.newBuilder()
-            .followRedirects(false)
-            .followSslRedirects(false)
-            .build()
-        val req = Request.Builder()
-            .url(target)
-            .header("User-Agent", HttpClient.DEFAULT_UA)
-            .header("Range", "bytes=0-0")
-            .build()
-        client.newCall(req).execute().use { res ->
-            val cl = res.header("Content-Length")?.toLongOrNull() ?: 0L
-            val ct = res.header("Content-Type")?.lowercase() ?: ""
-            if ((res.code == 200 || res.code == 206) && cl > 0 && !ct.startsWith("text/html")) {
-                com.anonrode.downloader.util.DebugLog.resolve(
-                    "VikingFileResolver: storage Location serves media ($res.code, ct=$ct, size=$cl) — accepting as direct file"
-                )
-                return target
-            }
+        val tp = HttpClient.probeTerminal(target)
+        if (tp != null && tp.totalBytes != null) {
             com.anonrode.downloader.util.DebugLog.resolve(
-                "VikingFileResolver: rejected misdirect to storage backend (probe $res.code, ct=$ct, size=$cl): ${loc.take(120)}"
+                "VikingFileResolver: storage Location serves media (${tp.code}, ct=${tp.contentType}, size=${tp.totalBytes}) — accepting as direct file"
             )
-            return null
+            return target
         }
+        com.anonrode.downloader.util.DebugLog.resolve(
+            "VikingFileResolver: rejected misdirect to storage backend (probe=${tp?.code ?: "network-fail"}): ${loc.take(120)}"
+        )
+        return null
     }
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
@@ -761,44 +753,39 @@ object VikingFileResolver : BaseResolver {
             // No 3MB body fetch here. The whole exchange fits in headers
             // (~500 bytes) and a 1-byte probe body, so the resolver
             // cost is ~600 bytes per call — no data waste.
-            val noRedirectClient = HttpClient.shared.newBuilder()
-                .followRedirects(false)
-                .followSslRedirects(false)
-                .build()
-            val probeReq = Request.Builder()
-                .url(HttpClient.safeUrl(url))
-                .header("User-Agent", HttpClient.DEFAULT_UA)
-                .header("Referer", "https://www.naijavault.com/")
-                .header("Range", "bytes=0-0")
-                .build()
-            noRedirectClient.newCall(probeReq).execute().use { res ->
-                // Case (a): the URL is already the direct file
-                if (res.code == 200 || res.code == 206) {
-                    val cl = res.header("Content-Length")?.toLongOrNull() ?: 0L
-                    val ct = res.header("Content-Type")?.lowercase() ?: ""
-                    if (cl > 0 && !ct.startsWith("text/html")) {
-                        com.anonrode.downloader.util.DebugLog.resolve(
-                            "VikingFileResolver: $url is the direct file (Range probe $res.code, size=$cl) — returning as-is"
-                        )
-                        return url
-                    }
+            // Unified terminal gate (HttpClient.probeTerminal) — replaces the
+            // old inline no-redirect copy so ALL terminal checks share one
+            // accept matrix, one timeout, and the cancellable registry.
+            // Failure semantics preserved: the old code let a network throw
+            // skip everything (return null) — it did NOT fall through to (c),
+            // so a null probe keeps that behavior.
+            val tp = HttpClient.probeTerminal(url, referer = "https://www.naijavault.com/")
+                ?: return null
+            // Case (a): the URL is already the direct file
+            if (tp.totalBytes != null) {
+                com.anonrode.downloader.util.DebugLog.resolve(
+                    "VikingFileResolver: $url is the direct file (Range probe ${tp.code}, size=${tp.totalBytes}) — returning as-is"
+                )
+                return url
+            }
+            // Case (b): the URL is a token-mint redirector
+            val rawLoc = tp.location
+            if (tp.code in 301..308 && !rawLoc.isNullOrBlank()) {
+                // A 3xx Location may be RELATIVE ("Location: /d/<tok>/<f>.mkv")
+                // — the old copy fed it to OkHttp/probes raw, which only worked
+                // because vikingfile answers with absolute Locations. Absolutize
+                // explicitly so relative hops resolve too.
+                val loc = HttpClient.safeResolveUri(url, rawLoc)
+                val lowLoc = loc.lowercase()
+                if (lowLoc.contains("r2.cloudflarestorage.com") ||
+                    lowLoc.contains(".r2.dev/") ||
+                    lowLoc.contains("cloudflarestorage.com/")) {
+                    return probeStorageLocation(loc)
                 }
-                // Case (b): the URL is a token-mint redirector
-                if (res.code in 301..308) {
-                    val loc = res.header("Location")
-                    if (!loc.isNullOrBlank()) {
-                        val lowLoc = loc.lowercase()
-                        if (lowLoc.contains("r2.cloudflarestorage.com") ||
-                            lowLoc.contains(".r2.dev/") ||
-                            lowLoc.contains("cloudflarestorage.com/")) {
-                            return probeStorageLocation(loc)
-                        }
-                        com.anonrode.downloader.util.DebugLog.resolve(
-                            "VikingFileResolver: followed $res.code → ${loc.take(120)}"
-                        )
-                        return HttpClient.safeUrl(loc)
-                    }
-                }
+                com.anonrode.downloader.util.DebugLog.resolve(
+                    "VikingFileResolver: followed ${tp.code} → ${loc.take(120)}"
+                )
+                return HttpClient.safeUrl(loc)
             }
             // Case (c): the URL is a true landing page. Try the legacy
             // window.location regex as a last resort.

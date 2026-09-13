@@ -132,6 +132,29 @@ object HttpClient {
         }
     }
 
+    /**
+     * SSRF floor for every PAGE/RESOLVER fetch: after the hybrid resolver, drop
+     * any address that points into private/loopback/link-local/metadata space.
+     * A hostile or compromised page we merely fetch can declare a URL that names
+     * the user's router (192.168.x), the LAN, or a cloud metadata endpoint
+     * (169.254.169.254); making DNS refuse those targets is the one check that
+     * cannot be bypassed by redirect chains (OkHttp re-consults Dns per connect)
+     * or by odd IP spellings (they all resolve to the same InetAddress).
+     * If EVERY address is private the host is unresolvable to us by design.
+     */
+    private val safeDns = object : okhttp3.Dns {
+        override fun lookup(hostname: String): List<java.net.InetAddress> {
+            val resolved = hybridDns.lookup(hostname)
+            val safe = resolved.filterNot { isBlockedAddress(it) }
+            if (safe.isEmpty()) {
+                throw java.net.UnknownHostException(
+                    "$hostname resolves only to private/link-local addresses — refused (SSRF guard)"
+                )
+            }
+            return safe
+        }
+    }
+
     private val trustAllCerts = arrayOf<javax.net.ssl.TrustManager>(object : javax.net.ssl.X509TrustManager {
         override fun checkClientTrusted(chain: Array<out java.security.cert.X509Certificate>?, authType: String?) {}
         override fun checkServerTrusted(chain: Array<out java.security.cert.X509Certificate>?, authType: String?) {}
@@ -145,7 +168,7 @@ object HttpClient {
     }
 
     val shared: OkHttpClient = OkHttpClient.Builder()
-        .dns(hybridDns)
+        .dns(safeDns)
         .connectionPool(pool)
         .dispatcher(dispatcher)
         .cookieJar(sessionCookieJar)
@@ -158,6 +181,13 @@ object HttpClient {
         .build()
 
     val downloadClient: OkHttpClient = shared.newBuilder()
+        // The DOWNLOAD plane deliberately keeps the raw hybrid DNS: a download
+        // URL is user-chosen (a shared/pasted link, a picked episode), not
+        // page-injected, and users legitimately pull files from a LAN server.
+        // The SSRF floor guards the page/redirect-following plane, where hosts
+        // are chosen by remote content. permissiveClient derives from shared
+        // and keeps safeDns — it serves resolver traffic (broken-TLS lockers).
+        .dns(hybridDns)
         // HTTP/1.1 only: with the default HTTP_2 ALPN, OkHttp coalesces every
         // concurrent Range request to one host onto a SINGLE TCP connection —
         // silently defeating Turbo's multi-socket throttle bypass and making
@@ -250,7 +280,57 @@ object HttpClient {
         return if (parts.size > 1) "$base?${parts[1]}" else base
     }
 
+    /**
+     * Cheap, DNS-free pre-filter for a target URL before any fetch. This is a
+     * FAST path, not the security boundary — [safeDns] is the real gate (it
+     * catches every odd IP spelling and every DNS rebind at connect time).
+     * What it guards here: non-http(s) schemes, service ports that no locker
+     * host uses (ssh/smtp/db/admin), and IP-literal hosts that are already
+     * obviously private (so we never even attempt the connect).
+     * HttpUrl.parse canonicalizes userinfo ("http://evil@127.0.0.1/") out of
+     * the host — asserted by HttpClientSafetyTest; do not hand string-split.
+     */
+    private val SERVICE_PORTS = setOf(
+        21, 22, 23, 25, 53, 110, 135, 137, 139, 143, 445, 1433, 2049, 3306,
+        3389, 5432, 5984, 6379, 9200, 11211, 27017
+    )
+
+    fun isSafeTarget(url: String): Boolean {
+        val parsed = okhttp3.HttpUrl.parse(safeUrl(url)) ?: return false
+        if (parsed.scheme != "http" && parsed.scheme != "https") return false
+        if (parsed.port in SERVICE_PORTS) return false
+        val host = parsed.host
+        if (host.isBlank()) return false
+        // IP-literal hosts (v4 quad, decimal/hex single-token, or any v6 form)
+        // get the full address check WITHOUT touching the network; plain
+        // hostnames are deferred to safeDns, which is the real boundary.
+        val bare = if (host.startsWith("[")) host.removeSurrounding("[", "]") else host
+        val looksLikeIp = bare.indexOf(':') >= 0 ||
+            (bare.isNotEmpty() && bare[0].isDigit() && !bare.any { it.isLetter() || it == '-' })
+        if (looksLikeIp) {
+            val addr = try { java.net.InetAddress.getByName(bare) } catch (_: Exception) {
+                return false // unparseable "numeric" host: refuse it
+            }
+            if (isBlockedAddress(addr)) return false
+        }
+        return true
+    }
+
+    /** get()/postForm()/getText() entry guard: throw (their existing failure
+     *  channels already log throws) instead of silently connecting. */
+    private fun refuseUnsafeTarget(url: String) {
+        if (!isSafeTarget(url)) {
+            lastFailure = "unsafe target refused: ${url.take(120)}"
+            throw java.io.IOException("Refused unsafe target: ${url.take(160)}")
+        }
+    }
+
     fun get(url: String, referer: String? = null, headers: Map<String, String> = emptyMap(), tag: String? = null, permissive: Boolean = false): Response {
+        // SSRF floor, page plane. safeDns filters DNS-resolved hosts, but OkHttp
+        // SKIPS the custom Dns for IP-literal hosts (RouteSelector:
+        // canParseAsIpAddress -> raw getByName; fact-checked against 4.12.0
+        // source). isSafeTarget closes that gap + service ports pre-flight.
+        refuseUnsafeTarget(url)
         val reqBuilder = Request.Builder()
             .url(safeUrl(url))
             .header("User-Agent", DEFAULT_UA)
@@ -372,7 +452,7 @@ object HttpClient {
         return bytes
     }
 
-    fun getText(url: String, referer: String? = null, headers: Map<String, String> = emptyMap(), acceptStatus: Set<Int> = emptySet(), tag: String? = null, permissive: Boolean = false): String? {
+    fun getText(url: String, referer: String? = null, headers: Map<String, String> = emptyMap(), acceptStatus: Set<Int> = emptySet(), tag: String? = null, permissive: Boolean = false, maxBytes: Long = MAX_TEXT_BYTES): String? {
         return try {
             get(url, referer, headers, tag, permissive).use { res ->
                 if (res.isSuccessful || res.code in acceptStatus) {
@@ -388,7 +468,7 @@ object HttpClient {
                     // a 200 response on the immediate next request). This
                     // clearIfAlive call is the single line that fixes it.
                     com.anonrode.downloader.pipeline.HostHealth.clearIfAlive(url)
-                    cappedText(res)
+                    cappedText(res, maxBytes)
                 } else {
                     lastFailure = "HTTP ${res.code} for ${url.take(120)}"
                     Log.w("HttpClient", lastFailure!!)
@@ -408,7 +488,8 @@ object HttpClient {
      * calls stay cancellable as a group). Used by the rules pipeline for
      * sites whose search is an admin-ajax style POST.
      */
-    fun postForm(url: String, form: Map<String, String>, referer: String? = null, headers: Map<String, String> = emptyMap(), tag: String? = null): String? {
+    fun postForm(url: String, form: Map<String, String>, referer: String? = null, headers: Map<String, String> = emptyMap(), tag: String? = null, maxBytes: Long = MAX_TEXT_BYTES): String? {
+        refuseUnsafeTarget(url) // same floor as get(); throws inside the try below
         return try {
             val body = okhttp3.FormBody.Builder().apply {
                 form.forEach { (k, v) -> add(k, v) }
@@ -436,7 +517,7 @@ object HttpClient {
                         "POST ${safeUrl(url)} -> ${res.code} in ${System.currentTimeMillis() - started}ms"
                     )
                     if (res.isSuccessful) {
-                        cappedText(res)
+                        cappedText(res, maxBytes)
                     } else {
                         lastFailure = "HTTP ${res.code} for ${url.take(120)}"
                         Log.w("HttpClient", lastFailure!!)
@@ -463,6 +544,10 @@ object HttpClient {
      * pinning it in DOWNLOADING at 0 bytes for minutes.
      */
     fun probe(url: String, referer: String? = null, timeoutMs: Long = 10_000L, tag: String? = null): Boolean {
+        if (!isSafeTarget(url)) {
+            com.anonrode.downloader.util.DebugLog.net("PROBE refused by isSafeTarget: ${url.take(140)}")
+            return false
+        }
         val reqBuilder = Request.Builder()
             .url(safeUrl(url))
             .header("User-Agent", DEFAULT_UA)
@@ -495,7 +580,195 @@ object HttpClient {
             }
         }
     }
+
+    // ------------------------------------------------------------ terminal gate
+
+    /**
+     * ONE canonical "is this URL actually serving the file" verdict, replacing
+     * the hand-copied checks that used to live inside individual resolvers
+     * (they disagreed with each other — the class of bug behind the vikingfile
+     * R2 misdirect rejection, 84e1d90). Semantics, each load-bearing and
+     * live-verified:
+     *  - no-redirect client: a 3xx is a HOP, never an acceptance. The shared
+     *    client auto-follows, which HIDES Locations inside OkHttp — that is why
+     *    this must run on a no-follow client (see [TerminalProbe.location]).
+     *  - `Range: bytes=0-0`: at most 1 body byte crosses the wire (metered-
+     *    data discipline); servers honoring it answer 206 + Content-Range.
+     *  - 200 with Content-Length = whole-file size: also accepted (servers
+     *    ignoring Range). No size proof (chunked/absent CL) = reject.
+     *  - text/html / application/xhtml = interstitial/ad page, reject.
+     *  - hard per-call timeout + [inFlightCalls] registration: pause/cancel
+     *    kills the probe (the old private copies were raw execute() —
+     *    uncancellable stragglers).
+     * Returns null ONLY on network failure; otherwise a [TerminalProbe] whose
+     * `totalBytes != null` is the sole acceptance signal.
+     */
+    fun probeTerminal(
+        url: String,
+        referer: String? = null,
+        timeoutMs: Long = 8_000L,
+        permissive: Boolean = false,
+        tag: String? = null
+    ): TerminalProbe? {
+        if (!isSafeTarget(url)) {
+            com.anonrode.downloader.util.DebugLog.net("TERMINAL refused by isSafeTarget: ${url.take(140)}")
+            return null
+        }
+        val reqBuilder = Request.Builder()
+            .url(safeUrl(url))
+            .header("User-Agent", DEFAULT_UA)
+            .header("Range", "bytes=0-0")
+        if (!referer.isNullOrBlank()) reqBuilder.header("Referer", referer)
+        val client = if (permissive) terminalProbeClientPermissive else terminalProbeClient
+        val call = client.newCall(reqBuilder.build())
+        call.timeout().timeout(timeoutMs, TimeUnit.MILLISECONDS)
+        inFlightCalls.add(call)
+        if (tag != null) {
+            taggedCalls.computeIfAbsent(tag) { java.util.concurrent.CopyOnWriteArrayList() }.add(call)
+        }
+        try {
+            call.execute().use { res ->
+                val ct = res.header("Content-Type")?.lowercase() ?: ""
+                val total = acceptsTerminalResponse(
+                    res.code, res.header("Content-Length"), res.header("Content-Range"), res.header("Content-Type")
+                )
+                val tp = TerminalProbe(res.code, res.header("Location"), ct, total)
+                com.anonrode.downloader.util.DebugLog.net(
+                    "TERMINAL ${safeUrl(url)} -> ${res.code}" +
+                        (if (total != null) " size=$total" else " (not a terminal)")
+                )
+                return tp
+            }
+        } catch (e: Exception) {
+            com.anonrode.downloader.util.DebugLog.net(
+                "TERMINAL ${safeUrl(url)} FAILED ${e.javaClass.simpleName}: ${e.message}"
+            )
+            return null
+        } finally {
+            inFlightCalls.remove(call)
+            if (tag != null) taggedCalls[tag]?.remove(call)
+        }
+    }
+
+    /** Cached no-follow variants (pool/dispatcher/cookies/safeDns are shared
+     *  with [shared] via newBuilder — only the redirect policy differs). */
+    private val terminalProbeClient: OkHttpClient by lazy {
+        shared.newBuilder().followRedirects(false).followSslRedirects(false).build()
+    }
+    private val terminalProbeClientPermissive: OkHttpClient by lazy {
+        permissiveClient.newBuilder().followRedirects(false).followSslRedirects(false).build()
+    }
 }
+
+/**
+ * Result of [HttpClient.probeTerminal]: the raw verdict on ONE no-redirect
+ * request. `totalBytes` non-null means VALIDATED TERMINAL (200/206, real size,
+ * non-HTML type). `location` is present on 3xx so callers can express the
+ * HOP explicitly (auto-following would swallow it).
+ */
+data class TerminalProbe(
+    val code: Int,
+    val location: String?,
+    val contentType: String,
+    val totalBytes: Long?
+)
+
+/**
+ * Pure decision half of [HttpClient.probeTerminal] — no network, JVM-testable.
+ * Returns the file's total byte size when the response proves it serves a
+ * real file, else null. Kept top-level per the isTlsChainFailure precedent so
+ * tests exercise the real accept/reject matrix without an Android-bound client.
+ */
+internal fun acceptsTerminalResponse(
+    code: Int,
+    contentLength: String?,
+    contentRange: String?,
+    contentType: String?
+): Long? {
+    if (code != 200 && code != 206) return null
+    val ct = (contentType ?: "").lowercase()
+    if (ct.startsWith("text/html") || ct.startsWith("application/xhtml")) return null
+    if (code == 206) {
+        // On 206 the Content-Length is just the 1 probed byte; the real total
+        // lives in Content-Range: "bytes 0-0/159703784" (or ".../*" — unknown,
+        // in which case the single-byte CL is the only size proof we get).
+        val cr = contentRange?.trim()
+        if (cr != null) {
+            val slash = cr.lastIndexOf('/')
+            if (slash >= 0) {
+                val t = cr.substring(slash + 1).trim()
+                if (t == "*") return (contentLength?.toLongOrNull() ?: 0L).takeIf { it > 0 }
+                return t.toLongOrNull()?.takeIf { it > 0 }
+            }
+            return null // malformed Content-Range: no size proof
+        }
+        // 206 without Content-Range is spec-violating — refuse, do not guess.
+        return null
+    }
+    // 200: Content-Length IS the size. Absent (chunked) = no proof.
+    return (contentLength?.toLongOrNull() ?: 0L).takeIf { it > 0 }
+}
+
+/**
+ * SSRF address predicate used by [HttpClient.safeDns] and the URL pre-filter.
+ * Blocks loopback, "this-network", link-local (incl. 169.254.169.254 cloud
+ * metadata), site-local RFC1918, multicast, CGNAT 100.64/10, and the private
+ * address smuggled inside 6to4 (2002::/16) / Teredo (2001::/32) IPv6 wrappers.
+ * IPv4-mapped v6 (::ffff:x) is delegated to the JDK's own is* checks.
+ * Top-level + pure per the isTlsChainFailure convention: full JVM matrix test.
+ */
+internal fun isBlockedAddress(addr: java.net.InetAddress): Boolean {
+    if (addr.isLoopbackAddress || addr.isAnyLocalAddress || addr.isLinkLocalAddress ||
+        addr.isSiteLocalAddress || addr.isMulticastAddress
+    ) return true
+    val b = addr.address ?: return true // fail closed on anything unreadable
+    if (b.size == 4) {
+        val o0 = b[0].toInt() and 0xFF
+        if (o0 == 0) return true // 0.0.0.0/8 "this network"
+        if (o0 == 100 && (b[1].toInt() and 0xC0) == 0x40) return true // 100.64.0.0/10 CGNAT
+        if (o0 == 0xFF && (b[1].toInt() and 0xFF) == 0xFF && (b[2].toInt() and 0xFF) == 0xFF &&
+            (b[3].toInt() and 0xFF) == 0xFF
+        ) return true // limited broadcast (JDK's isMulticastAddress does NOT cover it)
+        return false
+    }
+    if (b.size == 16) {
+        // ::ffff:a.b.c.d (mapped) and the obsolete ::a.b.c.d (compat): unwrap to
+        // the v4 rules OURSELVES — whether getByName hands us an Inet4Address
+        // or an Inet6Address for those texts is a JDK text-format detail we
+        // refuse to depend on. (NAT64 64:ff9b::/96 has non-zero leading bytes
+        // and is deliberately left alone: it is how v6-only networks reach
+        // public v4.)
+        val leadingZeros = (0..9).all { b[it].toInt() == 0 }
+        if (leadingZeros) {
+            val w10 = b[10].toInt() and 0xFF
+            val w11 = b[11].toInt() and 0xFF
+            if ((w10 == 0xFF && w11 == 0xFF) || (w10 == 0 && w11 == 0)) {
+                val v4 = embeddedV4OrNull(byteArrayOf(b[12], b[13], b[14], b[15])) ?: return true
+                if (isBlockedAddress(v4)) return true
+            }
+        }
+        // 6to4: 2002:<v4>:: — unwrap the embedded IPv4 and re-check.
+        if (b[0].toInt() and 0xFF == 0x20 && b[1].toInt() and 0xFF == 0x02) {
+            val v4 = embeddedV4OrNull(byteArrayOf(b[2], b[3], b[4], b[5])) ?: return true
+            if (isBlockedAddress(v4)) return true
+        }
+        // Teredo: 2001:0000::<..><client-v4 bitwise-NOT> — unwrap and re-check.
+        if (b[0].toInt() and 0xFF == 0x20 && b[1].toInt() and 0xFF == 0x01 &&
+            b[2].toInt() and 0xFF == 0x00 && b[3].toInt() and 0xFF == 0x00
+        ) {
+            val raw = byteArrayOf(
+                (b[12].toInt() and 0xFF).inv().toByte(), (b[13].toInt() and 0xFF).inv().toByte(),
+                (b[14].toInt() and 0xFF).inv().toByte(), (b[15].toInt() and 0xFF).inv().toByte()
+            )
+            val v4 = embeddedV4OrNull(raw) ?: return true
+            if (isBlockedAddress(v4)) return true
+        }
+    }
+    return false
+}
+
+private fun embeddedV4OrNull(bytes: ByteArray): java.net.InetAddress? =
+    try { java.net.Inet4Address.getByAddress(bytes) } catch (_: Exception) { null }
 
 /**
  * True when [e]'s cause chain is a TLS handshake/chain failure (strict
