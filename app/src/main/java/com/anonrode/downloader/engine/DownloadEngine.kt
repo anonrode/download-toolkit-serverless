@@ -1,7 +1,6 @@
 package com.anonrode.downloader.engine
 
 import android.content.Context
-import android.media.MediaScannerConnection
 import android.os.Environment
 import android.os.StatFs
 import com.anonrode.downloader.data.models.DownloadTask
@@ -2416,14 +2415,11 @@ class DownloadEngine(
                         }
                     } catch (_: Throwable) {}
 
-                    try {
-                        MediaScannerConnection.scanFile(
-                            context,
-                            arrayOf(producedFile.absolutePath),
-                            null,
-                            null
-                        )
-                    } catch (_: Throwable) {}
+                    // Main-looper hop inside: from this IO coroutine the old
+                    // inline scanFile never bound the scanner service and
+                    // silently no-opped — downloads stayed invisible to the
+                    // gallery until a system rescan (user report 2026-09-13).
+                    com.anonrode.downloader.util.MediaScan.notifyFile(context, producedFile)
 
                     if (completionNotifications) {
                         DownloadService.notifyCompleted(context, finalTitle)
@@ -2450,14 +2446,11 @@ class DownloadEngine(
                             validationNote = "File saved, but its format could not be verified — check that it plays before keeping."
                         )
                     }
-                    try {
-                        MediaScannerConnection.scanFile(
-                            context,
-                            arrayOf(producedFile.absolutePath),
-                            null,
-                            null
-                        )
-                    } catch (_: Throwable) {}
+                    // Main-looper hop inside: from this IO coroutine the old
+                    // inline scanFile never bound the scanner service and
+                    // silently no-opped — downloads stayed invisible to the
+                    // gallery until a system rescan (user report 2026-09-13).
+                    com.anonrode.downloader.util.MediaScan.notifyFile(context, producedFile)
                     com.anonrode.downloader.util.DebugLog.write("completed-unverified task=${task.id} file=${producedFile.absolutePath} bytes=$finalBytes validation=none")
                 } else {
                     val errReason = when {
