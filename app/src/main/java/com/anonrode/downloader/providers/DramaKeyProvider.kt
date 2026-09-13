@@ -144,7 +144,11 @@ object DramaKeyProvider : SiteProvider {
     }
 
     override suspend fun resolveEpisode(episodeUrl: String, quality: String): DownloadRecipe {
-        val direct = ResolverRegistry.resolve(episodeUrl, quality) ?: episodeUrl
+        // OTA resolve recipe first: a signed playbook's "resolve"+"terminal"
+        // stages can crack this site's download flow without an app update.
+        // The compiled registry stays the untouched fallback.
+        val direct = RulesPipeline.runResolveForSite(name, episodeUrl, quality)
+            ?: ResolverRegistry.resolve(episodeUrl, quality) ?: episodeUrl
         return DownloadRecipe(
             directUrl = direct,
             filename = direct.substringAfterLast('/').substringBefore('?').ifEmpty { "episode.mp4" },

@@ -105,6 +105,32 @@ class HttpClientSafetyTest {
         assertTrue(HttpClient.isSafeTarget("http://localhost:8080/x"))
     }
 
+    // ---------------------------------------------------------- parsedHost
+    // The A-5 terminal gate compares recipe-allowlist hosts against THIS view
+    // of the host, not the lenient safeHost() string-split: HttpUrl.kt
+    // (parent-4.12.0, authority loop) ends the host at  @ / \ ? #  — the
+    // forgeries below pass safeHost() but must never pass the gate.
+
+    @Test
+    fun parsedHost_agreesWithTheFetcher_onHostIdentity() {
+        assertEquals("vikingfile.com", HttpClient.parsedHost("https://vikingfile.com/dl/1"))
+        assertEquals("vikingfile.com", HttpClient.parsedHost("https://VIKINGFILE.COM:8443/dl/1"))
+        assertEquals("vikingfile.com", HttpClient.parsedHost("https://vikingfile.com/dl?x=1#f"))
+        // toCanonicalHost (hostnames.kt) normalizes IPv6 WITHOUT brackets:
+        assertEquals("::1", HttpClient.parsedHost("http://[::1]/x"))
+        // userinfo+port forgery: safeHost() answers "vikingfile.com"; the
+        // request actually goes to evil.com — parsedHost tells the truth:
+        assertEquals("evil.com", HttpClient.parsedHost("https://vikingfile.com:443@evil.com/f"))
+        // backslash ends the authority (WHATWG): "evil\.downloadwella.com" is
+        // host "evil", NOT a downloadwella.com subdomain:
+        assertEquals("evil", HttpClient.parsedHost("https://evil\\.downloadwella.com/f"))
+        // unparseable -> null (the gate treats null as REFUSE):
+        assertNull(HttpClient.parsedHost("not a url"))
+        assertNull(HttpClient.parsedHost(""))
+        assertNull(HttpClient.parsedHost("ftp://example.com/x"))
+        assertNull(HttpClient.parsedHost("https://[bad"))
+    }
+
     // ------------------------------------------------ acceptsTerminalResponse
 
     @Test

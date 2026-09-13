@@ -209,7 +209,10 @@ object NkiriProvider : SiteProvider {
         // contains the locker host, so canResolve matched by substring) — the
         // resolver just never reached the target behind the dead wrapper.
         val effective = unwrapDownloadManagerRedirect(episodeUrl)
-        val direct = ResolverRegistry.resolve(effective, quality) ?: effective
+        // OTA resolve recipe (a playbook can carry the wrapper-unwrap + locker
+        // crack) wins when present; compiled registry otherwise.
+        val direct = RulesPipeline.runResolveForSite(name, episodeUrl, quality)
+            ?: ResolverRegistry.resolve(effective, quality) ?: effective
         val isSingleSocket = effective.contains("nkiserv.com") || episodeUrl.contains("nkiserv.com") || direct.contains(".m3u8")
         val isHls = direct.contains(".m3u8") || direct.contains("manifest")
 
