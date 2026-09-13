@@ -1,10 +1,10 @@
 # 🚀 ANONRODE DOWNLOAD ENGINE — HANDOVER & ARCHITECTURE DOSSIER
 
-**Target Codebase:** `C:\Users\Anon\download-toolkit-serverless` (Android / Kotlin / Jetpack Compose / OkHttp / libaria2c / youtubedl-android)
-**Reference Python Monolith:** `C:\Users\Anon\download-toolkit` (`src/downloader.py`, `src/resolvers.py`, `src/extractors/`) — **the battle-tested reference; the Kotlin app is a port of it, and porting infidelities are the #1 bug source.**
+**Target Codebase:** `C:\Users\user\Anon\ANON TOOLS\download-toolkit-serverless` (Android / Kotlin / Jetpack Compose / OkHttp / libaria2c / youtubedl-android)
+**Reference Python Monolith:** `C:\Users\user\Anon\ANON TOOLS\download-toolkit` (`src/downloader.py`, `src/resolvers.py`, `src/extractors/`) — **the battle-tested reference; the Kotlin app is a port of it, and porting infidelities are the #1 bug source.**
 **Operating Charter:** `.agents/AGENTS.md` (Permanent source of truth — never delete)
-**Status:** ✅ **v3.0.3 RELEASED** (tag `v3.0.3`, 2026-08-23) — all jobs green (unit tests 77/77, emulator smoke, release APK). Everything on master is pushed.
-**Last updated:** 2026-08-23 ~21:30 UTC+1
+**Status:** ⚠️ **v3.1.0 is the last RELEASE** (tag `v3.1.0`; gradle `versionCode 310 / versionName "3.1.0"`) — BUT `master` is currently **~32 local commits AHEAD of origin** and the app has NOT been through a compiler since before `63a7032`. The next push + CI run is the first real compile of the whole arc (full-repo audit fixes, IG photo-music muxer, OTA resolve stage, NameSanitizer + mitigation, 2026-09-13 UI-audit round). CI = the only sanctioned build (user decree 2026-09-13: NEVER build locally).
+**Last updated:** 2026-09-13 (full UI audit round + doc-drift fixes)
 
 ---
 
@@ -15,6 +15,10 @@ Anon Downloader = 100% serverless on-device Android downloader. Multi-site searc
 - **aria2c**: via bundled yt-dlp `--downloader libaria2c.so`
 - **yt-dlp**: social embeds, HLS `.m3u8`, generic extractor fallbacks
 Magnets → aria2c with selective-file picker. No backend servers anywhere.
+- **Instagram photo+music**: local REST media probe + bounded ffmpeg cover/audio mux (`engine/InstagramPhotoMuxer.kt`, surfaced via `SocialModal`).
+- **One name standard**: every saved folder/file flows through `util/NameSanitizer.kt` (site-junk phrases stripped position-gated, HTML entities decoded, native script KEPT, Windows-reserved/traversal/dot guards, ≤80 chars / ≤240 UTF-8 bytes, `stripNoise=false` for user prose).
+- **History mirroring** (`engine/HistoryBackup.kt`): `download_tasks.json` mirrored to public Documents.
+- **In-app player**: fullscreen Compose Dialog over Media3/ExoPlayer (`ui/components/MediaPlayerModal.kt`) with subtitle picker, speed, framing cycle, resume positions (`PlaybackPositions.kt`).
 
 ### ⚖️ NON-NEGOTIABLE LAWS (user-mandated — violating these ends the session)
 1. **Never add AI attribution to commits.**
@@ -27,15 +31,15 @@ Magnets → aria2c with selective-file picker. No backend servers anywhere.
 8. **Subagents must NEVER push.** Push decision is main-agent-only, user-approved.
 
 ### 🧰 DIAGNOSTIC LIFEBLOOD
-The activity log (`filesDir/logs/app-YYYY-MM-DD.txt`, shared via Settings → "Share Activity Log") records EVERYTHING: USER actions, NET requests, ENGINE transitions, RESOLVE attempts, BACKEND lifecycle, ERROR lines. The user shares these constantly — read them first, they are the primary diagnostic artifact. Categories: `[USER] [NET] [ENGINE] [RESOLVE] [BACKEND] [ERROR] [CRASH]`.
+The activity log (`filesDir/logs/app-YYYY-MM-DD.txt`, shared via Settings → "Share Activity Log") records EVERYTHING: USER actions, NET requests, ENGINE transitions, RESOLVE attempts, BACKEND lifecycle, ERROR lines. The user shares these constantly — read them first, they are the primary diagnostic artifact. Categories: `[USER] [NET] [ENGINE] [RESOLVE] [BACKEND] [ERROR]` (crashes land here as `[ERROR] CRASH ...`) and `[TRACE]` (verbose mode only).
 
 ---
 
-## 📌 2. RELEASE STATE (v3.0.3, 2026-08-23)
+## 📌 2. RELEASE STATE
 
-**Release:** `AnonDownloader-v3.0.3-{arm64-v8a,armeabi-v7a,universal,x86,x86_64}.apk` on GitHub Releases (Latest).
+**Latest release on GitHub:** `AnonDownloader-v3.1.0-{arm64-v8a,armeabi-v7a,universal,x86,x86_64}.apk` (tag `v3.1.0`, gradle versionCode 310). **BUT** master now carries ~32 further local commits (A-5 resolve stage, OTA validator hardening, Instagram photo-music muxer + REST-first probe, full-repo audit fix batches, NameSanitizer + mitigation, 2026-09-13 UI-audit fixes) that NO compiler has seen — the next push triggers the first real build of the arc (CI = only sanctioned build).
 
-**v3.0.3 contains the full 10-commit LockerRegistry-era stack** (`4927e5d` → `e95d76b`):
+### Historical: v3.0.3 contained the full 10-commit LockerRegistry-era stack (`4927e5d` → `e95d76b`):
 
 ```
 e95d76b Fix PipelineTest: match >=3 consecutive-fails threshold (live-verified)
@@ -59,10 +63,10 @@ c3893a4 Seed vdl.np-downloader.com + www.moviereleases.net in lockerHosts; confo
 ## 🏛️ 3. ARCHITECTURE (key files)
 
 ### Core pipeline
-- **`pipeline/HostHealth.kt`** — Persistent per-host health ledger (JSON in filesDir). Exponential backoff (30s<<consec-1, cap 1h). **>=3 consecutive failures** opens the backoff window (a single 404/timeout must NOT gate a host — nepu.gd lesson, live-verified). `recordFail` ignores user-initiated cancellations ("Canceled"/"CancellationException"/"abort" via `HttpClient.lastFailure`). `hasProvenLocker(host)` — any host with >=1 successful crack is a known locker. `isUsable(url)` also checks playbook `knownDead`.
+- **`pipeline/HostHealth.kt`** — Persistent per-host health ledger (JSON in filesDir). Exponential backoff (30s<<consec-1, **capped at 2 minutes** since the 2026-09-02 queue incident — the old 1h cap is gone). **>=3 consecutive failures** opens the backoff window (a single 404/timeout must NOT gate a host — nepu.gd lesson, live-verified). `recordFail` ignores user-initiated cancellations ("Canceled"/"CancellationException"/"abort" via `HttpClient.lastFailure`). `hasProvenLocker(host)` — any host with >=1 successful crack is a known locker. `isUsable(url)` also checks playbook `knownDead`.
 - **`pipeline/StreamValidator.kt`** — 1KB Range probe with real download headers; rejects HTML/archive/exec via magic-byte sniffing; `sniff()` is JVM-testable. Throws `PipelineError.ValidationFailed`.
 - **`pipeline/ResolveCache.kt`** — In-memory, TTL = `tokenTtlMinutes` from playbook; `keyFor(url, quality)`; engine invalidates before refresh so the 403 self-heal can't be served a stale URL.
-- **`pipeline/PipelineJournal.kt`** — Structured `[hop]` lines with ms + page hash; wired into ResolverRegistry.
+- **`PipelineJournal` (object in `pipeline/PipelineError.kt`)** — Structured `[hop]` lines with ms + page hash; wired into ResolverRegistry and StreamValidator. (There is no PipelineJournal.kt file.)
 - **`pipeline/PipelineError.kt`** — Sealed: `SiteDown/HostDead/RateLimited/BlockedIp/TokenExpired/ParseEmpty/ValidationFailed/BudgetExceeded` + `classify(host, lastFailure)`.
 
 ### Resolver layer
@@ -74,7 +78,7 @@ c3893a4 Seed vdl.np-downloader.com + www.moviereleases.net in lockerHosts; confo
   - `resolveCandidates(urls, quality)` — direct passthrough, known lockers race via `resolveAny`, **unknown hosts probed once via StreamValidator** (works on first contact).
   - `isKnownMedia(url)` — classify is Direct or Locker (excludes Unknown; used for curated episode lists).
   - ⚠️ **All MediaKind references must be QUALIFIED** (`MediaKind.None` etc.) — unqualified references fail to compile (CI caught this).
-- **`data/rules/DynamicRulesManager.kt`** — OTA playbook: decrypts + **verifies ECDSA P-256 signature** BEFORE using the payload; parses domains/mirrors/sites/resolvers/hostPolicies/urlTemplates/knownDead/tokenTtlMinutes/searchStrategies/lockerHosts/directMediaExtensions/slugSuffixes/countries. `resolveReferer()` is the SINGLE referer source. `getSiteConfig(site).episodeSelector` exists (used by NaijaVault now).
+- **`data/rules/DynamicRulesManager.kt`** — OTA playbook: decrypts + **verifies ECDSA P-256 signature** BEFORE using the payload; parses domains/mirrors/sites/resolvers/hostPolicies/urlTemplates/knownDead/tokenTtlMinutes/searchStrategies/lockerHosts/directMediaExtensions/**pipelines** (A-5 declarative resolve/search step recipes — terminal-host allowlist gate, urlBinds pre-fetch, sectionGrouping season labels)/**dynamic_providers** (fully declarative sites via GenericDeclarativeProvider)/**seriesDescentSelectors**/**downloadAnchorSelector**, plus country/locker lists. `resolveReferer()` is the SINGLE referer source. `getSiteConfig(site).episodeSelector` exists (used by NaijaVault now). Encrypt-side shape checks live in `scripts/encrypt_rules.py` (incl. nested-quantifier ReDoS heuristic).
 
 ### Provider layer
 - **`providers/*.kt`** — Per-site search/drawers/resolveEpisode.
@@ -85,7 +89,7 @@ c3893a4 Seed vdl.np-downloader.com + www.moviereleases.net in lockerHosts; confo
 - **`providers/ProviderRegistry.kt`** — Search fan-out (7s timeout, 4-min result cache, searchEnabled flag).
 
 ### Download engine
-- **`engine/DownloadEngine.kt`** — Task state machine. `getDownloadDirectory` → `Download/Anon/<ShowTitle>/`. **NEW: writability guard** — fails fast with an actionable message when storage access is missing. `preflightHls` — probe + rewrite master; **NEW: `pickHlsResolution()`** extracts RESOLUTION from EXT-X-STREAM-INF, picks the variant yt-dlp's height-limited selector lands on (highest <= requested; smallest if nothing fits) → task.resolution → UI chip. `runSizeEstimate` — segment-sampling estimator (real segment sizes, not BANDWIDTH tags). Watchdog (crawl floor 64KiB/60s, rate-drop detector, zombie cap). HLS rewrite (`rewriteHlsMaster`, `resolveSegmentUrl`, `StaleStreamLinkException` → re-resolve on 401/403).
+- **`engine/DownloadEngine.kt`** — Task state machine. `getDownloadDirectory` → `Download/Anon/<ShowTitle>/` (auto-organize flag; social saves go to `Social/<platform>`, torrents keep their picked names under the same root). **Every saved name — file stems and folders — goes through `util/NameSanitizer.savedName()`** (the one naming standard). **NEW: writability guard** — fails fast with an actionable message when storage access is missing. `preflightHls` — probe + rewrite master; **NEW: `pickHlsResolution()`** extracts RESOLUTION from EXT-X-STREAM-INF, picks the variant yt-dlp's height-limited selector lands on (highest <= requested; smallest if nothing fits) → task.resolution → UI chip. `runSizeEstimate` — segment-sampling estimator (real segment sizes, not BANDWIDTH tags). Watchdog (crawl floor 64KiB/60s, rate-drop detector, zombie cap, throttle stall detection). Completed-task purge drops `.work-` sidecar dirs too. HLS rewrite (`rewriteHlsMaster`, `resolveSegmentUrl`, `StaleStreamLinkException` → re-resolve on 401/403).
 - **`data/models/Models.kt`** — `DownloadTask` has `quality` + **`resolution`** (NEW). `DownloadRecipe` (directUrl/filename/headers/backend/parallelSockets).
 
 ### UI
@@ -110,7 +114,7 @@ c3893a4 Seed vdl.np-downloader.com + www.moviereleases.net in lockerHosts; confo
 
 ### 🧱 Data vs Code split (the honest "thin kernel" answer)
 
-**Playbook-driven (OTA, no APK needed):** site base URLs + mirrors, search patterns/types + card/episode selectors, lockerHosts (unions with built-ins), hostPolicies (referers), urlTemplates, knownDead, tokenTtlMinutes, searchStrategies (urlTemplate/rss/slugGuess), directMediaExtensions, episodeSelector (NaijaVault reads it), minAppVersion (parsed, NOT enforced).
+**Playbook-driven (OTA, no APK needed):** site base URLs + mirrors, search patterns/types + card/episode selectors, lockerHosts (unions with built-ins), hostPolicies (referers), urlTemplates, knownDead, tokenTtlMinutes, searchStrategies (urlTemplate/rss/slugGuess), directMediaExtensions, episodeSelector (NaijaVault reads it), pipelines / dynamic_providers (A-5 declarative recipes), **minAppVersion (ENFORCED fleet guard: a payload requiring a newer app is rejected wholesale and the previous rules stay — DynamicRulesManager rejects on `minApp > BuildConfig.VERSION_CODE`)**.
 
 **Hardcoded in the APK (requires a release to change):** the 25 resolver implementations (JS unpackers, AES/wasm crypto, token chains — these are algorithms, not config), the resolver registry list + order, LockerRegistry DEFAULT_LOCKER_HOSTS/NAV_SEGMENTS fallbacks, engine constants (watchdog floors, socket counts, timeouts), provider extraction logic. Porting these to data is deliberately NOT planned — the schema can't express algorithms, and data-driven behavior would enlarge the attack surface if the signing key ever leaked.
 
@@ -138,15 +142,15 @@ The classify gate belongs ONLY where the design intends: NaijaVault's download-l
 5. **dramarain `?s=` search broken server-side** — slug guessing works (OTA searchStrategies).
 6. **9jarocks HTTP 522** — transient Cloudflare, not app issue.
 7. **seriezloaded.com.ng** — dead domain (DNS NXDOMAIN). Not seeded. Ignore.
-8. **USER ACTION PENDING: token rotation** — the old GitHub PAT pasted into chat. Rotate in GitHub Settings > Developer settings > Personal access tokens.
-9. **USER ACTION PENDING: phone test of v3.0.3** — install APK from Releases; verify: storage prompt at launch, naijaprey downloads (was broken until 24ce28d), resolution chip on HLS, anitaku/nepu cracks, pluto 20 eps, 9jarocks ordering, dramarain search.
+8. **USER ACTION PENDING (still): token rotation** — the old GitHub PAT pasted into chat. Rotate in GitHub Settings > Developer settings > Personal access tokens.
+9. **USER ACTION PENDING: device testing** — v3.1.0 phone test was never reported back, and the ~32 newer local commits need the push→CI build first before any device test is meaningful. When an APK does land, verify: storage prompt at launch, downloads across sites, IG photo+music mux, saved-name shapes (junk stripped, Hangul/CJK kept), player (bars hidden, resume positions, subtitle track).
 10. **Known minor**: naijaprey show pages emit a `.srt` subtitle link that appears as a dead episode entry (pre-existing, harmless — fails cleanly).
 
 ---
 
 ## 📋 6. INCOMING AI QUICK-START CHECKLIST
 
-1. `git status` + `git log --oneline -8` — everything on master is pushed (v3.0.3 released). Verify CI: `gh run list --limit 3` should be green.
+1. `git status` + `git log --oneline -8` — **master is currently ~32 commits AHEAD of origin** (see Status); nothing of this arc has been compiled yet, CI on push is the first real build. Verify CI after any push: `gh run list --limit 3`.
 2. Read `.agents/AGENTS.md` first (operating charter). Then this HANDOVER.
 3. **Unbiased review kit exists at `REVIEW_PROMPTS.md`** (root) — 6 focused prompts + a catch-all prompt the user can paste into any AI reviewer. Covers architecture, security, code quality, performance, UX, maintainability.
 4. Ask the user for the newest activity log if anything's broken — read `[ERROR]/[RESOLVE]/[ENGINE]` lines first.

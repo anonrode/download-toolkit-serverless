@@ -329,10 +329,12 @@ jobs:
           body: |
             ## Anon Downloader — Serverless ${{ github.ref_name }}
 
-            100% on-device drama scraping, episode search, stream resolution, and 16-socket parallel downloads directly on Android.
+            100% on-device drama scraping, episode search, stream resolution, and multi-socket parallel downloads directly on Android.
 
-            - **No VPS, No API Keys**: Scrapes and resolves NKiri, DramaKey, Pluto, 9jaRocks, Anitaku, and DramaRain locally with Jsoup.
-            - **Fast Resumable Downloads**: Direct CDN downloads run on aria2c with 16 parallel sockets; file lockers use 1-socket protection.
+            - **No VPS, No API Keys**: Scrapes and resolves NKiri, DramaKey, AsianC, Pluto, DramaRain, 9jaRocks, NaijaPrey, NaijaVault, Nepu, and Anitaku locally with Jsoup — plus Instagram / TikTok / Facebook via the embedded yt-dlp core.
+            - **Fast Resumable Downloads**: Direct CDN and locker files run on the in-house TurboDownloader engine (up to 16 parallel sockets, auto-forced to 1 on hosts that reject multi-connection); torrents run on native aria2c.
+            - **Built-In Player**: play downloads in-app — subtitle and audio track switching, playback speed, resume position, fullscreen.
+            - **Instagram Photo + Music**: carousel posts are muxed into a single video with the original audio, saved under one clean naming standard across every site.
             - **Signed OTA Rules**: The scraping playbook ships encrypted + ECDSA-signed; tampered payloads are refused on-device.
             - **Torrent Security Shield**: 7 layers incl. Android-executable blocking, PK/archive magic rejection, pre-enqueue validation.
           files: app/build/outputs/apk/release/*.apk

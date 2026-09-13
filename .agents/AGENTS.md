@@ -11,7 +11,7 @@
    - `magnet:?` URIs MUST NEVER pass into `yt-dlp` (`YoutubeDLRequest`). `yt-dlp` runs in Python `urllib` and crashes with `Unsupported url scheme: "magnet"`.
    - Magnets MUST execute directly via the native `libaria2c.so` binary with `--enable-dht=true`, `--bt-tracker=...`, and `--summary-interval=1`.
    - `.m3u8` streams and social video URLs route to `yt-dlp`.
-   - Direct HTTP/HTTPS lockers route to `aria2c` with `-x 16 -s 16` and explicit `--header="Referer: <url>"`.
+   - Direct HTTP/HTTPS locker URLs route to **`TurboDownloader`** (Kotlin multi-socket), NOT bare `aria2c`: socket count is clamped to 1..16 (`DownloadEngine` coerces `effectiveSockets`, `TurboDownloader` re-clamps), and hosts that reject multi-connection downloads (`kissorgrab.com`, `dl.plutomovies.com` — live-verified 2026-08) are **forced to 1 socket**. `aria2c` appears only as yt-dlp's external downloader (`--downloader libaria2c.so` with `-x/-s` + Referer) and for magnets.
 
 3. **HTML Parsing & Episode Extraction Invariants**:
    - ALL Jsoup parsing MUST pass the page URL as `baseUri` (`Jsoup.parse(html, pageUrl)`); otherwise relative links resolve to empty strings `""` and discard all episodes.
@@ -27,7 +27,7 @@
    - Never gate `ResolverRegistry.resolve` on `!streamUrl.startsWith("http")`. Web locker pages (`downloadwella.com`, `loadedfiles.net`, `dood.to`, `streamwish.com`) start with `http` and MUST be cracked to direct media/manifest URLs before handing off to aria2c.
 
 6. **Canonical Domain Migrations & Fallbacks**:
-   - Always keep canonical domains synchronized with the monolith: `9jarocks` -> `my9jarocks.bz`, `anitaku` -> `anitaku.com.ro`, `naijaprey` -> `naijaprey.com`.
+   - Canonical domains are owned by the OTA rules playbook; the Kotlin built-ins below are the offline fallbacks (`DynamicRulesManager`). As of 2026-09-13: `anitaku` -> `anitaku.com.ro` (also the host-policy/referer origin for its embeds), `9jarocks` search/home -> `9jarocks.net` (while the `my9jarocks.bz` locker chain keeps its own host policy), `naijaprey` -> `www.naijaprey.tv`. Update the playbook and built-ins together; never hardcode a domain in a provider without doing both.
 
 7. **Coroutine Threading & OkHttp Execution Invariants**:
    - `viewModelScope.launch { }` runs on `Dispatchers.Main` by default.
