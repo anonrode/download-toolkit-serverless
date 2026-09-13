@@ -210,17 +210,17 @@ object InstagramPhotoMuxer {
         return null
     }
 
-    /** Filename: caption (or a slug fallback) + shortcode, filesystem-safe. */
+    /** Filename: caption (or a slug fallback) + shortcode, filesystem-safe.
+     *  The label goes through the app-wide NameSanitizer standard (same noise
+     *  + safety policy as every other saved name); the "[shortcode]" suffix
+     *  is appended AFTER, since brackets are what the sanitizer strips from
+     *  scraped text. Captions are user prose: a blank one means "Instagram",
+     *  not the generic "Download" fallback. */
     internal fun buildFilename(shortcode: String, parts: MediaParts): String {
         val source = (parts.caption ?: parts.title?.let { t -> parts.artist?.let { a -> "$t — $a" } ?: t })
             ?: "Instagram"
-        val cleaned = source.replace(Regex("""[\r\n\t]+"""), " ")
-            .replace(Regex("""[/\\:*?"<>|]"""), "_")
-            .replace(Regex("""\s+"""), " ")
-            .trim()
-            .take(80)
-            .trimEnd('.', ' ')
-        val label = cleaned.ifBlank { "Instagram" }
+        val label = if (source.isBlank()) "Instagram"
+            else com.anonrode.downloader.util.NameSanitizer.savedName(source, 80)
         return "$label [$shortcode].mp4"
     }
 

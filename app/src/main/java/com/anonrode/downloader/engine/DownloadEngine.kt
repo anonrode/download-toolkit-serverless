@@ -919,31 +919,15 @@ class DownloadEngine(
     }
 
     /**
-     * Turn an arbitrary scraped title (HTML entities, em-dashes, slashes,
-     * control chars, 200-char runs, reserved names) into a safe single
-     * filesystem component. Covers every failure mode that produced broken or
-     * un-creatable folders:
-     *  - HTML entities decode first so "S1 &#038; 2" reads "S1 & 2" -> "S1_2"
-     *  - Windows-invalid chars and control chars replaced with '_'
-     *  - ".." / "." titles rejected (folder path traversal)
-     *  - Windows reserved names (CON, PRN, AUX, NUL, COM1-9, LPT1-9) prefixed
-     *  - trailing dots/spaces stripped (invalid on Windows, sync-hostile)
-     *  - length capped so a long show title cannot blow the 255-byte limit
+     * Turn an arbitrary scraped title into a safe single filesystem
+     * component. THE policy lives in util/NameSanitizer (the app-wide name
+     * standard: noise-phrase removal, full entity decoding, native script
+     * preserved, control/forbidden chars replaced, traversal/reserved-name/
+     * trailing-dot guards, byte-aware cap). Kept as the engine's local
+     * doorway so folder/stem/social call sites all share one entry.
      */
-    private fun sanitizeComponent(raw: String, maxChars: Int): String {
-        var s = raw
-        s = s.replace("&amp;", "&").replace("&#038;", "&").replace("&#38;", "&")
-            .replace("&#8211;", "-").replace("&ndash;", "-").replace("&#8212;", "-").replace("&mdash;", "-")
-            .replace("&#8217;", "'").replace("&rsquo;", "'").replace("&#039;", "'").replace("&quot;", "\"")
-        s = s.trim().replace(Regex("""\s+"""), " ")
-        s = s.replace(Regex("""[\\/:*?"<>|\u0000-\u001F]"""), "_")
-        s = s.replace(Regex("""[^a-zA-Z0-9._ -]"""), "_")
-        s = s.trimStart('.').trimEnd('.', ' ', '_')
-        if (s.equals("..", ignoreCase = true) || s.equals(".", ignoreCase = true) || s.isBlank()) s = "Download"
-        if (s.uppercase() in RESERVED_NAMES) s = "_$s"
-        if (s.length > maxChars) s = s.take(maxChars).trimEnd('.', ' ', '_')
-        return s
-    }
+    private fun sanitizeComponent(raw: String, maxChars: Int): String =
+        com.anonrode.downloader.util.NameSanitizer.savedName(raw, maxChars)
 
     private fun getRefererForUrl(url: String): String {
         // Single source of truth is now the OTA playbook (DynamicRulesManager:
@@ -971,15 +955,6 @@ class DownloadEngine(
         private val URI_VALUE = Pattern.compile("""URI="([^"]+)"""")
 
         private val STREAMING_QUERY_PATTERN = Regex("""[?&][^=&]*=(?:mpd|dash|hls)(?:&|$)""")
-
-        // Windows-reserved device names: a folder/file named CON, PRN, AUX,
-        // NUL, COM1-9 or LPT1-9 is un-creatable or unmountable on Windows/MTP
-        // sync. sanitizeComponent prefixes these with '_'.
-        private val RESERVED_NAMES = setOf(
-            "CON", "PRN", "AUX", "NUL",
-            "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
-            "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"
-        )
 
         // Locker hosts whose URLs are pages to crack, not direct files. Hoisted
         // out of isKnownLockerHost so the list is built once instead of on
