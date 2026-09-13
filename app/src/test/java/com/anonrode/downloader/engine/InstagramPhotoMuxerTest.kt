@@ -83,6 +83,20 @@ class InstagramPhotoMuxerTest {
         assertEquals("123", JSONObject(f["variables"]!!).getString("media_id"))
     }
 
+    // ---- REST surface (2026-09-13 live-probe finding) -----------------------
+
+    @Test
+    fun restInfoUrl_canonicalPkEndpoint() {
+        // The desktop graphql doc carries NO music fields at all (control test
+        // on a known-music reel: clips_metadata.music_info = null, zero
+        // music_asset_info occurrences). Music lives on the REST surface,
+        // which is keyed by the numeric pk, not the shortcode.
+        assertEquals(
+            "https://www.instagram.com/api/v1/media/3853340288614211471/info/",
+            InstagramPhotoMuxer.restInfoUrl("3853340288614211471")
+        )
+    }
+
     // ---- media decision ----------------------------------------------------
 
     private fun photoMusicMedia(): JSONObject = JSONObject(
