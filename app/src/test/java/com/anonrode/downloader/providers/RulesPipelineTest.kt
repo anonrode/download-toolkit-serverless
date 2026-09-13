@@ -250,6 +250,89 @@ class RulesPipelineTest {
     }
 
     @Test
+    fun episodesHtml_seasonGroupingSortsSectionsAndRestartsCounting() {
+        // dramakey-class season accordion: sections render NEWEST season first,
+        // each header carries data-season; the same "Episode N" label restarts
+        // per season, so position alone would collide. seasonCode(season, num)
+        // keeps episodeNum unique (the engine re-resolves by episodeNum).
+        val html = """
+            <html><body>
+              <div class="season-accordion">
+                <button class="season-header" data-season="2">Season 2</button>
+                <div class="episode-item"><a class="download-btn" href="https://lightdl.cc/d/b1">Download</a></div>
+                <div class="episode-item"><a class="download-btn" href="https://lightdl.cc/d/b2">Download</a></div>
+              </div>
+              <div class="season-accordion">
+                <button class="season-header" data-season="1">Season 1</button>
+                <div class="episode-item"><a class="download-btn" href="https://lightdl.cc/d/a1">Download</a></div>
+                <div class="episode-item"><a class="download-btn" href="https://lightdl.cc/d/a2">Download</a></div>
+              </div>
+            </body></html>
+        """.trimIndent()
+        val items = """
+            {
+              "anchorSelector": "a.download-btn",
+              "urlAllowlist": ["lightdl.cc"],
+              "labelChain": ["text", "counter"],
+              "sectionGrouping": {
+                "sectionSelector": "div.season-accordion",
+                "seasonSpec": "attr:.season-header:data-season",
+                "labelTemplate": "S{season:%02d} E{num:%02d}"
+              }
+            }
+        """.trimIndent()
+
+        val result = RulesPipeline.extractEpisodes(
+            "dramakey", step(items), htmlOutcome(html), baseVars, "https://dramakey.test/show/1"
+        )
+
+        assertEquals(4, result.episodes.size)
+        // Season 1 first (ascending), position restarts inside it
+        assertEquals("S01 E01", result.episodes[0].title)
+        assertEquals(101, result.episodes[0].episodeNum)
+        assertEquals("https://lightdl.cc/d/a1", result.episodes[0].url)
+        assertEquals("S01 E02", result.episodes[1].title)
+        assertEquals(102, result.episodes[1].episodeNum)
+        assertEquals("S02 E01", result.episodes[2].title)
+        assertEquals(201, result.episodes[2].episodeNum)
+        assertEquals("https://lightdl.cc/d/b1", result.episodes[3].url)
+        assertEquals(202, result.episodes[3].episodeNum)
+    }
+
+    @Test
+    fun episodesHtml_seasonGroupingUnparseableSeasonDegradesToChainLabel() {
+        // No data-season on the header -> season null -> grouping still bounds
+        // the anchors but the plain labelChain rides (no S?? prefix), and the
+        // global positional counter keeps episodeNum unique.
+        val html = """
+            <html><body>
+              <div class="season-accordion">
+                <div class="episode-item"><a class="download-btn" href="https://lightdl.cc/d/x1">Download</a></div>
+                <div class="episode-item"><a class="download-btn" href="https://lightdl.cc/d/x2">Download</a></div>
+              </div>
+            </body></html>
+        """.trimIndent()
+        val items = """
+            {
+              "anchorSelector": "a.download-btn",
+              "urlAllowlist": ["lightdl.cc"],
+              "labelChain": ["counter"],
+              "sectionGrouping": {
+                "sectionSelector": "div.season-accordion",
+                "seasonSpec": "attr:.season-header:data-season",
+                "labelTemplate": "S{season:%02d} E{num:%02d}"
+              }
+            }
+        """.trimIndent()
+        val result = RulesPipeline.extractEpisodes(
+            "dramakey", step(items), htmlOutcome(html), baseVars, "https://dramakey.test/show/1"
+        )
+        assertEquals(2, result.episodes.size)
+        assertEquals("Episode 1", result.episodes[0].title)
+        assertEquals("Episode 2", result.episodes[1].title)
+    }
+
+    @Test
     fun episodesHtml_derivedNumberingSortAndTextConfig() {
         // anitaku shape: number from text or from url, sorted ascending
         val html = """

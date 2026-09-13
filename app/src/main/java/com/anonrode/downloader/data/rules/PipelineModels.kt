@@ -61,6 +61,19 @@ import org.json.JSONObject
  * never calls back into the pipeline. The whole resolve run carries a fetch
  * byte budget (see RulesPipeline).
  *
+ * SEASON GROUPING (episodes items, added 2026-09-12): an episodes step may
+ * carry `"sectionGrouping": { "sectionSelector": css, "seasonSpec": <field
+ * spec>, "labelTemplate": "S{season:%02d} E{num:%02d} {label}" }`. Anchors
+ * are then collected per matching section, sections SORT by the season number
+ * parsed from `seasonSpec` (ascending — sites render newest first), and
+ * counting restarts inside each section, so a multi-season show gets
+ * season-correct labels and the episodeNum = season*100 + number convention
+ * the UI already decodes (EpisodeDrawer) and the engine's re-resolve
+ * requires (unique numbers). Pages whose sections carry no parseable season
+ * degrade to per-section position with plain chain labels; a page with ZERO
+ * matching sections behaves exactly like the flat path. Old schema-1 apps
+ * ignore the unknown items key — additive like the rest.
+ *
  * CLOSED VOCABULARY, v1. Deliberately no loops, no conditionals, no
  * expressions: execution is structurally bounded (max steps/sources enforced
  * at parse time, HttpClient caps apply), so a bad payload can be broken but
