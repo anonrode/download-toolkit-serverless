@@ -37,6 +37,10 @@ class ResolverHostClaimTest {
         assertTrue(hostClaim("https://nepu.gd/watch/t123", listOf("nepu.gd/watch")))
         assertFalse(hostClaim("https://evil.com/plutomovies.com/series/x", listOf("plutomovies.com/series/")))
         assertFalse(hostClaim("https://plutomovies.com/movie", listOf("plutomovies.com/series/")))
+        // path-only entry (empty host part): claims on the path alone — legacy
+        // semantics, pinned so it can never rot into a silently-dead branch.
+        assertTrue(hostClaim("https://evil.com/embed/x", listOf("/embed/")))
+        assertFalse(hostClaim("https://evil.com/e/x", listOf("/embed/")))
         // dot-free fragment: substring of the HOST only
         assertTrue(hostClaim("https://ajmidyad.se/e/1", listOf("ajmidyad")))
         assertFalse(hostClaim("https://evil.com/?x=ajmidyad", listOf("ajmidyad")))

@@ -476,6 +476,69 @@ class RulesPipelineTest {
     }
 
     @Test
+    fun episodesHtml_docFieldVarAndTemplateArms() {
+        // docField gained var:/template: (2026-09-13) to match the validator's
+        // doc-scope vocabulary: a var hit wins, a var miss falls through to
+        // the next candidate, and template: renders from the step vars.
+        val html = """
+            <html><body>
+              <h1 class="entry-title">Page Title</h1>
+              <a href="https://downloadwella.com/f/1">Download</a>
+            </body></html>
+        """.trimIndent()
+        val items = """
+            {
+              "anchorSelector": "a[href]",
+              "urlAllowlist": ["downloadwella.com"],
+              "labelChain": ["counter"],
+              "meta": {
+                "title": ["var:missing", "selector:h1"],
+                "synopsis": "template:{showName} ({year})"
+              }
+            }
+        """.trimIndent()
+        val vars = baseVars + mapOf("showName" to "Lovely Runner", "year" to "2024")
+
+        val result = RulesPipeline.extractEpisodes(
+            "nkiri", step(items), htmlOutcome(html), vars, "https://nkiri.test/drama/x"
+        )
+        assertEquals("Page Title", result.metaTitle)          // var miss -> selector arm
+        assertEquals("Lovely Runner (2024)", result.metaSynopsis) // template arm
+    }
+
+    @Test
+    fun episodesHtml_seasonGroupingSeasonSpecVarArm() {
+        // seasonSpec is evaluated by docField too — var: must work there so a
+        // season can ride step vars instead of page markup.
+        val html = """
+            <html><body>
+              <div class="season-accordion">
+                <div class="episode-item"><a class="download-btn" href="https://lightdl.cc/d/a1">Download</a></div>
+                <div class="episode-item"><a class="download-btn" href="https://lightdl.cc/d/a2">Download</a></div>
+              </div>
+            </body></html>
+        """.trimIndent()
+        val items = """
+            {
+              "anchorSelector": "a.download-btn",
+              "labelChain": ["counter"],
+              "sectionGrouping": {
+                "sectionSelector": ".season-accordion",
+                "seasonSpec": "var:seasonHint"
+              }
+            }
+        """.trimIndent()
+        val vars = baseVars + ("seasonHint" to "Season 3")
+
+        val result = RulesPipeline.extractEpisodes(
+            "dramakey", step(items), htmlOutcome(html), vars, "https://dramakey.test/drama/x"
+        )
+        assertEquals(2, result.episodes.size)
+        assertEquals(301, result.episodes[0].episodeNum) // seasonCode(3, 1)
+        assertEquals(302, result.episodes[1].episodeNum)
+    }
+
+    @Test
     fun episodesHtml_parentSectionLinkSkipped() {
         val html = """
             <html><body>
