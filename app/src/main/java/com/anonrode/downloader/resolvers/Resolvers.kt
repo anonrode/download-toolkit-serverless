@@ -36,6 +36,53 @@ interface BaseResolver {
     fun lastResolveFailure(): String? = null
 }
 
+/**
+ * TRUE-HOST dispatch gate for resolver claims (parsedHost retrofit, 2026-09-12).
+ *
+ * The historical form `url.lowercase().contains("locker.com")` claims a URL as
+ * soon as the host STRING appears anywhere in it — and a URL can be crafted so
+ * okhttp fetches a DIFFERENT host than the string shows:
+ *   `https://vikingfile.com:443@evil.com/f` (userinfo — host ends at '@')
+ *   `https://evil\.downloadwella.com/f`     (authority stops at the backslash)
+ * Both pass the substring test, get claimed by the locker's resolver, and are
+ * then fetched — and POSTed to — at evil. This gate compares each claim entry
+ * against the host `HttpClient.parsedHost()` computes (okhttp3.HttpUrl's own
+ * parse): gate and fetcher can no longer disagree about where bytes go. The
+ * OTA terminal gate (RulesPipeline) already uses the same source of truth.
+ *
+ * Entry semantics (matching how the resolver lists are written):
+ *  - contains '/'          -> host equals-or-subdomain of the host part AND
+ *                             the raw URL contains the path part;
+ *  - ends with '.'         -> label-prefix claim: the host starts with it or
+ *                             contains ".<entry>" (dood. -> dood.to, sub.dood.to);
+ *  - dotted domain         -> host equals it or is a sub-domain suffix of it;
+ *  - dot-free fragment     -> substring of the HOST only (no path/query spoof).
+ *
+ * Unparseable URLs fall back to the legacy whole-string test on purpose: a URL
+ * okhttp cannot parse cannot be fetched either, so this keeps dispatch behavior
+ * identical for legacy edge inputs, while every FORGED URL (which parses fine
+ * — that is the whole class) now hits the true-host rule.
+ */
+internal fun hostClaim(url: String, hosts: List<String>): Boolean {
+    val lower = url.lowercase()
+    val host = HttpClient.parsedHost(url)
+    if (host == null) return hosts.any { it.isNotBlank() && lower.contains(it) }
+    return hosts.any { e ->
+        val entry = e.lowercase().trim()
+        when {
+            entry.isBlank() -> false
+            entry.contains('/') -> {
+                val h = entry.substringBefore('/')
+                val path = "/" + entry.substringAfter('/')
+                (host == h || host.endsWith(".$h")) && lower.contains(path)
+            }
+            entry.endsWith(".") -> host.startsWith(entry) || host.contains(".$entry")
+            entry.contains('.') -> host == entry || host.endsWith(".$entry")
+            else -> host.contains(entry)
+        }
+    }
+}
+
 object ResolverRegistry {
     const val RESOLVE_DEPTH_LIMIT = 6
     private const val NETWORK_RETRY_DELAY_MS = 1500L
@@ -238,8 +285,8 @@ object VidbasicResolver : BaseResolver {
     private val HOSTS = listOf("vidbasic.", "vidb.top", "embedload.cfd")
 
     override fun canResolve(url: String): Boolean {
-        val lower = url.lowercase()
-        return HOSTS.any { lower.contains(it) } && !lower.endsWith(".m3u8") && !lower.endsWith(".mp4")
+        val low = url.lowercase()
+        return hostClaim(url, HOSTS) && !low.endsWith(".m3u8") && !low.endsWith(".mp4")
     }
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
@@ -342,7 +389,7 @@ object VidbasicResolver : BaseResolver {
 object KissasianResolver : BaseResolver {
     override fun canResolve(url: String): Boolean {
         val lower = url.lowercase()
-        return lower.contains("kissasian9.ro") && lower.contains("/kisskh/") && !lower.endsWith(".m3u8")
+        return hostClaim(url, listOf("kissasian9.ro")) && lower.contains("/kisskh/") && !lower.endsWith(".m3u8")
     }
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
@@ -377,7 +424,7 @@ object KisskhMegaplayResolver : BaseResolver {
     override fun canResolve(url: String): Boolean {
         if (url.contains("/playlist.php") || url.contains("/api/")) return false
         val lower = url.lowercase()
-        return HOSTS.any { lower.contains(it) } || lower.contains("/kisskh/")
+        return hostClaim(url, HOSTS) || lower.contains("/kisskh/")
     }
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
@@ -476,7 +523,7 @@ object KisskhMegaplayResolver : BaseResolver {
 object BloggerResolver : BaseResolver {
     override fun canResolve(url: String): Boolean {
         val low = url.lowercase()
-        return low.contains("blogger.com") && (low.contains("video.g") || low.contains("token="))
+        return hostClaim(url, listOf("blogger.com")) && (low.contains("video.g") || low.contains("token="))
     }
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
@@ -549,8 +596,7 @@ object VidsrcResolver : BaseResolver {
     private val ORIGIN_PATTERN = Pattern.compile("""https?://[^/]+""")
 
     override fun canResolve(url: String): Boolean {
-        val low = url.lowercase()
-        return HOSTS.any { low.contains(it) }
+        return hostClaim(url, HOSTS)
     }
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
@@ -629,7 +675,7 @@ object VidsrcResolver : BaseResolver {
 object LightDLResolver : BaseResolver {
     override fun canResolve(url: String): Boolean {
         if (url.contains("/api/download/")) return false
-        return url.lowercase().contains("lightdl.cc")
+        return hostClaim(url, listOf("lightdl.cc"))
     }
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
@@ -662,8 +708,7 @@ object LightDLResolver : BaseResolver {
 // -------------------------------------------------------------
 object FivePlayResolver : BaseResolver {
     override fun canResolve(url: String): Boolean {
-        val low = url.lowercase()
-        return low.contains("5play.cc")
+        return hostClaim(url, listOf("5play.cc"))
     }
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
@@ -681,7 +726,7 @@ object FivePlayResolver : BaseResolver {
 object VikingFileResolver : BaseResolver {
     override fun canResolve(url: String): Boolean {
         val low = url.lowercase()
-        return low.contains("vikingfile.com") && !low.endsWith(".mp4") && !low.endsWith(".mkv") && !low.endsWith(".m3u8")
+        return hostClaim(url, listOf("vikingfile.com")) && !low.endsWith(".mp4") && !low.endsWith(".mkv") && !low.endsWith(".m3u8")
     }
 
     // The Sep-2 hardening blanket-rejected every redirect whose Location sat
@@ -815,7 +860,7 @@ object VikingFileResolver : BaseResolver {
 // -------------------------------------------------------------
 object LulaCloudResolver : BaseResolver {
     override fun canResolve(url: String): Boolean {
-        return url.lowercase().contains("lulacloud.com")
+        return hostClaim(url, listOf("lulacloud.com"))
     }
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
@@ -840,7 +885,7 @@ object LulaCloudResolver : BaseResolver {
 object DramaGatewayResolver : BaseResolver {
     override fun canResolve(url: String): Boolean {
         val low = url.lowercase()
-        return (low.contains("dramarain.com") || low.contains("dramakey.cc")) && low.contains("/download")
+        return hostClaim(url, listOf("dramarain.com", "dramakey.cc")) && low.contains("/download")
     }
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
@@ -862,7 +907,7 @@ object DramaGatewayResolver : BaseResolver {
 object NaijaVaultGatewayResolver : BaseResolver {
     override fun canResolve(url: String): Boolean {
         val low = url.lowercase()
-        return low.contains("naijavault.com") && (low.contains("/dl-") || low.contains("/temp/"))
+        return hostClaim(url, listOf("naijavault.com")) && (low.contains("/dl-") || low.contains("/temp/"))
     }
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
@@ -889,8 +934,7 @@ object EmbedResolver : BaseResolver {
     private val KNOWN = listOf("megaplay.buzz", "megaplay.cc", "tamilembed.lol", "embedsito.com")
 
     override fun canResolve(url: String): Boolean {
-        val low = url.lowercase()
-        return KNOWN.any { low.contains(it) }
+        return hostClaim(url, KNOWN)
     }
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
@@ -907,13 +951,14 @@ object EmbedResolver : BaseResolver {
 // -------------------------------------------------------------
 object PlutoMoviesResolver : BaseResolver {
     override fun canResolve(url: String): Boolean {
-        val lower = url.lowercase()
         // /series/ episode pages carry the same download link as movies —
         // without them the Vincenzo-style episode taps failed with
         // "resolver chain EMPTY" (live-verified 2026-08-21).
-        return lower.contains("dl.plutomovies.com") ||
-            lower.contains("plutomovies.com/movie/") ||
-            lower.contains("plutomovies.com/series/")
+        return hostClaim(url, listOf(
+            "dl.plutomovies.com",
+            "plutomovies.com/movie/",
+            "plutomovies.com/series/"
+        ))
     }
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
@@ -980,8 +1025,7 @@ object PlutoMoviesResolver : BaseResolver {
 // -------------------------------------------------------------
 object DownloadwellaResolver : BaseResolver {
     override fun canResolve(url: String): Boolean {
-        val lower = url.lowercase()
-        return lower.contains("downloadwella.com") || lower.contains("wetafiles.com") || lower.contains("kissorgrab.com")
+        return hostClaim(url, listOf("downloadwella.com", "wetafiles.com", "kissorgrab.com"))
     }
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
@@ -1116,7 +1160,9 @@ object LoadedfilesResolver : BaseResolver {
     }
 
     override fun canResolve(url: String): Boolean {
-        return HOST_RE.matcher(url.lowercase()).find()
+        val host = HttpClient.parsedHost(url)
+        return if (host != null) HOST_RE.matcher(host).find()
+        else HOST_RE.matcher(url.lowercase()).find()
     }
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
@@ -1291,7 +1337,7 @@ object LoadedfilesResolver : BaseResolver {
 // -------------------------------------------------------------
 object WildshareResolver : BaseResolver {
     override fun canResolve(url: String): Boolean {
-        return url.lowercase().contains("wildshare.net")
+        return hostClaim(url, listOf("wildshare.net"))
     }
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
@@ -1365,7 +1411,7 @@ object WildshareResolver : BaseResolver {
 // -------------------------------------------------------------
 object WaffiCloudResolver : BaseResolver {
     override fun canResolve(url: String): Boolean {
-        return url.lowercase().contains("waffi.cloud")
+        return hostClaim(url, listOf("waffi.cloud"))
     }
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
@@ -1381,7 +1427,7 @@ object WaffiCloudResolver : BaseResolver {
 // -------------------------------------------------------------
 object VidmolyResolver : BaseResolver {
     override fun canResolve(url: String): Boolean {
-        return url.lowercase().contains("vidmoly.")
+        return hostClaim(url, listOf("vidmoly."))
     }
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
@@ -1407,8 +1453,7 @@ object StreamwishResolver : BaseResolver {
     )
 
     override fun canResolve(url: String): Boolean {
-        val lower = url.lowercase()
-        return HOSTS.any { lower.contains(it) }
+        return hostClaim(url, HOSTS)
     }
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
@@ -1469,8 +1514,7 @@ object VidhideResolver : BaseResolver {
     }
 
     override fun canResolve(url: String): Boolean {
-        val lower = url.lowercase()
-        return HOSTS.any { lower.contains(it) }
+        return hostClaim(url, HOSTS)
     }
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
@@ -1513,8 +1557,7 @@ object DoodstreamResolver : BaseResolver {
     )
 
     override fun canResolve(url: String): Boolean {
-        val lower = url.lowercase()
-        return HOSTS.any { lower.contains(it) }
+        return hostClaim(url, HOSTS)
     }
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
@@ -1552,8 +1595,7 @@ object MixdropResolver : BaseResolver {
     private val HOSTS = listOf("mixdrop.", "mixdrp.", "mdfx9dc8n.net", "mixdroop.")
 
     override fun canResolve(url: String): Boolean {
-        val lower = url.lowercase()
-        return HOSTS.any { lower.contains(it) }
+        return hostClaim(url, HOSTS)
     }
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
@@ -1582,8 +1624,7 @@ object StreamtapeResolver : BaseResolver {
     private val HOSTS = listOf("streamtape.", "watchadsontape.", "strtape.tech")
 
     override fun canResolve(url: String): Boolean {
-        val lower = url.lowercase()
-        return HOSTS.any { lower.contains(it) }
+        return hostClaim(url, HOSTS)
     }
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
@@ -1608,7 +1649,7 @@ object StreamtapeResolver : BaseResolver {
 // -------------------------------------------------------------
 object PixelDrainResolver : BaseResolver {
     override fun canResolve(url: String): Boolean {
-        return url.lowercase().contains("pixeldrain.com")
+        return hostClaim(url, listOf("pixeldrain.com"))
     }
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
@@ -1629,8 +1670,7 @@ object GenericLockerResolver : BaseResolver {
     private val HOSTS = listOf("vikingfile.com", "lulacloud.com")
 
     override fun canResolve(url: String): Boolean {
-        val lower = url.lowercase()
-        return HOSTS.any { lower.contains(it) }
+        return hostClaim(url, HOSTS)
     }
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
