@@ -40,8 +40,6 @@ import androidx.core.content.FileProvider
 import com.anonrode.downloader.data.models.DownloadTask
 import com.anonrode.downloader.data.models.TaskStatus
 import com.anonrode.downloader.ui.components.DownloadsSorter
-import com.anonrode.downloader.ui.components.MediaPlayerContext
-import com.anonrode.downloader.ui.components.MediaPlayerModal
 import com.anonrode.downloader.ui.components.downloadsStats
 import com.anonrode.downloader.ui.theme.*
 import com.anonrode.downloader.viewmodel.MainViewModel
@@ -53,11 +51,11 @@ private const val PREF_SORT_KEY = "pref_downloads_sort"
 @Composable
 fun DownloadsScreen(
     viewModel: MainViewModel,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onPlayTask: (DownloadTask) -> Unit
 ) {
     val tasks by viewModel.engine.tasks.collectAsState()
     val context = LocalContext.current
-    var activePlaybackTask by remember { mutableStateOf<DownloadTask?>(null) }
 
     // Read the persisted sort mode at composition. Default is "date" so
     // a fresh install matches the prototype's default tab.  A missing key
@@ -77,42 +75,11 @@ fun DownloadsScreen(
     // delete path WITHOUT a confirm gate.
     var pendingDeleteTask by remember { mutableStateOf<DownloadTask?>(null) }
 
-    // The Next/Previous queue the player steps through: every COMPLETED
-    // task's path, in screen order. Keyed on a cheap structural signature
-    // (the paths themselves) instead of the task list, because the list
-    // re-emits on every progress tick while the completed set only changes
-    // when a download finishes or is deleted. No File.exists() here — that
-    // was disk I/O on the main thread on EVERY tick; the player now skips
-    // missing peers itself when stepping.
-    val completedSig = remember(tasks) {
-        buildString {
-            tasks.forEach { if (it.status == TaskStatus.COMPLETED) append(it.filePath).append('\n') }
-        }
-    }
-    val completedQueuePaths = remember(completedSig) {
-        viewModel.engine.tasks.value
-            .filter { it.status == TaskStatus.COMPLETED }
-            .map { it.filePath }
-    }
-
-    activePlaybackTask?.let { task ->
-        MediaPlayerModal(
-            ctx = MediaPlayerContext(
-                filePath = task.filePath,
-                title = task.episodeTitle,
-                queuePeerPaths = completedQueuePaths,
-                onPlayFile = { path ->
-                    // Read the freshest snapshot (NOT the composed `tasks`,
-                    // which can lag) and never null the state on a miss —
-                    // a miss used to close the player mid-Next.
-                    viewModel.engine.tasks.value
-                        .firstOrNull { it.filePath == path }
-                        ?.let { activePlaybackTask = it }
-                }
-            ),
-            onDismiss = { activePlaybackTask = null }
-        )
-    }
+    // The player overlay is hosted by MainActivity at the ROOT of the window
+    // tree (see MediaPlayerModal's comment): rendered inside this screen it
+    // would sit within the Scaffold's content area and leave the bottom nav
+    // strip visible — one of the reasons the old in-Scaffold layout read as
+    // "not fullscreen". Tapping play just hands the task up.
 
     // "Cancel all" is destructive (partial files are wiped), so it confirms
     // first — the only bulk action that does.
@@ -411,7 +378,7 @@ fun DownloadsScreen(
                         DownloadCard(
                             task = task,
                             context = context,
-                            onPlay = { activePlaybackTask = task },
+                            onPlay = { onPlayTask(task) },
                             onPause = { viewModel.engine.pause(task.id) },
                             onRetry = { viewModel.engine.retry(task.id) },
                             onCancel = { viewModel.engine.cancel(task.id) },

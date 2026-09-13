@@ -85,7 +85,8 @@ fun MainScaffold(
     themeMode: String,
     onThemeChanged: (String) -> Unit,
     onOpenSocial: (String, String) -> Unit,
-    onWriteTabPref: (String) -> Unit
+    onWriteTabPref: (String) -> Unit,
+    onPlayTask: (com.anonrode.downloader.data.models.DownloadTask) -> Unit
 ) {
     var currentTab by rememberSaveable { mutableStateOf(initialTab) }
 
@@ -160,7 +161,8 @@ fun MainScaffold(
             TabPage(active = currentTab == MainTab.DOWNLOADS) {
                 DownloadsScreen(
                     viewModel = viewModel,
-                    onBack = openSearch
+                    onBack = openSearch,
+                    onPlayTask = onPlayTask
                 )
             }
             TabPage(active = currentTab == MainTab.SETTINGS) {
