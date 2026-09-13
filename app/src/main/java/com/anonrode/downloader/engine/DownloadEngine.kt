@@ -371,7 +371,10 @@ class DownloadEngine(
             if (existing != null) {
                 existing.id
             } else {
-                val cleanTitle = sanitizeComponent(episodeTitle, 80)
+                // Scraped names get the full noise cut; a DIRECT download's
+                // name is the user's own prose (shared filename / pasted URL)
+                // — safety only, never word deletion.
+                val cleanTitle = sanitizeComponent(episodeTitle, 80, stripNoise = !isDirect)
                 val ext = if (audioOnly) "mp3" else if (backend.contains("yt") || !isDirect) "mp4" else "mkv"
 
                 // Uniquify the target filename so two different sources with the same
@@ -926,8 +929,9 @@ class DownloadEngine(
      * trailing-dot guards, byte-aware cap). Kept as the engine's local
      * doorway so folder/stem/social call sites all share one entry.
      */
-    private fun sanitizeComponent(raw: String, maxChars: Int): String =
-        com.anonrode.downloader.util.NameSanitizer.savedName(raw, maxChars)
+    private fun sanitizeComponent(
+        raw: String, maxChars: Int, stripNoise: Boolean = true
+    ): String = com.anonrode.downloader.util.NameSanitizer.savedName(raw, maxChars, stripNoise)
 
     private fun getRefererForUrl(url: String): String {
         // Single source of truth is now the OTA playbook (DynamicRulesManager:

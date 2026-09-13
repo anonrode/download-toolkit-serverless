@@ -109,4 +109,47 @@ class NameSanitizerTest {
         // but a dash introducing the drawer's episode label should:
         assertEquals("Show S01 Episode 4", NameSanitizer.savedName("Show S01 - Episode 4"))
     }
+
+    // ---- 2026-09-13 over-cut mitigations -----------------------------------
+    // Bare noise phrases are cut only behind a decoration separator or at the
+    // END of the string — a title that contains the words as content never
+    // loses them mid-sentence.
+
+    @Test
+    fun midSentenceWordsSurvive() {
+        assertEquals("The Online Class", NameSanitizer.savedName("The Online Class"))
+        assertEquals("Free as a Bird", NameSanitizer.savedName("Free as a Bird"))
+        // whole title IS the phrase: it is the title, nothing gets cut
+        assertEquals("TV Series", NameSanitizer.savedName("TV Series"))
+        // the END cut only takes multi-word phrases — single-word titles that
+        // end on an ambiguous word keep every word even when the phrase would
+        // match mid-string ("… _ online" is noise; "Last Online" is a title):
+        assertEquals("Last Online", NameSanitizer.savedName("Last Online"))
+        assertEquals("The Watch", NameSanitizer.savedName("The Watch"))
+        assertEquals("Born Free", NameSanitizer.savedName("Born Free"))
+        // while the true trailing junk (scraped <title> shape) is multi-word
+        // and does get cut:
+        assertEquals("Dune (2021)", NameSanitizer.savedName("Dune (2021) Full Movie"))
+        assertEquals("Show", NameSanitizer.savedName("Show Watch Online"))
+    }
+
+    @Test
+    fun separatedOrTrailingNoiseIsCut() {
+        assertEquals("Show", NameSanitizer.savedName("Show - Watch Online"))
+        assertEquals("Show", NameSanitizer.savedName("Show _ Free Download"))
+        assertEquals("Show Episode 2", NameSanitizer.savedName("Show _ Episode 1 Added - Episode 2"))
+    }
+
+    @Test
+    fun userProseNeverLosesWords_stripNoiseOff() {
+        // IG captions / shared filenames: safety only, no word deletion.
+        val caption = "Feeling online and free 🎬 full movie marathon"
+        val cleaned = NameSanitizer.savedName(caption, 80, stripNoise = false)
+        assertTrue(cleaned.contains("online"))
+        assertTrue(cleaned.contains("free"))
+        assertTrue(cleaned.contains("movie"))
+        // ...while the same text as a SCRAPED title loses the site-junk tail:
+        assertEquals("Feeling online and free 🎬",
+            NameSanitizer.savedName("Feeling online and free 🎬 full movie", 80))
+    }
 }
