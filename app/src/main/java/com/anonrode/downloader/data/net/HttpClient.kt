@@ -309,7 +309,7 @@ object HttpClient {
      */
     fun parsedHost(url: String): String? {
         return try {
-            okhttp3.HttpUrl.parse(safeUrl(url))?.host?.lowercase()
+            okhttp3.toHttpUrlOrNull(safeUrl(url))?.host?.lowercase()
         } catch (_: Exception) {
             null
         }
@@ -359,7 +359,7 @@ object HttpClient {
     )
 
     fun isSafeTarget(url: String): Boolean {
-        val parsed = okhttp3.HttpUrl.parse(safeUrl(url)) ?: return false
+        val parsed = okhttp3.toHttpUrlOrNull(safeUrl(url)) ?: return false
         if (parsed.scheme != "http" && parsed.scheme != "https") return false
         if (parsed.port in SERVICE_PORTS) return false
         val host = parsed.host

@@ -408,12 +408,16 @@ object YoutubeDlDownloader {
         // original yt-dlp error below.
         if (produced == null && isExtractorTask && InstagramPhotoMuxer.shortcodeFromUrl(sourceUrl) != null) {
             com.anonrode.downloader.util.DebugLog.backend("task=$taskId yt-dlp exhausted on an Instagram post URL — trying photo+music muxer")
+            // Capture the Job in the SUSPEND body: CoroutineContext.isActive is
+            // a suspend property and cannot be read from the plain
+            // () -> Boolean callback below.
+            val muxJob = coroutineContext[kotlinx.coroutines.Job]
             produced = InstagramPhotoMuxer.tryMux(
                 context = context,
                 sourceUrl = sourceUrl,
                 outDir = outDir,
                 taskId = taskId,
-                isCancelled = { !coroutineContext.isActive }
+                isCancelled = { muxJob?.isActive != true }
             )
         }
         if (produced == null && errors.isNotBlank()) {

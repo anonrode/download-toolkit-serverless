@@ -1908,7 +1908,7 @@ class DownloadEngine(
                                 val stallMsg = if (stalledLong) {
                                     "Download stalled — no progress for ${stallTimeoutSec}s across $stallKills attempts"
                                 } else {
-                                    "Download throttled to ${(windowBps / 1024).coerceAtLeast(0)} KiB/s after a healthy start — killed and re-sourced $stallKills times without recovery"
+                                    "Download throttled to ${(windowBps / 1024).toLong().coerceAtLeast(0L)} KiB/s after a healthy start — killed and re-sourced $stallKills times without recovery"
                                 }
                                 repository.update(task.id) {
                                     it.copy(status = TaskStatus.FAILED, errorMessage = stallMsg)

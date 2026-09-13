@@ -72,7 +72,8 @@ object AnonTheme {
 }
 
 // Backward-compatible dynamic accessors for Compose call sites
-val BackgroundDark: Color @Composable get() = AnonTheme.colors.backgroundval SurfaceCard: Color @Composable get() = AnonTheme.colors.surfaceCard
+val BackgroundDark: Color @Composable get() = AnonTheme.colors.background
+val SurfaceCard: Color @Composable get() = AnonTheme.colors.surfaceCard
 val SurfaceElevated: Color @Composable get() = AnonTheme.colors.surfaceElevated
 val BorderHairline: Color @Composable get() = AnonTheme.colors.borderHairline
 val AccentPrimary: Color @Composable get() = AnonTheme.colors.accentPrimary
