@@ -3,6 +3,7 @@ package com.anonrode.downloader.providers
 import com.anonrode.downloader.data.rules.PipelineSource
 import com.anonrode.downloader.data.rules.PipelineStep
 import com.anonrode.downloader.data.rules.PipelineTerminal
+import com.anonrode.downloader.data.rules.PipelineVarBind
 import com.anonrode.downloader.data.rules.parseSitePipeline
 import org.json.JSONObject
 import org.jsoup.Jsoup
@@ -582,9 +583,19 @@ class RulesPipelineTest {
             )
         )
 
-        // terminal without resolve: dropped together with its absent pipeline
-        val termOnly = parseSitePipeline(JSONObject("""{"schema":1,"terminal":${validTerminalJson()}}"""))
-        assertNull(termOnly) // nothing usable left
+        // FINAL terminal without resolve: dropped — its spec vars could never
+        // bind without steps.
+        assertNull(parseSitePipeline(JSONObject("""{"schema":1,"terminal":${validTerminalJson()}}""")))
+
+        // ENTRY terminal rides ALONE (zero-fetch recipe: candidate comes from
+        // the episode URL itself — the nkiri wrapper class).
+        val entryOnly = parseSitePipeline(
+            JSONObject("""{"schema":1,"terminal":{"source":"entry","regex":"redirect=([^&]+)",
+                            "hosts":["downloadwella.com"],"mode":"handoff"}}""")
+        )
+        assertNotNull(entryOnly)
+        assertNull(entryOnly!!.resolve)
+        assertNotNull(entryOnly.terminal)
 
         // broken terminal must NOT void the site's search pipeline
         val searchPlusBadTerm = parseSitePipeline(
@@ -716,5 +727,67 @@ class RulesPipelineTest {
             "https://a.com/f?x=1 2", // %20 -> space via decode
             RulesPipeline.resolveCandidate(t, "https://s.test/w", mapOf("dlink" to "https://a.com/f%3Fx%3D1%202"))
         )
+    }
+
+    // ---------------------------------------------------------------- urlBinds
+
+    @Test
+    fun urlBinds_parseRejectsInvalidShapes() {
+        fun resolveWith(binds: String) = parseSitePipeline(
+            JSONObject("""{"schema":1,"resolve":{"steps":[{"sources":[{"url":"http://x"}]}],
+                            "urlBinds":$binds},"terminal":${validTerminalJson()}}""")
+        )
+        // JSON \\. -> regex source \. -> escaped dot at compile
+        assertNotNull(resolveWith("""{"fileid":{"regex":"wella\\.com/([a-z0-9]+)/","group":1}}"""))
+        assertNull(resolveWith("""{"fileid":{"regex":""}}"""))              // blank regex
+        assertNull(resolveWith("""{"fileid":{"regex":"([unclosed"}}"""))    // uncompilable
+        assertNull(resolveWith("""{"fileid":{"regex":"x","group":99}}"""))  // group bounds
+        assertNull(resolveWith("""{"fileid":{"regex":"x","group":-1}}"""))  // group bounds
+        assertNull(resolveWith("""{"fileid":"just-a-string"}"""))           // non-object entry
+        // an invalid urlBinds map drops resolve+terminal but NOT search:
+        val keep = parseSitePipeline(
+            JSONObject("""{"schema":1,
+                "search":{"steps":[{"sources":[{"url":"{base}/?s={query}"}],
+                    "items":{"cardSelector":"a","title":"self","url":"self"}}]},
+                "resolve":{"steps":[{"sources":[{"url":"http://x"}]}],
+                           "urlBinds":{"bad":{"regex":"([unclosed"}}},
+                "terminal":${validTerminalJson()}}""")
+        )
+        assertNotNull(keep)
+        assertNotNull(keep!!.search)
+        assertNull(keep.resolve)
+        assertNull(keep.terminal)
+    }
+
+    @Test
+    fun applyUrlBinds_fileIdClassAndMisses() {
+        // The real downloadwella shape: file id = first path segment, needed
+        // by the POST body BEFORE any fetch.
+        val vars = mutableMapOf("url" to "https://downloadwella.com/kjo5ujwtg2bx/Heartman.Rock.and.Love.2026.mkv.html")
+        RulesPipeline.applyUrlBinds(
+            listOf(PipelineVarBind("fileid", """downloadwella\.com/([A-Za-z0-9]+)/""", 1)), vars
+        )
+        assertEquals("kjo5ujwtg2bx", vars["fileid"])
+
+        // no match -> var untouched (later blank-var failure is the honest one)
+        val v2 = mutableMapOf("url" to "https://other.test/x")
+        RulesPipeline.applyUrlBinds(listOf(PipelineVarBind("fileid", """downloadwella\.com/([A-Za-z0-9]+)/""", 1)), v2)
+        assertNull(v2["fileid"])
+
+        // out-of-range group -> untouched
+        val v3 = mutableMapOf("url" to "https://downloadwella.com/abc12/x")
+        RulesPipeline.applyUrlBinds(listOf(PipelineVarBind("fileid", """wella\.com/([^/]+)/""", 5)), v3)
+        assertNull(v3["fileid"])
+
+        // decode=true percent-decodes the captured value
+        val v4 = mutableMapOf("url" to "https://x.test/a%20b")
+        RulesPipeline.applyUrlBinds(listOf(PipelineVarBind("seg", """/([^/?]+)$""", 1, decode = true)), v4)
+        assertEquals("a b", v4["seg"])
+
+        // group 0 = whole match; no url var in scope -> silent no-op
+        val v5 = mutableMapOf("url" to "https://x.test/p/q")
+        RulesPipeline.applyUrlBinds(listOf(PipelineVarBind("all", """.+""", 0)), v5)
+        assertEquals("https://x.test/p/q", v5["all"])
+        RulesPipeline.applyUrlBinds(listOf(PipelineVarBind("all", """.+""", 0)), mutableMapOf())
     }
 }

@@ -16,18 +16,26 @@ import org.json.JSONObject
  *     "search":   { "steps": [ <step>, ... ] },
  *     "episodes": { "steps": [ <step>, ... ] },
  *
- *     "resolve":  { "steps": [ <step>, ... ] },     // optional; drives
- *     "terminal": {                                 // resolveEpisode.
- *       "source": "entry" | "final",                //   entry = extract from
- *       "regex": "...", "group": 1, "decode": true, //          the EPISODE URL
- *       "spec": "{var}",                            //   final = template bound
- *       "hosts": ["downloadwella.com", ...],        //          by the last step
- *       "mode": "probe" | "handoff",                //   referer: template, probe only
+ *     "resolve":  { "steps": [ <step>, ... ],      // optional; drives
+ *       "urlBinds": { "fileid": { "regex": "..",   //   resolveEpisode. Binds
+ *                     "group": 1, "decode": false } } // vars from {url}
+ *     },                                           //   BEFORE any fetch
+ *     "terminal": {                                 // (the locker file-id
+ *       "source": "entry" | "final",                //   from the URL class).
+ *       "regex": "...", "group": 1, "decode": true, //   entry = extract from
+ *       "spec": "{var}",                            //          the EPISODE URL
+ *       "hosts": ["downloadwella.com", ...],        //   final = template bound
+ *       "mode": "probe" | "handoff",                //          by the last step
  *       "referer": "{base}/"
  *     }
  *   }
  * }
  * ```
+ *
+ * A `terminal` with `source:"entry"` may ride ALONE (zero-fetch recipe: the
+ * candidate comes out of the episode URL itself, e.g. nkiri's dead
+ * download-manager wrapper); a `final` terminal needs its `resolve` pipeline
+ * to bind the vars, and a `resolve` without a valid terminal is refused.
  *
  * Step:
  * ```
@@ -94,8 +102,20 @@ data class PipelineStep(
     val items: JSONObject? = null
 )
 
+/** Pre-step binding from a pipeline VARIABLE (the resolve stage binds names
+ *  out of the raw {url} — e.g. downloadwella's file id, which the POST body
+ *  needs BEFORE any fetch happens). Regex-only by design; compile-checked at
+ *  parse like every other spec in this schema. */
+data class PipelineVarBind(
+    val name: String,
+    val regex: String,
+    val group: Int = 1,
+    val decode: Boolean = false
+)
+
 data class Pipeline(
-    val steps: List<PipelineStep>
+    val steps: List<PipelineStep>,
+    val urlBinds: List<PipelineVarBind> = emptyList()
 )
 
 /**
@@ -142,15 +162,22 @@ internal fun parseSitePipeline(obj: JSONObject): SitePipeline? {
         if (schema != 1) return null // unknown future schema — ignore, keep fallback
         val resolvePl = obj.optJSONObject("resolve")?.let { parsePipeline(it) }
         val terminal = obj.optJSONObject("terminal")?.let { parseTerminal(it) }
+        val paired = resolvePl != null && terminal != null
+        // Zero-fetch recipes: an ENTRY terminal extracts from the raw episode
+        // URL — no steps needed. A FINAL terminal renders bound vars, so it
+        // may never ride without its pipeline.
+        val entryOnly = terminal != null && resolvePl == null && terminal.source == "entry"
         SitePipeline(
             schema = schema,
             search = obj.optJSONObject("search")?.let { parsePipeline(it) },
             episodes = obj.optJSONObject("episodes")?.let { parsePipeline(it) },
             // resolve without a valid terminal is refused BY DESIGN (the
             // trust lives in the terminal gate, not in the hops).
-            resolve = if (resolvePl != null && terminal != null) resolvePl else null,
-            terminal = if (resolvePl != null && terminal != null) terminal else null
-        ).takeIf { it.search != null || it.episodes != null || it.resolve != null }
+            resolve = if (paired) resolvePl else null,
+            terminal = if (paired || entryOnly) terminal else null
+        ).takeIf {
+            it.search != null || it.episodes != null || it.resolve != null || it.terminal != null
+        }
     } catch (_: Exception) {
         null
     }
@@ -197,7 +224,34 @@ private fun parsePipeline(obj: JSONObject): Pipeline? {
         val s = stepsArr.optJSONObject(i) ?: return null
         steps.add(parseStep(s) ?: return null)
     }
-    return Pipeline(steps)
+    return Pipeline(steps, parseUrlBinds(obj.optJSONObject("urlBinds")) ?: return null)
+}
+
+/** urlBinds: {name: {"regex":..,"group":n,"decode":bool}} — all-or-nothing:
+ *  ANY invalid entry voids the whole pipeline (same contract as parseStep).
+ *  Regexes compile-checked NOW, not while the user waits on a download. */
+private fun parseUrlBinds(obj: JSONObject?): List<PipelineVarBind>? {
+    if (obj == null) return emptyList()
+    val out = mutableListOf<PipelineVarBind>()
+    val keys = obj.keys()
+    while (keys.hasNext()) {
+        val name = keys.next()
+        val spec = obj.optJSONObject(name) ?: return null
+        val regex = spec.optString("regex")
+        if (regex.isBlank()) return null
+        try { Regex(regex) } catch (_: Exception) { return null }
+        val group = spec.optInt("group", 1)
+        if (group < 0 || group > 32) return null
+        out.add(
+            PipelineVarBind(
+                name = name,
+                regex = regex,
+                group = group,
+                decode = spec.optBoolean("decode", false)
+            )
+        )
+    }
+    return out
 }
 
 private fun parseStep(obj: JSONObject): PipelineStep? {
