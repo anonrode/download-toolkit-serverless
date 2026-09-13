@@ -155,25 +155,57 @@ object RocksProvider : SiteProvider {
                             ?: Regex("""\b(?:EPISODE|EP|E)\s*(\d{1,3})\b""", RegexOption.IGNORE_CASE).find(parentText)
 
                         val itemSeason = explicitSm?.groupValues?.getOrNull(1)?.toIntOrNull() ?: currentSeason
-                        val epNum = explicitSm?.groupValues?.getOrNull(2)?.toIntOrNull()
-                            ?: epMatch?.groupValues?.getOrNull(1)?.toIntOrNull()
-                            ?: count
-
-                        val epCode = "S%02dE%02d".format(itemSeason, epNum)
                         val qMatch = Regex("""\b(\d{3,4}p)\b""", RegexOption.IGNORE_CASE).find(text)
                             ?: Regex("""\b(\d{3,4}p)\b""", RegexOption.IGNORE_CASE).find(parentText)
                         val qualitySuffix = qMatch?.groupValues?.getOrNull(1)?.let { " [$it]" } ?: ""
 
-                        val label = "$epCode$qualitySuffix"
+                        // Server-mirror / part detection for marker-free links.
+                        // Device-verified 2026-09-13: movie posts host ONE file on
+                        // two lockers labelled "DOWNLOAD VIDEO SERVER 1/2" — with
+                        // no S/E marker the old code numbered them as sequential
+                        // episodes, so a single film rendered as S01E01+S01E02.
+                        // Text-first search keeps the label faithful to the link
+                        // the user is actually tapping.
+                        val mirrorMark = if (explicitSm == null && epMatch == null) {
+                            Regex("""\b(?:video\s+)?server\s*(\d+)\b""", RegexOption.IGNORE_CASE).find(text)
+                                ?: Regex("""\b(?:video\s+)?server\s*(\d+)\b""", RegexOption.IGNORE_CASE).find(parentText)
+                        } else null
+                        val partMark = if (mirrorMark == null && explicitSm == null && epMatch == null) {
+                            Regex("""\b(?:file\s+)?part\s*(\d{1,2})\b""", RegexOption.IGNORE_CASE).find(text)
+                                ?: Regex("""\b(?:file\s+)?part\s*(\d{1,2})\b""", RegexOption.IGNORE_CASE).find(parentText)
+                        } else null
 
-                        episodes.add(
-                            EpisodeItem(
-                                title = label,
-                                url = href,
-                                episodeNum = itemSeason * 100 + epNum,
-                                site = name
+                        when {
+                            mirrorMark != null -> episodes.add(
+                                EpisodeItem(
+                                    title = "Server ${mirrorMark.groupValues[1]}$qualitySuffix",
+                                    url = href,
+                                    episodeNum = itemSeason * 100 + 1,
+                                    site = name
+                                )
                             )
-                        )
+                            partMark != null -> episodes.add(
+                                EpisodeItem(
+                                    title = "Part ${partMark.groupValues[1]}$qualitySuffix",
+                                    url = href,
+                                    episodeNum = itemSeason * 100 + (partMark.groupValues[1].toIntOrNull() ?: count),
+                                    site = name
+                                )
+                            )
+                            else -> {
+                                val epNum = explicitSm?.groupValues?.getOrNull(2)?.toIntOrNull()
+                                    ?: epMatch?.groupValues?.getOrNull(1)?.toIntOrNull()
+                                    ?: count
+                                episodes.add(
+                                    EpisodeItem(
+                                        title = "S%02dE%02d".format(itemSeason, epNum) + qualitySuffix,
+                                        url = href,
+                                        episodeNum = itemSeason * 100 + epNum,
+                                        site = name
+                                    )
+                                )
+                            }
+                        }
                         count++
                     }
                 }
