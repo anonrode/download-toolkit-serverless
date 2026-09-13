@@ -1163,6 +1163,13 @@ internal fun SettingsDiagnosticsSection(state: SettingsState) {
                                     combined.append("===== ").append(f.name).append(" =====\n")
                                     combined.append(f.readText()).append('\n')
                                 }
+                                // Crash reports carry the full untruncated
+                                // "Caused by:" chain the log's CRASH line cuts.
+                                val crashTxt = com.anonrode.downloader.util.CrashHandler
+                                    .crashReportsText(context)
+                                if (crashTxt.isNotBlank()) {
+                                    combined.append("\n===== CRASH REPORTS =====\n").append(crashTxt)
+                                }
                                 val redacted = combined.toString().replace(
                                     Regex("""[?&](token|download_token|pt|expiry|expires)=[^\s&]+""")
                                 ) { match ->
