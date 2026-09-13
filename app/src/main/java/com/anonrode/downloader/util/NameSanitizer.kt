@@ -34,20 +34,26 @@ object NameSanitizer {
      * anchored to the FULL group text (no substring fishing inside
      * otherwise-legit parentheticals like "(2019)" or "(Original Mix)").
      */
-    // ENGINE RULE (v3.1.1 + v3.1.2 hotfixes): Android's java.util.regex fork is
-    // NOT the desktop engine — two device crashes proved it. A pattern string
-    // in <clinit> that the device rejects becomes ExceptionInInitializerError
-    // and hard-kills the FIRST download tap of every session (device logs
-    // 2026-09-13: 18:09 build died on a mid-pattern "(?i)"; the 21:18 retagged
-    // build STILL died at sanitizeComponent with only one exotic construct
-    // left — the "(?<=\S)" lookbehind below). JVM unit tests and CI compile the
-    // desktop engine and can never see these. The portable whitelist for all
-    // main-source regexes is: classes, groups, alternation, quantifiers, \b,
-    // LOOKAHEAD ("(?=" / "(?!"), and inline flags only at position 0. Banned:
-    // mid-pattern flags, lookBEHIND "(?<=" / "(?<", named groups, atomic
-    // "(?>", possessive quantifiers. Use capture-group equivalents instead:
-    // "(?<!x)" -> "(?:^|[^x-prefix])", with RegexOption for case handling.
-    // Enforced by ~/.zcode/tmp/ktregexflags.py in the pre-commit routine.
+    // ENGINE RULE (v3.1.x saga, root cause CONFIRMED by the phone's own
+    // Downloads/Anon/anon_crash.txt): on Android, java.util.regex delegates to
+    // ICU (com.android.icu.util.regex.PatternNative) — NOT the desktop JVM
+    // engine every unit test and CI tier compiles against. Every download
+    // crash since v3.1.1 was ONE character: a literal-brace pattern ending in
+    // an UNESCAPED `}` (`\{([^{}]{1,60})}`) — literal to the JVM,
+    // "Syntax error in regexp pattern near index 16" to ICU — thrown in
+    // <clinit>, so the first download tap of the session died with
+    // ExceptionInInitializerError. The earlier `(?i)` and `(?<=)` theories
+    // were both wrong (the engine died at this line before reaching them).
+    // Portable whitelist for ALL main-source regexes:
+    //  - literal braces: ALWAYS write \{ and \} (an unmatched `}` outside [...]
+    //    is banned even mid-string);
+    //  - inline flags only via RegexOption (no (?i)/(?u) inside pattern text);
+    //  - avoid lookbehind (?<=/(?<!, named groups, atomic (??>, possessive
+    //    *+ ++ ?+, \p{ classes — defensive only: each is proven to bite at
+    //    least one supported engine and every one has a capture-group equivalent;
+    //  - lookahead (?= (?! is fine (universally supported, repo precedent).
+    // Enforced twice: ktregexflags.py static gate + RegexEngineCompatTest, the
+    // CI Tier-2 suite that compiles EVERY pattern against the REAL engine.
     private val NOISE_GROUP = Regex(
         """^[\s.!-]*(added?|updated?|new episode.*|now streaming.*|coming soon.*|""" +
             """(full )?(movie|episode|hd|4k|uhd|cam|ts|scr|web-?rip|dvd-?rip|blu-?ray)( .*)?|""" +
@@ -63,7 +69,13 @@ object NameSanitizer {
         Regex("""_([^_]{1,60})_"""),
         Regex("""\[([^\[\]]{1,60})]"""),
         Regex("""\(([^()]{1,60})\)"""),
-        Regex("""\{([^{}]{1,60})}""")
+        // BOTH braces escaped. A trailing unescaped `}` compiles on the
+        // desktop JVM (literal) but the phone's ICU-backed engine rejects an
+        // unmatched `}` — THIS line (index 16) is what threw on every device
+        // download since v3.1.1 (anon_crash.txt: PatternSyntaxException in
+        // com.android.icu.util.regex.PatternNative at <clinit>). `]` as a
+        // literal (line above) is fine on both engines; `}` is NOT.
+        Regex("""\{([^{}]{1,60})\}""")
     )
 
     /**

@@ -1064,7 +1064,15 @@ object RulesPipeline {
     private fun fillSeasonTemplate(template: String, season: Int?, num: Int, label: String): String {
         if (season == null) return label
         return try {
-            Regex("""\{(season|num)(?::(%[^}]+))?}|\{label}""").replace(template) { m ->
+            // BOTH braces escaped in every literal-brace pattern: the phone's
+            // ICU-backed engine rejects a trailing unescaped `}` that the
+            // desktop JVM happily reads as a literal (confirmed root cause of
+            // the v3.1.x crash chain — anon_crash.txt). Before this, these
+            // three catches ran on-device for every OTA site: renderTemplate
+            // silently returned null for EVERY templated URL (playbook sites
+            // dead), fillSeasonTemplate dropped its labels to bare, and
+            // fillCaptureTemplate leaked "{1}" text into titles.
+            Regex("""\{(season|num)(?::(%[^}]+))?\}|\{label\}""").replace(template) { m ->
                 when (m.groupValues[1]) {
                     "season" -> formatInt(season, m.groupValues[2])
                     "num" -> formatInt(num, m.groupValues[2])
@@ -1096,7 +1104,7 @@ object RulesPipeline {
     /** Fills {1}, {2}, ... from capture groups; {1:%02d} zero-pads numerics. */
     internal fun fillCaptureTemplate(template: String, captures: List<String>): String {
         return try {
-            Regex("""\{(\d+)(?::(%[^}]+))?}""").replace(template) { m ->
+            Regex("""\{(\d+)(?::(%[^}]+))?\}""").replace(template) { m ->
                 val idx = (m.groupValues[1].toIntOrNull() ?: 0) - 1
                 val value = captures.getOrNull(idx) ?: ""
                 val fmt = m.groupValues[2]
@@ -1231,7 +1239,7 @@ object RulesPipeline {
         return try {
             val sb = StringBuilder()
             var cursor = 0
-            val re = Regex("""\{([^{}]+)}""")
+            val re = Regex("""\{([^{}]+)\}""")
             var matched = false
             for (m in re.findAll(template)) {
                 matched = true
