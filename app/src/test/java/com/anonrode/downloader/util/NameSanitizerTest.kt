@@ -47,11 +47,23 @@ class NameSanitizerTest {
     }
 
     @Test
-    fun yearsAndRealParens_survive_noiseGroupsDie() {
+    fun yearsAndRealParens_surviveNoiseGroupsDie() {
         assertEquals("Dune (2021)", NameSanitizer.savedName("Dune (2021) Full Movie"))
         assertEquals("Blade [2049]", NameSanitizer.savedName("Blade [2049]"))
         assertEquals("Show", NameSanitizer.savedName("Show [Watch Online HD]"))
         assertEquals("Title (Original Mix)", NameSanitizer.savedName("Title (Original Mix)"))
+    }
+
+    @Test
+    fun curlyDecoration_works() {
+        // Pins the DECORATIONS brace pattern — the exact regex that threw
+        // PatternSyntaxException on the phone's ICU engine (unescaped trailing
+        // `}`, anon_crash.txt) and killed every download since v3.1.1. Until
+        // this test the brace decoration had ZERO coverage anywhere.
+        assertEquals("Show", NameSanitizer.savedName("Show {Watch Online}"))
+        assertEquals("Dune {2021}", NameSanitizer.savedName("Dune {2021}"))
+        assertEquals("Show S02 Episode 1",
+            NameSanitizer.savedName("Show S02 {TV Series} - Episode 1"))
     }
 
     @Test
