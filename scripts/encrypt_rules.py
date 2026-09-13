@@ -171,6 +171,25 @@ def _validate_pipeline_items(where, items, problems):
         _check_regex(items["hrefRegex"], f"{where}.hrefRegex", problems)
     if items.get("sortBy", "none") not in ("none", "captures"):
         problems.append(f"{where}.sortBy: must be none|captures")
+    sg = items.get("sectionGrouping")
+    if sg is not None:
+        if not isinstance(sg, dict):
+            problems.append(f"{where}.sectionGrouping: must be an object")
+        else:
+            unknown = set(sg) - {"sectionSelector", "seasonSpec", "labelTemplate"}
+            if unknown:
+                problems.append(
+                    f"{where}.sectionGrouping: unknown keys {sorted(unknown)} (closed vocabulary)")
+            sel = sg.get("sectionSelector")
+            if not isinstance(sel, str) or not sel or len(sel) > MAX_SELECTOR_LEN:
+                problems.append(
+                    f"{where}.sectionGrouping.sectionSelector: string 1..{MAX_SELECTOR_LEN} required")
+            if "seasonSpec" in sg:
+                _check_field_spec(sg["seasonSpec"], f"{where}.seasonGrouping.seasonSpec", problems)
+            tmpl = sg.get("labelTemplate")
+            if tmpl is not None and (not isinstance(tmpl, str) or len(tmpl) > MAX_SELECTOR_LEN):
+                problems.append(
+                    f"{where}.sectionGrouping.labelTemplate: string <= {MAX_SELECTOR_LEN}")
 
     lc = items.get("labelChain")
     if lc is not None:

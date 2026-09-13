@@ -674,37 +674,63 @@ object RulesPipeline {
         val items = step.items ?: return PipelineEpisodes()
         val doc = outcome.doc ?: return PipelineEpisodes()
 
-        // ---- collect anchors
-        val anchors = mutableListOf<AnchorCtx>()
+        // ---- optional season grouping (the dramakey-class season accordion:
+        // one container per season whose header declares the season number).
+        // When present, anchors are collected PER SECTION, sections sort by
+        // parsed season ascending (dramakey renders NEWEST season first), and
+        // the in-section position restarts so counter labels and {num} become
+        // season-relative. episodeNum = season*100 + position — the convention
+        // EpisodeDrawer already decodes (`episodeNum >= 100 -> / 100`) and the
+        // engine's re-resolve requires (it picks an episode with
+        // firstOrNull { episodeNum == task.episodeNum }, so numbers must stay
+        // unique across seasons).
+        val grouping = items.optJSONObject("sectionGrouping")
+        val seasonSpec = grouping?.optString("seasonSpec").orEmpty()
+        val labelTemplate = grouping?.optString("labelTemplate").orEmpty()
+        val sections: List<Pair<Element, Int?>> = if (grouping != null) {
+            val sel = grouping.optString("sectionSelector")
+            val found = if (sel.isNotBlank()) doc.select(sel).toList() else emptyList()
+            val parsed = found.map { it to parseSeason(it, seasonSpec, vars) }
+            if (parsed.isEmpty()) emptyList() else parsed.sortedBy { it.second ?: Int.MAX_VALUE }
+        } else emptyList()
+        val grouped = sections.isNotEmpty()
+
+        // ---- collect anchors (root-scoped when grouped)
+        class Collected(val ctx: AnchorCtx, val season: Int?)
+        val anchors = mutableListOf<Collected>()
         val hrefRegexStr = items.optString("hrefRegex")
-        if (hrefRegexStr.isNotBlank()) {
-            val re = try { Regex(hrefRegexStr) } catch (_: Exception) { null }
-            if (re != null) {
-                for (a in doc.select("a[href]")) {
+        fun collectFrom(root: Element, season: Int?) {
+            if (hrefRegexStr.isNotBlank()) {
+                val re = try { Regex(hrefRegexStr) } catch (_: Exception) { null } ?: return
+                for (a in root.select("a[href]")) {
                     val raw = a.attr("href")
                     val m = re.find(raw) ?: continue
                     anchors.add(
-                        AnchorCtx(
-                            href = HttpClient.safeResolveUri(showUrl, raw),
-                            text = a.text().trim(),
-                            element = a,
-                            captures = m.groupValues.drop(1)
+                        Collected(
+                            AnchorCtx(
+                                href = HttpClient.safeResolveUri(showUrl, raw),
+                                text = a.text().trim(),
+                                element = a,
+                                captures = m.groupValues.drop(1)
+                            ), season
                         )
                     )
                 }
-            }
-        } else {
-            val selector = items.optString("anchorSelector")
-            if (selector.isNotBlank()) {
-                for (a in doc.select(selector)) {
-                    val raw = a.attr("href").trim()
-                    if (raw.isBlank() || raw.startsWith("#") || raw.startsWith("javascript:")) continue
-                    val href = a.attr("abs:href").ifBlank { HttpClient.safeResolveUri(showUrl, raw) }
-                        .substringBefore('#')
-                    anchors.add(AnchorCtx(href, a.text().trim(), a, emptyList()))
+            } else {
+                val selector = items.optString("anchorSelector")
+                if (selector.isNotBlank()) {
+                    for (a in root.select(selector)) {
+                        val raw = a.attr("href").trim()
+                        if (raw.isBlank() || raw.startsWith("#") || raw.startsWith("javascript:")) continue
+                        val href = a.attr("abs:href").ifBlank { HttpClient.safeResolveUri(showUrl, raw) }
+                            .substringBefore('#')
+                        anchors.add(Collected(AnchorCtx(href, a.text().trim(), a, emptyList()), season))
+                    }
                 }
             }
         }
+        if (grouped) sections.forEach { (el, season) -> collectFrom(el, season) }
+        else collectFrom(doc, null)
 
         // ---- numbering
         val numbering = items.optJSONObject("numbering")
@@ -722,8 +748,9 @@ object RulesPipeline {
         // explicit numbering chain or a captures regex already defines its own
         // episode numbers and gets none of the heuristics.
         val heuristicNums = numChain == null && !dedupeByCaptures
-        val kept = mutableListOf<Pair<AnchorCtx, List<Int>>>()
-        for (ctx in anchors) {
+        val kept = mutableListOf<Pair<Collected, List<Int>>>()
+        for (col in anchors) {
+            val ctx = col.ctx
             val href = ctx.href
             if (href.isBlank() || href == showUrl) continue
             // A link to a parent section of the current page (e.g. /anime/ from
@@ -740,7 +767,7 @@ object RulesPipeline {
             } else {
                 if (!seenUrls.add(href)) continue
             }
-            kept.add(ctx to nums)
+            kept.add(col to nums)
         }
 
         fun deriveNum(ctx: AnchorCtx, position: Int): Int {
@@ -773,24 +800,50 @@ object RulesPipeline {
             return "Episode $num"
         }
 
+        /** Grouped/flat label: template when the section carries a season and
+         *  one is configured, otherwise the plain labelChain result. */
+        fun seasonLabel(ctx: AnchorCtx, num: Int, season: Int?, tmpl: String): String {
+            val chainLabel = labelFor(ctx, num)
+            return if (season != null && tmpl.isNotBlank())
+                fillSeasonTemplate(tmpl, season, num, chainLabel) else chainLabel
+        }
+
         // Combined posts expand into one EpisodeItem per real episode (same
         // anchor URL reused — never an invented one). A positional number only
         // applies when the anchor carries no episode tokens; positional count
         // walks over already-numbered items so the two ranges cannot collide.
+        // Grouped pages count WITHIN the current section (season), so S2's
+        // first anchor is ep 1 of season 2, not ep 13 of the show.
         val builtList = mutableListOf<EpisodeItem>()
         var positional = 0
-        kept.forEach { (ctx, nums) ->
+        var lastSeason: Int? = null
+        var posInSeason = 0
+        kept.forEach { (col, nums) ->
+            val ctx = col.ctx
+            val season = col.season
+            if (season != lastSeason) { lastSeason = season; posInSeason = 0 }
             if (nums.isEmpty()) {
                 positional += 1
-                val num = deriveNum(ctx, positional)
-                builtList.add(EpisodeItem(title = labelFor(ctx, num), url = ctx.href, episodeNum = num, site = site))
+                val position = if (season != null) { posInSeason += 1; posInSeason } else positional
+                val num = deriveNum(ctx, position)
+                builtList.add(
+                    EpisodeItem(
+                        title = seasonLabel(ctx, num, season, labelTemplate),
+                        url = ctx.href,
+                        episodeNum = seasonCode(season, num),
+                        site = site
+                    )
+                )
             } else {
                 // An expanded post's heading/label describes the whole post
                 // ("Episode 17 & 18"); only the counter gives each expanded
                 // item its own correct title.
+                if (season != null) posInSeason += 1
                 nums.forEach { n ->
-                    val title = if (nums.size > 1) "Episode $n" else labelFor(ctx, n)
-                    builtList.add(EpisodeItem(title = title, url = ctx.href, episodeNum = n, site = site))
+                    val base = if (nums.size > 1) "Episode $n" else labelFor(ctx, n)
+                    val title = if (nums.size > 1 || season == null || labelTemplate.isBlank()) base
+                    else fillSeasonTemplate(labelTemplate, season, n, base)
+                    builtList.add(EpisodeItem(title = title, url = ctx.href, episodeNum = seasonCode(season, n), site = site))
                 }
             }
         }
@@ -800,7 +853,7 @@ object RulesPipeline {
         val sortBy = items.optString("sortBy", "none")
         if (sortBy == "captures") {
             built = kept
-                .mapIndexed { idx, (anchorCtx, _) -> idx to anchorCtx }
+                .mapIndexed { idx, (anchorCtx, _) -> idx to anchorCtx.ctx }
                 .sortedWith(
                     compareBy(
                         { numericCapture(it.second.captures, 0) },
@@ -944,10 +997,48 @@ object RulesPipeline {
         return t
     }
 
+    /** Season grouping: parses the section's season number out of a field
+     *  spec (e.g. `attr:.season-header:data-season` — dramakey declares it;
+     *  `selector:.season-number` works where the text carries it). First
+     *  integer in the value; 1..99 or null (null = "not season-scoped"). */
+    private fun parseSeason(section: Element, seasonSpec: String, vars: Map<String, String>): Int? {
+        if (seasonSpec.isBlank()) return null
+        val raw = docField(seasonSpec, section, vars) ?: return null
+        return Regex("""\d+""").find(raw)?.value?.toIntOrNull()?.takeIf { it in 1..99 }
+    }
+
+    /** The codebase's episodeNum convention (EpisodeDrawer decodes it, the
+     *  engine's re-resolve requires uniqueness): season*100 + number. Falls
+     *  back to the plain number when there is no season or the number would
+     *  overflow the hundreds slot. */
+    private fun seasonCode(season: Int?, num: Int): Int =
+        if (season == null || num !in 1..99) num else season * 100 + num
+
+    /** Grouped-label template: {season}/{num} support the same %d format
+     *  knobs as fillCaptureTemplate; {label} embeds the labelChain result.
+     *  Without a season the template is ignored (chain label rides alone). */
+    private fun fillSeasonTemplate(template: String, season: Int?, num: Int, label: String): String {
+        if (season == null) return label
+        return try {
+            Regex("""\{(season|num)(?::(%[^}]+))?}|\{label}""").replace(template) { m ->
+                when (m.groupValues[1]) {
+                    "season" -> formatInt(season, m.groupValues[2])
+                    "num" -> formatInt(num, m.groupValues[2])
+                    else -> label
+                }
+            }
+        } catch (_: Exception) {
+            label
+        }
+    }
+
+    private fun formatInt(v: Int, fmt: String): String =
+        if (fmt.isBlank()) v.toString()
+        else try { String.format(Locale.US, fmt, v) } catch (_: Exception) { v.toString() }
+
     /** Nearest preceding h1-h6/p sibling (of the anchor or its parent) whose
      *  text contains [contains] — the "Episode 3" heading above a locker link. */
-    private fun siblingLabel(anchor: Element?, contains: String): String? {
-        if (anchor == null) return null
+    private fun siblingLabel(anchor: Element?, contains: String): String? {        if (anchor == null) return null
         val candidates = listOfNotNull(anchor.previousElementSibling(), anchor.parent()?.previousElementSibling())
         for (el in candidates) {
             val tag = el.tagName().lowercase()
@@ -990,7 +1081,7 @@ object RulesPipeline {
     }
 
     /** Doc-scoped field specs for episode meta (selector:/attr:/literal:/template:). */
-    private fun docField(spec: Any?, doc: Document, vars: Map<String, String>): String? {
+    private fun docField(spec: Any?, doc: Element, vars: Map<String, String>): String? {
         val candidates = when (spec) {
             is JSONArray -> (0 until spec.length()).map { spec.optString(it) }
             is String -> listOf(spec)
