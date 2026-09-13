@@ -309,11 +309,22 @@ object HttpClient {
      */
     fun parsedHost(url: String): String? {
         return try {
-            okhttp3.toHttpUrlOrNull(safeUrl(url))?.host?.lowercase()
+            parseHttpUrl(safeUrl(url))?.host?.lowercase()
         } catch (_: Exception) {
             null
         }
     }
+
+    /**
+     * Single chokepoint for okhttp URL parsing in the security gates. The CI
+     * build treats deprecation warnings as errors, and the idiomatic
+     * String.toHttpUrlOrNull() extension does not resolve from this Kotlin
+     * setup against okhttp 4.12.0's Android facade — so the one call to the
+     * (identical-behavior, same parser) deprecated companion `parse` lives
+     * HERE, suppressed. Do not add further HttpUrl.parse call sites.
+     */
+    @Suppress("DEPRECATION")
+    private fun parseHttpUrl(url: String): okhttp3.HttpUrl? = okhttp3.HttpUrl.parse(url)
 
     fun safeUrl(url: String): String {
         if (url.isBlank()) return url
@@ -359,7 +370,7 @@ object HttpClient {
     )
 
     fun isSafeTarget(url: String): Boolean {
-        val parsed = okhttp3.toHttpUrlOrNull(safeUrl(url)) ?: return false
+        val parsed = parseHttpUrl(safeUrl(url)) ?: return false
         if (parsed.scheme != "http" && parsed.scheme != "https") return false
         if (parsed.port in SERVICE_PORTS) return false
         val host = parsed.host
