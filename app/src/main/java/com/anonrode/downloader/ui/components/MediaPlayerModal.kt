@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.ActivityInfo
 import android.net.Uri
+import androidx.activity.compose.BackHandler
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.enableEdgeToEdge
@@ -76,10 +77,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
-import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -88,7 +87,6 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
-import androidx.compose.ui.window.DialogWindowProvider
 import androidx.core.content.FileProvider
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -218,6 +216,17 @@ private fun MediaPlayerModalImpl(
             statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
         )
+        // The overlay shares the ACTIVITY's one window (no dialog window any
+        // more), so hiding the bars here is what makes the player immersive
+        // from frame one — this used to live on the dialog's own window.
+        // A swipe from an edge reveals them transiently; the Fullscreen
+        // toggle below re-asserts the same policy for rotation.
+        activity?.let { act ->
+            val controller = WindowCompat.getInsetsController(act.window, act.window.decorView)
+            controller.systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            controller.hide(WindowInsetsCompat.Type.systemBars())
+        }
         onDispose {
             // Drop any fullscreen rotation and bring the system bars back so
             // the rest of the app isn't stuck in landscape.
@@ -509,7 +518,12 @@ private fun MediaPlayerModalImpl(
             insetsController.hide(WindowInsetsCompat.Type.systemBars())
         } else {
             act.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
-            insetsController.show(WindowInsetsCompat.Type.systemBars())
+            // The overlay is immersive for its WHOLE lifetime, not just the
+            // fullscreen mode — the old dialog hid the bars via its own
+            // window; here the only equivalent is re-hiding (running show()
+            // on first composition would also race the DisposableEffect
+            // above and leave the bars up during portrait playback).
+            insetsController.hide(WindowInsetsCompat.Type.systemBars())
         }
     }
 
@@ -571,87 +585,20 @@ private fun MediaPlayerModalImpl(
     }
 
     // ---- UI: one layout for every orientation ----
-    Dialog(
-        onDismissRequest = onDismiss,
-        properties = DialogProperties(
-            usePlatformDefaultWidth = false,
-            dismissOnBackPress = true,
-            dismissOnClickOutside = false
-        )
-    ) {
-        // This Dialog is its OWN window. Edge-to-edge fitting and bar hiding
-        // applied to the activity's window never reach it: Compose Dialogs
-        // are normally sized to the activity's CONTENT area (below the
-        // status bar) and the activity's status + nav bars are painted ON
-        // TOP of the dialog, so even with setDecorFitsSystemWindows(false)
-        // the activity's bars stay visible — they are not part of the
-        // dialog's window at all. Take the dialog's window (exposed by the
-        // dialog's root layout) and: (1) force it to MATCH_PARENT with
-        // FLAG_LAYOUT_NO_LIMITS so it extends UNDER the activity's bars
-        // edge-to-edge, (2) pin the bar colors to BLACK on the dialog
-        // window so the API 30+ contrast scrim doesn't paint a translucent
-        // gray over our canvas, (3) hide the system bars while the player
-        // is up — a swipe from an edge reveals them transiently. The
-        // activity-side enableEdgeToEdge call above hides the ACTIVITY's
-        // bars; this block hides the DIALOG's bars. Both layers need to
-        // agree for the player to be truly fullscreen.
-        val dialogWindow = (LocalView.current as? DialogWindowProvider)?.window
-        // Re-key on the dialog's Configuration: windows carrying
-        // FLAG_LAYOUT_NO_LIMITS are not re-clamped to the display when the
-        // orientation flips (Fullscreen toggle requests a landscape
-        // round-trip), so after returning to portrait the window keeps its
-        // stale pre-rotation frame — the player renders as a letterboxed
-        // band with the app screen visible around it, and Fit/Crop can't
-        // help because they only rescale video INSIDE the surface.
-        // Re-asserting the layout params forces WindowManager to relayout
-        // the window at the current display metrics.
-        val dialogConfig = LocalConfiguration.current
-        DisposableEffect(dialogWindow, dialogConfig) {
-            dialogWindow?.let { win ->
-                val lp = win.attributes
-                lp.width = android.view.WindowManager.LayoutParams.MATCH_PARENT
-                lp.height = android.view.WindowManager.LayoutParams.MATCH_PARENT
-                lp.flags = lp.flags or
-                    android.view.WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
-                    android.view.WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS
-                win.attributes = lp
-                WindowCompat.setDecorFitsSystemWindows(win, false)
-                // Pin the dialog's own bar fill to black so the OS never
-                // paints a contrast scrim over it (TRANSPARENT triggers the
-                // scrim on API 30+ when the underlying content is light).
-                win.statusBarColor = android.graphics.Color.BLACK
-                win.navigationBarColor = android.graphics.Color.BLACK
-            }
-            onDispose {
-                // Release FLAG_LAYOUT_NO_LIMITS so the dialog's window
-                // returns to its default sizing the next time one is
-                // created. Bar visibility is restored by the activity-side
-                // enableEdgeToEdge call in onDispose of the outer
-                // DisposableEffect (lines above this block).
-                dialogWindow?.let { win ->
-                    val lp = win.attributes
-                    lp.width = android.view.WindowManager.LayoutParams.MATCH_PARENT
-                    lp.height = android.view.WindowManager.LayoutParams.MATCH_PARENT
-                    lp.flags = lp.flags and
-                        android.view.WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS.inv()
-                    win.attributes = lp
-                }
-            }
-        }
-        // Hidden-by-default bars, asserted ONCE per dialog window. Deliberately
-        // NOT re-keyed on dialogConfig/isFullscreen: re-running hide() on a
-        // configuration change cancelled an in-progress swipe-reveal of the
-        // transient bars (the layout clamp above still re-runs on config
-        // change — that's the part rotation actually needs).
-        DisposableEffect(dialogWindow) {
-            dialogWindow?.let { win ->
-                val controller = WindowInsetsControllerCompat(win, win.decorView)
-                controller.systemBarsBehavior =
-                    WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-                controller.hide(WindowInsetsCompat.Type.systemBars())
-            }
-            onDispose { }
-        }
+    // ROOT-LEVEL OVERLAY, not a Dialog. The player used to live in its own
+    // Compose Dialog WINDOW; every window-level tactic tried over six
+    // complaint rounds (platformDefaultWidth=false, forced MATCH_PARENT +
+    // FLAG_LAYOUT_NO_LIMITS, per-config re-asserts) still rendered on device
+    // as a ~75% content-sized square with the app showing around its edges,
+    // because a Dialog window is sized by the platform/OEM, re-clamped on
+    // recomposition, and never reliably obeyable. Hosted at MainActivity's
+    // root (after MainScaffold, so it is the topmost child of the activity's
+    // ONE window), a fillMaxSize Box is fullscreen BY CONSTRUCTION — there is
+    // no second window left to shrink. System bars stay managed by the
+    // activity-window effects above (edge-to-edge dark + immersive). The
+    // audio/track/subtitle sheets are still separate dialog windows — they
+    // stack over this overlay fine.
+    BackHandler { onDismiss() }
 
         Box(
             modifier = Modifier
@@ -998,9 +945,9 @@ private fun MediaPlayerModalImpl(
                 }
             }
         }
-    }
-
-    if (showAudioSheet) {
+        // (formerly the Dialog's closing brace — the overlay Box now closes
+        // directly before the choice sheets)
+        if (showAudioSheet) {
         BottomChoiceSheet(
             title = "Audio Track",
             options = audioTrackLabels,

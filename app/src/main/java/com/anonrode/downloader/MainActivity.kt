@@ -14,6 +14,10 @@ import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import com.anonrode.downloader.data.models.DownloadTask
+import com.anonrode.downloader.data.models.TaskStatus
+import com.anonrode.downloader.ui.components.MediaPlayerContext
+import com.anonrode.downloader.ui.components.MediaPlayerModal
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
@@ -202,6 +206,31 @@ class MainActivity : ComponentActivity() {
                     return@AnonDownloaderTheme
                 }
 
+                // The media player is a ROOT-LEVEL overlay (not a Dialog —
+                // see MediaPlayerModal): emitted after MainScaffold it covers
+                // the whole window INCLUDING the bottom nav, so a
+                // fillMaxSize Box is genuinely fullscreen and nothing of the
+                // app can bleed around its edges. Queue snapshot happens at
+                // launch (completed set changes only when a download
+                // finishes/deletes; stepping re-reads the engine fresh).
+                var playerCtx by remember { mutableStateOf<MediaPlayerContext?>(null) }
+                fun openPlayer(task: DownloadTask) {
+                    playerCtx = MediaPlayerContext(
+                        filePath = task.filePath,
+                        title = task.episodeTitle,
+                        queuePeerPaths = viewModel.engine.tasks.value
+                            .filter { it.status == TaskStatus.COMPLETED }
+                            .map { it.filePath },
+                        onPlayFile = { path ->
+                            // Freshest engine snapshot, never null on a miss
+                            // (a miss used to close the player mid-Next).
+                            viewModel.engine.tasks.value
+                                .firstOrNull { it.filePath == path }
+                                ?.let { openPlayer(it) }
+                        }
+                    )
+                }
+
                 MainScaffold(
                     viewModel = viewModel,
                     initialTab = initialTab,
@@ -232,7 +261,12 @@ class MainActivity : ComponentActivity() {
                     onWriteTabPref = { newTab ->
                         prefs.edit().putString("pref_last_tab", newTab).apply()
                     }
+                    onPlayTask = { task -> openPlayer(task) }
                 )
+
+                playerCtx?.let { ctx ->
+                    MediaPlayerModal(ctx = ctx, onDismiss = { playerCtx = null })
+                }
 
                 socialTarget?.let { (platform, url) ->
                     SocialModal(
