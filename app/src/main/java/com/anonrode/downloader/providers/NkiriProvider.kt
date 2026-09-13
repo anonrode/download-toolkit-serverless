@@ -1,5 +1,6 @@
 package com.anonrode.downloader.providers
 
+import com.anonrode.downloader.util.DownloadLinkLabels
 import com.anonrode.downloader.data.rules.DynamicRulesManager
 import com.anonrode.downloader.data.models.DownloadRecipe
 import com.anonrode.downloader.data.models.EpisodeItem
@@ -173,7 +174,13 @@ object NkiriProvider : SiteProvider {
                         count = nums.last() + 1
                     } else {
                         val num = nums.firstOrNull() ?: count
+                        // Mirror-servers of ONE file are not episodes (device bug class
+                        // 2026-09-13, shared with Rocks/RulesPipeline).
+                        val mirrorLabel = DownloadLinkLabels.serverOrPart(
+                            text, prevHeading, href.substringAfterLast('/').substringBefore('?')
+                        )
                         val epTitle = when {
+                            mirrorLabel != null -> mirrorLabel
                             !prevHeading.isNullOrBlank() && prevHeading.contains("Episode", ignoreCase = true) -> prevHeading
                             text.isNotBlank() && text.length < 40 && !text.equals("Download Episode", ignoreCase = true) && !text.equals("Download Movie", ignoreCase = true) && !text.equals("Download", ignoreCase = true) -> text
                             else -> "Episode $num"

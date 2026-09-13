@@ -1,5 +1,6 @@
 package com.anonrode.downloader.providers
 
+import com.anonrode.downloader.util.DownloadLinkLabels
 import com.anonrode.downloader.data.rules.DynamicRulesManager
 import com.anonrode.downloader.data.models.DownloadRecipe
 import com.anonrode.downloader.data.models.EpisodeItem
@@ -128,7 +129,15 @@ object DramaRainProvider : SiteProvider {
 
             val episodes = mutableListOf<EpisodeItem>()
             val seen = mutableSetOf<String>()
-            val links = doc.select("a[href*='download'], a[href*='episode'], a[href*='loadedfiles'], a[href*='waffi'], .entry-content a")
+            // Content-rooted sweep with the SAME host/shape allowlist the
+            // loose union used — the old `.entry-content a` catch-all made
+            // every synopsis/trailer link an "episode".
+            val entryRoot = doc.selectFirst(".entry-content") ?: doc.body()
+            val links = entryRoot.select("a[href]").filter { cand ->
+                val h = cand.attr("href").lowercase()
+                h.contains("download") || h.contains("episode") || h.contains("loadedfiles") ||
+                    h.contains("waffi") || h.contains(".mkv") || h.contains(".mp4")
+            }
 
             var count = 1
             for (a in links) {
@@ -141,7 +150,8 @@ object DramaRainProvider : SiteProvider {
                     seen.add(href)
                     episodes.add(
                         EpisodeItem(
-                            title = if (text.isNotBlank() && !text.equals("Download", ignoreCase = true)) text else "Episode $count",
+                            title = if (text.isNotBlank() && !text.equals("Download", ignoreCase = true)) text
+                                else DownloadLinkLabels.serverOrPart(text, href.substringAfterLast('/')) ?: "Episode $count",
                             url = href,
                             episodeNum = count++,
                             site = name

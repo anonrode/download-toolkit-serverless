@@ -2,6 +2,7 @@ package com.anonrode.downloader.providers
 
 import com.anonrode.downloader.data.models.DownloadRecipe
 import com.anonrode.downloader.data.models.EpisodeItem
+import com.anonrode.downloader.util.DownloadLinkLabels
 import com.anonrode.downloader.data.models.ShowCard
 import com.anonrode.downloader.data.models.ShowDetails
 import com.anonrode.downloader.data.net.HttpClient
@@ -60,7 +61,11 @@ object AsianCProvider : SiteProvider {
 
             val episodes = mutableListOf<EpisodeItem>()
             val seen = mutableSetOf<String>()
-            val epLinks = doc.select("ul.list-episode-item-2 li a, .all-episodes li a, .list-episode a, .list-episode-item a, a[href*='-episode-']")
+            // Container selectors FIRST; the page-wide `-episode-` tail is a
+            // sidebar magnet (related-episode widgets share the slug shape),
+            // so it only rescues an otherwise-empty drawer.
+            var epLinks = doc.select("ul.list-episode-item-2 li a, .all-episodes li a, .list-episode a, .list-episode-item a")
+            if (epLinks.isEmpty()) epLinks = doc.select("a[href*='-episode-']")
 
             for (link in epLinks) {
                 val rawHref = link.attr("href")
@@ -76,10 +81,14 @@ object AsianCProvider : SiteProvider {
                     ?: Regex("""episode-(\d+)""", RegexOption.IGNORE_CASE).find(href)?.groupValues?.get(1)?.toIntOrNull()
                     ?: (episodes.size + 1)
 
-                val cleanTitle = if (epRaw.contains("Episode", ignoreCase = true)) {
-                    "Episode $epNum" + if (epRaw.contains("RAW", ignoreCase = true)) " (RAW)" else ""
-                } else {
-                    "Episode $epNum"
+                // Mirror-server / part rows must not be relabeled "Episode N"
+                // (2026-09-13 drawer bug class, shared with Rocks).
+                val mirrorLabel = DownloadLinkLabels.serverOrPart(epRaw, href)
+                val cleanTitle = when {
+                    mirrorLabel != null -> mirrorLabel
+                    epRaw.contains("Episode", ignoreCase = true) ->
+                        "Episode $epNum" + if (epRaw.contains("RAW", ignoreCase = true)) " (RAW)" else ""
+                    else -> "Episode $epNum"
                 }
 
                 episodes.add(
@@ -90,6 +99,16 @@ object AsianCProvider : SiteProvider {
                         site = name
                     )
                 )
+            }
+
+            // SINGLE-FILM shape used to yield an empty drawer (the site has
+            // no episode list on movie pages): if a player is embedded, the
+            // detail URL itself is the watch/download target.
+            if (episodes.isEmpty()) {
+                val player = doc.selectFirst("#video-embed iframe, .video-embed iframe, .watch-content iframe, iframe[src]")
+                if (player != null) {
+                    episodes.add(EpisodeItem(title = "Full Movie", url = showUrl, episodeNum = 1, site = name))
+                }
             }
 
             val card = ShowCard(title = title, url = showUrl, posterUrl = poster, site = name)
