@@ -2,10 +2,12 @@ package com.anonrode.downloader.providers
 
 import com.anonrode.downloader.data.rules.PipelineSource
 import com.anonrode.downloader.data.rules.PipelineStep
+import com.anonrode.downloader.data.rules.PipelineTerminal
 import com.anonrode.downloader.data.rules.parseSitePipeline
 import org.json.JSONObject
 import org.jsoup.Jsoup
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -555,5 +557,164 @@ class RulesPipelineTest {
         assertEquals(2, result.episodes.size)
         assertEquals("Episode 1", result.episodes[0].title) // generic label rejected -> counter
         assertEquals("Real Label Here", result.episodes[1].title)
+    }
+
+    // --------------------------------------------------- resolve / terminal
+
+    private fun validTerminalJson() =
+        """{"source":"final","spec":"{dlink}","hosts":["downloadwella.com"],"mode":"probe"}"""
+
+    @Test
+    fun parseSitePipeline_resolveRequiresValidTerminal() {
+        val good = parseSitePipeline(
+            JSONObject("""{"schema":1,"resolve":{"steps":[{"sources":[{"url":"http://x"}]}]},
+                            "terminal":${validTerminalJson()}}""")
+        )
+        assertNotNull(good)
+        assertNotNull(good!!.resolve)
+        assertNotNull(good.terminal)
+
+        // resolve alone: the stage is refused and, with nothing else usable,
+        // the whole entry drops out (compiled fallback keeps running).
+        assertNull(
+            parseSitePipeline(
+                JSONObject("""{"schema":1,"resolve":{"steps":[{"sources":[{"url":"http://x"}]}]}}""")
+            )
+        )
+
+        // terminal without resolve: dropped together with its absent pipeline
+        val termOnly = parseSitePipeline(JSONObject("""{"schema":1,"terminal":${validTerminalJson()}}"""))
+        assertNull(termOnly) // nothing usable left
+
+        // broken terminal must NOT void the site's search pipeline
+        val searchPlusBadTerm = parseSitePipeline(
+            JSONObject(
+                """{"schema":1,
+                    "search":{"steps":[{"sources":[{"url":"{base}/?s={query}"}],
+                       "items":{"cardSelector":"a","title":"self","url":"self"}}]},
+                    "resolve":{"steps":[{"sources":[{"url":"http://x"}]}]},
+                    "terminal":{"source":"final","spec":"{d}","hosts":[],"mode":"probe"}}"""
+            )
+        )
+        assertNotNull(searchPlusBadTerm)
+        assertNotNull(searchPlusBadTerm!!.search)
+        assertNull(searchPlusBadTerm.resolve)
+        assertNull(searchPlusBadTerm.terminal)
+    }
+
+    @Test
+    fun parseTerminal_closedVocabAndFieldRules() {
+        fun terminal(t: String) = parseSitePipeline(
+            JSONObject("""{"schema":1,"resolve":{"steps":[{"sources":[{"url":"http://x"}]}]},"terminal":$t}""")
+        )?.terminal
+        // closed vocabularies
+        assertNull(terminal("""{"source":"path","spec":"{d}","hosts":["a.com"],"mode":"probe"}"""))
+        assertNull(terminal("""{"source":"final","spec":"{d}","hosts":["a.com"],"mode":"guess"}"""))
+        assertNull(terminal("""{"source":"final","spec":"{d}","mode":"probe"}"""))                   // hosts missing
+        assertNull(terminal("""{"source":"final","hosts":["a.com"],"mode":"probe"}"""))            // spec missing for final
+        assertNull(terminal("""{"source":"entry","hosts":["a.com"],"mode":"probe"}"""))            // regex missing for entry
+        // entry with valid regex compiles
+        assertNotNull(terminal("""{"source":"entry","regex":"[?&]redirect=([^&]+)","decode":true,"hosts":["a.com"],"mode":"handoff"}"""))
+        // invalid entry regex caught at PARSE time (not on the user's tap)
+        assertNull(terminal("""{"source":"entry","regex":"([unclosed","hosts":["a.com"],"mode":"handoff"}"""))
+        // host list must be PURE domains: scheme/path/port markers rejected
+        assertNull(terminal("""{"source":"final","spec":"{d}","hosts":["https://a.com/x"],"mode":"probe"}"""))
+        assertNull(terminal("""{"source":"final","spec":"{d}","hosts":["a.com:443"],"mode":"probe"}"""))
+        assertNull(terminal("""{"source":"final","spec":"{d}","hosts":["a b.com"],"mode":"probe"}"""))
+        // group bounds
+        assertNull(terminal("""{"source":"entry","regex":"x(y)","group":99,"hosts":["a.com"],"mode":"probe"}"""))
+        assertNotNull(terminal("""{"source":"entry","regex":"x(y)","group":0,"hosts":["a.com"],"mode":"probe"}"""))
+        // normalization: lowercase, www-less wildcard stripped
+        val t = terminal("""{"source":"final","spec":"{d}","hosts":["*.DownloadWella.com"],"mode":"probe"}""")
+        assertNotNull(t)
+        assertEquals(listOf("downloadwella.com"), t!!.hosts)
+    }
+
+    @Test
+    fun terminalHostAllowed_labelBoundaryMatrix() {
+        val hosts = listOf("vikingfile.com")
+        assertTrue(RulesPipeline.terminalHostAllowed("vikingfile.com", hosts))
+        assertTrue(RulesPipeline.terminalHostAllowed("uz.vikingfile.com", hosts))
+        assertTrue(RulesPipeline.terminalHostAllowed("a.b.vikingfile.com", hosts))
+        assertTrue(RulesPipeline.terminalHostAllowed("www.vikingfile.com", hosts))
+        assertTrue(RulesPipeline.terminalHostAllowed("Vikingfile.COM.", hosts)) // case + trailing dot
+        // the substring holes the design refuses to reopen:
+        assertFalse(RulesPipeline.terminalHostAllowed("evilvikingfile.com", hosts))
+        assertFalse(RulesPipeline.terminalHostAllowed("vikingfile.com.evil.co", hosts))
+        assertFalse(RulesPipeline.terminalHostAllowed("vikingfile.comx", hosts))
+        assertFalse(RulesPipeline.terminalHostAllowed("", hosts))
+        assertFalse(RulesPipeline.terminalHostAllowed("com", hosts))
+    }
+
+    @Test
+    fun resolveCandidate_entry_nkiriWrapperShape() {
+        val t = PipelineTerminal(
+            source = "entry", regex = "[?&]redirect=([^&]+)", group = 1, decode = true,
+            hosts = listOf("downloadwella.com"), mode = "handoff"
+        )
+        val episodeUrl = "https://nkiri.test/wp-content/plugins/download-manager/inc/dl/download-17827/?redirect=https%3A%2F%2Fdownloadwella.com%2Fmovie%2Ffile%2F"
+        assertEquals(
+            "https://downloadwella.com/movie/file/",
+            RulesPipeline.resolveCandidate(t, episodeUrl, emptyMap())
+        )
+        // no match -> null, never a partial
+        assertNull(RulesPipeline.resolveCandidate(t, "https://nkiri.test/watch/1", emptyMap()))
+        // out-of-range group -> null
+        val t2 = t.copy(group = 5)
+        assertNull(RulesPipeline.resolveCandidate(t2, episodeUrl, emptyMap()))
+        // group 0 = whole match (no capture prefix in the regex here)
+        val t3 = t.copy(regex = "https%3A%2F%2F[^&]+", group = 0)
+        assertEquals(
+            "https://downloadwella.com/movie/file/",
+            RulesPipeline.resolveCandidate(t3, episodeUrl, emptyMap())
+        )
+        // decode=false keeps the raw percent form — and a percent form is NOT
+        // absolute, so it gets absolutized against the episode URL (garbage
+        // candidate; the host gate refuses it downstream — never shipped raw).
+        val t4 = t.copy(decode = false)
+        val raw4 = RulesPipeline.resolveCandidate(t4, episodeUrl, emptyMap())!!
+        assertTrue(raw4.startsWith("https://nkiri.test/"))
+        assertTrue(raw4.endsWith("https%3A%2F%2Fdownloadwella.com%2Fmovie%2Ffile%2F"))
+        // invalid regex -> null (parse pre-checks, executor still must not throw)
+        val t5 = t.copy(regex = "([unclosed")
+        assertNull(RulesPipeline.resolveCandidate(t5, episodeUrl, emptyMap()))
+    }
+
+    @Test
+    fun resolveCandidate_final_templateAndRelative() {
+        val t = PipelineTerminal(source = "final", spec = "{dlink}", hosts = listOf("a.com"), mode = "probe")
+        val ep = "https://s.test/watch/e1?x=1"
+        // absolute bound value passes through
+        assertEquals(
+            "https://a.com/file.mkv",
+            RulesPipeline.resolveCandidate(t, ep, mapOf("dlink" to "https://a.com/file.mkv"))
+        )
+        // relative values resolve against the episode URL, never ship raw
+        assertEquals(
+            "https://s.test/files/a.mp4",
+            RulesPipeline.resolveCandidate(t, ep, mapOf("dlink" to "/files/a.mp4"))
+        )
+        assertEquals(
+            "https://s.test/watch/videos/a.mp4",
+            RulesPipeline.resolveCandidate(t, ep, mapOf("dlink" to "videos/a.mp4"))
+        )
+        // missing or blank var -> null
+        assertNull(RulesPipeline.resolveCandidate(t, ep, emptyMap()))
+        assertNull(RulesPipeline.resolveCandidate(t, ep, mapOf("dlink" to "  ")))
+        // multi-var template: ANY blank var fails the whole render
+        val t2 = t.copy(spec = "{host}{path}")
+        assertNull(RulesPipeline.resolveCandidate(t2, ep, mapOf("host" to "https://a.com", "path" to "")))
+    }
+
+    @Test
+    fun resolveCandidate_finalWithDecodeAppliesAfterRender() {
+        val t = PipelineTerminal(
+            source = "final", spec = "{dlink}", decode = true,
+            hosts = listOf("a.com"), mode = "probe"
+        )
+        assertEquals(
+            "https://a.com/f?x=1 2", // %20 -> space via decode
+            RulesPipeline.resolveCandidate(t, "https://s.test/w", mapOf("dlink" to "https://a.com/f%3Fx%3D1%202"))
+        )
     }
 }

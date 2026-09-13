@@ -273,6 +273,25 @@ object HttpClient {
         }
     }
 
+    /**
+     * The TRUE host of [url] per okhttp3.HttpUrl — the same parser that decides
+     * which server a request actually connects to. [safeHost] is a lenient
+     * string-split with legacy callers and MUST NOT be used for security
+     * decisions: HttpUrl.kt 4.12.0 ends the host at `@ / \ ? #` and strips
+     * userinfo, so "https://vikingfile.com:443@evil.com/f" really fetches
+     * evil.com while safeHost() cheerfully answers "vikingfile.com". Any
+     * allowlist gate must compare against THIS function (fact-checked
+     * 2026-09-12 against parent-4.12.0 HttpUrl.kt parse(), authority loop).
+     * Null for anything HttpUrl itself refuses.
+     */
+    fun parsedHost(url: String): String? {
+        return try {
+            okhttp3.HttpUrl.parse(safeUrl(url))?.host?.lowercase()
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     fun safeUrl(url: String): String {
         if (url.isBlank()) return url
         val parts = url.split("?", limit = 2)

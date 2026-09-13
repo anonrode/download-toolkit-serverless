@@ -7,7 +7,9 @@ import com.anonrode.downloader.data.rules.DynamicRulesManager
 import com.anonrode.downloader.data.rules.Pipeline
 import com.anonrode.downloader.data.rules.PipelineSource
 import com.anonrode.downloader.data.rules.PipelineStep
+import com.anonrode.downloader.data.rules.PipelineTerminal
 import com.anonrode.downloader.data.rules.jsonStringList
+import com.anonrode.downloader.resolvers.ResolverRegistry
 import com.anonrode.downloader.util.DebugLog
 import org.json.JSONArray
 import org.json.JSONObject
@@ -251,6 +253,164 @@ object RulesPipeline {
                 else -> null
             }
             if (!value.isNullOrBlank()) vars[bind.name] = value.trim()
+        }
+    }
+
+    // -------------------------------------------------------------- resolve
+
+    /** Byte accounting for one resolve run: per-fetch cap and a hard
+     *  cumulative cap. The point of these is the hostile-review budget
+     *  failure (F3): "bounded" must be a number some code checks. */
+    private const val RESOLVE_FETCH_MAX_BYTES = 600_000L
+    private const val RESOLVE_TOTAL_MAX_BYTES = 2_000_000L
+
+    /**
+     * OTA resolve stage entry point for providers: run the signed crack recipe
+     * for [site] against [episodeUrl]; return a trusted direct URL, or null —
+     * meaning "no recipe / recipe refused" — and the provider's compiled path
+     * runs untouched. With no rules present this function returns null before
+     * ANY network I/O (zero behavior change until a recipe ships).
+     *
+     * handoff mode feeds the host-gated candidate to the compiled
+     * [ResolverRegistry]; the registry never calls back into RulesPipeline,
+     * so this cannot recurse.
+     */
+    suspend fun runResolveForSite(site: String, episodeUrl: String, quality: String): String? {
+        if (episodeUrl.isBlank()) return null
+        val sp = DynamicRulesManager.getPipeline(site) ?: return null
+        val pl = sp.resolve ?: return null
+        val term = sp.terminal ?: return null
+        return try {
+            runResolveInner(site, pl, term, episodeUrl) { cand ->
+                ResolverRegistry.resolve(cand, quality)
+            }
+        } catch (e: Exception) {
+            DebugLog.error("$site pipeline resolve: aborted (${e.javaClass.simpleName}: ${e.message})")
+            null
+        }
+    }
+
+    private suspend fun runResolveInner(
+        site: String,
+        pipeline: Pipeline,
+        terminal: PipelineTerminal,
+        episodeUrl: String,
+        handoff: suspend (String) -> String?
+    ): String? {
+        val bases = DynamicRulesManager.getBaseUrls(site)
+        val base = (bases.firstOrNull { it.isNotBlank() } ?: "").trimEnd('/')
+        val vars = mutableMapOf("base" to base, "url" to episodeUrl, "query" to "")
+        var consumed = 0L
+
+        for ((idx, step) in pipeline.steps.withIndex()) {
+            var bound = false
+            for ((source, sourceVars) in expandSources(site, step, vars)) {
+                val url = renderTemplate(source.url, sourceVars) { name -> sourceVars[name] }
+                if (url.isNullOrBlank() || !url.startsWith("http")) continue
+                val referer = source.headers.entries
+                    .firstOrNull { it.key.equals("Referer", ignoreCase = true) }
+                    ?.value?.let { renderTemplate(it, sourceVars) { n -> sourceVars[n] } }
+                val headers = source.headers
+                    .filterKeys { !it.equals("Referer", ignoreCase = true) }
+                    .mapValues { renderTemplate(it.value, sourceVars) { n -> sourceVars[n] } ?: "" }
+                val body = if (source.method == "POST") {
+                    val form = source.form.mapValues { renderTemplate(it.value, sourceVars) { n -> sourceVars[n] } ?: "" }
+                    HttpClient.postForm(url, form, referer, headers, tag = null, maxBytes = RESOLVE_FETCH_MAX_BYTES)
+                } else {
+                    HttpClient.getText(url, referer, headers, tag = null, maxBytes = RESOLVE_FETCH_MAX_BYTES)
+                }
+                if (body.isNullOrEmpty()) continue
+                consumed += body.length
+                if (consumed > RESOLVE_TOTAL_MAX_BYTES) {
+                    DebugLog.resolve("$site pipeline resolve: byte budget exceeded (${consumed}B) at step $idx — refusing")
+                    return null
+                }
+                val body2 = body
+                val doc = if (step.asFormat == "json") null
+                    else if (step.asFormat == "rss") JsoupXml(body2)
+                    else org.jsoup.Jsoup.parse(body2, url)
+                val json: Any? = if (step.asFormat == "json") {
+                    try {
+                        JSONObject(body2)
+                    } catch (_: Exception) {
+                        // array-rooted API responses bind like search's
+                        try { JSONArray(body2) } catch (_: Exception) { null }
+                    }
+                } else null
+                val outcome = StepOutcome(body2, doc, json, url)
+                applyBinds(step, outcome, vars)
+                bound = true
+                if (step.mode != "merge") break
+            }
+            if (!bound) {
+                DebugLog.resolve("$site pipeline resolve: step $idx produced no response — refusing")
+                return null
+            }
+        }
+
+        val candidate = resolveCandidate(terminal, episodeUrl, vars) ?: return null
+        // Gate on parsedHost — HttpUrl's own view of the host, identical to
+        // what the fetch will connect to. safeHost's string-split lets
+        // userinfo/backslash forgeries through (see HttpClient.parsedHost).
+        val host = HttpClient.parsedHost(candidate)
+        if (host == null || !terminalHostAllowed(host, terminal.hosts)) {
+            DebugLog.resolve("$site pipeline resolve: terminal host '${host ?: "unparseable"}' not in recipe allowlist — refused")
+            return null
+        }
+        if (terminal.mode == "probe") {
+            val ref = if (terminal.referer.isNotBlank())
+                renderTemplate(terminal.referer, vars) { name -> vars[name] }
+            else base.ifBlank { null }?.plus("/")
+            val tp = HttpClient.probeTerminal(HttpClient.safeUrl(candidate), referer = ref)
+            if (tp?.totalBytes == null) {
+                DebugLog.resolve("$site pipeline resolve: probe rejected terminal ${candidate.take(140)}")
+                return null
+            }
+            DebugLog.resolve("$site pipeline resolve: terminal validated (${tp.totalBytes}B) ${candidate.take(140)}")
+            return HttpClient.safeUrl(candidate)
+        }
+        val out = handoff(candidate)
+        DebugLog.resolve("$site pipeline resolve: handoff ${candidate.take(120)} -> ${out?.take(120) ?: "null"}")
+        return out
+    }
+
+    /**
+     * Pure candidate extraction of a terminal spec — JVM-testable.
+     * entry: regex(+group,+decode) against the RAW episode URL (the
+     * download-manager-wrapper class: the target lives in ?redirect= and the
+     * wrapper page itself is dead). final: render the template from bound
+     * vars. Relative results resolve against the episode URL. Returns null
+     * on any miss (never a partial value).
+     */
+    internal fun resolveCandidate(
+        terminal: PipelineTerminal,
+        episodeUrl: String,
+        vars: Map<String, String>
+    ): String? {
+        val raw = if (terminal.source == "entry") {
+            if (terminal.regex.isBlank()) return null
+            val m = try { Regex(terminal.regex).find(episodeUrl) } catch (_: Exception) { null } ?: return null
+            m.groupValues.getOrNull(terminal.group)?.takeIf { it.isNotBlank() } ?: return null
+        } else {
+            renderTemplate(terminal.spec, vars) { name -> vars[name] }?.takeIf { it.isNotBlank() } ?: return null
+        }
+        val value = if (terminal.decode) {
+            try { java.net.URLDecoder.decode(raw, "UTF-8") } catch (_: Exception) { raw }
+        } else raw
+        if (value.isBlank()) return null
+        return if (value.startsWith("http://", true) || value.startsWith("https://", true)) value
+        else HttpClient.safeResolveUri(episodeUrl, value)
+    }
+
+    /** Host gate: exact or suffix match on LABEL boundaries (h == e or
+     *  h endsWith ".e") — deliberately NOT substring: "evilvikingfile.com"
+     *  and "vikingfile.com.evil.co" must both fail. JVM-testable. */
+    internal fun terminalHostAllowed(host: String, hosts: List<String>): Boolean {
+        val h = host.lowercase().trimEnd('.').removePrefix("www.")
+        if (h.isBlank()) return false
+        return hosts.any { e ->
+            val ee = e.removePrefix("www.")
+            h == ee || h.endsWith(".$ee")
         }
     }
 

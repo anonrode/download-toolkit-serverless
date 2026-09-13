@@ -182,72 +182,79 @@ object AnitakuProvider : SiteProvider {
     }
 
     override suspend fun resolveEpisode(episodeUrl: String, quality: String): DownloadRecipe {
-        var direct: String? = null
+        // OTA resolve recipe first: when a signed playbook carries the
+        // resolve+terminal stages it replaces this compiled scraping flow
+        // entirely — and skips the page fetch below on success. The compiled
+        // path stays the untouched fallback (playbook absent, or resolve fails).
+        val ota = RulesPipeline.runResolveForSite(name, episodeUrl, quality)
+        var direct: String? = ota
 
-        try {
-            val html = HttpClient.getText(episodeUrl, referer = "https://gogoanime.or.at/") ?: ""
+        if (direct == null) {
+            try {
+                val html = HttpClient.getText(episodeUrl, referer = "https://gogoanime.or.at/") ?: ""
 
-            // 1. Direct candidate player embeds on page (newplayer.php, megaplay.buzz, megaplays.se, takuembed)
-            val doc = Jsoup.parse(html, episodeUrl)
-            val candidates = mutableListOf<String>()
-            for (a in doc.select(".anime_muti_link a[data-video], .servers a[data-video], .anime_muti_link a[href]")) {
-                val dataVideo = a.attr("data-video").ifEmpty { a.attr("href") }
-                if (dataVideo.isNotBlank() && !dataVideo.startsWith("javascript:")) candidates.add(dataVideo)
-            }
-            for (iframe in doc.select("iframe[src]")) {
-                val src = iframe.attr("src")
-                if (src.isNotBlank() && !src.startsWith("javascript:")) candidates.add(src)
-            }
-
-            if (candidates.isNotEmpty()) {
-                val fullCandidates = candidates.map { HttpClient.safeResolveUri(episodeUrl, it) }
-                val resolved = ResolverRegistry.resolveAny(fullCandidates, quality)
-                if (!resolved.isNullOrBlank()) {
-                    direct = resolved
+                // 1. Direct candidate player embeds on page (newplayer.php, megaplay.buzz, megaplays.se, takuembed)
+                val doc = Jsoup.parse(html, episodeUrl)
+                val candidates = mutableListOf<String>()
+                for (a in doc.select(".anime_muti_link a[data-video], .servers a[data-video], .anime_muti_link a[href]")) {
+                    val dataVideo = a.attr("data-video").ifEmpty { a.attr("href") }
+                    if (dataVideo.isNotBlank() && !dataVideo.startsWith("javascript:")) candidates.add(dataVideo)
                 }
-            }
+                for (iframe in doc.select("iframe[src]")) {
+                    val src = iframe.attr("src")
+                    if (src.isNotBlank() && !src.startsWith("javascript:")) candidates.add(src)
+                }
 
-            // 2. Gogoanime fetch_download_links API fallback
-            if (direct.isNullOrBlank()) {
-                val malMatch = Pattern.compile("""malId\s*=\s*['"](\d+)['"]""").matcher(html)
-                val epMatch = Pattern.compile("""ep\s*=\s*['"](\d+)['"]""").matcher(html)
-                if (malMatch.find() && epMatch.find()) {
-                    val malId = malMatch.group(1) ?: ""
-                    val ep = epMatch.group(1) ?: ""
-                    val host = HttpClient.safeHost(episodeUrl, "gogoanime.or.at")
-                    val ajaxUrl = "https://$host/wp-admin/admin-ajax.php"
+                if (candidates.isNotEmpty()) {
+                    val fullCandidates = candidates.map { HttpClient.safeResolveUri(episodeUrl, it) }
+                    val resolved = ResolverRegistry.resolveAny(fullCandidates, quality)
+                    if (!resolved.isNullOrBlank()) {
+                        direct = resolved
+                    }
+                }
 
-                    val form = FormBody.Builder()
-                        .add("action", "fetch_download_links")
-                        .add("mal_id", malId)
-                        .add("ep", ep)
-                        .build()
+                // 2. Gogoanime fetch_download_links API fallback
+                if (direct.isNullOrBlank()) {
+                    val malMatch = Pattern.compile("""malId\s*=\s*['"](\d+)['"]""").matcher(html)
+                    val epMatch = Pattern.compile("""ep\s*=\s*['"](\d+)['"]""").matcher(html)
+                    if (malMatch.find() && epMatch.find()) {
+                        val malId = malMatch.group(1) ?: ""
+                        val ep = epMatch.group(1) ?: ""
+                        val host = HttpClient.safeHost(episodeUrl, "gogoanime.or.at")
+                        val ajaxUrl = "https://$host/wp-admin/admin-ajax.php"
 
-                    val req = Request.Builder()
-                        .url(ajaxUrl)
-                        .header("User-Agent", HttpClient.DEFAULT_UA)
-                        .header("Referer", episodeUrl)
-                        .header("X-Requested-With", "XMLHttpRequest")
-                        .post(form)
-                        .build()
+                        val form = FormBody.Builder()
+                            .add("action", "fetch_download_links")
+                            .add("mal_id", malId)
+                            .add("ep", ep)
+                            .build()
 
-                    HttpClient.shared.newCall(req).execute().use { res ->
-                        if (res.isSuccessful) {
-                            val body = res.body?.string() ?: ""
-                            val dlHtml = JSONObject(body).optJSONObject("data")?.optString("result") ?: ""
-                            if (dlHtml.isNotBlank()) {
-                                val dlDoc = Jsoup.parse(dlHtml, episodeUrl)
-                                val dlLinks = dlDoc.select("a[href]").map { it.attr("href") }
-                                val resolved = ResolverRegistry.resolveAny(dlLinks, quality)
-                                if (!resolved.isNullOrBlank()) {
-                                    direct = resolved
+                        val req = Request.Builder()
+                            .url(ajaxUrl)
+                            .header("User-Agent", HttpClient.DEFAULT_UA)
+                            .header("Referer", episodeUrl)
+                            .header("X-Requested-With", "XMLHttpRequest")
+                            .post(form)
+                            .build()
+
+                        HttpClient.shared.newCall(req).execute().use { res ->
+                            if (res.isSuccessful) {
+                                val body = res.body?.string() ?: ""
+                                val dlHtml = JSONObject(body).optJSONObject("data")?.optString("result") ?: ""
+                                if (dlHtml.isNotBlank()) {
+                                    val dlDoc = Jsoup.parse(dlHtml, episodeUrl)
+                                    val dlLinks = dlDoc.select("a[href]").map { it.attr("href") }
+                                    val resolved = ResolverRegistry.resolveAny(dlLinks, quality)
+                                    if (!resolved.isNullOrBlank()) {
+                                        direct = resolved
+                                    }
                                 }
                             }
                         }
                     }
                 }
-            }
-        } catch (_: Exception) {}
+            } catch (_: Exception) {}
+        }
 
         val target = direct ?: episodeUrl
         val isHls = target.contains(".m3u8") || target.contains("manifest")

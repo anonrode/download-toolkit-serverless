@@ -131,7 +131,10 @@ object NepuProvider : SiteProvider {
         // API -> wasm ChaCha20 decrypt -> CDN playlist) VidsrcResolver now cracks,
         // so directUrl is the token-stamped master playlist the engine feeds
         // straight to yt-dlp.
-        var direct = ResolverRegistry.resolve(episodeUrl, quality)
+        // OTA resolve recipe first (a signed playbook can replace the vidsrc
+        // chain knowledge without an app update); compiled registry fallback.
+        val ota = RulesPipeline.runResolveForSite(name, episodeUrl, quality)
+        var direct = ota ?: ResolverRegistry.resolve(episodeUrl, quality)
         // No iframe fallback here: the watch page's iframe is only a pointer
         // into the vidsrc chain, not a stream. Returning the embed URL as
         // directUrl made the engine persist an un-downloadable page and loop
