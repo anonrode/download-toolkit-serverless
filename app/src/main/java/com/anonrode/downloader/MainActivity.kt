@@ -24,14 +24,19 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.*
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import com.anonrode.downloader.ui.components.MainScaffold
 import com.anonrode.downloader.ui.components.MainTab
 import com.anonrode.downloader.ui.screens.SocialModal
 import com.anonrode.downloader.ui.screens.SplashContent
+import com.anonrode.downloader.ui.screens.TorrentFilePicker
+import com.anonrode.downloader.ui.screens.TorrentFilePickerDialog
 import com.anonrode.downloader.ui.theme.AccentPrimary
 import com.anonrode.downloader.ui.theme.AnonDownloaderTheme
 import com.anonrode.downloader.ui.theme.DarkAnonColors
@@ -156,14 +161,28 @@ class MainActivity : ComponentActivity() {
                         !Environment.isExternalStorageManager()
                 }
 
-                LaunchedEffect(Unit) {
-                    showStorageRationale = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                        !Environment.isExternalStorageManager()
-                    } else {
-                        ContextCompat.checkSelfPermission(
-                            context, Manifest.permission.WRITE_EXTERNAL_STORAGE
-                        ) != PackageManager.PERMISSION_GRANTED
+                // The check re-runs on EVERY resume, not just the first
+                // composition: with LaunchedEffect(Unit) a "Not now" was an
+                // in-session dead end — the dialog said "Downloads will fail
+                // until then", yet the only way back to the grant screen was
+                // force-restarting the app. Observers registered while the
+                // activity is already RESUMED receive ON_RESUME synchronously,
+                // so the first-launch check is preserved.
+                val storageLifecycleOwner = LocalLifecycleOwner.current
+                DisposableEffect(storageLifecycleOwner) {
+                    val observer = LifecycleEventObserver { _, event ->
+                        if (event == Lifecycle.Event.ON_RESUME) {
+                            showStorageRationale = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                                !Environment.isExternalStorageManager()
+                            } else {
+                                ContextCompat.checkSelfPermission(
+                                    context, Manifest.permission.WRITE_EXTERNAL_STORAGE
+                                ) != PackageManager.PERMISSION_GRANTED
+                            }
+                        }
                     }
+                    storageLifecycleOwner.lifecycle.addObserver(observer)
+                    onDispose { storageLifecycleOwner.lifecycle.removeObserver(observer) }
                 }
 
                 // Guaranteed-visible splash: the system SplashScreen API dismisses
@@ -223,6 +242,15 @@ class MainActivity : ComponentActivity() {
                         onDismiss = { activeSocialTarget.value = null }
                     )
                 }
+
+                // Torrent selective-file picker (engine -> IO thread -> this
+                // dialog). Hosted at the ROOT, not inside HomeScreen: when the
+                // host lived there, a magnet that started while the user was
+                // on Downloads or Settings (or one enqueued from the share
+                // sheet) had no dialog composed, stalled out the 60 s bridge
+                // timeout, and fell back to downloading the WHOLE torrent —
+                // shield-blocked files included.
+                TorrentFilePickerHost()
 
                 if (showStorageRationale) {
                     AlertDialog(
@@ -389,4 +417,33 @@ private fun MainActivity.setWindowBackground(isDark: Boolean) {
     window.setBackgroundDrawable(
         ColorDrawable((if (isDark) DarkAnonColors else LightAnonColors).background.toArgb())
     )
+}
+
+/** Polls the engine's torrent-file-selection bridge and renders the picker
+ *  dialog while a request is outstanding. Completes the deferred with the
+ *  user's choice (null = whole torrent, only ever from the explicit
+ *  "Whole torrent" button).
+ *  Moved here from HomeScreen on 2026-09-13 — a root host is composed
+ *  regardless of which tab is on stage, so the engine's 60 s fallback can no
+ *  longer fire simply because the user wasn't looking at Search. */
+@Composable
+private fun TorrentFilePickerHost() {
+    var request by remember { mutableStateOf<TorrentFilePicker.Request?>(null) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            val r = TorrentFilePicker.consume()
+            if (r != null) {
+                request = r
+                runCatching { r.deferred.await() }
+                request = null
+            }
+            kotlinx.coroutines.delay(250)
+        }
+    }
+    request?.let { req ->
+        TorrentFilePickerDialog(
+            request = req,
+            onDismiss = { selection -> req.deferred.complete(selection) }
+        )
+    }
 }

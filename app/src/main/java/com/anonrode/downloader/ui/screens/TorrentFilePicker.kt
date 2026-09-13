@@ -186,9 +186,18 @@ fun TorrentFilePickerDialog(
                     Text("Close", color = AccentPrimary)
                 }
             } else {
-                TextButton(onClick = {
-                    onDismiss(if (selected.isEmpty()) null else selected.toList())
-                }) {
+                TextButton(
+                    // "Download (0)" used to submit an EMPTY selection,
+                    // which the bridge reads as null = "the whole torrent"
+                    // — including shield-blocked files. Un-checking
+                    // everything must not be the biggest download of the
+                    // list; the explicit "Whole torrent" opt-in beside this
+                    // button is the only null path.
+                    enabled = selected.isNotEmpty(),
+                    onClick = {
+                        onDismiss(selected.toList())
+                    }
+                ) {
                     Text("Download (${selected.size})", color = AccentPrimary)
                 }
             }

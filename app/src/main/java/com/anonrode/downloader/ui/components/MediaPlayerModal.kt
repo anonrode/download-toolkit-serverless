@@ -17,6 +17,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -54,14 +55,17 @@ import androidx.compose.material.icons.rounded.Speed
 import androidx.compose.material.icons.rounded.SubtitlesOff
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -107,7 +111,6 @@ import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import com.anonrode.downloader.R
 import com.anonrode.downloader.ui.theme.Spacing
-import com.anonrode.downloader.ui.theme.StatusError
 import kotlinx.coroutines.delay
 import java.io.File
 
@@ -251,6 +254,18 @@ private fun MediaPlayerModalImpl(
     var currentPosition by remember { mutableLongStateOf(0L) }
     var duration by remember { mutableLongStateOf(0L) }
     var showControls by remember { mutableStateOf(true) }
+    // Seek-drag ownership: while the thumb is held, the finger (dragFrac) IS
+    // the value. The 500 ms poll otherwise yanks the thumb back to the
+    // player's real (pre-seek, keyframe-snapped) position mid-drag, and
+    // seeking on every pixel value thrashes the decoder.
+    var isDragging by remember { mutableStateOf(false) }
+    var dragFrac by remember { mutableFloatStateOf(0f) }
+    // Auto-hide reset counter: the timer must restart on EVERY control
+    // interaction, not only when showControls/isPlaying flip — otherwise
+    // tapping +10s two seconds in loses the overlay mid-interaction.
+    var interactionTick by remember { mutableIntStateOf(0) }
+    val touchControls: () -> Unit = { interactionTick++ }
+    var isBuffering by remember { mutableStateOf(false) }
     var playbackSpeed by remember { mutableFloatStateOf(initialSpeed) }
     var audioTrackLabels by remember { mutableStateOf<List<String>>(emptyList()) }
     var currentAudioLabel by remember { mutableStateOf<String?>(null) }
@@ -258,7 +273,6 @@ private fun MediaPlayerModalImpl(
     var currentSubtitleLabel by remember { mutableStateOf<String?>(null) }
     var showAudioSheet by remember { mutableStateOf(false) }
     var showSubtitleSheet by remember { mutableStateOf(false) }
-    var playerError by remember { mutableStateOf<String?>(null) }
     var tracksLoaded by remember { mutableStateOf(false) }
     // Fullscreen: rotate to landscape + hide system bars, YouTube-style.
     var isFullscreen by remember { mutableStateOf(false) }
@@ -338,7 +352,14 @@ private fun MediaPlayerModalImpl(
         val leaving = lastLoadedPath
         if (leaving != null && leaving != ctx.filePath) {
             runCatching {
-                PlaybackPositions.save(context, leaving, exoPlayer.currentPosition, exoPlayer.duration)
+                // coerceAtLeast(0): the leaving item may never have reached
+                // READY (duration still C.TIME_UNSET = -1); saving -1 poisoned
+                // that file's future "watched to the end" computations.
+                PlaybackPositions.save(
+                    context, leaving,
+                    exoPlayer.currentPosition.coerceAtLeast(0L),
+                    exoPlayer.duration.coerceAtLeast(0L)
+                )
             }
         }
         // Resume where the user left off the last time this file was open;
@@ -350,8 +371,9 @@ private fun MediaPlayerModalImpl(
         currentPosition = resumeMs
         duration = 0L
         isPlaying = true
+        isBuffering = false
+        isDragging = false
         tracksLoaded = false
-        playerError = null
         audioTrackLabels = emptyList()
         currentAudioLabel = null
         subtitleOptions = emptyList()
@@ -366,6 +388,7 @@ private fun MediaPlayerModalImpl(
             }
 
             override fun onPlaybackStateChanged(playbackState: Int) {
+                isBuffering = playbackState == Player.STATE_BUFFERING
                 when (playbackState) {
                     Player.STATE_READY -> {
                         duration = exoPlayer.duration.coerceAtLeast(0L)
@@ -388,8 +411,15 @@ private fun MediaPlayerModalImpl(
 
             override fun onPlayerError(error: PlaybackException) {
                 // Escape hatch for unsupported codecs / broken streams:
-                // hand the file to the system player, then close.
-                playerError = error.errorCodeName
+                // hand the file to the system player, then close. The dialog
+                // is gone the same frame, so an in-content error Text could
+                // never be READ (it rendered for exactly zero frames before)
+                // — the toast is what the user actually sees.
+                android.widget.Toast.makeText(
+                    context,
+                    "Playback failed (${error.errorCodeName}) — opening external player",
+                    android.widget.Toast.LENGTH_LONG
+                ).show()
                 playExternal(context, File(currentCtx.filePath))
                 currentOnDismiss()
             }
@@ -453,8 +483,11 @@ private fun MediaPlayerModalImpl(
         }
     }
 
-    // Auto-hide controls after 3s of playback.
-    LaunchedEffect(showControls, isPlaying) {
+    // Auto-hide controls after 3s of playback. Keyed on interactionTick as
+    // well: any control touch re-arms the countdown (the old keys only fired
+    // when the overlay appeared or playback started/stopped, so interacting
+    // with the transport let the overlay fade out mid-use).
+    LaunchedEffect(showControls, isPlaying, interactionTick) {
         if (showControls && isPlaying) {
             delay(3000)
             showControls = false
@@ -573,7 +606,7 @@ private fun MediaPlayerModalImpl(
         // Re-asserting the layout params forces WindowManager to relayout
         // the window at the current display metrics.
         val dialogConfig = LocalConfiguration.current
-        DisposableEffect(dialogWindow, dialogConfig, isFullscreen) {
+        DisposableEffect(dialogWindow, dialogConfig) {
             dialogWindow?.let { win ->
                 val lp = win.attributes
                 lp.width = android.view.WindowManager.LayoutParams.MATCH_PARENT
@@ -588,10 +621,6 @@ private fun MediaPlayerModalImpl(
                 // scrim on API 30+ when the underlying content is light).
                 win.statusBarColor = android.graphics.Color.BLACK
                 win.navigationBarColor = android.graphics.Color.BLACK
-                val controller = WindowInsetsControllerCompat(win, win.decorView)
-                controller.systemBarsBehavior =
-                    WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-                controller.hide(WindowInsetsCompat.Type.systemBars())
             }
             onDispose {
                 // Release FLAG_LAYOUT_NO_LIMITS so the dialog's window
@@ -608,6 +637,20 @@ private fun MediaPlayerModalImpl(
                     win.attributes = lp
                 }
             }
+        }
+        // Hidden-by-default bars, asserted ONCE per dialog window. Deliberately
+        // NOT re-keyed on dialogConfig/isFullscreen: re-running hide() on a
+        // configuration change cancelled an in-progress swipe-reveal of the
+        // transient bars (the layout clamp above still re-runs on config
+        // change — that's the part rotation actually needs).
+        DisposableEffect(dialogWindow) {
+            dialogWindow?.let { win ->
+                val controller = WindowInsetsControllerCompat(win, win.decorView)
+                controller.systemBarsBehavior =
+                    WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                controller.hide(WindowInsetsCompat.Type.systemBars())
+            }
+            onDispose { }
         }
 
         Box(
@@ -688,14 +731,17 @@ private fun MediaPlayerModalImpl(
                 }
             }
 
-            playerError?.let { err ->
-                Text(
-                    text = "Player error: $err",
-                    color = StatusError,
-                    fontSize = 11.sp,
+            // Buffering line across the top (YouTube-style): while
+            // STATE_BUFFERING the seek bar would otherwise sit frozen at the
+            // old position or a dead 0% and the clock reads 0:00 — this says
+            // "in flight, no percentage yet" without pretending.
+            if (isBuffering) {
+                LinearProgressIndicator(
                     modifier = Modifier
                         .align(Alignment.TopCenter)
-                        .padding(top = Spacing.xxxl)
+                        .fillMaxWidth(),
+                    color = PlayerAccent,
+                    trackColor = Color.White.copy(alpha = 0.15f)
                 )
             }
 
@@ -743,7 +789,7 @@ private fun MediaPlayerModalImpl(
                             PlayerCircleButton(
                                 icon = if (isFullscreen) Icons.Rounded.FullscreenExit else Icons.Rounded.Fullscreen,
                                 contentDescription = if (isFullscreen) "Exit fullscreen" else "Fullscreen",
-                                onClick = { isFullscreen = !isFullscreen }
+                                onClick = { touchControls(); isFullscreen = !isFullscreen }
                             )
                             Spacer(modifier = Modifier.width(Spacing.xs))
                         }
@@ -766,7 +812,7 @@ private fun MediaPlayerModalImpl(
                         PlayerCircleButton(
                             icon = Icons.Rounded.SkipPrevious,
                             contentDescription = "Previous",
-                            onClick = playPrev,
+                            onClick = { touchControls(); playPrev() },
                             enabled = hasPrev,
                             size = 44.dp,
                             iconSize = 24.dp
@@ -775,6 +821,7 @@ private fun MediaPlayerModalImpl(
                             icon = Icons.Rounded.Replay10,
                             contentDescription = "Rewind 10 seconds",
                             onClick = {
+                                touchControls()
                                 val target = (exoPlayer.currentPosition - 10_000).coerceAtLeast(0)
                                 exoPlayer.seekTo(target)
                                 currentPosition = target
@@ -784,6 +831,7 @@ private fun MediaPlayerModalImpl(
                         )
                         IconButton(
                             onClick = {
+                                touchControls()
                                 if (exoPlayer.isPlaying) exoPlayer.pause() else exoPlayer.play()
                             },
                             modifier = Modifier
@@ -801,7 +849,14 @@ private fun MediaPlayerModalImpl(
                             icon = Icons.Rounded.Forward10,
                             contentDescription = "Forward 10 seconds",
                             onClick = {
-                                val target = (exoPlayer.currentPosition + 10_000).coerceAtMost(exoPlayer.duration)
+                                touchControls()
+                                // Guards TIME_UNSET (-1): before READY the old
+                                // coerceAtMost(duration) yielded -1, and
+                                // seekTo(-1) clamps to 0 — the user was thrown
+                                // to the START by trying to go FORWARD.
+                                val d = exoPlayer.duration
+                                val target = (exoPlayer.currentPosition + 10_000)
+                                    .let { if (d > 0) it.coerceAtMost(d) else it }
                                 exoPlayer.seekTo(target)
                                 currentPosition = target
                             },
@@ -811,7 +866,7 @@ private fun MediaPlayerModalImpl(
                         PlayerCircleButton(
                             icon = Icons.Rounded.SkipNext,
                             contentDescription = "Next",
-                            onClick = playNext,
+                            onClick = { touchControls(); playNext() },
                             enabled = hasNext,
                             size = 44.dp,
                             iconSize = 24.dp
@@ -833,7 +888,11 @@ private fun MediaPlayerModalImpl(
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
                             Text(
-                                text = formatDuration(currentPosition),
+                                // Follow the finger while scrubbing so the
+                                // readout matches the thumb, not the clock.
+                                text = formatDuration(
+                                    if (isDragging) (dragFrac * duration).toLong() else currentPosition
+                                ),
                                 color = Color.White,
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.Medium
@@ -846,11 +905,27 @@ private fun MediaPlayerModalImpl(
                             )
                         }
                         Slider(
-                            value = if (duration > 0) (currentPosition.toFloat() / duration.toFloat()).coerceIn(0f, 1f) else 0f,
+                            value = when {
+                                isDragging -> dragFrac
+                                duration > 0 -> (currentPosition.toFloat() / duration.toFloat()).coerceIn(0f, 1f)
+                                else -> 0f
+                            },
                             onValueChange = { frac ->
-                                val target = (frac * duration).toLong()
-                                exoPlayer.seekTo(target)
-                                currentPosition = target
+                                isDragging = true
+                                dragFrac = frac
+                                touchControls()
+                            },
+                            // ONE seek when the finger lifts — not one per
+                            // pixel — and the poll (which may land mid-drag)
+                            // cannot yank the thumb, because while isDragging
+                            // the value above ignores currentPosition.
+                            onValueChangeFinished = {
+                                if (duration > 0) {
+                                    val target = (dragFrac * duration).toLong()
+                                    exoPlayer.seekTo(target)
+                                    currentPosition = target
+                                }
+                                isDragging = false
                             },
                             colors = SliderDefaults.colors(
                                 thumbColor = PlayerAccent,
@@ -861,13 +936,19 @@ private fun MediaPlayerModalImpl(
                         )
                         Spacer(modifier = Modifier.height(Spacing.sm))
                         Row(
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                // Audio labels are real strings ("RUS • 192 kbps • 5.1ch");
+                                // without scroll the fixed four-chip row pushed the
+                                // Subtitles/Fit chips off the right edge on a 360dp phone.
+                                .horizontalScroll(rememberScrollState()),
                             horizontalArrangement = Arrangement.spacedBy(Spacing.xs)
                         ) {
                             PlayerChip(
                                 label = formatSpeed(playbackSpeed),
                                 selected = playbackSpeed != 1.0f,
                                 onClick = {
+                                    touchControls()
                                     val nextSpeed = PLAYBACK_SPEEDS[
                                         (PLAYBACK_SPEEDS.indexOf(playbackSpeed) + 1) % PLAYBACK_SPEEDS.size
                                     ]
@@ -880,13 +961,13 @@ private fun MediaPlayerModalImpl(
                             PlayerChip(
                                 label = currentAudioLabel ?: "Audio",
                                 selected = false,
-                                onClick = { showAudioSheet = true },
+                                onClick = { touchControls(); showAudioSheet = true },
                                 leading = Icons.Filled.GraphicEq
                             )
                             PlayerChip(
                                 label = currentSubtitleLabel ?: "Subtitles",
                                 selected = currentSubtitleLabel != null,
-                                onClick = { showSubtitleSheet = true },
+                                onClick = { touchControls(); showSubtitleSheet = true },
                                 leading = if (currentSubtitleLabel == null) Icons.Rounded.SubtitlesOff else Icons.Filled.Subtitles
                             )
                             PlayerChip(
@@ -897,6 +978,7 @@ private fun MediaPlayerModalImpl(
                                 },
                                 selected = resizeMode != AspectRatioFrameLayout.RESIZE_MODE_FIT,
                                 onClick = {
+                                    touchControls()
                                     // Fit -> Crop -> Stretch -> Fit. Stretch is
                                     // Media3's FILL mode: it distorts the aspect
                                     // ratio to fill the frame — offered because
@@ -983,7 +1065,10 @@ private fun applySubtitleByLabel(
     player.trackSelectionParameters = builder.build()
 }
 
-/** One circle-button style for the whole player. */
+/** One circle-button style for the whole player. The OUTER box owns the hit
+ *  area and is forced to the 48dp Android minimum; the inner box is the
+ *  visual circle at the requested size. (The raw `clickable` this composes
+ *  has no IconButton auto-bump, so 40dp corners used to mean 40dp targets.) */
 @Composable
 private fun PlayerCircleButton(
     icon: ImageVector,
@@ -995,9 +1080,8 @@ private fun PlayerCircleButton(
 ) {
     Box(
         modifier = Modifier
-            .size(size)
+            .minimumInteractiveComponentSize()
             .clip(CircleShape)
-            .background(Color.White.copy(alpha = 0.12f))
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,
@@ -1006,16 +1090,26 @@ private fun PlayerCircleButton(
             ),
         contentAlignment = Alignment.Center
     ) {
-        Icon(
-            icon,
-            contentDescription = contentDescription,
-            tint = Color.White.copy(alpha = if (enabled) 1f else 0.35f),
-            modifier = Modifier.size(iconSize)
-        )
+        Box(
+            modifier = Modifier
+                .size(size)
+                .clip(CircleShape)
+                .background(Color.White.copy(alpha = 0.12f)),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                icon,
+                contentDescription = contentDescription,
+                tint = Color.White.copy(alpha = if (enabled) 1f else 0.35f),
+                modifier = Modifier.size(iconSize)
+            )
+        }
     }
 }
 
-/** Compact action chip for the bottom row (speed / audio / subtitles / fit-crop). */
+/** Compact action chip for the bottom row (speed / audio / subtitles / fit-crop).
+ *  Same trick as PlayerCircleButton: the pill keeps its ~38dp visual height,
+ *  the wrapping box guarantees a 48dp-tall hit area. */
 @Composable
 private fun PlayerChip(
     label: String,
@@ -1025,15 +1119,21 @@ private fun PlayerChip(
 ) {
     val bg = if (selected) PlayerAccent else Color.White.copy(alpha = 0.10f)
     val fg = if (selected) Color.Black else Color.White
-    Row(
+    Box(
         modifier = Modifier
+            .minimumInteractiveComponentSize()
             .clip(RoundedCornerShape(50))
-            .background(bg)
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,
                 onClick = onClick
-            )
+            ),
+        contentAlignment = Alignment.Center
+    ) {
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(50))
+            .background(bg)
             .padding(horizontal = Spacing.md, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(Spacing.xs)
@@ -1052,6 +1152,7 @@ private fun PlayerChip(
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
         )
+    }
     }
 }
 

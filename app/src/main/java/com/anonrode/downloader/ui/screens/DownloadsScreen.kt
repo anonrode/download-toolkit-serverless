@@ -28,6 +28,10 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.ProgressBarRangeInfo
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.progressBarRangeInfo
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -68,6 +72,10 @@ fun DownloadsScreen(
     var sortMenuOpen by remember { mutableStateOf(false) }
     // Destructive bulk action: "Cancel all" wipes partial files, so it asks first.
     var confirmCancelAll by remember { mutableStateOf(false) }
+    // A completed card's trash icon deletes the FINISHED FILE (purgeTaskArtifacts
+    // + remove is irreversible) — equally destructive, yet until now the only
+    // delete path WITHOUT a confirm gate.
+    var pendingDeleteTask by remember { mutableStateOf<DownloadTask?>(null) }
 
     // The Next/Previous queue the player steps through: every COMPLETED
     // task's path, in screen order. Keyed on a cheap structural signature
@@ -140,6 +148,42 @@ fun DownloadsScreen(
         )
     }
 
+    // Single-file delete confirm — mirrors the "Cancel all" gate for the
+    // other irreversible path.
+    pendingDeleteTask?.let { task ->
+        AlertDialog(
+            onDismissRequest = { pendingDeleteTask = null },
+            shape = RoundedCornerShape(Radius.lg),
+            containerColor = SurfaceCard,
+            titleContentColor = TextPrimary,
+            textContentColor = TextSecondary,
+            title = { Text("Delete downloaded file?") },
+            text = {
+                Text(
+                    "\"${task.episodeTitle}\" will be removed from storage. " +
+                        "This cannot be undone.",
+                    color = TextSecondary,
+                    fontSize = 13.sp,
+                    maxLines = 4,
+                    overflow = TextOverflow.Ellipsis
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        pendingDeleteTask = null
+                        viewModel.engine.cancel(task.id)
+                    }
+                ) { Text("Delete", color = StatusError) }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingDeleteTask = null }) {
+                    Text("Keep file", color = TextSecondary)
+                }
+            }
+        )
+    }
+
     // Build age-override map so "Date added" groups use the task's real
     // enqueue timestamp (task.createdAt, set by the engine at enqueue).
     // Tasks persisted by older builds carry createdAt == 0; for those the
@@ -191,8 +235,10 @@ fun DownloadsScreen(
         modifier = Modifier
             .fillMaxSize()
             .background(BackgroundDark)
+            // statusBarsPadding only: the outer Scaffold already clears the
+            // bottom bar — navigationBarsPadding() on top of it added a
+            // second nav-bar-height dead band above the bottom bar.
             .statusBarsPadding()
-            .navigationBarsPadding()
             .padding(horizontal = Spacing.lg)
     ) {
         // Header
@@ -338,6 +384,11 @@ fun DownloadsScreen(
                     )
                     Spacer(modifier = Modifier.height(Spacing.sm))
                     Text("No active or completed downloads", color = TextSecondary, fontSize = 14.sp)
+                    // The empty state should say what to do NEXT, not just
+                    // name the void — one tap back to the search tab.
+                    TextButton(onClick = onBack) {
+                        Text("Find something to download", color = AccentPrimary, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                    }
                 }
             }
         } else {
@@ -363,7 +414,8 @@ fun DownloadsScreen(
                             onPlay = { activePlaybackTask = task },
                             onPause = { viewModel.engine.pause(task.id) },
                             onRetry = { viewModel.engine.retry(task.id) },
-                            onCancel = { viewModel.engine.cancel(task.id) }
+                            onCancel = { viewModel.engine.cancel(task.id) },
+                            onDelete = { pendingDeleteTask = task }
                         )
                     }
                 }
@@ -381,13 +433,20 @@ private fun sortModeLabel(mode: String): String = when (mode) {
 
 @Composable
 private fun SortChip(label: String, onClick: () -> Unit) {
+    // The pill itself renders ~24dp; minimumInteractiveComponentSize grows
+    // the HIT box to the 48dp Android minimum without resizing the visual.
+    Box(
+        modifier = Modifier
+            .minimumInteractiveComponentSize()
+            .clip(RoundedCornerShape(Radius.full))
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
-            .clip(RoundedCornerShape(Radius.full))
             .background(SurfaceCard)
             .border(1.dp, BorderHairline, RoundedCornerShape(Radius.full))
-            .clickable(onClick = onClick)
             .padding(horizontal = Spacing.md, vertical = Spacing.xs)
     ) {
         Text(
@@ -404,17 +463,23 @@ private fun SortChip(label: String, onClick: () -> Unit) {
             fontWeight = FontWeight.Bold
         )
     }
+    }
 }
 
 @Composable
 private fun BulkActionChip(label: String, icon: ImageVector, accent: Color = AccentPrimary, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .minimumInteractiveComponentSize()
+            .clip(RoundedCornerShape(Radius.full))
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
-            .clip(RoundedCornerShape(Radius.full))
             .background(SurfaceCard)
             .border(1.dp, BorderHairline, RoundedCornerShape(Radius.full))
-            .clickable(onClick = onClick)
             .padding(horizontal = Spacing.md, vertical = Spacing.xs)
     ) {
         Icon(
@@ -430,6 +495,7 @@ private fun BulkActionChip(label: String, icon: ImageVector, accent: Color = Acc
             fontSize = 11.sp,
             fontWeight = FontWeight.SemiBold
         )
+    }
     }
 }
 
@@ -486,7 +552,8 @@ fun DownloadCard(
     onPlay: () -> Unit,
     onPause: () -> Unit,
     onRetry: () -> Unit,
-    onCancel: () -> Unit
+    onCancel: () -> Unit,
+    onDelete: () -> Unit = onCancel
 ) {
     val isCompleted = task.status == TaskStatus.COMPLETED
     val isDownloading = task.status == TaskStatus.DOWNLOADING || task.status == TaskStatus.RESOLVING
@@ -556,7 +623,12 @@ fun DownloadCard(
             if (isCompleted) {
                 // ---- COMPLETED: ext chip + size + Play / Share / Delete ----
                 val sizeText = if (task.totalBytes > 0) formatBytes(task.totalBytes) else formatBytes(task.downloadedBytes)
-                val extText = File(task.filePath).name.substringAfterLast('.').uppercase()
+                // substringAfterLast('.') with NO dot returns the WHOLE string —
+                // an extension-less filename rendered its entire name into the
+                // 9.sp chip and crushed the size label beside it. Only a real
+                // (short) extension gets a chip.
+                val extRaw = File(task.filePath).name.substringAfterLast('.', "")
+                val extText = if (extRaw.length in 1..5) extRaw.uppercase() else null
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -567,13 +639,15 @@ fun DownloadCard(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(Spacing.xs)
                     ) {
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(Radius.xs))
-                                .background(SurfaceElevated)
-                                .padding(horizontal = Spacing.sm, vertical = Spacing.xxs)
-                        ) {
-                            Text(text = extText, color = TextPrimary, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                        if (extText != null) {
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(Radius.xs))
+                                    .background(SurfaceElevated)
+                                    .padding(horizontal = Spacing.sm, vertical = Spacing.xxs)
+                            ) {
+                                Text(text = extText, color = TextPrimary, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                            }
                         }
                         // Quality/resolution chip: the real stream resolution
                         // for HLS (parsed from the master's RESOLUTION during
@@ -635,7 +709,7 @@ fun DownloadCard(
                         }
 
                         IconButton(
-                            onClick = onCancel,
+                            onClick = onDelete,
                             modifier = Modifier.size(48.dp)
                         ) {
                             Box(
@@ -683,6 +757,15 @@ fun DownloadCard(
                         .height(6.dp)
                         .clip(RoundedCornerShape(Radius.xs))
                         .background(SurfaceElevated)
+                        // A hand-drawn bar is invisible to TalkBack: expose it
+                        // as a real progress range so the card announces
+                        // progress, not just the title row.
+                        .semantics {
+                            progressBarRangeInfo =
+                                if (indeterminate) ProgressBarRangeInfo.Indeterminate
+                                else ProgressBarRangeInfo(animatedProgress, 0f..1f)
+                            contentDescription = "Download progress"
+                        }
                 ) {
                     if (!indeterminate) {
                         Box(
@@ -814,6 +897,12 @@ fun DownloadCard(
                         },
                         fontSize = 11.sp,
                         maxLines = 2,
+                        // Churning states (percent/size/speed/ETA all mutate
+                        // every tick) reserve BOTH lines: otherwise the
+                        // "10:00 left" -> "9:59 left" width wobble flips the
+                        // text between 1 and 2 lines and the whole card
+                        // visibly jumps mid-download.
+                        minLines = if (isDownloadingNow || task.status == TaskStatus.RESOLVING) 2 else 1,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f)
                     )
