@@ -324,6 +324,47 @@ def _validate_pipeline(where, pl, problems):
             _validate_pipeline_items(f"{w}.items", step["items"], problems)
 
 
+def _validate_terminal(where, t, problems):
+    """Mirror of PipelineModels.parseTerminal — every rejection there must be
+    visible HERE too, so an unsignable payload never reaches a fleet phone.
+    (Regexes are NOT dialect-checked here: Kotlin validates them at parse via
+    java.util.regex; Python's re would reject Java-specific syntax that is
+    actually loadable on the phones.)"""
+    if not isinstance(t, dict):
+        problems.append(f"{where}: must be an object")
+        return
+    # Kotlin lowercases source/mode before matching — mirror exactly, so the
+    # gate and the parser never disagree on what is signable.
+    source = str(t.get("source") or "").lower()
+    mode = str(t.get("mode") or "").lower()
+    if source not in ("entry", "final"):
+        problems.append(f"{where}.source: must be entry|final")
+    if mode not in ("probe", "handoff"):
+        problems.append(f"{where}.mode: must be probe|handoff")
+    hosts = t.get("hosts")
+    if not isinstance(hosts, list) or not hosts:
+        problems.append(f"{where}.hosts: non-empty array of PURE domain names required")
+    else:
+        for h in hosts:
+            # lowercased/trimmed/`*.`-normalized exactly like the Kotlin parse
+            hh = str(h).lower().strip().removeprefix("*.")
+            if not hh:
+                problems.append(f"{where}.hosts: blank entry")
+            elif any(c in hh for c in "/: "):
+                problems.append(f"{where}.hosts: '{h}' is not a pure domain (scheme/path/port/space)")
+    g = t.get("group", 1)
+    if not isinstance(g, int) or not 0 <= g <= 32:
+        problems.append(f"{where}.group: must be an int 0-32")
+    if source == "entry" and not str(t.get("regex") or "").strip():
+        problems.append(f"{where}.regex: required for source=entry")
+    if source == "final" and not str(t.get("spec") or "").strip():
+        problems.append(f"{where}.spec: required for source=final")
+    for key in ("regex", "spec", "referer"):
+        v = t.get(key)
+        if v is not None and (not isinstance(v, str) or len(v) > MAX_SELECTOR_LEN):
+            problems.append(f"{where}.{key}: string <= {MAX_SELECTOR_LEN}")
+
+
 def validate_pipelines(obj) -> list:
     """Deep validation of the declarative step-pipeline key. Mirrors the
     parse-time bounds in PipelineModels.kt and the closed vocabulary in
@@ -342,13 +383,23 @@ def validate_pipelines(obj) -> list:
         if pl.get("schema") != 1:
             problems.append(f"{where}: schema must be 1 (unknown versions are refused)")
             continue
-        known = {"schema", "search", "episodes"}
+        known = {"schema", "search", "episodes", "resolve", "terminal"}
         for key in pl.keys():
             if key not in known:
                 problems.append(f"{where}: unknown key '{key}'")
-        for stage in ("search", "episodes"):
+        for stage in ("search", "episodes", "resolve"):
             if stage in pl:
                 _validate_pipeline(f"{where}.{stage}", pl[stage], problems)
+        # TERMINAL GOVERNANCE coupling (A-5): the app refuses resolve without a
+        # valid terminal, and a lone terminal has no consumer — both shapes are
+        # dead weight, so the signing gate refuses them outright.
+        has_resolve, has_terminal = "resolve" in pl, "terminal" in pl
+        if has_resolve != has_terminal:
+            problems.append(
+                f"{where}: 'resolve' and 'terminal' must appear TOGETHER "
+                "(the app refuses a crack recipe without its trust gate)")
+        if has_terminal:
+            _validate_terminal(f"{where}.terminal", pl["terminal"], problems)
     return problems
 
 
