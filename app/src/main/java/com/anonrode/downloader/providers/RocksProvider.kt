@@ -210,7 +210,10 @@ object RocksProvider : SiteProvider {
     }
 
     override suspend fun resolveEpisode(episodeUrl: String, quality: String): DownloadRecipe {
-        val direct = ResolverRegistry.resolve(episodeUrl, quality) ?: episodeUrl
+        // OTA resolve recipe first (signed terminal-gated crack); compiled
+        // registry stays the untouched fallback.
+        val direct = RulesPipeline.runResolveForSite(name, episodeUrl, quality)
+            ?: ResolverRegistry.resolve(episodeUrl, quality) ?: episodeUrl
         return DownloadRecipe(
             directUrl = direct,
             filename = direct.substringAfterLast('/').substringBefore('?').ifEmpty { "movie.mp4" },

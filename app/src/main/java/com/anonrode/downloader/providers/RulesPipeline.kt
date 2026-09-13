@@ -8,6 +8,7 @@ import com.anonrode.downloader.data.rules.Pipeline
 import com.anonrode.downloader.data.rules.PipelineSource
 import com.anonrode.downloader.data.rules.PipelineStep
 import com.anonrode.downloader.data.rules.PipelineTerminal
+import com.anonrode.downloader.data.rules.PipelineVarBind
 import com.anonrode.downloader.data.rules.jsonStringList
 import com.anonrode.downloader.resolvers.ResolverRegistry
 import com.anonrode.downloader.util.DebugLog
@@ -278,10 +279,9 @@ object RulesPipeline {
     suspend fun runResolveForSite(site: String, episodeUrl: String, quality: String): String? {
         if (episodeUrl.isBlank()) return null
         val sp = DynamicRulesManager.getPipeline(site) ?: return null
-        val pl = sp.resolve ?: return null
         val term = sp.terminal ?: return null
         return try {
-            runResolveInner(site, pl, term, episodeUrl) { cand ->
+            runResolveInner(site, sp.resolve, term, episodeUrl) { cand ->
                 ResolverRegistry.resolve(cand, quality)
             }
         } catch (e: Exception) {
@@ -290,9 +290,28 @@ object RulesPipeline {
         }
     }
 
+    /** Apply a resolve pipeline's urlBinds to the vars map BEFORE any fetch
+     *  (each binds from the raw {url} — downloadwella needs its file id in
+     *  the POST body, which no response has produced yet). Misses are
+     *  silent: a later blank-var template fails the run the honest way.
+     *  JVM-testable pure core (parse pre-validates regex/group). */
+    internal fun applyUrlBinds(bindings: List<PipelineVarBind>, vars: MutableMap<String, String>) {
+        val src = vars["url"] ?: return
+        for (b in bindings) {
+            try {
+                val m = Regex(b.regex).find(src) ?: continue
+                val v = m.groupValues.getOrNull(b.group)?.takeIf { it.isNotBlank() } ?: continue
+                val out = if (b.decode) {
+                    try { java.net.URLDecoder.decode(v, "UTF-8") } catch (_: Exception) { v }
+                } else v
+                if (out.isNotBlank()) vars[b.name] = out
+            } catch (_: Exception) {}
+        }
+    }
+
     private suspend fun runResolveInner(
         site: String,
-        pipeline: Pipeline,
+        pipeline: Pipeline?,
         terminal: PipelineTerminal,
         episodeUrl: String,
         handoff: suspend (String) -> String?
@@ -300,9 +319,10 @@ object RulesPipeline {
         val bases = DynamicRulesManager.getBaseUrls(site)
         val base = (bases.firstOrNull { it.isNotBlank() } ?: "").trimEnd('/')
         val vars = mutableMapOf("base" to base, "url" to episodeUrl, "query" to "")
+        applyUrlBinds(pipeline?.urlBinds ?: emptyList(), vars)
         var consumed = 0L
 
-        for ((idx, step) in pipeline.steps.withIndex()) {
+        pipeline?.steps?.forEachIndexed { idx, step ->
             var bound = false
             for ((source, sourceVars) in expandSources(site, step, vars)) {
                 val url = renderTemplate(source.url, sourceVars) { name -> sourceVars[name] }

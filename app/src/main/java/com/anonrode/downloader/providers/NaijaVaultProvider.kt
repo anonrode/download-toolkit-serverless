@@ -290,7 +290,10 @@ object NaijaVaultProvider : SiteProvider {
         }
     }
     override suspend fun resolveEpisode(episodeUrl: String, quality: String): DownloadRecipe {
-        var direct = ResolverRegistry.resolve(episodeUrl, quality)
+        // OTA resolve recipe first (signed terminal-gated crack); the compiled
+        // registry + /dl- page scan below stay the untouched fallback.
+        var direct = RulesPipeline.runResolveForSite(name, episodeUrl, quality)
+            ?: ResolverRegistry.resolve(episodeUrl, quality)
         if (direct == null && episodeUrl.contains("/dl-")) {
             try {
                 val html = HttpClient.getText(episodeUrl) ?: ""

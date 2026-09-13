@@ -271,6 +271,28 @@ def _validate_pipeline(where, pl, problems):
     if not isinstance(steps, list) or not 1 <= len(steps) <= PIPELINE_MAX_STEPS:
         problems.append(f"{where}.steps: must be a list of 1-{PIPELINE_MAX_STEPS} steps")
         return
+    ub = pl.get("urlBinds")
+    if ub is not None:
+        # Pipeline-level pre-fetch binds (resolve stage reads the episode URL
+        # BEFORE any fetch — downloadwella's file-id-in-POST-body class).
+        # All-or-nothing at parse: ANY invalid entry voids the pipeline.
+        if not isinstance(ub, dict):
+            problems.append(f"{where}.urlBinds: must be an object")
+        else:
+            for name, spec in ub.items():
+                w = f"{where}.urlBinds.{name}"
+                if not isinstance(spec, dict):
+                    problems.append(f"{w}: must be an object")
+                    continue
+                rx = spec.get("regex")
+                if not isinstance(rx, str) or not rx.strip():
+                    problems.append(f"{w}.regex: required non-empty string (Java regex)")
+                g = spec.get("group", 1)
+                if isinstance(g, bool) or not isinstance(g, int) or not 0 <= g <= 32:
+                    problems.append(f"{w}.group: must be an int 0-32")
+                d = spec.get("decode", False)
+                if not isinstance(d, bool):
+                    problems.append(f"{w}.decode: must be a boolean")
     for i, step in enumerate(steps):
         w = f"{where}.steps[{i}]"
         if not isinstance(step, dict):
@@ -390,16 +412,23 @@ def validate_pipelines(obj) -> list:
         for stage in ("search", "episodes", "resolve"):
             if stage in pl:
                 _validate_pipeline(f"{where}.{stage}", pl[stage], problems)
-        # TERMINAL GOVERNANCE coupling (A-5): the app refuses resolve without a
-        # valid terminal, and a lone terminal has no consumer — both shapes are
-        # dead weight, so the signing gate refuses them outright.
+        # resolve/terminal coupling (A-5), mirroring parseSitePipeline:
+        #  - resolve WITHOUT a valid terminal -> refused (trust lives in the gate)
+        #  - terminal(final) WITHOUT resolve  -> refused (its spec vars could
+        #    never bind — a final ride needs its pipeline)
+        #  - terminal(entry) WITHOUT resolve  -> ALLOWED: zero-fetch recipe
+        #    (candidate extracted from the episode URL itself)
         has_resolve, has_terminal = "resolve" in pl, "terminal" in pl
-        if has_resolve != has_terminal:
+        if has_resolve and not has_terminal:
             problems.append(
-                f"{where}: 'resolve' and 'terminal' must appear TOGETHER "
-                "(the app refuses a crack recipe without its trust gate)")
+                f"{where}: 'resolve' without a valid 'terminal' is refused by the app")
         if has_terminal:
             _validate_terminal(f"{where}.terminal", pl["terminal"], problems)
+            source = str(pl["terminal"].get("source") or "").lower() if isinstance(pl["terminal"], dict) else ""
+            if not has_resolve and source != "entry":
+                problems.append(
+                    f"{where}: 'terminal' source=final without a 'resolve' pipeline "
+                    "is refused (bound vars can never exist)")
     return problems
 
 
