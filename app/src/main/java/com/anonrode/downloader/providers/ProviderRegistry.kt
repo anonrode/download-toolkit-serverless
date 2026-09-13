@@ -3,7 +3,9 @@ package com.anonrode.downloader.providers
 import com.anonrode.downloader.data.models.DownloadRecipe
 import com.anonrode.downloader.data.models.ShowCard
 import com.anonrode.downloader.data.models.ShowDetails
+import com.anonrode.downloader.data.net.HttpClient
 import com.anonrode.downloader.data.rules.DynamicRulesManager
+import com.anonrode.downloader.util.DebugLog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.async
