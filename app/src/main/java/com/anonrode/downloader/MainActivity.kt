@@ -260,7 +260,7 @@ class MainActivity : ComponentActivity() {
                     },
                     onWriteTabPref = { newTab ->
                         prefs.edit().putString("pref_last_tab", newTab).apply()
-                    }
+                    },
                     onPlayTask = { task -> openPlayer(task) }
                 )
 
