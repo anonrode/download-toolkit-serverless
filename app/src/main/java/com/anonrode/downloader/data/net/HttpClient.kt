@@ -316,15 +316,22 @@ object HttpClient {
     }
 
     /**
-     * Single chokepoint for okhttp URL parsing in the security gates. The CI
-     * build treats deprecation warnings as errors, and the idiomatic
-     * String.toHttpUrlOrNull() extension does not resolve from this Kotlin
-     * setup against okhttp 4.12.0's Android facade — so the one call to the
-     * (identical-behavior, same parser) deprecated companion `parse` lives
-     * HERE, suppressed. Do not add further HttpUrl.parse call sites.
+     * Single chokepoint for okhttp URL parsing in the security gates.
+     * HttpUrl.parse is DEPRECATION-ERROR level against okhttp 4.12.0 (an
+     * @Suppress("DEPRECATION") does not silence it), and the recommended
+     * String.toHttpUrlOrNull extension does not resolve from this CI's Kotlin
+     * setup — so we route through Request.Builder.url(), which delegates to
+     * the SAME non-lenient HttpUrl parser (same userinfo/host canonicalization
+     * the safety comment above relies on) and is not deprecated anywhere.
+     * Malformed input throws IllegalArgumentException where parse would
+     * return null; identical net semantics. Do not add raw HttpUrl.parse
+     * call sites.
      */
-    @Suppress("DEPRECATION")
-    private fun parseHttpUrl(url: String): okhttp3.HttpUrl? = okhttp3.HttpUrl.parse(url)
+    private fun parseHttpUrl(url: String): okhttp3.HttpUrl? = try {
+        okhttp3.Request.Builder().url(url).build().url
+    } catch (_: IllegalArgumentException) {
+        null
+    }
 
     fun safeUrl(url: String): String {
         if (url.isBlank()) return url
