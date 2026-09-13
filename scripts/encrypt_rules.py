@@ -75,13 +75,21 @@ PIPELINE_MAX_STEPS = 8
 PIPELINE_MAX_SOURCES = 4
 FIELD_SPEC_PREFIXES = ("literal:", "link:", "selector:", "attr:",
                        "field:", "var:", "template:")
+# RulesPipeline.docField (used by items.meta.* and sectionGrouping.seasonSpec)
+# evaluates at DOC scope: no anchor element and no JSON document, so
+# self/link:/field: can never resolve there. A rule author must not be able to
+# pass validation with a spec the executor will silently null.
+DOC_FIELD_SPEC_PREFIXES = ("literal:", "selector:", "attr:",
+                           "template:", "var:")
 LABEL_CHAIN_STRINGS = ("text", "counter")
 LABEL_CHAIN_OBJ_KEYS = ("text", "regexText", "regexUrl", "label")
 
 
-def _check_field_spec(spec, where, problems):
+def _check_field_spec(spec, where, problems, prefixes=None, allow_self=True):
     """A field spec is a string or an array of alternative strings, each a
-    known primitive (see FIELD_SPEC_PREFIXES / RulesPipeline.kt)."""
+    known primitive (see FIELD_SPEC_PREFIXES / RulesPipeline.kt).
+    Doc-scoped evaluators pass a narrower `prefixes` tuple and allow_self=False
+    (DOC_FIELD_SPEC_PREFIXES / RulesPipeline.docField)."""
     if isinstance(spec, list):
         if len(spec) > PIPELINE_MAX_SOURCES * 2:
             problems.append(f"{where}: at most 8 alternatives")
@@ -89,11 +97,12 @@ def _check_field_spec(spec, where, problems):
         specs = spec
     else:
         specs = [spec]
+    prefixes = prefixes or FIELD_SPEC_PREFIXES
     for s in specs:
         if not isinstance(s, str) or not s or len(s) > MAX_SELECTOR_LEN:
             problems.append(
                 f"{where}: field spec must be a non-empty string <= {MAX_SELECTOR_LEN}")
-        elif s != "self" and not s.startswith(FIELD_SPEC_PREFIXES):
+        elif (s != "self" if allow_self else True) and not s.startswith(prefixes):
             problems.append(
                 f"{where}: unknown field spec {s[:40]!r} (closed vocabulary)")
 
@@ -185,7 +194,9 @@ def _validate_pipeline_items(where, items, problems):
                 problems.append(
                     f"{where}.sectionGrouping.sectionSelector: string 1..{MAX_SELECTOR_LEN} required")
             if "seasonSpec" in sg:
-                _check_field_spec(sg["seasonSpec"], f"{where}.seasonGrouping.seasonSpec", problems)
+                _check_field_spec(sg["seasonSpec"], f"{where}.seasonGrouping.seasonSpec",
+                                  problems, prefixes=DOC_FIELD_SPEC_PREFIXES,
+                                  allow_self=False)
             tmpl = sg.get("labelTemplate")
             if tmpl is not None and (not isinstance(tmpl, str) or len(tmpl) > MAX_SELECTOR_LEN):
                 problems.append(
@@ -252,7 +263,9 @@ def _validate_pipeline_items(where, items, problems):
         else:
             for field in ("title", "poster", "synopsis"):
                 if field in meta:
-                    _check_field_spec(meta[field], f"{where}.meta.{field}", problems)
+                    _check_field_spec(meta[field], f"{where}.meta.{field}", problems,
+                                      prefixes=DOC_FIELD_SPEC_PREFIXES,
+                                      allow_self=False)
             tc = meta.get("titleCleanup")
             if tc is not None:
                 if not isinstance(tc, list) or len(tc) > PIPELINE_MAX_STEPS:

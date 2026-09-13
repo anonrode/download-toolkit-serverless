@@ -1099,6 +1099,10 @@ object RulesPipeline {
                     doc.selectFirst(css)?.attrValue(attr)
                 }
                 raw.startsWith("template:") -> renderTemplate(raw.substringAfter(":"), vars) { name -> vars[name] }
+                // vars: is doc-scoped-safe (the map is always in hand); self/
+                // link:/field: need an anchor or JSON context that doc/section
+                // scope does not have — the validator rejects them here.
+                raw.startsWith("var:") -> vars[raw.substringAfter(":")]
                 else -> null
             }
             if (!v.isNullOrBlank()) return v

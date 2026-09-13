@@ -52,7 +52,10 @@ interface BaseResolver {
  *
  * Entry semantics (matching how the resolver lists are written):
  *  - contains '/'          -> host equals-or-subdomain of the host part AND
- *                             the raw URL contains the path part;
+ *                             the raw URL contains the path part; a path-only
+ *                             entry (empty host part, e.g. "/embed/") claims
+ *                             on the path alone — legacy semantics, kept
+ *                             honest rather than silently never-matching;
  *  - ends with '.'         -> label-prefix claim: the host starts with it or
  *                             contains ".<entry>" (dood. -> dood.to, sub.dood.to);
  *  - dotted domain         -> host equals it or is a sub-domain suffix of it;
@@ -74,7 +77,8 @@ internal fun hostClaim(url: String, hosts: List<String>): Boolean {
             entry.contains('/') -> {
                 val h = entry.substringBefore('/')
                 val path = "/" + entry.substringAfter('/')
-                (host == h || host.endsWith(".$h")) && lower.contains(path)
+                if (h.isEmpty()) lower.contains(path) // path-only entry
+                else (host == h || host.endsWith(".$h")) && lower.contains(path)
             }
             entry.endsWith(".") -> host.startsWith(entry) || host.contains(".$entry")
             entry.contains('.') -> host == entry || host.endsWith(".$entry")
