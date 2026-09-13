@@ -333,6 +333,67 @@ class RulesPipelineTest {
     }
 
     @Test
+    fun episodesHtml_seasonGroupingDuplicateSeasonCodesGetReStamped() {
+        // The uniqueness safety net: seasonCode puts the number in the
+        // HUNDREDS slot and only works for 1..99; the 100th+ episode of a
+        // season falls back to the plain number — and for episode 101 that
+        // plain number IS seasonCode(1,1) = 101. A duplicate episodeNum is
+        // silent data loss because the engine re-resolves with
+        // firstOrNull { episodeNum == … }. The net re-stamps collisions
+        // above the list max while the titles (built from the true numbers
+        // first) keep the page's labels.
+        // LETTERS-only hrefs and text: any digit would trip the
+        // filename-numbering heuristic and take the token path instead of
+        // the positional counter this test is about.
+        fun letters(i: Int): String {
+            val n = i - 1
+            return "${'a' + n / 676}${'a' + (n / 26) % 26}${'a' + n % 26}"
+        }
+        val eps = (1..101).joinToString("") { i ->
+            "<div class=\"episode-item\">" +
+                "<a class=\"download-btn\" href=\"https://lightdl.cc/d/${letters(i)}\">Download</a></div>"
+        }
+        val html = """
+            <html><body>
+              <div class="season-accordion">
+                <button class="season-header" data-season="1">Season 1</button>$eps
+              </div>
+            </body></html>
+        """
+        val items = """
+            {
+              "anchorSelector": "a.download-btn",
+              "urlAllowlist": ["lightdl.cc"],
+              "labelChain": ["text", "counter"],
+              "sectionGrouping": {
+                "sectionSelector": "div.season-accordion",
+                "seasonSpec": "attr:.season-header:data-season",
+                "labelTemplate": "S{season:%02d} E{num:%02d}"
+              }
+            }
+        """.trimIndent()
+        val result = RulesPipeline.extractEpisodes(
+            "dramakey", step(items), htmlOutcome(html), baseVars, "https://dramakey.test/show/1"
+        )
+        assertEquals(101, result.episodes.size)
+        val nums = result.episodes.map { it.episodeNum }
+        assertEquals("episodeNums must be unique for the engine re-resolve",
+            nums.size, nums.toSet().size)
+        // Eps 1..99 keep their season codes, ep 100 keeps the plain 100
+        // (no collision with 101..199); ep 101 collided with ep 1's 101 and
+        // was re-stamped above the max.
+        assertEquals(101, nums[0])
+        assertEquals(199, nums[98])
+        assertEquals(100, nums[99])
+        assertEquals(200, nums[100])
+        // The title still carries the TRUE page number (S01 E101) and the
+        // right href — only the internal re-resolve key moved.
+        assertEquals("S01 E101", result.episodes[100].title)
+        // letters(101): n=100 -> 100/676=0 'a', (100/26)%26=3 'd', 100%26=22 'w'
+        assertEquals("https://lightdl.cc/d/adw", result.episodes[100].url)
+    }
+
+    @Test
     fun episodesHtml_derivedNumberingSortAndTextConfig() {
         // anitaku shape: number from text or from url, sorted ascending
         val html = """

@@ -1,5 +1,6 @@
 package com.anonrode.downloader.data.net
 
+import okhttp3.asResponseBody
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -129,6 +130,60 @@ class HttpClientSafetyTest {
         assertNull(HttpClient.parsedHost(""))
         assertNull(HttpClient.parsedHost("ftp://example.com/x"))
         assertNull(HttpClient.parsedHost("https://[bad"))
+    }
+
+    // ------------------------------------------------ safeUrl (v6 literals)
+    // The blanket "[" -> %5B encode used to break every IPv6 URL into
+    // "%5Bfd00::5%5D", which HttpUrl.parse then REFUSED — killing the v6
+    // branch of isSafeTarget and making bracketed LAN/NAS targets
+    // unreachable. encodeBaseKeepingIpv6Literal keeps the literal intact.
+
+    @Test
+    fun safeUrl_keepsIpv6LiteralAndEncodesStrayBrackets() {
+        assertEquals("http://[fd00::5]:8080/x%20y.mkv",
+            HttpClient.safeUrl("http://[fd00::5]:8080/x y.mkv"))
+        // with the preserved literal, parsedHost now WORKS (used to be null):
+        assertEquals("fd00::5", HttpClient.parsedHost("http://[fd00::5]:8080/x"))
+        // hostname URLs keep the old stray-bracket/space encoding:
+        assertEquals("https://ex.com/a%5Bb%5D.mkv", HttpClient.safeUrl("https://ex.com/a[b].mkv"))
+        // query part is passed through untouched (only the base is encoded):
+        assertEquals("https://ex.com/f?x=1 [2]",
+            HttpClient.safeUrl("https://ex.com/f?x=1 [2]"))
+    }
+
+    // ------------------------------------------ cappedText / cappedBytes caps
+    // Binary consumers (ffmpeg inputs, wasm blobs) must NEVER receive a
+    // truncated-and-blessed file: oversize binary bodies are REFUSED (null),
+    // text bodies truncated (pages are previewable). An announced oversize is
+    // refused before reading a byte of a metered connection.
+
+    private fun fakeRes(body: okio.Buffer, announced: Long): okhttp3.Response {
+        val req = okhttp3.Request.Builder().url("https://example.com/f").build()
+        return okhttp3.Response.Builder()
+            .request(req)
+            .protocol(okhttp3.Protocol.HTTP_1_1)
+            .code(200).message("OK")
+            .body(body.asResponseBody(announced))
+            .build()
+    }
+
+    @Test
+    fun cappedBytes_refusesOversize_neverTruncates() {
+        val ten = okio.Buffer().write(ByteArray(10))
+        // announced far over the cap: refused unread (0 bytes cross the "wire")
+        assertNull(HttpClient.cappedBytes(fakeRes(ten, 6_000_000L), maxBytes = 1024))
+        // no announcement, but the drained body exceeds the cap: refused
+        val twenty = okio.Buffer().write(ByteArray(20))
+        assertNull(HttpClient.cappedBytes(fakeRes(twenty, -1L), maxBytes = 10))
+        // at the cap exactly: delivered whole
+        val ten2 = okio.Buffer().write(ByteArray(10))
+        assertEquals(10, HttpClient.cappedBytes(fakeRes(ten2, 10L), maxBytes = 10)?.size)
+    }
+
+    @Test
+    fun cappedText_stillTruncatesPages() {
+        val six = okio.Buffer().writeUtf8("abcdef")
+        assertEquals("abc", HttpClient.cappedText(fakeRes(six, 6L), maxBytes = 3))
     }
 
     // ------------------------------------------------ acceptsTerminalResponse
