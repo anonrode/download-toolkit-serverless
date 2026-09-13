@@ -220,7 +220,7 @@ object InstagramPhotoMuxer {
         val source = (parts.caption ?: parts.title?.let { t -> parts.artist?.let { a -> "$t — $a" } ?: t })
             ?: "Instagram"
         val label = if (source.isBlank()) "Instagram"
-            else com.anonrode.downloader.util.NameSanitizer.savedName(source, 80)
+            else com.anonrode.downloader.util.NameSanitizer.savedName(source, 80, stripNoise = false)
         return "$label [$shortcode].mp4"
     }
 

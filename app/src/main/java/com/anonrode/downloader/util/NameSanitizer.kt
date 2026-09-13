@@ -75,18 +75,42 @@ object NameSanitizer {
      * Unbracketed noise phrases. Sites decorate fields with single '_'
      * separators that never pair up ("_Episode 15 Added_ _ TV Series" leaves
      * "_ TV Series" unpaired once the first group is removed), so the common
-     * taxonomy/promo phrases are also cut wherever they appear as free text.
+     * taxonomy/promo phrases are cut too. Mitigation against over-cutting
+     * real titles (2026-09-13): position IS the gate —
+     *  - [sepBare] cuts a phrase only when a site hangs it off a decoration
+     *    separator (`_`, ` - `, ` | `, en/em-dash): "Show _ Free Download"
+     *    loses the tail, "The Online Class" keeps the word mid-phrase;
+     *  - [endBare] additionally cuts at the string END, but the end vocabulary
+     *    is deliberately restricted to multi-word phrases — nothing that can
+     *    plausibly be the last words of a real title ("Last Online",
+     *    "The Watch", "Born Free" survive; "…Full Movie" / "…Watch Online"
+     *    trailing the scraped `<title>` is the case this exists for).
+     * No length heuristic: a legitimate cut can remove MORE than half of a
+     * short title ("Show - Watch Online"), so mass-based reverts fired exactly
+     * when the cleaner was right.
      */
+    private fun sepBare(alts: String) = Regex("""(?i)(?:_|\s[-–—|])\s*\b(?:$alts)\b_?""")
+    private fun endBare(alts: String) = Regex("""(?i)(?<=\S)\s\b(?:$alts)\s*$""")
     private val BARE_NOISE_PHRASES = listOf(
-        Regex("""(?i)\s*_?\s*\b(tv series|k-?drama|dorama|web series|movie series|anime series)\b_?"""),
-        Regex("""(?i)\s*_?\s*\b(ep(isode)?\.?\s*\d+\s+(added|new|updat(e|ed)))\b_?"""),
-        Regex("""(?i)\s*_?\s*\b(watch( online)?( hd| in hd)?|online( now)?|free (download|watch)|full (movie|episode|hd))\b_?"""),
-        Regex("""(?i)\s*_?\s*\b(english sub(title)?s?|eng subs?|dual audio|multi audio)\b_?""")
+        sepBare("""tv series|k-?drama|dorama|web series|movie series|anime series"""),
+        sepBare("""ep(isode)?\.?\s*\d+\s+(added|new|updat(e|ed))"""),
+        sepBare("""watch( online)?( hd| in hd)?|online( now)?|free (download|watch)|full (movie|episode|hd)"""),
+        sepBare("""english sub(title)?s?|eng subs?|dual audio|multi audio"""),
+        endBare("""tv series|k-?drama|web series|movie series|anime series|""" +
+            """ep(isode)?\.?\s*\d+\s+(added|new|updat(e|ed))|""" +
+            """watch online( hd)?|online hd|free (download|watch)|full (movie|episode|hd)|""" +
+            """english sub(title)?s?|eng subs?|dual audio|multi audio""")
     )
 
-    /** Decoded-entity pass uses Jsoup's full HTML4 table — the hand-rolled
-     *  7-entity list this replaces mangled everything else into '_'. */
-    fun cleanTitle(raw: String): String {
+    /**
+     * Noise + whitespace/entity normalization for a scraped title.
+     * [stripNoise]=false skips ONLY the bare-phrase layer (user prose like
+     * IG captions or a shared filename must never have words deleted — a
+     * caption may legally contain "online", "movie", "free" as content);
+     * entity decoding, decoration-group cuts, and whitespace hygiene still
+     * run, so the no-junk guarantee keeps its teeth for genuine artifacts.
+     */
+    fun cleanTitle(raw: String, stripNoise: Boolean = true): String {
         var s = org.jsoup.parser.Parser.unescapeEntities(raw, false)
         s = s.replace('\u00A0', ' ')
         for (dec in DECORATIONS) {
@@ -99,9 +123,11 @@ object NameSanitizer {
                 }
             }
         }
-        for (p in BARE_NOISE_PHRASES) s = p.replace(s, " ")
-        // isolated "_" field separators left by the phrase cuts
-        s = s.replace(Regex("""\s+_\s*"""), " ")
+        if (stripNoise) {
+            for (p in BARE_NOISE_PHRASES) s = p.replace(s, " ")
+            // isolated "_" field separators left by the cuts
+            s = s.replace(Regex("""\s+_\s*"""), " ")
+        }
         // duplicate episode tokens: keep the LAST (the real drawer label)
         val eps = EPISODE_TOKEN.findAll(s).toList()
         if (eps.size >= 2) {
@@ -153,8 +179,10 @@ object NameSanitizer {
         return if (s.isBlank()) "Download" else s
     }
 
-    /** THE one-liner every save path calls: noise-clean, then make safe. */
-    fun savedName(raw: String, maxChars: Int = 80): String = safeComponent(cleanTitle(raw), maxChars)
+    /** THE one-liner every save path calls: noise-clean, then make safe.
+     *  stripNoise=false for USER PROSE (captions, shared filenames). */
+    fun savedName(raw: String, maxChars: Int = 80, stripNoise: Boolean = true): String =
+        safeComponent(cleanTitle(raw, stripNoise), maxChars)
 
     private const val MAX_COMPONENT_BYTES = 240
 
