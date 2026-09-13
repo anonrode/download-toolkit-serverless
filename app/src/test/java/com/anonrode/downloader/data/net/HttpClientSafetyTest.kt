@@ -1,6 +1,5 @@
 package com.anonrode.downloader.data.net
 
-import okhttp3.asResponseBody
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -159,11 +158,21 @@ class HttpClientSafetyTest {
 
     private fun fakeRes(body: okio.Buffer, announced: Long): okhttp3.Response {
         val req = okhttp3.Request.Builder().url("https://example.com/f").build()
+        // Hand-rolled ResponseBody: the okhttp3.internal create/asResponseBody
+        // helpers are not public API (an import of okhttp3.asResponseBody was
+        // the first-ever test-compile failure of this arc). Public abstract
+        // class only — no version coupling, no deprecation.
+        val rb = object : okhttp3.ResponseBody() {
+            override fun contentLength(): Long = announced
+            override fun contentType(): okhttp3.MediaType? = null
+            override fun source(): okio.Buffer = body
+            override fun close() {}
+        }
         return okhttp3.Response.Builder()
             .request(req)
             .protocol(okhttp3.Protocol.HTTP_1_1)
             .code(200).message("OK")
-            .body(body.asResponseBody(announced))
+            .body(rb)
             .build()
     }
 
