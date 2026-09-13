@@ -83,4 +83,27 @@ class PlutoProviderTest {
     fun tooShortStemsTrustThePage() {
         assertTrue(PlutoProvider.sameSlugStem("abc", "love-on-the-menu"))
     }
+
+    // ---- (season, episode) key: the -e105 regression -----------------------
+    // The key regex used to allow only 2 episode digits, so a long-runner
+    // slug "-s02-e105" matched "-e10" and left a stray "5"; the 3-digit form
+    // then collided in the key-dedupe and silently dropped the episode.
+
+    @Test
+    fun episodeKey_threeDigitEpisode() {
+        assertEquals(2 to 105, PlutoProvider.parseEpisodeKey("show-s02-e105-12345-mkv"))
+        assertTrue(PlutoProvider.EP_SLUG_REGEX.containsMatchIn("show-s02-e105"))
+        // (?!\d) guards: four digits is NOT an episode key at all.
+        assertEquals(null, PlutoProvider.parseEpisodeKey("show-s02-e1055"))
+        assertEquals(null, PlutoProvider.EP_SLUG_REGEX.find("show-s02-e1055"))
+    }
+
+    @Test
+    fun episodeKey_bothShapesAndGuards() {
+        assertEquals(1 to 3, PlutoProvider.parseEpisodeKey("love-s01e03-32693-mkv"))
+        assertEquals(1 to 1, PlutoProvider.parseEpisodeKey("show-s1-e1"))
+        // the season guard too: s105 is not a season, (?!\d) rejects it
+        assertEquals(null, PlutoProvider.parseEpisodeKey("show-s105-e01"))
+        assertEquals(9 to 105, PlutoProvider.parseEpisodeKey("x-S09_E105-y"))
+    }
 }

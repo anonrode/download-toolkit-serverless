@@ -169,7 +169,16 @@ object RulesPipeline {
     }
 
     /** Failover steps with a single {base} source expand across the site's
-     *  OTA domain + mirrors, so mirror rotation stays a rules edit. */
+     *  OTA domain + mirrors, so mirror rotation stays a rules edit.
+     *  Bounded: the validator allows up to 64 mirrors, and search re-enters
+     *  on every keystroke — an uncapped fan-out of 3 MB-capped fetches could
+     *  burn hundreds of MB on a site whose mirrors all soft-redirect to big
+     *  pages. 8 bases cover a healthy primary + realistic outage rotation. */
+    private const val MAX_FAILOVER_BASES = 8
+    // Hard ceiling for how many search/episodes card contexts are processed per
+    // step (see extractSearchCards). Bounds the per-item work regardless of a
+    // rule's itemPath/cardSelector breadth; every real feed returns 10..40.
+    private const val MAX_SEARCH_CONTEXTS = 500
     private fun expandSources(
         site: String,
         step: PipelineStep,
@@ -178,7 +187,7 @@ object RulesPipeline {
         if (step.mode == "failover" && step.sources.size == 1 && step.sources[0].url.contains("{base}")) {
             val bases = DynamicRulesManager.getBaseUrls(site).filter { it.isNotBlank() }
             if (bases.isNotEmpty()) {
-                return bases.map { b ->
+                return bases.take(MAX_FAILOVER_BASES).map { b ->
                     step.sources[0] to (vars + ("base" to b.trimEnd('/')))
                 }
             }
@@ -470,7 +479,7 @@ object RulesPipeline {
         val items = step.items ?: return emptyList()
         val defaults = stringMapOf(items.optJSONObject("defaults"))
 
-        val contexts: List<CardCtx> = when (step.asFormat) {
+        val contexts: List<CardCtx> = (when (step.asFormat) {
             "json" -> walkJson(outcome.json, items.optString("itemPath"))
                 .filterIsInstance<JSONObject>()
                 .map { obj ->
@@ -484,7 +493,8 @@ object RulesPipeline {
                 if (selector.isBlank()) return emptyList()
                 outcome.doc?.select(selector)?.map { CardCtx(it, null, vars) } ?: emptyList()
             }
-        }
+        }).take(MAX_SEARCH_CONTEXTS)  // bound the WORK, not just the output —
+        // see MAX_SEARCH_CONTEXTS.
 
         // Per-item computed vars ("vars": {name: fieldSpec}) available to templates.
         val varSpecs = items.optJSONObject("vars")
@@ -837,8 +847,13 @@ object RulesPipeline {
             } else {
                 // An expanded post's heading/label describes the whole post
                 // ("Episode 17 & 18"); only the counter gives each expanded
-                // item its own correct title.
-                if (season != null) posInSeason += 1
+                // item its own correct title. Advance posInSeason to the HIGHEST
+                // episode the post consumed, not by 1 — otherwise the next
+                // position-based anchor reuses a number already emitted as a
+                // token (Ep 2&3 -> 102,103 then posInSeason=1 -> next anchor
+                // position 2 -> 1*100+2 = 102 again -> the engine re-resolves
+                // the wrong episode).
+                if (season != null) posInSeason = maxOf(posInSeason + 1, nums.maxOrNull() ?: posInSeason)
                 nums.forEach { n ->
                     val base = if (nums.size > 1) "Episode $n" else labelFor(ctx, n)
                     val title = if (nums.size > 1 || season == null || labelTemplate.isBlank()) base
@@ -848,6 +863,24 @@ object RulesPipeline {
             }
         }
         var built: List<EpisodeItem> = builtList
+
+        // ---- uniqueness safety net (grouped pages only)
+        // The engine re-resolves an episode by firstOrNull { episodeNum == … }
+        // — duplicates silently pick the wrong one. seasonCode guarantees
+        // uniqueness while nums stay <=99 and counters stay aligned, but a
+        // pathological page (100+ episodes in one season, or a token that
+        // collides across seasons because `num !in 1..99` falls back to the
+        // plain num) can still emit a duplicate. Make every grouped list
+        // provably unique: re-stamp collisions above the list maximum. The
+        // item KEEPS its correct title (labels were already built from the
+        // true numbers); only the internal re-resolve key moves.
+        if (grouped) {
+            val seen = HashSet<Int>(built.size)
+            var overflow = (built.maxOfOrNull { it.episodeNum } ?: 0) + 1
+            built = built.map { e ->
+                if (seen.add(e.episodeNum)) e else e.copy(episodeNum = overflow++)
+            }
+        }
 
         // ---- ordering
         val sortBy = items.optString("sortBy", "none")

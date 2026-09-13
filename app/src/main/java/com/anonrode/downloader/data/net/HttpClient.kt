@@ -318,8 +318,29 @@ object HttpClient {
     fun safeUrl(url: String): String {
         if (url.isBlank()) return url
         val parts = url.split("?", limit = 2)
-        val base = parts[0].replace("[", "%5B").replace("]", "%5D").replace(" ", "%20")
+        val base = encodeBaseKeepingIpv6Literal(parts[0])
         return if (parts.size > 1) "$base?${parts[1]}" else base
+    }
+
+    /** Encode stray `[`/`]` and spaces, but PRESERVE a well-formed IPv6 host
+     *  literal (`scheme://[v6]:port/path`). The old blanket encode broke every
+     *  IPv6 URL into `%5Bfd00::5%5D`, which HttpUrl.parse then refused — so the
+     *  v6 branch of [isSafeTarget] was dead and LAN/NAS targets written as v6
+     *  literals were unreachable. OkHttp parses the bracketed form and returns
+     *  a bare `fd00::5` host, which then flows through isBlockedAddress. */
+    private fun encodeBaseKeepingIpv6Literal(base: String): String {
+        val schemeEnd = base.indexOf("://")
+        if (schemeEnd < 0) return base.replace("[", "%5B").replace("]", "%5D").replace(" ", "%20")
+        val afterScheme = schemeEnd + 3
+        if (afterScheme < base.length && base[afterScheme] == '[') {
+            val close = base.indexOf(']', afterScheme)
+            if (close > afterScheme) {
+                val literal = base.substring(0, close + 1)          // "http://[fd00::5]"
+                val rest = base.substring(close + 1)
+                return literal + rest.replace("[", "%5B").replace("]", "%5D").replace(" ", "%20")
+            }
+        }
+        return base.replace("[", "%5B").replace("]", "%5D").replace(" ", "%20")
     }
 
     /**
@@ -463,12 +484,40 @@ object HttpClient {
     const val MAX_TEXT_BYTES = 3L * 1024 * 1024
     const val MAX_BIN_BYTES = 5L * 1024 * 1024
 
+    /**
+     * Bounded body drain shared by [cappedText]/[cappedBytes]. Okio's
+     * `request(n)` blocks until n bytes or EOF; a server trickling one byte
+     * every 14 s therefore held the calling thread (and the task's
+     * cancellation point) open essentially forever — [budgetMs] is now a hard
+     * wall, checked between 64 KiB chunks, on top of the 15 s socket read
+     * timeout. Returns the bytes obtained (size vs the caller's cap decides
+     * truncation semantics); EOF or budget expiry stops the drain.
+     */
+    private const val DRAIN_STEP = 64L * 1024
+    /** Overall budget for one page/blob body read. Generous for real pages
+     *  (kilobytes) yet a hard wall against trickling servers. */
+    const val DEFAULT_BODY_BUDGET_MS = 90_000L
+    private fun drainCapped(source: okio.BufferedSource, maxBytes: Long, budgetMs: Long): ByteArray {
+        val want = java.lang.Long.min(maxBytes + 1, Int.MAX_VALUE.toLong())
+        val deadline = System.currentTimeMillis() + budgetMs
+        var have = 0L
+        while (have < want) {
+            val target = minOf(have + DRAIN_STEP, want)
+            val ok = try {
+                source.request(target)
+            } catch (_: Exception) {
+                false
+            }
+            have = source.buffer.size
+            if (!ok || have >= want || System.currentTimeMillis() > deadline) break
+        }
+        return source.buffer.readByteArray()
+    }
+
     /** Read at most [maxBytes] of the response body as UTF-8 text. */
-    fun cappedText(res: Response, maxBytes: Long = MAX_TEXT_BYTES): String? {
+    fun cappedText(res: Response, maxBytes: Long = MAX_TEXT_BYTES, budgetMs: Long = DEFAULT_BODY_BUDGET_MS): String? {
         val body = res.body ?: return null
-        val source = body.source()
-        source.request(java.lang.Long.min(maxBytes + 1, Int.MAX_VALUE.toLong()))
-        val bytes = source.buffer.readByteArray()
+        val bytes = drainCapped(body.source(), maxBytes, budgetMs)
         val truncated = bytes.size > maxBytes
         val text = String(if (truncated) bytes.copyOf(maxBytes.toInt()) else bytes, Charsets.UTF_8)
         if (truncated) {
@@ -479,17 +528,27 @@ object HttpClient {
         return text
     }
 
-    /** Read at most [maxBytes] of the response body as bytes. */
-    fun cappedBytes(res: Response, maxBytes: Long = MAX_BIN_BYTES): ByteArray? {
+    /** Read at most [maxBytes] of the response body as bytes.
+     *  An oversize body is REJECTED (null), never truncated-and-returned: the
+     *  callers are byte consumers (ffmpeg inputs, wasm blobs) and a clipped
+     *  file is corrupt garbage that still "succeeds" — strictly worse than a
+     *  clean null that routes to the normal failure path. When the server
+     *  announces the length we refuse before reading a single byte (data cap). */
+    fun cappedBytes(res: Response, maxBytes: Long = MAX_BIN_BYTES, budgetMs: Long = DEFAULT_BODY_BUDGET_MS): ByteArray? {
         val body = res.body ?: return null
-        val source = body.source()
-        source.request(java.lang.Long.min(maxBytes + 1, Int.MAX_VALUE.toLong()))
-        val bytes = source.buffer.readByteArray()
+        val announced = body.contentLength()
+        if (announced > maxBytes) {
+            com.anonrode.downloader.util.DebugLog.net(
+                "binary body from ${res.request.url.host} is $announced bytes > cap $maxBytes — refused unread"
+            )
+            return null
+        }
+        val bytes = drainCapped(body.source(), maxBytes, budgetMs)
         if (bytes.size > maxBytes) {
             com.anonrode.downloader.util.DebugLog.net(
-                "binary body from ${res.request.url.host} truncated at $maxBytes bytes"
+                "binary body from ${res.request.url.host} exceeds $maxBytes bytes — refused (not truncated)"
             )
-            return bytes.copyOf(maxBytes.toInt())
+            return null
         }
         return bytes
     }
@@ -531,8 +590,11 @@ object HttpClient {
      * sites whose search is an admin-ajax style POST.
      */
     fun postForm(url: String, form: Map<String, String>, referer: String? = null, headers: Map<String, String> = emptyMap(), tag: String? = null, maxBytes: Long = MAX_TEXT_BYTES): String? {
-        refuseUnsafeTarget(url) // same floor as get(); throws inside the try below
         return try {
+            refuseUnsafeTarget(url) // same floor as get() — INSIDE the try so an
+            // unsafe target journal+returns null exactly like getText does; one
+            // guard throwing for one verb and returning null for the other is
+            // the kind of split-brain the resolvers were hardened against.
             val body = okhttp3.FormBody.Builder().apply {
                 form.forEach { (k, v) -> add(k, v) }
             }.build()
@@ -590,36 +652,44 @@ object HttpClient {
             com.anonrode.downloader.util.DebugLog.net("PROBE refused by isSafeTarget: ${url.take(140)}")
             return false
         }
-        val reqBuilder = Request.Builder()
-            .url(safeUrl(url))
-            .header("User-Agent", DEFAULT_UA)
-            .header("Accept", "*/*")
-            .header("Range", "bytes=0-0")
-        if (!referer.isNullOrBlank()) reqBuilder.header("Referer", referer)
-        val call = shared.newCall(reqBuilder.build())
-        call.timeout().timeout(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
-        inFlightCalls.add(call)
-        if (tag != null) {
-            taggedCalls.computeIfAbsent(tag) { java.util.concurrent.CopyOnWriteArrayList() }.add(call)
-        }
-        return try {
-            val res = call.execute()
-            // 2xx proves the host serves; 416 (range not satisfiable for a
-            // bytes=0-0 probe) still proves it is reachable and alive.
-            val ok = res.code in 200..299 || res.code == 416
-            // Headers-only check: close the body without reading it, so a
-            // server that ignores Range cannot stream data past us.
-            try { res.body?.close() } catch (_: Exception) {}
-            com.anonrode.downloader.util.DebugLog.net("PROBE ${safeUrl(url)} -> ${res.code} (timeout=${timeoutMs}ms)")
-            ok
-        } catch (e: Exception) {
-            com.anonrode.downloader.util.DebugLog.net("PROBE ${safeUrl(url)} FAILED ${e.javaClass.simpleName}: ${e.message}")
-            false
-        } finally {
-            inFlightCalls.remove(call)
+        // Request construction (Builder.url, newCall) sits INSIDE the try on
+        // purpose: okhttp3 throws IllegalArgumentException for a malformed
+        // URL, and probe's contract is "answer true/false, never throw" —
+        // callers run it inside coroutine children (SearchStrategyRunner's
+        // concurrent suffix probes) where an escaping exception would fail
+        // the whole scope, not just the one candidate.
+        try {
+            val reqBuilder = Request.Builder()
+                .url(safeUrl(url))
+                .header("User-Agent", DEFAULT_UA)
+                .header("Accept", "*/*")
+                .header("Range", "bytes=0-0")
+            if (!referer.isNullOrBlank()) reqBuilder.header("Referer", referer)
+            val call = shared.newCall(reqBuilder.build())
+            call.timeout().timeout(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+            inFlightCalls.add(call)
             if (tag != null) {
-                taggedCalls[tag]?.remove(call)
+                taggedCalls.computeIfAbsent(tag) { java.util.concurrent.CopyOnWriteArrayList() }.add(call)
             }
+            return try {
+                val res = call.execute()
+                // 2xx proves the host serves; 416 (range not satisfiable for a
+                // bytes=0-0 probe) still proves it is reachable and alive.
+                val ok = res.code in 200..299 || res.code == 416
+                // Headers-only check: close the body without reading it, so a
+                // server that ignores Range cannot stream data past us.
+                try { res.body?.close() } catch (_: Exception) {}
+                com.anonrode.downloader.util.DebugLog.net("PROBE ${safeUrl(url)} -> ${res.code} (timeout=${timeoutMs}ms)")
+                ok
+            } finally {
+                inFlightCalls.remove(call)
+                if (tag != null) {
+                    taggedCalls[tag]?.remove(call)
+                }
+            }
+        } catch (e: Exception) {
+            com.anonrode.downloader.util.DebugLog.net("PROBE ${url.take(140)} FAILED ${e.javaClass.simpleName}: ${e.message}")
+            return false
         }
     }
 
@@ -656,39 +726,44 @@ object HttpClient {
             com.anonrode.downloader.util.DebugLog.net("TERMINAL refused by isSafeTarget: ${url.take(140)}")
             return null
         }
-        val reqBuilder = Request.Builder()
-            .url(safeUrl(url))
-            .header("User-Agent", DEFAULT_UA)
-            .header("Range", "bytes=0-0")
-        if (!referer.isNullOrBlank()) reqBuilder.header("Referer", referer)
-        val client = if (permissive) terminalProbeClientPermissive else terminalProbeClient
-        val call = client.newCall(reqBuilder.build())
-        call.timeout().timeout(timeoutMs, TimeUnit.MILLISECONDS)
-        inFlightCalls.add(call)
-        if (tag != null) {
-            taggedCalls.computeIfAbsent(tag) { java.util.concurrent.CopyOnWriteArrayList() }.add(call)
-        }
+        // Request construction inside the try, exactly as in [probe]: "returns
+        // null ONLY on network failure" is the documented contract, and an
+        // IllegalArgumentException from a malformed URL must honor it.
         try {
-            call.execute().use { res ->
-                val ct = res.header("Content-Type")?.lowercase() ?: ""
-                val total = acceptsTerminalResponse(
-                    res.code, res.header("Content-Length"), res.header("Content-Range"), res.header("Content-Type")
-                )
-                val tp = TerminalProbe(res.code, res.header("Location"), ct, total)
-                com.anonrode.downloader.util.DebugLog.net(
-                    "TERMINAL ${safeUrl(url)} -> ${res.code}" +
-                        (if (total != null) " size=$total" else " (not a terminal)")
-                )
-                return tp
+            val reqBuilder = Request.Builder()
+                .url(safeUrl(url))
+                .header("User-Agent", DEFAULT_UA)
+                .header("Range", "bytes=0-0")
+            if (!referer.isNullOrBlank()) reqBuilder.header("Referer", referer)
+            val client = if (permissive) terminalProbeClientPermissive else terminalProbeClient
+            val call = client.newCall(reqBuilder.build())
+            call.timeout().timeout(timeoutMs, TimeUnit.MILLISECONDS)
+            inFlightCalls.add(call)
+            if (tag != null) {
+                taggedCalls.computeIfAbsent(tag) { java.util.concurrent.CopyOnWriteArrayList() }.add(call)
+            }
+            try {
+                call.execute().use { res ->
+                    val ct = res.header("Content-Type")?.lowercase() ?: ""
+                    val total = acceptsTerminalResponse(
+                        res.code, res.header("Content-Length"), res.header("Content-Range"), res.header("Content-Type")
+                    )
+                    val tp = TerminalProbe(res.code, res.header("Location"), ct, total)
+                    com.anonrode.downloader.util.DebugLog.net(
+                        "TERMINAL ${safeUrl(url)} -> ${res.code}" +
+                            (if (total != null) " size=$total" else " (not a terminal)")
+                    )
+                    return tp
+                }
+            } finally {
+                inFlightCalls.remove(call)
+                if (tag != null) taggedCalls[tag]?.remove(call)
             }
         } catch (e: Exception) {
             com.anonrode.downloader.util.DebugLog.net(
-                "TERMINAL ${safeUrl(url)} FAILED ${e.javaClass.simpleName}: ${e.message}"
+                "TERMINAL ${url.take(140)} FAILED ${e.javaClass.simpleName}: ${e.message}"
             )
             return null
-        } finally {
-            inFlightCalls.remove(call)
-            if (tag != null) taggedCalls[tag]?.remove(call)
         }
     }
 

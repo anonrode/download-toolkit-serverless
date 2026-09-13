@@ -533,8 +533,8 @@ object DynamicRulesManager {
             // Lenient per site: a malformed entry or an unknown schema version
             // is skipped and journaled, never fatal — that site's compiled
             // provider fallback covers it, and the rest of the payload still
-            // applies. (Contrast with dynamic_providers below, which throws
-            // on a bad entry and fails the whole parse.)
+            // applies. (dynamic_providers below follows the same lenient
+            // contract after the 2026-09-13 fix; it used to throw.)
             val pipelines = mutableMapOf<String, SitePipeline>()
             val pipelinesObj = obj.optJSONObject("pipelines")
             if (pipelinesObj != null) {
@@ -553,11 +553,18 @@ object DynamicRulesManager {
                 }
             }
 
-            // Parse any dynamic new providers added remotely
+            // Parse any dynamic new providers added remotely.
+            // optJSONObject, not getJSONObject: a non-object entry here used
+            // to throw JSONException and fail the WHOLE playbook parse — one
+            // stray string in dynamic_providers poisoned every OTA update for
+            // every site. Malformed entries are skipped, like everywhere else
+            // in this parser; id/base_url are load-bearing (a provider
+            // without them can never match a URL or build a search), so an
+            // entry missing either is skipped too.
             val dynamicList = obj.optJSONArray("dynamic_providers")
             if (dynamicList != null) {
                 for (i in 0 until dynamicList.length()) {
-                    val item = dynamicList.getJSONObject(i)
+                    val item = dynamicList.optJSONObject(i) ?: continue
                     val cfg = DynamicSiteConfig(
                         id = item.optString("id"),
                         displayName = item.optString("display_name"),
@@ -571,6 +578,7 @@ object DynamicRulesManager {
                         posterSelector = item.optString("poster_selector", "img"),
                         episodeLinkSelector = item.optString("episode_link_selector", "a[href*='download']")
                     )
+                    if (cfg.id.isBlank() || cfg.baseUrl.isBlank()) continue
                     dynProviders.add(GenericDeclarativeProvider(cfg))
                 }
             }

@@ -215,12 +215,15 @@ object PlutoProvider : SiteProvider {
         }
     }
 
-    /** Episode slug pattern: both -s01-e01 (dash) and -s01e01 (compact) occur live. */
-    private val EP_SLUG_REGEX = Regex("""-s\d{1,2}[-_]?e\d{1,2}""", RegexOption.IGNORE_CASE)
+    /** Episode slug pattern: both -s01-e01 (dash) and -s01e01 (compact) occur live.
+     *  Episode digits go to 3 (long runners: -e105); the `(?!\d)` guards stop a
+     *  3-digit episode from being read as 2 (E105 -> E10 silently dropped E105
+     *  into addEpisode's key-dedupe). internal: pinned by PlutoProviderTest. */
+    internal val EP_SLUG_REGEX = Regex("""-s\d{1,2}[-_]?e\d{1,3}(?!\d)""", RegexOption.IGNORE_CASE)
 
     /** (season, episode) parsed from a slug or URL, tolerant of both slug shapes. */
-    private fun parseEpisodeKey(href: String): Pair<Int, Int>? {
-        val m = Regex("""-s(\d{1,2})[-_]?e(\d{1,2})""", RegexOption.IGNORE_CASE).find(href) ?: return null
+    internal fun parseEpisodeKey(href: String): Pair<Int, Int>? {
+        val m = Regex("""-s(\d{1,2})(?!\d)[-_]?e(\d{1,3})(?!\d)""", RegexOption.IGNORE_CASE).find(href) ?: return null
         val s = m.groupValues[1].toIntOrNull() ?: return null
         val e = m.groupValues[2].toIntOrNull() ?: return null
         return s to e

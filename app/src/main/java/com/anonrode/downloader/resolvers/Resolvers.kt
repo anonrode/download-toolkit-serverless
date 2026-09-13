@@ -153,7 +153,12 @@ object ResolverRegistry {
         if (depth == 0) lastAttemptFailure = null
         val result = resolveInternal(url, quality, depth)
         if (depth == 0) {
-            val host = url.trim().substringAfter("://").substringBefore('/').substringBefore('?')
+            // Health must be keyed on the TRUE host (same source of truth as
+            // hostClaim/the terminal gate): the old string-split host recorded
+            // `vikingfile.com:443@evil.com` as a key for forged URLs, leaving
+            // the real victim host's backoff stale while garbage keys grew.
+            val host = HttpClient.parsedHost(url)
+                ?: url.trim().substringAfter("://").substringBefore('/').substringBefore('?')
             if (result != null) {
                 com.anonrode.downloader.pipeline.ResolveCache.put(cacheKey, result)
                 com.anonrode.downloader.pipeline.HostHealth.recordOk(host)
@@ -189,15 +194,26 @@ object ResolverRegistry {
         return kotlinx.coroutines.supervisorScope {
             val deferreds = candidates.map { u ->
                 async {
-                    try { resolve(u, quality) } catch (_: Exception) { null }
+                    try { resolve(u, quality) }
+                    catch (ce: kotlinx.coroutines.CancellationException) { throw ce }
+                    catch (_: Exception) { null }
                 }
             }
-            val winner = select<String?> {
-                deferreds.forEach { d ->
-                    d.onAwait { it }
+            // select must wait for the first SUCCESS, not the first COMPLETION:
+            // a candidate failing fast (dead locker answering null in ~200ms)
+            // used to win the race and have the still-working racers cancelled
+            // underneath it — exactly the opposite of the method's purpose.
+            // Drain completions until one carries a URL; then cancel the rest.
+            val pending = deferreds.toMutableList()
+            var winner: String? = null
+            while (winner == null && pending.isNotEmpty()) {
+                val (done, value) = select<Pair<kotlinx.coroutines.Deferred<String?>, String?>> {
+                    pending.forEach { d -> d.onAwait { d to it } }
                 }
+                pending.remove(done)
+                winner = value
             }
-            deferreds.forEach { it.cancel() }
+            pending.forEach { it.cancel() }
             winner
         }
     }
@@ -428,7 +444,13 @@ object KisskhMegaplayResolver : BaseResolver {
     override fun canResolve(url: String): Boolean {
         if (url.contains("/playlist.php") || url.contains("/api/")) return false
         val lower = url.lowercase()
-        return hostClaim(url, HOSTS) || lower.contains("/kisskh/")
+        if (hostClaim(url, HOSTS)) return true
+        // Legacy path-shape claim: kisskh mirrors ride rotating hosts whose
+        // only stable marker IS the /kisskh/ path, so the clause stays — but
+        // path/authority only, never query/fragment: `evil.test/x?u=/kisskh/`
+        // must not be pulled into this resolver by a spoofed parameter.
+        val pathPart = lower.substringAfter("://").substringBefore('#').substringBefore('?')
+        return pathPart.contains("/kisskh/")
     }
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
