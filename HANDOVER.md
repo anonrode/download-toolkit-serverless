@@ -3,7 +3,7 @@
 **Target Codebase:** `C:\Users\user\Anon\ANON TOOLS\download-toolkit-serverless` (Android / Kotlin / Jetpack Compose / OkHttp / libaria2c / youtubedl-android)
 **Reference Python Monolith:** `C:\Users\user\Anon\ANON TOOLS\download-toolkit` (`src/downloader.py`, `src/resolvers.py`, `src/extractors/`) — **the battle-tested reference; the Kotlin app is a port of it, and porting infidelities are the #1 bug source.**
 **Operating Charter:** `.agents/AGENTS.md` (Permanent source of truth — never delete)
-**Status:** ⚠️ **v3.1.0 is the last RELEASE** (tag `v3.1.0`; gradle `versionCode 310 / versionName "3.1.0"`) — BUT `master` is currently **~32 local commits AHEAD of origin** and the app has NOT been through a compiler since before `63a7032`. The next push + CI run is the first real compile of the whole arc (full-repo audit fixes, IG photo-music muxer, OTA resolve stage, NameSanitizer + mitigation, 2026-09-13 UI-audit round). CI = the only sanctioned build (user decree 2026-09-13: NEVER build locally).
+**Status:** ⚠️ **v3.1.0 is the last PUBLISHED RELEASE** (tag `v3.1.0`; gradle `versionCode 310 / versionName "3.1.0"`) — but the stale-release problem is RESOLVED as of 2026-09-13: the whole arc has been **PUSHED and CI IS GREEN on `50fd154`** (first real compile ever: 244 unit tests pass, emulator smoke pass, release build jobs succeed). It took five fix commits (`611a9af`→`50fd154`, details in the issues ledger D-1). master == origin/master. The public release still points at the old `v3.1.0` tag — **re-tagging/releasing at `50fd154` awaits the user's GO**, then phone device test. CI = the only sanctioned build (user decree 2026-09-13: NEVER build locally).
 **Last updated:** 2026-09-13 (full UI audit round + doc-drift fixes)
 
 ---
@@ -37,7 +37,7 @@ The activity log (`filesDir/logs/app-YYYY-MM-DD.txt`, shared via Settings → "S
 
 ## 📌 2. RELEASE STATE
 
-**Latest release on GitHub:** `AnonDownloader-v3.1.0-{arm64-v8a,armeabi-v7a,universal,x86,x86_64}.apk` (tag `v3.1.0`, gradle versionCode 310). **BUT** master now carries ~32 further local commits (A-5 resolve stage, OTA validator hardening, Instagram photo-music muxer + REST-first probe, full-repo audit fix batches, NameSanitizer + mitigation, 2026-09-13 UI-audit fixes) that NO compiler has seen — the next push triggers the first real build of the arc (CI = only sanctioned build).
+**Latest release on GitHub:** `AnonDownloader-v3.1.0-{arm64-v8a,armeabi-v7a,universal,x86,x86_64}.apk` (tag `v3.1.0`, gradle versionCode 310) — still the OLD artifact. **2026-09-13 update:** the 32-commit arc (A-5 resolve stage, OTA validator hardening, Instagram photo-music muxer + REST-first probe, full-repo audit fix batches, NameSanitizer + mitigation, UI-audit fixes) plus five CI-fix commits is PUSHED and **CI green on `50fd154`** — first real compile of everything, 244/244 tests, emulator smoke, release build all pass. Remaining: re-tag the release (user GO) + install on the phone.
 
 ### Historical: v3.0.3 contained the full 10-commit LockerRegistry-era stack (`4927e5d` → `e95d76b`):
 
@@ -143,14 +143,14 @@ The classify gate belongs ONLY where the design intends: NaijaVault's download-l
 6. **9jarocks HTTP 522** — transient Cloudflare, not app issue.
 7. **seriezloaded.com.ng** — dead domain (DNS NXDOMAIN). Not seeded. Ignore.
 8. **USER ACTION PENDING (still): token rotation** — the old GitHub PAT pasted into chat. Rotate in GitHub Settings > Developer settings > Personal access tokens.
-9. **USER ACTION PENDING: device testing** — v3.1.0 phone test was never reported back, and the ~32 newer local commits need the push→CI build first before any device test is meaningful. When an APK does land, verify: storage prompt at launch, downloads across sites, IG photo+music mux, saved-name shapes (junk stripped, Hangul/CJK kept), player (bars hidden, resume positions, subtitle track).
+9. **USER ACTION PENDING: device testing** — CI has now REALLY built the code (`50fd154`, green). Once the release is re-tagged/published (user GO), install and verify: storage prompt at launch, downloads across sites, IG photo+music mux, saved-name shapes (junk stripped, Hangul/CJK kept), player (bars hidden, resume positions, subtitle track), episode drawer (the duplicate-key crash fix — open a combined 9jaRocks post).
 10. **Known minor**: naijaprey show pages emit a `.srt` subtitle link that appears as a dead episode entry (pre-existing, harmless — fails cleanly).
 
 ---
 
 ## 📋 6. INCOMING AI QUICK-START CHECKLIST
 
-1. `git status` + `git log --oneline -8` — **master is currently ~32 commits AHEAD of origin** (see Status); nothing of this arc has been compiled yet, CI on push is the first real build. Verify CI after any push: `gh run list --limit 3`.
+1. `git status` — master == origin, **CI green on `50fd154`** (244 tests + emulator smoke + release build). After any change, verify CI: `gh run list --limit 3`. Note: `gh` now exists at `C:\Users\user\bin\gh.exe` (v2.100.0) — no login state; authenticate per-invocation by exporting `GH_TOKEN` from `git credential fill` (github.com) without echoing it.
 2. Read `.agents/AGENTS.md` first (operating charter). Then this HANDOVER.
 3. **Unbiased review kit exists at `REVIEW_PROMPTS.md`** (root) — 6 focused prompts + a catch-all prompt the user can paste into any AI reviewer. Covers architecture, security, code quality, performance, UX, maintainability.
 4. Ask the user for the newest activity log if anything's broken — read `[ERROR]/[RESOLVE]/[ENGINE]` lines first.
