@@ -34,13 +34,22 @@ object NameSanitizer {
      * anchored to the FULL group text (no substring fishing inside
      * otherwise-legit parentheticals like "(2019)" or "(Original Mix)").
      */
+    // ENGINE RULE (v3.1.1 hotfix): this class must never use embedded inline
+    // flags like "(?i)" / "(?u)" INSIDE a pattern string — Android's own
+    // java.util.regex engine (libcore, pre-OpenJDK-sync releases) only accepts
+    // them at position 0 and throws PatternSyntaxException otherwise. Since
+    // every val here initializes in <clinit>, one rejected pattern turns the
+    // FIRST download tap of the session into ExceptionInInitializerError and
+    // hard-crashes the app (device log 2026-09-13: every enqueue died at
+    // sanitizeComponent). RegexOption/Pattern flags are universally supported.
     private val NOISE_GROUP = Regex(
-        """(?i)^[\s.!-]*(added?|updated?|new episode.*|now streaming.*|coming soon.*|""" +
+        """^[\s.!-]*(added?|updated?|new episode.*|now streaming.*|coming soon.*|""" +
             """(full )?(movie|episode|hd|4k|uhd|cam|ts|scr|web-?rip|dvd-?rip|blu-?ray)( .*)?|""" +
             """watch( online| free)?( hd)?( in high quality)?|online( now| free)?|free( download| watch)?|""" +
             """tv series|series|dorama|k-?drama|anime|movie series|""" +
             """episode \d+( added| new| update[d]?)?|season \d+ added|""" +
-            """english sub(title)?s?|eng sub.*|dual audio|multi sub.*)[\s.!-]*$"""
+            """english sub(title)?s?|eng sub.*|dual audio|multi sub.*)[\s.!-]*$""",
+        RegexOption.IGNORE_CASE
     )
 
     /** Decorations sites actually use: `_text_`, [text], (text), {text}. */
@@ -65,11 +74,14 @@ object NameSanitizer {
      * name either — but ONLY when the dash introduces an episode token
      * (never touch the real dash in "Dr. Dolittle - 2001").
      */
-    private val DASH_EPISODE_JOIN = Regex("""\s+[-–—]\s+(?=(?i)(episode|ep\.?\s*\d+|part|ch(apter)?|s\d{1,2}e\d{1,3})\b)""")
+    private val DASH_EPISODE_JOIN = Regex(
+        """\s+[-–—]\s+(?=(episode|ep\.?\s*\d+|part|ch(apter)?|s\d{1,2}e\d{1,3})\b)""",
+        RegexOption.IGNORE_CASE
+    )
 
     /** Multiple "Episode N" tokens after cleaning: the LAST one is the
      *  drawer-appended real label — the earlier ones are leftovers. */
-    private val EPISODE_TOKEN = Regex("""(?i)\b(episode|ep)\.?\s*\d+\b""")
+    private val EPISODE_TOKEN = Regex("""\b(episode|ep)\.?\s*\d+\b""", RegexOption.IGNORE_CASE)
 
     /**
      * Unbracketed noise phrases. Sites decorate fields with single '_'
@@ -89,8 +101,10 @@ object NameSanitizer {
      * short title ("Show - Watch Online"), so mass-based reverts fired exactly
      * when the cleaner was right.
      */
-    private fun sepBare(alts: String) = Regex("""(?i)(?:_|\s[-–—|])\s*\b(?:$alts)\b_?""")
-    private fun endBare(alts: String) = Regex("""(?i)(?<=\S)\s\b(?:$alts)\s*$""")
+    private fun sepBare(alts: String) =
+        Regex("""(?:_|\s[-–—|])\s*\b(?:$alts)\b_?""", RegexOption.IGNORE_CASE)
+    private fun endBare(alts: String) =
+        Regex("""(?<=\S)\s\b(?:$alts)\s*$""", RegexOption.IGNORE_CASE)
     private val BARE_NOISE_PHRASES = listOf(
         sepBare("""tv series|k-?drama|dorama|web series|movie series|anime series"""),
         sepBare("""ep(isode)?\.?\s*\d+\s+(added|new|updat(e|ed))"""),
@@ -139,9 +153,11 @@ object NameSanitizer {
         }
         s = DASH_EPISODE_JOIN.replace(s, " ")
         s = s.replace(Regex("""\s+"""), " ").trim()
-        // dangling separators left behind by removed groups
-        s = s.replace(Regex("""(?u)^[\s._\-–—]+"""), "")
-        s = s.replace(Regex("""(?u)[\s._\-–—]+$"""), "")
+        // dangling separators left behind by removed groups (no (?u) flag:
+        // these classes contain no case-relevant letters, and embedded flags
+        // are the <clinit> crash vector — see ENGINE RULE above)
+        s = s.replace(Regex("""^[\s._\-–—]+"""), "")
+        s = s.replace(Regex("""[\s._\-–—]+$"""), "")
         return s.trim()
     }
 
