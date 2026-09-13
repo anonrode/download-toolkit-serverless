@@ -295,7 +295,7 @@ class RulesPipelineTest {
         assertEquals(102, result.episodes[1].episodeNum)
         assertEquals("S02 E01", result.episodes[2].title)
         assertEquals(201, result.episodes[2].episodeNum)
-        assertEquals("https://lightdl.cc/d/b1", result.episodes[3].url)
+        assertEquals("https://lightdl.cc/d/b2", result.episodes[3].url)
         assertEquals(202, result.episodes[3].episodeNum)
     }
 
