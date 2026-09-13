@@ -334,7 +334,16 @@ object RulesPipeline {
                     .filterKeys { !it.equals("Referer", ignoreCase = true) }
                     .mapValues { renderTemplate(it.value, sourceVars) { n -> sourceVars[n] } ?: "" }
                 val body = if (source.method == "POST") {
-                    val form = source.form.mapValues { renderTemplate(it.value, sourceVars) { n -> sourceVars[n] } ?: "" }
+                    // A form value whose template references an unbound var is
+                    // a BROKEN source — POSTing it empty is the junk-request
+                    // bug the compiled resolvers guard (fileId.isNullOrBlank()
+                    // return null). Skip this source; another may resolve.
+                    var formBroken = false
+                    val form = source.form.entries.associate { (k, v) ->
+                        val r = renderTemplate(v, sourceVars) { n -> sourceVars[n] }
+                        if (r == null) { formBroken = true; k to "" } else k to r
+                    }
+                    if (formBroken) continue
                     HttpClient.postForm(url, form, referer, headers, tag = null, maxBytes = RESOLVE_FETCH_MAX_BYTES)
                 } else {
                     HttpClient.getText(url, referer, headers, tag = null, maxBytes = RESOLVE_FETCH_MAX_BYTES)
