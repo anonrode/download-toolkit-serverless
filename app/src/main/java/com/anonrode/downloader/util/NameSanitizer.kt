@@ -34,14 +34,20 @@ object NameSanitizer {
      * anchored to the FULL group text (no substring fishing inside
      * otherwise-legit parentheticals like "(2019)" or "(Original Mix)").
      */
-    // ENGINE RULE (v3.1.1 hotfix): this class must never use embedded inline
-    // flags like "(?i)" / "(?u)" INSIDE a pattern string — Android's own
-    // java.util.regex engine (libcore, pre-OpenJDK-sync releases) only accepts
-    // them at position 0 and throws PatternSyntaxException otherwise. Since
-    // every val here initializes in <clinit>, one rejected pattern turns the
-    // FIRST download tap of the session into ExceptionInInitializerError and
-    // hard-crashes the app (device log 2026-09-13: every enqueue died at
-    // sanitizeComponent). RegexOption/Pattern flags are universally supported.
+    // ENGINE RULE (v3.1.1 + v3.1.2 hotfixes): Android's java.util.regex fork is
+    // NOT the desktop engine — two device crashes proved it. A pattern string
+    // in <clinit> that the device rejects becomes ExceptionInInitializerError
+    // and hard-kills the FIRST download tap of every session (device logs
+    // 2026-09-13: 18:09 build died on a mid-pattern "(?i)"; the 21:18 retagged
+    // build STILL died at sanitizeComponent with only one exotic construct
+    // left — the "(?<=\S)" lookbehind below). JVM unit tests and CI compile the
+    // desktop engine and can never see these. The portable whitelist for all
+    // main-source regexes is: classes, groups, alternation, quantifiers, \b,
+    // LOOKAHEAD ("(?=" / "(?!"), and inline flags only at position 0. Banned:
+    // mid-pattern flags, lookBEHIND "(?<=" / "(?<", named groups, atomic
+    // "(?>", possessive quantifiers. Use capture-group equivalents instead:
+    // "(?<!x)" -> "(?:^|[^x-prefix])", with RegexOption for case handling.
+    // Enforced by ~/.zcode/tmp/ktregexflags.py in the pre-commit routine.
     private val NOISE_GROUP = Regex(
         """^[\s.!-]*(added?|updated?|new episode.*|now streaming.*|coming soon.*|""" +
             """(full )?(movie|episode|hd|4k|uhd|cam|ts|scr|web-?rip|dvd-?rip|blu-?ray)( .*)?|""" +
@@ -104,7 +110,11 @@ object NameSanitizer {
     private fun sepBare(alts: String) =
         Regex("""(?:_|\s[-–—|])\s*\b(?:$alts)\b_?""", RegexOption.IGNORE_CASE)
     private fun endBare(alts: String) =
-        Regex("""(?<=\S)\s\b(?:$alts)\s*$""", RegexOption.IGNORE_CASE)
+        // no "(?<=\S)": lookbehinds are in the banned class (ENGINE RULE) —
+        // the match already requires a separating \s before the phrase, which
+        // carries the intended meaning (a phrase that IS the whole string has
+        // no leading \s and is never cut).
+        Regex("""\s\b(?:$alts)\s*$""", RegexOption.IGNORE_CASE)
     private val BARE_NOISE_PHRASES = listOf(
         sepBare("""tv series|k-?drama|dorama|web series|movie series|anime series"""),
         sepBare("""ep(isode)?\.?\s*\d+\s+(added|new|updat(e|ed))"""),

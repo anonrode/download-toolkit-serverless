@@ -961,7 +961,9 @@ object RulesPipeline {
      */
     private val ANCHOR_NUM_PATTERNS = listOf(
         Regex("""(?i)\bs(\d+)e(\d+)\b"""),
-        Regex("""(?i)(?<![a-z0-9])e(?:p)?[\s._-]*(\d{1,4})(?![a-z0-9])""")
+        // no lookbehind — banned class, see NameSanitizer ENGINE RULE; group 1
+        // stays the episode number because the prefix is non-capturing
+        Regex("""(?i)(?:^|[^a-z0-9])e(?:p)?[\s._-]*(\d{1,4})(?![a-z0-9])""")
     )
 
     private fun anchorEpisodeNums(ctx: AnchorCtx): List<Int> {
