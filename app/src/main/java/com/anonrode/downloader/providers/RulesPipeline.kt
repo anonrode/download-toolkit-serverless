@@ -1,6 +1,7 @@
 package com.anonrode.downloader.providers
 
 import com.anonrode.downloader.data.models.EpisodeItem
+import com.anonrode.downloader.util.DownloadLinkLabels
 import com.anonrode.downloader.data.models.ShowCard
 import com.anonrode.downloader.data.net.HttpClient
 import com.anonrode.downloader.data.rules.DynamicRulesManager
@@ -836,9 +837,17 @@ object RulesPipeline {
                 positional += 1
                 val position = if (season != null) { posInSeason += 1; posInSeason } else positional
                 val num = deriveNum(ctx, position)
+                // Device bug class 2026-09-13 (Rocks/Nkiri/DramaKey): an
+                // unmarked anchor whose text says "SERVER n"/"PART n" is a
+                // mirror or split of ONE file, not a positional episode.
+                // Checked code-side so every playbook site inherits it
+                // without numbering-chain gymnastics.
+                val mirrorTitle = DownloadLinkLabels.serverOrPart(
+                    ctx.text, ctx.href.substringAfterLast('/').substringBefore('?')
+                )
                 builtList.add(
                     EpisodeItem(
-                        title = seasonLabel(ctx, num, season, labelTemplate),
+                        title = mirrorTitle ?: seasonLabel(ctx, num, season, labelTemplate),
                         url = ctx.href,
                         episodeNum = seasonCode(season, num),
                         site = site

@@ -1,5 +1,6 @@
 package com.anonrode.downloader.providers
 
+import com.anonrode.downloader.util.DownloadLinkLabels
 import com.anonrode.downloader.data.models.DownloadRecipe
 import com.anonrode.downloader.data.models.EpisodeItem
 import com.anonrode.downloader.data.models.ShowCard
@@ -105,7 +106,7 @@ object DramaKeyProvider : SiteProvider {
             val episodes = mutableListOf<EpisodeItem>()
             val seen = mutableSetOf<String>()
             val episodeRe = Regex("""(?i)S(\d+)E(\d+)""")
-            val links = doc.select("a[href]").filter { a ->
+            val links = (doc.selectFirst(".entry-content, .post-content, article") ?: doc).select("a[href]").filter { a ->
                 val h = a.attr("abs:href").ifBlank { a.attr("href") }
                 h.contains("downloadwella.com") || h.contains("wetafiles.com") ||
                     h.contains("loadedfiles.") || h.contains("dood.") ||
@@ -124,7 +125,8 @@ object DramaKeyProvider : SiteProvider {
                 val filename = href.substringAfterLast('/').substringBefore('?').substringBefore('#')
                 val label = episodeRe.find(filename)?.let { m ->
                     "S${m.groupValues[1]} E${m.groupValues[2]}"
-                } ?: "Episode $count"
+                } ?: DownloadLinkLabels.serverOrPart(a.text(), filename)
+                    ?: "Episode $count"
 
                 episodes.add(
                     EpisodeItem(

@@ -2,6 +2,7 @@ package com.anonrode.downloader.providers
 
 import com.anonrode.downloader.data.models.DownloadRecipe
 import com.anonrode.downloader.data.models.EpisodeItem
+import com.anonrode.downloader.util.DownloadLinkLabels
 import com.anonrode.downloader.data.models.ShowCard
 import com.anonrode.downloader.data.models.ShowDetails
 import com.anonrode.downloader.data.net.HttpClient
@@ -124,13 +125,20 @@ class GenericDeclarativeProvider(
             val links = doc.select(config.episodeLinkSelector)
 
             var count = 1
+            // seen-set parity: repeated anchors for the same href used to
+            // double-list, and the bare "Episode $count" fallback turned a
+            // two-server FILM into fake episodes (2026-09-13 bug class).
+            val seen = mutableSetOf<String>()
             for (a in links) {
                 val href = a.attr("abs:href")
                 val text = a.text().trim()
-                if (href.isNotBlank()) {
+                if (href.isNotBlank() && href !in seen) {
+                    seen.add(href)
                     episodes.add(
                         EpisodeItem(
-                            title = if (text.isNotBlank() && !text.equals("download", ignoreCase = true)) text else "Episode $count",
+                            title = if (text.isNotBlank() && !text.equals("download", ignoreCase = true)) text
+                                else DownloadLinkLabels.serverOrPart(text, href.substringAfterLast('/'))
+                                    ?: "Episode $count",
                             url = href,
                             episodeNum = count++,
                             site = name

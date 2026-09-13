@@ -3,6 +3,7 @@ package com.anonrode.downloader.providers
 import com.anonrode.downloader.data.rules.DynamicRulesManager
 import com.anonrode.downloader.data.models.DownloadRecipe
 import com.anonrode.downloader.data.models.EpisodeItem
+import com.anonrode.downloader.util.DownloadLinkLabels
 import com.anonrode.downloader.data.models.ShowCard
 import com.anonrode.downloader.data.models.ShowDetails
 import com.anonrode.downloader.data.net.HttpClient
@@ -192,19 +193,28 @@ object PlutoProvider : SiteProvider {
 
                 episodes.sortBy { it.episodeNum }
             } else {
-                // Movie download link from detail page
+                // Movie download links from the detail page. The old
+                // selectFirst kept ONLY THE FIRST anchor: a film published
+                // on two servers or as a 2-part file silently lost the
+                // rest. Now one item per distinct href, Server/Part-labelled
+                // when marked, single one keeps the plain "Full Movie" title.
                 val dlSelector = cfg?.downloadAnchorSelector?.ifBlank { null } ?: "a[href*='dl.plutomovies.com']"
-                val dlLink = doc.selectFirst(dlSelector)?.let {
-                    it.attr("abs:href").ifBlank { it.attr("href") }
-                } ?: showUrl
-                episodes.add(
-                    EpisodeItem(
-                        title = "Full Movie",
-                        url = dlLink,
-                        episodeNum = 1,
-                        site = name
+                val dlHrefs = doc.select(dlSelector).mapNotNull { a ->
+                    a.attr("abs:href").ifBlank { a.attr("href") }.takeIf { it.isNotBlank() }
+                }.distinct()
+                when (dlHrefs.size) {
+                    0 -> episodes.add(
+                        EpisodeItem(title = "Full Movie", url = showUrl, episodeNum = 1, site = name)
                     )
-                )
+                    1 -> episodes.add(
+                        EpisodeItem(title = "Full Movie", url = dlHrefs.first(), episodeNum = 1, site = name)
+                    )
+                    else -> dlHrefs.forEachIndexed { i, h ->
+                        val label = DownloadLinkLabels.serverOrPart(h.substringAfterLast('/'))
+                            ?: "Full Movie (link ${i + 1})"
+                        episodes.add(EpisodeItem(title = label, url = h, episodeNum = i + 1, site = name))
+                    }
+                }
             }
 
             com.anonrode.downloader.util.DebugLog.resolve("pluto loadEpisodes: found ${episodes.size} episodes")

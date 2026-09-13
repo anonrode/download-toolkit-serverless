@@ -3,6 +3,7 @@ package com.anonrode.downloader.providers
 import com.anonrode.downloader.data.rules.DynamicRulesManager
 import com.anonrode.downloader.data.models.DownloadRecipe
 import com.anonrode.downloader.data.models.EpisodeItem
+import com.anonrode.downloader.util.DownloadLinkLabels
 import com.anonrode.downloader.data.models.ShowCard
 import com.anonrode.downloader.data.models.ShowDetails
 import com.anonrode.downloader.data.net.HttpClient
@@ -109,31 +110,44 @@ object NaijaVaultProvider : SiteProvider {
                 (dlButtons.size == 1 && dlButtons.first().text().contains("MOVIE", ignoreCase = true))
                 )
             if (isMoviePage) {
-                val button = dlButtons.firstOrNull()
-                val movieHref = button?.attr("abs:href").orEmpty().ifBlank {
-                    button?.attr("href")?.let { HttpClient.safeResolveUri(showUrl, it) }.orEmpty()
-                }.ifBlank {
+                // Every #download-button on a MOVIE page is a download of
+                // THIS film — live-verified 2026-09-13 (Project Sacrifice):
+                // one button, "WATCH & DOWNLOAD MOVIE HERE". The shape this
+                // replaces (firstOrNull) silently DROPPED server 2 whenever
+                // a film was published on two mirror buttons. Labels: an
+                // explicit "SERVER n" text wins as Server N, otherwise the
+                // button text, else Download N.
+                val movieItems = dlButtons.mapIndexedNotNull { i, b ->
+                    val h = b.attr("abs:href").ifBlank {
+                        HttpClient.safeResolveUri(showUrl, b.attr("href"))
+                    }
+                    if (h.isBlank()) null else {
+                        val t = b.text().trim()
+                        EpisodeItem(
+                            title = DownloadLinkLabels.serverOrPart(t, h) ?: t.ifBlank { "Download ${i + 1}" },
+                            url = h,
+                            episodeNum = i + 1,
+                            site = name
+                        )
+                    }
+                }.ifEmpty {
                     // No literal button (theme variant): any known locker
                     // link on the page is the movie's download.
-                    doc.select("a[href]").firstOrNull { a ->
+                    val fallback = doc.select("a[href]").firstOrNull { a ->
                         val h = a.attr("abs:href").ifBlank { a.attr("href") }
                         com.anonrode.downloader.resolvers.LockerRegistry.isKnownMedia(h)
                     }?.attr("abs:href").orEmpty()
+                    if (fallback.isBlank()) emptyList()
+                    else listOf(EpisodeItem(title = "Download 1", url = fallback, episodeNum = 1, site = name))
                 }
-                if (movieHref.isNotBlank()) {
-                    val label = button?.text()?.trim().orEmpty()
-                    com.anonrode.downloader.util.DebugLog.resolve("naijavault movie page: single download $movieHref")
+                if (movieItems.isNotEmpty()) {
+                    com.anonrode.downloader.util.DebugLog.resolve(
+                        "naijavault movie page: ${movieItems.size} download button(s), first=${movieItems.first().url}"
+                    )
                     return ShowDetails(
                         show = ShowCard(title = title, url = showUrl, posterUrl = poster, site = name),
                         synopsis = synopsis,
-                        episodes = listOf(
-                            EpisodeItem(
-                                title = if (label.isNotBlank() && !label.equals("Download", ignoreCase = true)) label else "Download 1",
-                                url = movieHref,
-                                episodeNum = 1,
-                                site = name
-                            )
-                        )
+                        episodes = movieItems
                     )
                 }
                 // Movie page with no usable link: fall through to the sweep
