@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -403,10 +404,11 @@ internal fun SettingsSelfHealingSection(
                                         // Match on .name (never a guessed
                                         // constant) so this compiles against
                                         // every library version's enum.
-                                        val msg = when (status.name) {
+                                        val msg = when (status?.name) {
                                             "UP_TO_DATE", "NO_UPDATE", "UNDEFINED" -> "Core is already up to date"
                                             "NEW_VERSION_AVAILABLE" -> "Core updated to the latest build"
                                             "ERROR" -> "Core update failed (yt-dlp reported an error)"
+                                            null -> "Core update finished — the library reported no status"
                                             else -> "Core update: $status"
                                         }
                                         Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
@@ -1215,7 +1217,7 @@ fun SettingsCategoryHeader(title: String) {
         // Nine categories on a long scrolling page: without heading semantics
         // a screen-reader user gets no landmarks to jump between sections.
         modifier = Modifier
-            .semantics { heading = true }
+            .semantics { heading() }
             .padding(start = Spacing.xs, bottom = Spacing.xs)
     )
 }
@@ -1243,14 +1245,16 @@ fun SettingsSwitchRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            // selectable(role = Switch) instead of plain clickable: tapping
+            // toggleable(role = Switch) instead of plain clickable: tapping
             // the row toggled correctly, but the row region exposed NO
             // checked state to TalkBack (the Switch child alone owned it,
-            // split from the label users actually read).
-            .selectable(
-                checked = checked,
+            // split from the label users actually read). toggleable carries
+            // the Checked semantics — selectable is the RadioButton-side
+            // modifier.
+            .toggleable(
+                value = checked,
                 role = Role.Switch,
-                onClick = { onCheckedChange(!checked) }
+                onValueChange = { onCheckedChange(it) }
             )
             .padding(Spacing.md),
         horizontalArrangement = Arrangement.SpaceBetween,

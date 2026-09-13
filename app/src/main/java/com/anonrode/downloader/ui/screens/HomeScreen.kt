@@ -6,7 +6,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.PaddingValues
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -419,6 +418,7 @@ fun HomeScreen(
                 // (feature request: show what's trending on open, scrolling
                 // left to right, not top to bottom).
                 TrendingSection(
+                    modifier = Modifier.weight(1f),
                     items = uiState.trending,
                     isLoading = uiState.isTrendingLoading,
                     failed = uiState.trendingFailed,
@@ -465,6 +465,7 @@ fun HomeScreen(
  */
 @Composable
 private fun TrendingSection(
+    modifier: Modifier = Modifier,
     items: List<ShowCard>,
     isLoading: Boolean,
     failed: Boolean,
@@ -473,9 +474,7 @@ private fun TrendingSection(
     onOpen: (ShowCard) -> Unit
 ) {
     Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .weight(1f)
+        modifier = modifier.fillMaxWidth()
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
