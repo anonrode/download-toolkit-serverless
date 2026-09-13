@@ -23,8 +23,12 @@ local.properties
 *.log
 *.tmp
 probe/results-*.jsonl
+.ci-logs/
 __pycache__/
 *.pyc
 
 # OTA rules plaintext stays local — only the encrypted payload is committed
 scraper_rules.json
+# plain-text playbook probe dumps (same sensitivity as scraper_rules.json)
+ota_plain_probe.json
+probe/results-nightly/
