@@ -250,7 +250,10 @@ object NkiriProvider : SiteProvider {
      *  patterns RulesPipeline applies to anchors, kept as NkiriProvider-local
      *  helpers (see [filenameEpisodeNums]). */
     private val SEASON_EP_REGEX = Regex("""(?i)\bs(\d+)e(\d+)\b""")
-    private val EP_TOKEN_REGEX = Regex("""(?i)(?<![a-z0-9])e(?:p)?[\s._-]*(\d{1,4})(?![a-z0-9])""")
+    // "(?:^|[^a-z0-9])" replaces "(?<![a-z0-9])" — lookbehinds are banned in
+    // main source (Android regex-engine crash class, see NameSanitizer ENGINE
+    // RULE); the non-capturing prefix keeps group 1 = the episode number.
+    private val EP_TOKEN_REGEX = Regex("""(?i)(?:^|[^a-z0-9])e(?:p)?[\s._-]*(\d{1,4})(?![a-z0-9])""")
 
     /** Numbers an episode heading declares: the bare number, "E5", "Episode 5",
      *  or a combined "Episode 17 & 18" / "Episodes 17-18" (all of them). */
@@ -260,11 +263,11 @@ object NkiriProvider : SiteProvider {
         // Normalize separators so "17 & 18", "17-18" and "17, 18" share a path.
         val parts = h.replace("&", ",").replace("-", ",").split(",", " to ", " To ")
         val headNum = Regex("""(?i)episode?s?\s*(\d{1,4})""").find(h)?.groupValues?.get(1)?.toIntOrNull()
-            ?: Regex("""(?i)(?<![a-z0-9])e(?:p)?[\s._-]*(\d{1,4})(?![a-z0-9])""").find(h)?.groupValues?.get(1)?.toIntOrNull()
+            ?: Regex("""(?i)(?:^|[^a-z0-9])e(?:p)?[\s._-]*(\d{1,4})(?![a-z0-9])""").find(h)?.groupValues?.get(1)?.toIntOrNull()
         if (headNum == null) return emptyList()
         val out = mutableListOf(headNum)
         for (part in parts.drop(1)) {
-            val n = Regex("""(?<!\d)(\d{1,4})(?!\d)""").find(part)?.groupValues?.get(1)?.toIntOrNull()
+            val n = Regex("""(?:^|\D)(\d{1,4})(?!\d)""").find(part)?.groupValues?.get(1)?.toIntOrNull()
             if (n != null && n > headNum && n <= headNum + 30) out.add(n)
         }
         return out.distinct()
