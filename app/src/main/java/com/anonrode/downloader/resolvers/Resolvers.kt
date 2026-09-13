@@ -1396,7 +1396,7 @@ object WildshareResolver : BaseResolver {
                 noRedirectClient.newCall(req).execute().use { res ->
                     if (res.code !in 200..399) {
                         com.anonrode.downloader.util.DebugLog.resolve(
-                            "WildshareResolver: ?pt= returned HTTP ${res.code} for $fileId (cookie present=${HttpClient.shared.cookieJar.loadForRequest(HttpUrl.parse("https://wildshare.net/")){ req -> req.headers }.size} cookies)"
+                            "WildshareResolver: ?pt= returned HTTP ${res.code} for $fileId"
                         )
                         return null
                     }

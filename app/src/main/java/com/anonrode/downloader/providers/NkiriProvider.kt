@@ -151,8 +151,8 @@ object NkiriProvider : SiteProvider {
                     // locker link (ad, season pack) precedes it. Combined
                     // "Episode 17 & 18" posts expand to one item per episode,
                     // each reusing the one anchor that exists in the HTML.
-                    val headingNums = RulesPipeline.headingEpisodeNumbers(prevHeading)
-                    val fileNums = RulesPipeline.filenameEpisodeNums(href)
+                    val headingNums = headingEpisodeNumbers(prevHeading)
+                    val fileNums = filenameEpisodeNums(href)
                     val nums = when {
                         headingNums.size > 1 -> headingNums
                         fileNums.isNotEmpty() -> fileNums
@@ -239,8 +239,9 @@ object NkiriProvider : SiteProvider {
         return if (!target.isNullOrBlank() && target.startsWith("http", ignoreCase = true)) target else url
     }
 
-    /** S02E05 season episode numbers from locker filenames. Private mirrors of
-     *  RulesPipeline's number patterns; see [RulesPipeline.filenameEpisodeNums]. */
+    /** S02E05 season episode numbers from locker filenames. Mirrors the number
+     *  patterns RulesPipeline applies to anchors, kept as NkiriProvider-local
+     *  helpers (see [filenameEpisodeNums]). */
     private val SEASON_EP_REGEX = Regex("""(?i)\bs(\d+)e(\d+)\b""")
     private val EP_TOKEN_REGEX = Regex("""(?i)(?<![a-z0-9])e(?:p)?[\s._-]*(\d{1,4})(?![a-z0-9])""")
 
