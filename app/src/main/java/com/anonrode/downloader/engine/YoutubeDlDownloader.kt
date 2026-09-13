@@ -177,7 +177,9 @@ object YoutubeDlDownloader {
                 // Embed/watch-page cracks (nepu, social, etc.) often resolve to HLS.
                 // Parallel fragments keep multi-socket speed instead of a single
                 // rate-capped connection.
-                val frags = if (hlsFragments > 0) hlsFragments.coerceIn(1, 16) else parallelSockets.coerceIn(4, 16)
+                // Floor 1: the engine forces single-socket for hosts that reject
+                // multi-connection downloads; clamping the floor to 4 overrode that.
+                val frags = if (hlsFragments > 0) hlsFragments.coerceIn(1, 16) else parallelSockets.coerceIn(1, 16)
                 addOption("-N", "$frags")
                 addOption("--concurrent-fragments", "$frags")
                 addOption("--buffer-size", "1M")
@@ -199,7 +201,7 @@ object YoutubeDlDownloader {
                 addOption("-S", "height~$height,+size,+br")
                 addOption("--merge-output-format", "mp4")
                 addOption("--no-playlist")
-                val frags = if (hlsFragments > 0) hlsFragments.coerceIn(1, 16) else parallelSockets.coerceIn(4, 16)
+                val frags = if (hlsFragments > 0) hlsFragments.coerceIn(1, 16) else parallelSockets.coerceIn(1, 16)
                 addOption("-N", "$frags")
                 addOption("--concurrent-fragments", "$frags")
                 addOption("--buffer-size", "1M")
@@ -216,7 +218,7 @@ object YoutubeDlDownloader {
                 val stem = File(outDir, preferredFilename.substringBeforeLast('.')).absolutePath
                 addOption("-o", "$stem.%(ext)s")
                 addOption("--downloader", "libaria2c.so")
-                val conns = parallelSockets.coerceIn(4, 16)
+                val conns = parallelSockets.coerceIn(1, 16)
                 val aria2Args = buildString {
                     // --max-tries/--retry-wait mirror the magnet path: without them
                     // aria2c hammers a flaky connection 5x with zero wait.
@@ -747,15 +749,18 @@ object YoutubeDlDownloader {
                     } else {
                         val fb = fallbackRegex.find(line)
                         if (fb != null) {
-                            val pct = fb.groupValues[1].toLongOrNull() ?: 0L
                             val spd = parseSpeedString(fb.groupValues[2])
-                            // total=0 on purpose: a percentage carries no byte
-                            // information, and emitting a synthetic total=100
-                            // here overwrote the real multi-GB total in the
-                            // repository — corrupting the size display and
-                            // making the engine's "transfer complete" check
+                            // total=0 AND downloaded=0 on purpose: a percentage
+                            // carries no byte information. Passing pct in the
+                            // downloaded slot used to stamp "50 bytes" into the
+                            // task (and flipped RESOLVING->DOWNLOADING off a
+                            // number that never counted anything);
+                            // repository.updateProgress already ignores zeros,
+                            // so this line contributes SPEED only. A synthetic
+                            // total likewise overwrote the real multi-GB total
+                            // and made the "transfer complete" check
                             // (fileSize >= totalBytes) vacuously true.
-                            onProgress(pct, 0L, spd, 0L)
+                            onProgress(0L, 0L, spd, 0L)
                         }
                     }
                     line = reader.readLine()
@@ -784,7 +789,14 @@ object YoutubeDlDownloader {
             val stem = preferredFilename.substringBeforeLast('.')
             val found = fresh.firstOrNull { it.nameWithoutExtension == stem || it.name.startsWith("$stem.") }
                 ?: fresh.maxByOrNull { it.lastModified() }
-                ?: candidates.maxByOrNull { it.lastModified() }
+                // A resumed aria2 run (--continue=true) keeps writing the SAME
+                // file that existed before this attempt, so a legitimate result
+                // is not always "fresh" — but it must still carry the name we
+                // asked aria2 for. The previous "newest file in the folder"
+                // fallback here could bless an UNRELATED finished episode that
+                // already lived in the season directory and report the torrent
+                // as a success, so the folder-wide match is by stem only.
+                ?: candidates.firstOrNull { it.nameWithoutExtension == stem || it.name.startsWith("$stem.") }
                 // Multi-file torrents (season packs) land as a NEW directory
                 // whose File.length() is ~0 — when no file matched, take the
                 // most-recently-created directory as the produced artifact.

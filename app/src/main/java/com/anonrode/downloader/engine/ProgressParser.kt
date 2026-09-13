@@ -227,6 +227,10 @@ internal fun parseByteString(str: String): Long {
     val clean = str.trim().uppercase()
     val numPart = clean.takeWhile { it.isDigit() || it == '.' }.toDoubleOrNull() ?: return 0L
     return when {
+        // TIB/TB first: with a generic endsWith("B") catch-all below, "1.5TiB"
+        // would match it and return 1 (byte), making the engine's completion
+        // check (fileSize >= total) vacuously true for multi-TB torrents.
+        clean.endsWith("TIB") || clean.endsWith("TB") -> (numPart * 1024.0 * 1024 * 1024 * 1024).toLong()
         clean.endsWith("GIB") || clean.endsWith("GB") -> (numPart * 1024 * 1024 * 1024).toLong()
         clean.endsWith("MIB") || clean.endsWith("MB") -> (numPart * 1024 * 1024).toLong()
         clean.endsWith("KIB") || clean.endsWith("KB") -> (numPart * 1024).toLong()
@@ -239,6 +243,7 @@ internal fun parseSpeedString(str: String): Double {
     val clean = str.trim().uppercase()
     val numPart = clean.takeWhile { it.isDigit() || it == '.' }.toDoubleOrNull() ?: return 0.0
     return when {
+        clean.contains("TB") || clean.contains("TIB") -> numPart * 1024.0 * 1024 * 1024 * 1024
         clean.contains("GB") || clean.contains("GIB") -> numPart * 1024 * 1024 * 1024
         clean.contains("MB") || clean.contains("MIB") -> numPart * 1024 * 1024
         clean.contains("KB") || clean.contains("KIB") -> numPart * 1024

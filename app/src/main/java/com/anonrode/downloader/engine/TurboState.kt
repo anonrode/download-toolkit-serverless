@@ -95,8 +95,22 @@ class TurboState(private val file: File) {
             val tmp = File(parent, "${file.name}.tmp")
             tmp.writeText(sb.toString())
             if (tmp.exists()) {
-                if (file.exists()) file.delete()
-                tmp.renameTo(file)
+                // REPLACE_EXISTING keeps the old state readable right up to
+                // the instant the new one lands: the previous delete-then-
+                // renameTo window lost the whole resume plan when a crash or a
+                // failed rename landed between the two calls (cost: a full
+                // re-download of a multi-GB file). minSdk 26 = java.nio.file
+                // available; fall back to the old path only if the platform
+                // refuses Files.move.
+                try {
+                    java.nio.file.Files.move(
+                        tmp.toPath(), file.toPath(),
+                        java.nio.file.StandardCopyOption.REPLACE_EXISTING
+                    )
+                } catch (_: Exception) {
+                    if (file.exists()) file.delete()
+                    tmp.renameTo(file)
+                }
             }
         } catch (_: Exception) {
             // Losing a commit only costs re-downloading a small buffer; never fatal.

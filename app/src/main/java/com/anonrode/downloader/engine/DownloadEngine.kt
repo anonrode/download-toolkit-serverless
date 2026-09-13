@@ -527,23 +527,34 @@ class DownloadEngine(
         if (activeJobs.isEmpty()) HttpClient.cancelInFlight()
         com.anonrode.downloader.util.DebugLog.user("cancel $taskId")
         if (task != null) {
-            // Remove every partial artifact so cancelled downloads cannot leave orphaned files.
-            // deleteRecursively: multi-file torrents write a DIRECTORY, and File.delete()
-            // silently refuses non-empty dirs — canceled season torrents left their
-            // preallocated gigabytes behind (user-reported 2026-08-22: 8GB+ stuck after
-            // cancel of a magnet with a dead swarm).
-            try {
-                val target = File(task.filePath)
-                target.deleteRecursively()
-                File(task.filePath + ".part").delete()
-                File(task.filePath + ".ytdl").delete()
-                File(task.filePath + ".aria2").delete()
-                File(task.filePath + ".turbo").delete()
-            } catch (_: Throwable) {}
+            purgeTaskArtifacts(task)
         }
         repository.remove(taskId)
         updateServiceState(force = true)
         processQueue()
+    }
+
+    /** Remove every partial artifact a cancelled download may have left.
+     *  deleteRecursively: multi-file torrents write a DIRECTORY, and File.delete()
+     *  silently refuses non-empty dirs — canceled season torrents left their
+     *  preallocated gigabytes behind (user-reported 2026-08-22: 8GB+ stuck after
+     *  cancel of a magnet with a dead swarm). The `.work-<taskId>` extractor
+     *  dir is the same hazard reintroduced: yt-dlp's `.f140.m4a`/`.f135.mp4`
+     *  shards live THERE, not at filePath, and were named after nothing the old
+     *  sweep matched — a cancelled 2 GiB YouTube job stranded the whole partial
+     *  set in the user's visible folder (audit 2026-09-13). */
+    private fun purgeTaskArtifacts(task: DownloadTask) {
+        try {
+            val target = File(task.filePath)
+            target.deleteRecursively()
+            File(task.filePath + ".part").delete()
+            File(task.filePath + ".ytdl").delete()
+            File(task.filePath + ".aria2").delete()
+            File(task.filePath + ".turbo").delete()
+            target.parentFile?.let { parent ->
+                File(parent, ".work-${task.id}").deleteRecursively()
+            }
+        } catch (_: Throwable) {}
     }
 
     fun retry(taskId: String) {
@@ -1885,15 +1896,20 @@ class DownloadEngine(
                         // and the kill-then-rerun-then-kill loop could consume 8
                         // attempts in 4 minutes. The rule now treats a kill as
                         // definitive: a kill is only allowed if BOTH
-                        //   (a) the stall has been continuous for at least
-                        //       2 * STALL_TIMEOUT_MS, AND
+                        //   (a) the download is dead by one of two signals —
+                        //       stalledLong (no bytes at all for 2x the window)
+                        //       OR the rate-drop rule above (burst >= 1 MiB/s,
+                        //       then a sub-floor trickle for >= 30s: bytes move,
+                        //       so lastActivity never goes stale and neither
+                        //       signal but this one catches the downloadwella
+                        //       burst-then-trickle trap), AND
                         //   (b) the wrapper has not just started a fresh attempt
                         //       (guards against the wrapper being mid-resolve
                         //       when the watchdog fires).
                         // Magnet exemption unchanged.
                         val attemptBoundary = stallKills * STALL_TIMEOUT_MS * 2
                         val stalledLong = now - lastActivity > STALL_TIMEOUT_MS
-                        if (!magnetTask && stalledLong && (now - watchdogStart) > attemptBoundary && (stallKills == 0 || now - lastKillTime > STALL_TIMEOUT_MS)) {
+                        if (!magnetTask && (stalledLong || throttled) && (now - watchdogStart) > attemptBoundary && (stallKills == 0 || now - lastKillTime > STALL_TIMEOUT_MS)) {
                             stallKills++
                             com.anonrode.downloader.util.DebugLog.engine(
                                 "task=${task.id} watchdog kill #$stallKills (idle=${(now - lastActivity) / 1000}s crawl=$crawlStalled throttled=$throttled window=${(moved / 1024).toInt()}KiB best=${(bestWindowBps / 1024).toInt()}KiB/s)"
@@ -1910,7 +1926,11 @@ class DownloadEngine(
                             // another 3 attempts. Allow that recovery chain to
                             // play out; only then give up and fail the task.
                             if (stallKills >= MAX_STALL_KILLS) {
-                                val stallMsg = "Download stalled — no progress for ${stallTimeoutSec}s across $stallKills attempts"
+                                val stallMsg = if (stalledLong) {
+                                    "Download stalled — no progress for ${stallTimeoutSec}s across $stallKills attempts"
+                                } else {
+                                    "Download throttled to ${(windowBps / 1024).coerceAtLeast(0)} KiB/s after a healthy start — killed and re-sourced $stallKills times without recovery"
+                                }
                                 repository.update(task.id) {
                                     it.copy(status = TaskStatus.FAILED, errorMessage = stallMsg)
                                 }
@@ -2233,7 +2253,7 @@ class DownloadEngine(
                         backend = finalBackend,
                         referer = getRefererForUrl(url),
                         ua = HttpClient.DEFAULT_UA,
-                        parallelSockets = effectiveSockets.coerceIn(4, 16),
+                        parallelSockets = effectiveSockets.coerceIn(1, 16),
                         quality = task.quality ?: defaultQuality,
                         isExtractorTask = isExtractor,
                         audioOnly = task.audioOnly,
@@ -2630,16 +2650,7 @@ class DownloadEngine(
             TurboDownloader.cancelTask(taskId)
             com.anonrode.downloader.util.DebugLog.user("cancel $taskId")
             val live = repository.find(taskId)
-            if (live != null) {
-                try {
-                    val target = File(live.filePath)
-                    target.deleteRecursively()
-                    File(live.filePath + ".part").delete()
-                    File(live.filePath + ".ytdl").delete()
-                    File(live.filePath + ".aria2").delete()
-                    File(live.filePath + ".turbo").delete()
-                } catch (_: Throwable) {}
-            }
+            if (live != null) purgeTaskArtifacts(live)
             repository.remove(taskId)
         }
         // Every job was cancelled above, so a global in-flight sweep cannot
