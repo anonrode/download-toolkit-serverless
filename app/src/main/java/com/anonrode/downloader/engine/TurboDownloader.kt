@@ -73,11 +73,15 @@ object TurboDownloader {
     }
 
     /**
-     * Sockets per download: ensures 4 to 16 concurrent range connections
-     * to bypass server-side single-socket 200KB/s throttling.
+     * Sockets per download: capped at 16, and the 4-way multi-socket default
+     * exists to bypass server-side single-socket 200KB/s throttling — but the
+     * floor is 1, NOT 4. The engine deliberately forces a single socket for
+     * hosts that reject multi-connection downloads (kissorgrab, dl.plutomovies);
+     * a 4 floor silently overrode that policy and recreated the documented
+     * fail→rescue→fail loop for those hosts.
      */
     fun socketsFor(url: String, configured: Int): Int {
-        return configured.coerceIn(4, 16)
+        return configured.coerceIn(1, 16)
     }
 
     /** Outcome of a transfer: either a completed file or a failure with the server status when known. */
@@ -103,8 +107,17 @@ object TurboDownloader {
     private fun atomicMove(src: File, dest: File): Boolean {
         if (!src.exists()) return false
         try {
-            if (dest.exists()) dest.delete()
+            // Android is Linux: rename(2) REPLACES an existing dest
+            // atomically, so try the rename first. The old unconditional
+            // dest.delete() before the rename opened a window where the
+            // completed file was gone and nothing had taken its place yet —
+            // a crash there destroyed the previous download for nothing.
             if (src.renameTo(dest)) return true
+            if (dest.exists()) {
+                if (!dest.delete()) return false
+                if (src.renameTo(dest)) return true
+            }
+            // Cross-device or rename-refused: stream-copy, then remove src.
             src.inputStream().use { input ->
                 dest.outputStream().use { output ->
                     input.copyTo(output)

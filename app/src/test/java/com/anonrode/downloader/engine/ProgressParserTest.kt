@@ -124,6 +124,19 @@ class ProgressParserTest {
     }
 
     @Test
+    fun tebibyteSizes() {
+        // Regression: without a T branch, "1.5TiB" fell through the generic
+        // endsWith("B") case and returned 1 — so a multi-TB torrent's total
+        // landed as one byte and the completion check (fileSize >= total)
+        // was vacuously true.
+        assertEquals((1.5 * 1024 * 1024 * 1024 * 1024).toLong(), parseByteString("1.5TiB"))
+        assertEquals(2L * 1024 * 1024 * 1024 * 1024, parseByteString("2TB"))
+        assertEquals(3.0 * 1024 * 1024 * 1024 * 1024, parseSpeedString("3TiB/s"), 1.0)
+        // the "of ~" prefix yt-dlp prints before the size must not break T math
+        assertEquals((4.0 * 1024 * 1024 * 1024 * 1024).toLong(), parseByteString("4.00TiB"))
+    }
+
+    @Test
     fun speedStrings() {
         assertEquals(3.8 * 1024 * 1024, parseSpeedString("3.8MiB/s"), 1.0)
         assertEquals(999.0 * 1024, parseSpeedString("999KiB/s"), 1.0)
