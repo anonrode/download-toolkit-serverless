@@ -1,11 +1,12 @@
 package com.anonrode.downloader.ui.components
 
 import androidx.activity.compose.BackHandler
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Search
@@ -120,6 +121,12 @@ fun MainScaffold(
     // laggy app-wide. Only the badge leaf below observes the task list.
     Scaffold(
         containerColor = BackgroundDark,
+        // innerPadding = bottom-bar height ONLY. The M3 default folds the
+        // system bars into innerPadding, but every tab already applies its
+        // own statusBarsPadding (they paint their own background behind the
+        // status bar) — the default therefore double-inset the top on every
+        // tab. Zeroing it makes the comment below true.
+        contentWindowInsets = WindowInsets(0.dp),
         bottomBar = {
             BottomNavBar(
                 currentTab = currentTab,
@@ -169,7 +176,14 @@ fun MainScaffold(
 }
 
 /** One always-composed tab layer. The active layer sits on top and swallows
- *  stray taps (a plain Box would let them fall through to the hidden page). */
+ *  stray taps (a plain Box would let them fall through to the hidden page).
+ *  pointerInput/detectTapGestures, not `clickable`: clickable() contributes
+ *  onClick SEMANTICS, so TalkBack announced a nameless "double-tap to
+ *  activate" container over every page. The raw gesture detector consumes
+ *  the same taps (child handlers win because a consumed up aborts this
+ *  detector — clickable's internals are literally this) without emitting a
+ *  fake interactive node. Re-keyed on `active`: enabling/disabling restarts
+ *  the block, so the hidden layer never swallows anything. */
 @Composable
 private fun TabPage(active: Boolean, content: @Composable () -> Unit) {
     Box(
@@ -177,12 +191,9 @@ private fun TabPage(active: Boolean, content: @Composable () -> Unit) {
             .fillMaxSize()
             .zIndex(if (active) 1f else 0f)
             .graphicsLayer { alpha = if (active) 1f else 0f }
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-                enabled = active,
-                onClick = {}
-            )
+            .pointerInput(active) {
+                if (active) detectTapGestures(onTap = {})
+            }
     ) {
         content()
     }

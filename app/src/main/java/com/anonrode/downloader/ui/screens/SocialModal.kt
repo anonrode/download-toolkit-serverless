@@ -246,10 +246,14 @@ fun SocialModal(
                 onClick = {
                     if (enqueued) return@Button
                     enqueued = true
-                    if (alwaysInstant) {
-                        // Persist like QuickShareActivity does — the engine field
-                        // alone is lost on restart (loadPreferences re-reads prefs).
-                        viewModel.engine.setInstantSocial(true)
+                    // Sync BOTH directions, persisting through the engine
+                    // (which writes the pref). The old one-way `if
+                    // (alwaysInstant)` meant a checked-then-unchecked box
+                    // silently left a previously-enabled instant mode ON —
+                    // the uncheck "vanished" and the next share skipped this
+                    // dialog entirely.
+                    if (alwaysInstant != viewModel.engine.instantSocialDownload) {
+                        viewModel.engine.setInstantSocial(alwaysInstant)
                     }
                     viewModel.engine.enqueue(
                         showTitle = "Social/$cleanPlatform",

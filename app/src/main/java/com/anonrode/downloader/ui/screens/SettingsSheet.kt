@@ -9,6 +9,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -24,6 +25,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -172,7 +176,14 @@ internal data class SettingsStateSnapshot(
 private fun rememberSettingsState(
     viewModel: MainViewModel,
     initialThemeMode: String
-): SettingsState = remember(viewModel, initialThemeMode) {
+): SettingsState = remember(viewModel) {
+    // NOT keyed on initialThemeMode anymore: every theme change re-passes
+    // that parameter (MainScaffold), which used to RECREATE the whole state
+    // from the engine's still-STALE fields — inside the 500 ms save-debounce
+    // window a toggled switch visibly snapped back to its old value even
+    // though the new one was about to persist. themeMode is now synced in
+    // SettingsScreen via LaunchedEffect instead; all other fields keep their
+    // live values across a theme flip.
     SettingsState(initialThemeMode = initialThemeMode, viewModel = viewModel)
 }
 
@@ -194,20 +205,27 @@ fun SettingsScreen(
 
     val state = rememberSettingsState(viewModel, themeMode)
 
-    // Live storage figures whenever the screen enters composition.
-    LaunchedEffect(Unit) {
-        viewModel.refreshStorageInfo()
-    }
+    // themeMode flows INTO the state (instead of recreating it — see
+    // rememberSettingsState). Covers changes made elsewhere too (Android
+    // Auto night flip), not just the chips in this screen.
+    LaunchedEffect(themeMode) { state.themeMode = themeMode }
 
-    // Controls persist through the debounced save (MainViewModel.saveSettings
-    // coalesces 500ms), so the pending write must be flushed when the screen
-    // goes away OR when the app backgrounds while the sheet is open — the
-    // "flip a switch and immediately leave" window. ON_PAUSE covers the OS
-    // killing the process; onDispose covers closing the sheet.
     val lifecycleOwner = LocalLifecycleOwner.current
+    // Two jobs on one observer:
+    //  - flush the debounced settings write when the app backgrounds / the
+    //    screen leaves (the "flip a switch and immediately leave" window,
+    //    ON_PAUSE covering OS process kill);
+    //  - re-read the storage figures on EVERY resume. The old
+    //    LaunchedEffect(Unit) fired exactly once — MainScaffold keeps all
+    //    three tabs composed, so the screen never "re-enters composition"
+    //    and the GB numbers went stale after any download or deletion.
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_PAUSE) viewModel.flushPendingSettings()
+            when (event) {
+                Lifecycle.Event.ON_PAUSE -> viewModel.flushPendingSettings()
+                Lifecycle.Event.ON_RESUME -> viewModel.refreshStorageInfo()
+                else -> {}
+            }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose {
@@ -218,6 +236,12 @@ fun SettingsScreen(
 
     Scaffold(
         containerColor = BackgroundDark,
+        // The outer MainScaffold already excludes the system bars around the
+        // tab content; the default here folded them into `padding` AGAIN
+        // (dead band above "Settings", extra nav-height gap at the bottom).
+        // The TopAppBar still self-insets the status bar — that one stays
+        // correct because the inner content now starts at the very top.
+        contentWindowInsets = WindowInsets(0.dp),
         topBar = {
             TopAppBar(
                 title = {
@@ -376,12 +400,29 @@ internal fun SettingsSelfHealingSection(
                                     val status = YoutubeDL.getInstance().updateYoutubeDL(context, YoutubeDL.UpdateChannel.STABLE)
                                     withContext(Dispatchers.Main) {
                                         state.isUpdatingYtDlp = false
-                                        Toast.makeText(context, "Core update: $status", Toast.LENGTH_SHORT).show()
+                                        // Match on .name (never a guessed
+                                        // constant) so this compiles against
+                                        // every library version's enum.
+                                        val msg = when (status.name) {
+                                            "UP_TO_DATE", "NO_UPDATE", "UNDEFINED" -> "Core is already up to date"
+                                            "NEW_VERSION_AVAILABLE" -> "Core updated to the latest build"
+                                            "ERROR" -> "Core update failed (yt-dlp reported an error)"
+                                            else -> "Core update: $status"
+                                        }
+                                        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
                                     }
                                 } catch (t: Throwable) {
                                     withContext(Dispatchers.Main) {
                                         state.isUpdatingYtDlp = false
-                                        Toast.makeText(context, "Core is up to date", Toast.LENGTH_SHORT).show()
+                                        // The old catch said "Core is up to
+                                        // date" for EVERY failure — a dead
+                                        // network or a failed download wore
+                                        // the costume of good news.
+                                        Toast.makeText(
+                                            context,
+                                            "Core update failed: ${t.message ?: t.javaClass.simpleName}",
+                                            Toast.LENGTH_LONG
+                                        ).show()
                                     }
                                 }
                             }
@@ -454,15 +495,24 @@ internal fun SettingsAppearanceSection(
             Row(horizontalArrangement = Arrangement.spacedBy(Spacing.xs)) {
                 listOf("Dark" to "dark", "Light" to "light", "Auto" to "system").forEach { (label, mode) ->
                     val isSel = state.themeMode.equals(mode, ignoreCase = true)
+                    // selectable() + RadioButton role: the chips used to be
+                    // raw clickable Boxes — TalkBack announced no selection
+                    // between the three. minimumInteractiveComponentSize
+                    // grows the ~24dp visual into the 48dp hit minimum.
                     Box(
                         modifier = Modifier
+                            .minimumInteractiveComponentSize()
                             .clip(RoundedCornerShape(Radius.sm))
                             .background(if (isSel) AccentPrimary else SurfaceElevated)
-                            .clickable {
-                                state.themeMode = mode
-                                onThemeChanged(mode)
-                            }
-                            .padding(horizontal = Spacing.sm, vertical = Spacing.xs),
+                            .selectable(
+                                selected = isSel,
+                                role = Role.RadioButton,
+                                onClick = {
+                                    state.themeMode = mode
+                                    onThemeChanged(mode)
+                                }
+                            )
+                            .padding(horizontal = Spacing.md, vertical = Spacing.sm),
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
@@ -1035,6 +1085,7 @@ internal fun SettingsTorrentsSection(state: SettingsState) {
 @Composable
 internal fun SettingsDiagnosticsSection(state: SettingsState) {
     val context = LocalContext.current
+    val shareScope = rememberCoroutineScope()
     SettingsCategoryHeader(title = "Diagnostics")
     SettingsCard {
         Column(modifier = Modifier.padding(Spacing.md)) {
@@ -1078,40 +1129,49 @@ internal fun SettingsDiagnosticsSection(state: SettingsState) {
                     // sharing only today made the log look like it auto-cleared
                     // every 24h (user-reported). Oldest first, with a header per
                     // day file so a reader can tell them apart.
-                    val files = com.anonrode.downloader.util.DebugLog.retainedLogFiles()
-                    if (files.isEmpty()) {
-                        Toast.makeText(context, "No activity log yet", Toast.LENGTH_SHORT).show()
-                    } else {
+                    //
+                    // The build (up to 8 MB of File reads + a regex pass + a
+                    // cache write) runs on Dispatchers.IO: it used to run
+                    // inline in the click handler — a multi-second UI freeze
+                    // / ANR risk on low-end devices with zero feedback.
+                    shareScope.launch {
+                        val files = com.anonrode.downloader.util.DebugLog.retainedLogFiles()
+                        if (files.isEmpty()) {
+                            Toast.makeText(context, "No activity log yet", Toast.LENGTH_SHORT).show()
+                            return@launch
+                        }
                         try {
-                            // Keep the share bounded: on heavy logging days drop
-                            // the OLDEST files until the total fits (recent
-                            // entries matter most for diagnosis).
-                            val cap = 8L * 1024 * 1024
-                            var total = files.sumOf { it.length() }
-                            var from = 0
-                            while (from < files.size - 1 && total > cap) {
-                                total -= files[from].length()
-                                from++
+                            val uri = withContext(Dispatchers.IO) {
+                                // Keep the share bounded: on heavy logging days drop
+                                // the OLDEST files until the total fits (recent
+                                // entries matter most for diagnosis).
+                                val cap = 8L * 1024 * 1024
+                                var total = files.sumOf { it.length() }
+                                var from = 0
+                                while (from < files.size - 1 && total > cap) {
+                                    total -= files[from].length()
+                                    from++
+                                }
+                                val combined = StringBuilder()
+                                if (from > 0) {
+                                    combined.append("(oldest ").append(from)
+                                        .append(" log files omitted to keep the share under 8 MB)\n\n")
+                                }
+                                for (f in files.subList(from, files.size)) {
+                                    combined.append("===== ").append(f.name).append(" =====\n")
+                                    combined.append(f.readText()).append('\n')
+                                }
+                                val redacted = combined.toString().replace(
+                                    Regex("""[?&](token|download_token|pt|expiry|expires)=[^\s&]+""")
+                                ) { match ->
+                                    "${match.value.substringBefore('=')}=***REDACTED***"
+                                }
+                                val shareFile = File(context.cacheDir, "activity-log-share.txt")
+                                shareFile.writeText(redacted)
+                                androidx.core.content.FileProvider.getUriForFile(
+                                    context, "${context.packageName}.fileprovider", shareFile
+                                )
                             }
-                            val combined = StringBuilder()
-                            if (from > 0) {
-                                combined.append("(oldest ").append(from)
-                                    .append(" log files omitted to keep the share under 8 MB)\n\n")
-                            }
-                            for (f in files.subList(from, files.size)) {
-                                combined.append("===== ").append(f.name).append(" =====\n")
-                                combined.append(f.readText()).append('\n')
-                            }
-                            val redacted = combined.toString().replace(
-                                Regex("""[?&](token|download_token|pt|expiry|expires)=[^\s&]+""")
-                            ) { match ->
-                                "${match.value.substringBefore('=')}=***REDACTED***"
-                            }
-                            val shareFile = File(context.cacheDir, "activity-log-share.txt")
-                            shareFile.writeText(redacted)
-                            val uri = androidx.core.content.FileProvider.getUriForFile(
-                                context, "${context.packageName}.fileprovider", shareFile
-                            )
                             val send = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
                                 type = "text/plain"
                                 putExtra(android.content.Intent.EXTRA_STREAM, uri)
@@ -1152,7 +1212,11 @@ fun SettingsCategoryHeader(title: String) {
         fontWeight = FontWeight.Bold,
         color = TextMuted,
         letterSpacing = 0.8.sp,
-        modifier = Modifier.padding(start = Spacing.xs, bottom = Spacing.xs)
+        // Nine categories on a long scrolling page: without heading semantics
+        // a screen-reader user gets no landmarks to jump between sections.
+        modifier = Modifier
+            .semantics { heading = true }
+            .padding(start = Spacing.xs, bottom = Spacing.xs)
     )
 }
 
@@ -1179,7 +1243,15 @@ fun SettingsSwitchRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable { onCheckedChange(!checked) }
+            // selectable(role = Switch) instead of plain clickable: tapping
+            // the row toggled correctly, but the row region exposed NO
+            // checked state to TalkBack (the Switch child alone owned it,
+            // split from the label users actually read).
+            .selectable(
+                checked = checked,
+                role = Role.Switch,
+                onClick = { onCheckedChange(!checked) }
+            )
             .padding(Spacing.md),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
@@ -1196,7 +1268,15 @@ fun SettingsSwitchRow(
         Switch(
             checked = checked,
             onCheckedChange = onCheckedChange,
-            colors = SwitchDefaults.colors(checkedThumbColor = AccentPrimary, checkedTrackColor = SurfaceElevated)
+            // The old checkedTrackColor (SurfaceElevated) was nearly the
+            // same paint as the default unchecked track — on/off hung
+            // entirely on thumb position. An accent-tinted track restores
+            // the color cue for sighted users; semantics above restore it
+            // for TalkBack.
+            colors = SwitchDefaults.colors(
+                checkedThumbColor = AccentPrimary,
+                checkedTrackColor = AccentPrimary.copy(alpha = 0.35f)
+            )
         )
     }
 }

@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -29,13 +30,12 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.anonrode.downloader.ui.theme.AccentPrimary
-import com.anonrode.downloader.ui.theme.BackgroundDark
 import com.anonrode.downloader.ui.theme.Radius
+import com.anonrode.downloader.ui.theme.SplashBackground
+import com.anonrode.downloader.ui.theme.SplashElevated
+import com.anonrode.downloader.ui.theme.SplashMuted
+import com.anonrode.downloader.ui.theme.SplashOnBackground
 import com.anonrode.downloader.ui.theme.Spacing
-import com.anonrode.downloader.ui.theme.SurfaceElevated
-import com.anonrode.downloader.ui.theme.TextPrimary
-import com.anonrode.downloader.ui.theme.TextSecondary
 
 @Composable
 fun SplashContent() {
@@ -53,7 +53,7 @@ fun SplashContent() {
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(BackgroundDark),
+            .background(SplashBackground),
         contentAlignment = Alignment.Center
     ) {
         Column(
@@ -65,20 +65,23 @@ fun SplashContent() {
                 modifier = Modifier
                     .size(64.dp)
                     .clip(RoundedCornerShape(Radius.lg))
-                    .background(SurfaceElevated),
+                    .background(SplashElevated),
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
                     imageVector = Icons.Rounded.ArrowDownward,
                     contentDescription = null,
-                    tint = AccentPrimary,
+                    // SplashOnBackground, not AccentPrimary: the accent is
+                    // theme-aware (#0F172A in light) and would vanish on the
+                    // pinned-black splash.
+                    tint = SplashOnBackground,
                     modifier = Modifier.size(34.dp)
                 )
             }
 
             Text(
                 text = "ANONRODE",
-                color = TextPrimary,
+                color = SplashOnBackground,
                 fontSize = 30.sp,
                 fontWeight = FontWeight.Black,
                 letterSpacing = 3.sp,
@@ -86,7 +89,7 @@ fun SplashContent() {
             )
             Text(
                 text = "100% Serverless Downloader",
-                color = TextSecondary,
+                color = SplashMuted,
                 fontSize = 12.sp,
                 fontWeight = FontWeight.Medium,
                 modifier = Modifier.padding(top = Spacing.xs)
@@ -94,10 +97,14 @@ fun SplashContent() {
         }
 
         LinearProgressIndicator(
-            color = AccentPrimary,
-            trackColor = SurfaceElevated,
+            color = SplashOnBackground,
+            trackColor = SplashElevated,
             modifier = Modifier
                 .align(Alignment.BottomCenter)
+                // system nav clearance — the fixed 48dp lift only
+                // *touches* a classic 3-button bar; on gesture-nav devices
+                // the pill overlapped the indicator
+                .navigationBarsPadding()
                 .padding(bottom = Spacing.xxxl)
                 .height(3.dp)
                 .size(width = 120.dp, height = 3.dp)

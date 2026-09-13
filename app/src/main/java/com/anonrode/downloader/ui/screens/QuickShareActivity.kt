@@ -57,8 +57,24 @@ class QuickShareActivity : ComponentActivity() {
     private val writeStoragePermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
-        if (!granted) {
+        if (granted) {
+            // The sheet is still open and its Download guard just refused —
+            // without this hint the user had to guess they may tap again.
+            Toast.makeText(this, "Storage permission granted — tap Download again", Toast.LENGTH_SHORT).show()
+        } else {
             Toast.makeText(this, "Storage permission required to download", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    // API 30+ has no runtime dialog; deep-link into the exact Settings page
+    // (the toast alone said "enable it in Settings" and left the walking to
+    // the user — and the result code is meaningless here, so re-check on
+    // return and tell them to tap Download again).
+    private val manageStorageLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && Environment.isExternalStorageManager()) {
+            Toast.makeText(this, "Storage access granted — tap Download again", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -76,6 +92,23 @@ class QuickShareActivity : ComponentActivity() {
                     "Enable 'All files access' for Anon Downloader in Settings",
                     Toast.LENGTH_SHORT
                 ).show()
+                try {
+                    manageStorageLauncher.launch(
+                        Intent(android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
+                            data = android.net.Uri.parse("package:$packageName")
+                        }
+                    )
+                } catch (_: Exception) {
+                    // Some OEMs drop the All-files-access action — fall back
+                    // to the app's own info page (same as MainActivity).
+                    try {
+                        startActivity(
+                            Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                                data = android.net.Uri.parse("package:$packageName")
+                            }
+                        )
+                    } catch (_: Exception) {}
+                }
                 false
             }
         } else {
@@ -99,6 +132,20 @@ class QuickShareActivity : ComponentActivity() {
         }
 
         val parsed = UrlRouter.parse(sharedText)
+        // A share with NO URL in it (a caption, a lyric, a title) parses to a
+        // SearchQuery. The download paths cannot handle a query: the sheet
+        // used to show the text as a monospace "URL preview" with a live
+        // Download button, and the engine would enqueue the prose as a URL —
+        // a doomed task with confusing failures after retries.
+        if (parsed is ParsedUrl.SearchQuery) {
+            Toast.makeText(
+                this,
+                "Shared text contains no link — copy the URL (starting with http) and share again",
+                Toast.LENGTH_LONG
+            ).show()
+            finish()
+            return
+        }
         val prefs = getSharedPreferences("downloader_settings", Context.MODE_PRIVATE)
         val isInstant = prefs.getBoolean("pref_instant_social", false)
 
@@ -128,14 +175,24 @@ class QuickShareActivity : ComponentActivity() {
                     QuickShareCard(
                         parsedUrl = parsed,
                         rawUrl = sharedText,
+                        defaultQuality = (application as? AnonApp)?.engine?.defaultQuality ?: "720p",
                         onDismiss = { finish() },
                         onDownload = { quality, audioOnly, makeInstant, engineOverride ->
                             if (!ensureStoragePermission()) {
                                 false
                             } else {
+                                val appEngine = (application as? AnonApp)?.engine
                                 if (makeInstant) {
                                     prefs.edit().putBoolean("pref_instant_social", true).apply()
-                                    (application as? AnonApp)?.engine?.instantSocialDownload = true
+                                    appEngine?.instantSocialDownload = true
+                                } else if (appEngine != null && appEngine.instantSocialDownload) {
+                                    // Un-checking here must be able to turn instant
+                                    // mode OFF — it is settable from SocialModal in
+                                    // the SAME process, so the pref read at
+                                    // onCreate can be stale-true while the sheet
+                                    // still showed (race between the two writes).
+                                    appEngine.setInstantSocial(false)
+                                    prefs.edit().putBoolean("pref_instant_social", false).apply()
                                 }
                                 dispatchDownload(parsed, sharedText, quality, audioOnly, engineOverride)
                                 Toast.makeText(this@QuickShareActivity, "🚀 Download queued in background", Toast.LENGTH_SHORT).show()
@@ -172,7 +229,10 @@ class QuickShareActivity : ComponentActivity() {
 
     private fun handleInstantDownload(parsed: ParsedUrl, rawUrl: String) {
         if (!ensureStoragePermission()) return
-        dispatchDownload(parsed, rawUrl, quality = "720p", audioOnly = false)
+        // Honor the user's configured default quality instead of a hardcoded
+        // 720p — the in-app SocialModal already seeds from defaultQuality.
+        val q = (application as? AnonApp)?.engine?.defaultQuality ?: "720p"
+        dispatchDownload(parsed, rawUrl, quality = q, audioOnly = false)
         val label = when (parsed) {
             is ParsedUrl.SocialUrl -> parsed.platform
             is ParsedUrl.DramaUrl -> parsed.site
@@ -261,11 +321,15 @@ class QuickShareActivity : ComponentActivity() {
 fun QuickShareCard(
     parsedUrl: ParsedUrl,
     rawUrl: String,
+    // Seeded from the engine (see call site): the in-app SocialModal already
+    // respects the configured default — a hardcoded 720p here made the same
+    // feature offer two different qualities from two entry points.
+    defaultQuality: String = "720p",
     onDismiss: () -> Unit,
     onDownload: (quality: String, audioOnly: Boolean, makeInstant: Boolean, engineOverride: String) -> Boolean
 ) {
     var audioOnly by remember { mutableStateOf(false) }
-    var selectedQuality by remember { mutableStateOf("720p") }
+    var selectedQuality by remember { mutableStateOf(defaultQuality) }
     var alwaysInstant by remember { mutableStateOf(false) }
     var engineOverride by remember { mutableStateOf("auto") }
     // Guards against double-tap re-enqueue during the dismissal animation.

@@ -2,12 +2,12 @@ package com.anonrode.downloader.ui.components
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -15,6 +15,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -41,6 +42,10 @@ fun QualityChipRow(
     ) {
         options.forEach { option ->
             val isSelected = option.equals(selected, ignoreCase = true)
+            // selectable(), not clickable(): the violet fill + bold text are
+            // VISUAL-only selection signals — TalkBack heard "button" for both
+            // the selected and the unselected chip. RadioButton role + the
+            // selected state now ride in the semantics.
             Box(
                 modifier = Modifier
                     .weight(1f)
@@ -55,7 +60,11 @@ fun QualityChipRow(
                         color = if (isSelected) AccentViolet else BorderHairline,
                         shape = RoundedCornerShape(Radius.md)
                     )
-                    .clickable { onSelect(option) },
+                    .selectable(
+                        selected = isSelected,
+                        role = Role.RadioButton,
+                        onClick = { onSelect(option) }
+                    ),
                 contentAlignment = Alignment.Center
             ) {
                 Text(

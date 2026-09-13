@@ -115,8 +115,11 @@ fun HomeScreen(
         Column(
             modifier = Modifier
                 .fillMaxSize()
+                // statusBarsPadding only: this Column sits inside MainScaffold's
+                // content Box, which already clears the bottom navigation bar —
+                // navigationBarsPadding() on top of that added a second
+                // nav-bar-height dead band above the bottom bar.
                 .statusBarsPadding()
-                .navigationBarsPadding()
                 .padding(horizontal = Spacing.lg)
         ) {
             // Header Bar
@@ -298,6 +301,7 @@ fun HomeScreen(
                                 onOpenSocial(platform, url)
                             }
                         }
+                        .heightIn(min = 48.dp) // 16dp icon + 8+8dp padding alone was a ~36dp target
                         .padding(horizontal = Spacing.md, vertical = Spacing.sm),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
@@ -394,6 +398,13 @@ fun HomeScreen(
                         )
                         Spacer(modifier = Modifier.height(Spacing.sm))
                         Text("Check your connection and try again", color = TextMuted, fontSize = 12.sp)
+                        // The hint said "try again" but the only way to try
+                        // again was perturbing the query — mirror the
+                        // trending panel and offer the retry as a button.
+                        Spacer(modifier = Modifier.height(Spacing.xs))
+                        TextButton(onClick = { viewModel.search() }) {
+                            Text("Retry", color = AccentPrimary, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                        }
                     }
                 }
             } else if (uiState.searchResults.isEmpty() && uiState.query.trim().length >= 2 && !uiState.isSearching) {
@@ -440,8 +451,10 @@ fun HomeScreen(
             )
         }
 
-        // Torrent selective-file picker (engine -> IO thread -> this dialog)
-        TorrentFilePickerHost()
+        // (The torrent file-picker host moved to the MainActivity root: a
+        // magnet that starts while DownloadsScreen or the share sheet is on
+        // stage used to find no dialog composed, stall 60s, and fall back to
+        // the WHOLE torrent.)
     }
 }
 
@@ -596,31 +609,6 @@ private fun TrendingCard(
             color = AccentPrimary,
             fontSize = 10.sp,
             fontWeight = FontWeight.Bold
-        )
-    }
-}
-
-/** Polls the engine's torrent-file-selection bridge and renders the picker
- *  dialog while a request is outstanding. Completes the deferred with the
- *  user's choice (null = whole torrent). */
-@Composable
-private fun TorrentFilePickerHost() {
-    var request by remember { mutableStateOf<TorrentFilePicker.Request?>(null) }
-    LaunchedEffect(Unit) {
-        while (true) {
-            val r = TorrentFilePicker.consume()
-            if (r != null) {
-                request = r
-                val result = runCatching { r.deferred.await() }.getOrNull()
-                request = null
-            }
-            kotlinx.coroutines.delay(250)
-        }
-    }
-    request?.let { req ->
-        TorrentFilePickerDialog(
-            request = req,
-            onDismiss = { selection -> req.deferred.complete(selection) }
         )
     }
 }

@@ -8,21 +8,25 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.rounded.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -75,6 +79,12 @@ fun EpisodeDrawer(
                 p.toIntOrNull()?.let { targetNums.add(it) }
             }
         }
+        // While TYPING a range the intermediate states are meaningless, not
+        // a command: "10-" (end not typed yet) or pure garbage must not wipe
+        // the existing selection — that made the checkboxes flicker with
+        // every keystroke. Only a parsed non-empty set re-marks the list
+        // (clearing stays available via "none"/backspace-to-empty/above).
+        if (targetNums.isEmpty()) return
         selectedEpisodes = episodes.filter { it.episodeNum in targetNums }.toSet()
     }
 
@@ -249,6 +259,10 @@ fun EpisodeDrawer(
                         },
                         placeholder = { Text("Range (e.g. 1-5, 8, 10)", color = TextMuted, fontSize = 11.sp) },
                         singleLine = true,
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.Text,
+                            imeAction = ImeAction.Done
+                        ),
                         modifier = Modifier.weight(1f),
                         colors = OutlinedTextFieldDefaults.colors(
                             focusedBorderColor = AccentPrimary,
@@ -294,11 +308,12 @@ fun EpisodeDrawer(
                         shape = RoundedCornerShape(Radius.md),
                         contentPadding = PaddingValues(horizontal = Spacing.md, vertical = Spacing.sm)
                     ) {
-                        Text(
-                            if (selectedEpisodes.isNotEmpty()) "Download (${selectedEpisodes.size})" else "All",
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold
-                        )
+                        // Was "All" while nothing was selected — a label that
+                        // PROMISES a whole-show download and then refuses with
+                        // a toast. The button never enqueued "all"; the count
+                        // lives on the sticky batch bar so the two bars don't
+                        // mirror each other.
+                        Text("Download", fontSize = 12.sp, fontWeight = FontWeight.Bold)
                     }
                 }
             }
@@ -354,7 +369,13 @@ fun EpisodeDrawer(
                         .heightIn(max = 380.dp),
                     verticalArrangement = Arrangement.spacedBy(Spacing.xs)
                 ) {
-                    items(episodes, key = { it.url }) { ep ->
+                    // Combined posts expand into MULTIPLE episodes that share
+                    // one anchor URL (RulesPipeline: "same anchor URL reused —
+                    // never an invented one"), and episodeNum uniqueness is
+                    // only re-stamped on grouped pages — so a url- or
+                    // num-only key can still collide and crash LazyColumn
+                    // with "Key was already used". Index-composed keys cannot.
+                    itemsIndexed(episodes, key = { i, ep -> "${ep.episodeNum}|$i" }) { _, ep ->
                         val isSelected = ep in selectedEpisodes
                         EpisodeRow(
                             episode = ep,
@@ -470,7 +491,10 @@ fun EpisodeRow(
     // so a wrong-quality or dead-looking link is visible before a task is
     // queued. Zero network: every field is parsed from the URL already in
     // hand — the real resolve still happens exactly once, at engine start.
-    var expanded by remember { mutableStateOf(false) }
+    // rememberSaveable, not remember: rows are disposed as the LazyColumn
+    // scrolls, and a plain remember silently collapses the panel the user
+    // just opened the moment it recycles off-screen.
+    var expanded by rememberSaveable { mutableStateOf(false) }
     val (lockerHost, lockerFile) = remember(episode.url) { lockerPreview(episode.url) }
 
     Column(
@@ -519,9 +543,12 @@ fun EpisodeRow(
                 )
             }
 
+            // 48dp (was 40) with an 8dp gap to the download button: two
+            // adjacent controls below the Android minimum with zero spacing
+            // is how a mis-tap enqueues the wrong action.
             IconButton(
                 onClick = { expanded = !expanded },
-                modifier = Modifier.size(40.dp)
+                modifier = Modifier.size(48.dp)
             ) {
                 Icon(
                     imageVector = Icons.Rounded.Info,
@@ -530,6 +557,8 @@ fun EpisodeRow(
                     modifier = Modifier.size(18.dp)
                 )
             }
+
+            Spacer(modifier = Modifier.width(Spacing.xs))
 
             IconButton(
                 onClick = onDownloadSingle,
