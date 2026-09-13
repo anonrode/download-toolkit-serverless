@@ -32,6 +32,7 @@ import argparse
 import base64
 import json
 import os
+import re
 import secrets as _secrets
 import sys
 
@@ -116,6 +117,23 @@ def _check_regex(val, where, problems, max_len=300):
         _re.compile(val)
     except _re.error as e:
         problems.append(f"{where}: invalid regex: {e}")
+    # ReDoS heuristic: a quantifier on the inside end of a group that is
+    # itself quantified — (a+)+, (.*)*, (?:x+y*)+ — is the catastrophic
+    # backtracking shape: on a non-matching input the engine enumerates
+    # exponentially many partitions of the inner repetition. These regexes
+    # come from OTA JSON and run against attacker-influenced page HTML on
+    # the parse pool, so one signed-but-wrong rule could pin device cores.
+    # It is a HEURISTIC, not a proof of safety: it misses shapes where the
+    # group's last token is a char class ending in a quantifier written
+    # like [^)]* — treat a pass as "no known bomb", not "safe". Rewrite
+    # guidance: possessive (*+ / ++), atomic (?>...), or split the pattern.
+    if _NESTED_QUANT.search(val):
+        problems.append(f"{where}: nested quantifier ((a+)+ shape) — "
+                        "catastrophic-backtracking risk on hostile HTML; "
+                        "use a possessive/atomic group or split it")
+
+
+_NESTED_QUANT = re.compile(r"\((?:[^()\\]|\\.)*[*+]\)(?:[*+]|\{\d+,\d*\})")
 
 
 def _validate_pipeline_items(where, items, problems):
@@ -194,13 +212,24 @@ def _validate_pipeline_items(where, items, problems):
                 problems.append(
                     f"{where}.sectionGrouping.sectionSelector: string 1..{MAX_SELECTOR_LEN} required")
             if "seasonSpec" in sg:
-                _check_field_spec(sg["seasonSpec"], f"{where}.seasonGrouping.seasonSpec",
+                _check_field_spec(sg["seasonSpec"], f"{where}.sectionGrouping.seasonSpec",
                                   problems, prefixes=DOC_FIELD_SPEC_PREFIXES,
                                   allow_self=False)
             tmpl = sg.get("labelTemplate")
             if tmpl is not None and (not isinstance(tmpl, str) or len(tmpl) > MAX_SELECTOR_LEN):
                 problems.append(
                     f"{where}.sectionGrouping.labelTemplate: string <= {MAX_SELECTOR_LEN}")
+            # Cross-check: the executor's sortBy:"captures" branch
+            # (RulesPipeline) rebuilds the episode list from RAW DOM order
+            # with sequential numbering — it silently discards the season
+            # codes and the uniqueness safety net sectionGrouping just built.
+            # A rule carrying both states an intent that cannot happen;
+            # reject it instead of shipping a half-broken season list.
+            if items.get("sortBy") == "captures":
+                problems.append(
+                    f"{where}: sectionGrouping + sortBy:'captures' are "
+                    "incompatible — the captures branch renumbers over the "
+                    "season grouping; remove one of them")
 
     lc = items.get("labelChain")
     if lc is not None:
@@ -558,6 +587,73 @@ def validate_schema(plain: bytes) -> list:
                         f"hostPolicies[{i}].referer: must be none|site|exact:<url>")
             if isinstance(pol, dict) and len(pol.get("match", "")) > 120:
                 problems.append(f"hostPolicies[{i}].match too long")
+
+    # These collections used to be signature-through: ANY JSON type passed
+    # here while DynamicRulesManager silently skips malformed entries
+    # (optJSONObject/?: continue). Net effect: a typo shipped a playbook
+    # where a whole feature quietly did nothing and nothing ever reported
+    # it. The shapes below mirror what the executor actually consumes.
+    resolvers = obj.get("resolvers")
+    if resolvers is not None:
+        if not isinstance(resolvers, dict) or len(resolvers) > MAX_RULES_ARRAY:
+            problems.append(f"resolvers: object (<= {MAX_RULES_ARRAY} hosts)")
+        else:
+            for k, v in resolvers.items():
+                if not isinstance(v, dict):
+                    problems.append(f"resolvers.{k}: must be an object "
+                                    "(the app silently drops it otherwise)")
+
+    exts = obj.get("directMediaExtensions")
+    if exts is not None:
+        if not isinstance(exts, list) or len(exts) > MAX_RULES_ARRAY:
+            problems.append(f"directMediaExtensions: list <= {MAX_RULES_ARRAY}")
+        elif not all(isinstance(x, str) and 0 < len(x) <= 10 for x in exts):
+            problems.append("directMediaExtensions: short strings, e.g. \".mp4\"")
+
+    for name in ("knownDead", "lockerHosts"):
+        arr = obj.get(name)
+        if arr is None:
+            continue
+        if not isinstance(arr, list) or len(arr) > 512:
+            problems.append(f"{name}: list <= 512")
+        elif not all(isinstance(x, str) and 0 < len(x) <= 120 and " " not in x
+                     for x in arr):
+            problems.append(f"{name}: bare host strings (<= 120, no spaces)")
+
+    ut = obj.get("urlTemplates")
+    if ut is not None:
+        if not isinstance(ut, dict) or len(ut) > MAX_RULES_ARRAY:
+            problems.append(f"urlTemplates: object (<= {MAX_RULES_ARRAY} keys)")
+        else:
+            for k, v in ut.items():
+                if not isinstance(v, str) or not v.strip() or len(v) > 500:
+                    problems.append(f"urlTemplates.{k}: non-empty string <= 500")
+
+    ss = obj.get("searchStrategies")
+    if ss is not None:
+        if not isinstance(ss, dict) or len(ss) > 128:
+            problems.append("searchStrategies: object keyed by site (<= 128)")
+        else:
+            for k, arr in ss.items():
+                if not isinstance(arr, list) or len(arr) > 16:
+                    problems.append(f"searchStrategies.{k}: list of <= 16 steps")
+                elif not all(isinstance(s, dict) and isinstance(s.get("type"), str)
+                             and s["type"].strip() for s in arr):
+                    problems.append(f"searchStrategies.{k}: every step needs a "
+                                    "string 'type' (unknown/absent types are dead weight)")
+
+    dp = obj.get("dynamic_providers")
+    if dp is not None:
+        if not isinstance(dp, list) or len(dp) > 64:
+            problems.append("dynamic_providers: list <= 64")
+        else:
+            for i, p in enumerate(dp):
+                if (not isinstance(p, dict)
+                        or not isinstance(p.get("id"), str) or not p["id"].strip()
+                        or not isinstance(p.get("base_url"), str)
+                        or not p["base_url"].strip()):
+                    problems.append(f"dynamic_providers[{i}]: object with "
+                                    "non-empty id and base_url required")
 
     for key in obj.keys():
         if key not in ("version", "domains", "mirrors", "sites", "resolvers",
