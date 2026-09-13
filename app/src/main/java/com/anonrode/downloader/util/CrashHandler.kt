@@ -31,6 +31,9 @@ object CrashHandler : Thread.UncaughtExceptionHandler {
             val timeStamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())
             val logMessage = "=== ANONRODE CRASH LOG ($timeStamp) ===\n" +
                     "Thread: ${thread.name} (id=${thread.id})\n" +
+                    "Device: android ${android.os.Build.VERSION.SDK_INT}" +
+                    " (${android.os.Build.VERSION.RELEASE})" +
+                    " ${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}\n" +
                     "Exception: ${throwable::class.java.name}: ${throwable.message}\n\n" +
                     "Stacktrace:\n$stackTrace\n" +
                     "========================================\n\n"
@@ -61,5 +64,41 @@ object CrashHandler : Thread.UncaughtExceptionHandler {
         } catch (_: Exception) {}
 
         defaultHandler?.uncaughtException(thread, throwable)
+    }
+
+    /**
+     * Contents of the crash report files this handler writes (public Downloads
+     * copy first, internal fallback second). Unlike the activity-log CRASH
+     * line, these carry the FULL untruncated printStackTrace — including the
+     * "Caused by:" chain that the v3.1.x incidents were diagnosed blind
+     * without. Settings -> Share Activity Log appends this so one share is
+     * always enough to root-cause a device crash.
+     */
+    fun crashReportsText(context: Context): String {
+        val sb = StringBuilder()
+        val candidates = listOfNotNull(
+            try {
+                File(
+                    Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+                    "Anon"
+                ).let { File(it, "anon_crash.txt") }
+            } catch (_: Exception) {
+                null
+            },
+            File(context.filesDir, "anon_crash.txt")
+        )
+        for (f in candidates) {
+            try {
+                if (f.exists() && f.length() > 0) {
+                    sb.append("===== ").append(f.absolutePath).append(" =====\n")
+                    val text = f.readText()
+                    // tail-first: the newest crash is the one being diagnosed
+                    sb.append(
+                        if (text.length > 512_000) text.substring(text.length - 512_000) else text
+                    ).append('\n')
+                }
+            } catch (_: Exception) {}
+        }
+        return sb.toString()
     }
 }

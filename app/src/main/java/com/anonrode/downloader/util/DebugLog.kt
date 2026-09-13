@@ -70,7 +70,16 @@ object DebugLog {
         } catch (_: Exception) {
             "?"
         }
-        engine("=== app started (v$version) ===")
+        // Version banner lets a shared log identify which build produced it
+        // (a log from an old APK was once misdiagnosed as a live bug). The
+        // Android version + device model joined it after the regex-engine
+        // incidents: "JVM compiles it, the phone rejects it" is only
+        // diagnosable if the log says WHICH engine ran.
+        engine(
+            "=== app started (v$version) android=${android.os.Build.VERSION.SDK_INT}" +
+                " (${android.os.Build.VERSION.RELEASE}) ${android.os.Build.MANUFACTURER}" +
+                " ${android.os.Build.MODEL} ==="
+        )
     }
 
     fun setEnabled(on: Boolean) {
