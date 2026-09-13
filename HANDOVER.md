@@ -3,8 +3,8 @@
 **Target Codebase:** `C:\Users\user\Anon\ANON TOOLS\download-toolkit-serverless` (Android / Kotlin / Jetpack Compose / OkHttp / libaria2c / youtubedl-android)
 **Reference Python Monolith:** `C:\Users\user\Anon\ANON TOOLS\download-toolkit` (`src/downloader.py`, `src/resolvers.py`, `src/extractors/`) — **the battle-tested reference; the Kotlin app is a port of it, and porting infidelities are the #1 bug source.**
 **Operating Charter:** `.agents/AGENTS.md` (Permanent source of truth — never delete)
-**Status:** ⚠️ **v3.1.0 is the last PUBLISHED RELEASE** (tag `v3.1.0`; gradle `versionCode 310 / versionName "3.1.0"`) — but the stale-release problem is RESOLVED as of 2026-09-13: the whole arc has been **PUSHED and CI IS GREEN on `50fd154`** (first real compile ever: 244 unit tests pass, emulator smoke pass, release build jobs succeed). It took five fix commits (`611a9af`→`50fd154`, details in the issues ledger D-1). master == origin/master. The public release still points at the old `v3.1.0` tag — **re-tagging/releasing at `50fd154` awaits the user's GO**, then phone device test. CI = the only sanctioned build (user decree 2026-09-13: NEVER build locally).
-**Last updated:** 2026-09-13 (full UI audit round + doc-drift fixes)
+**Status:** ✅ **v3.1.1 is CURRENT** — published 2026-09-13 18:09 UTC from `7f66249`: the first release ever built from fully compiled, tested code (the whole arc after the fix rounds `611a9af`→`50fd154`, the gallery media-scan fix `32d518a`, version 311/3.1.1 so installed v3.1.0 devices upgrade in place). All five ABI APKs on GitHub Releases; 244/244 unit tests + emulator smoke + release build all green. master == origin == the tag. Remaining gate: **phone device testing** (§5.9) — plus the still-open user activity log explaining the old IG-vs-TikTok gallery asymmetry the `32d518a` fix hardens. CI = the only sanctioned build (user decree 2026-09-13: NEVER build locally).
+**Last updated:** 2026-09-13 (v3.1.1 RELEASED — arc compiled, gallery media-scan fix, release published from 7f66249)
 
 ---
 
@@ -37,7 +37,7 @@ The activity log (`filesDir/logs/app-YYYY-MM-DD.txt`, shared via Settings → "S
 
 ## 📌 2. RELEASE STATE
 
-**Latest release on GitHub:** `AnonDownloader-v3.1.0-{arm64-v8a,armeabi-v7a,universal,x86,x86_64}.apk` (tag `v3.1.0`, gradle versionCode 310) — still the OLD artifact. **2026-09-13 update:** the 32-commit arc (A-5 resolve stage, OTA validator hardening, Instagram photo-music muxer + REST-first probe, full-repo audit fix batches, NameSanitizer + mitigation, UI-audit fixes) plus five CI-fix commits is PUSHED and **CI green on `50fd154`** — first real compile of everything, 244/244 tests, emulator smoke, release build all pass. Remaining: re-tag the release (user GO) + install on the phone.
+**Latest release on GitHub:** `AnonDownloader-v3.1.1-{arm64-v8a,armeabi-v7a,universal,x8,x86_64}.apk` (tag `v3.1.1`, gradle versionCode 311, published 2026-09-13T18:09Z from `7f66249`) — the first release ever compiled + tested from the full arc. The old `v3.1.0` artifacts remain below it as pre-compiler-era history (that APK was the last one devices could have installed before today; its code had never passed a compiler since 63a7032 until CI did it on the arc).
 
 ### Historical: v3.0.3 contained the full 10-commit LockerRegistry-era stack (`4927e5d` → `e95d76b`):
 
@@ -143,7 +143,7 @@ The classify gate belongs ONLY where the design intends: NaijaVault's download-l
 6. **9jarocks HTTP 522** — transient Cloudflare, not app issue.
 7. **seriezloaded.com.ng** — dead domain (DNS NXDOMAIN). Not seeded. Ignore.
 8. **USER ACTION PENDING (still): token rotation** — the old GitHub PAT pasted into chat. Rotate in GitHub Settings > Developer settings > Personal access tokens.
-9. **USER ACTION PENDING: device testing** — CI has now REALLY built the code (`50fd154`, green). Once the release is re-tagged/published (user GO), install and verify: storage prompt at launch, downloads across sites, IG photo+music mux, saved-name shapes (junk stripped, Hangul/CJK kept), player (bars hidden, resume positions, subtitle track), episode drawer (the duplicate-key crash fix — open a combined 9jaRocks post).
+9. **USER ACTION PENDING: device testing (v3.1.1)** — install the arm64 (or universal) APK from GitHub Releases and verify: storage prompt at launch, downloads across sites, IG photo+music mux, saved-name shapes (junk stripped, Hangul/CJK kept), player (bars hidden, resume positions, subtitle track), episode drawer (duplicate-key crash fix — open a combined 9jaRocks post), and **gallery visibility: download a TikTok/Facebook video — it must appear in the gallery WITHOUT sharing it out of the app** (fix `32d518a`). If any social video still stays invisible, send the activity log (Settings → Share Activity Log) — the IG-vs-TikTok asymmetry the user saw on v3.1.0 has no code-level explanation and the log's `completed` lines are how we compare.
 10. **Known minor**: naijaprey show pages emit a `.srt` subtitle link that appears as a dead episode entry (pre-existing, harmless — fails cleanly).
 
 ---
