@@ -115,7 +115,11 @@ object DownloadsSorter {
 
     private fun groupLibrary(tasks: List<DownloadTask>): List<Pair<String, List<DownloadTask>>> {
         // Group by showTitle; order shows by count of COMPLETED tasks
-        // descending, then by show name ascending for stability.
+        // descending, then by show name ascending for stability. Within a
+        // show the episodes run NUMERICALLY (ep1, ep2, ep3…) — the user
+        // asked for exactly that (2026-09-14), and the player's Next queue
+        // is built from this order via [playerQueueFor], so a group tapped
+        // at ep1 steps to ep2, not to "whatever finished next".
         val byShow: MutableMap<String, MutableList<DownloadTask>> = linkedMapOf()
         for (t in tasks) {
             val key = t.showTitle.ifBlank { "Unknown" }
@@ -127,8 +131,35 @@ object DownloadsSorter {
                     entry.value.count { it.status == TaskStatus.COMPLETED }
                 }.thenBy { it.key }
             )
-            .map { it.key to it.value.toList() }
+            .map { it.key to it.value.sortedWith(EPISODE_ORDER) }
     }
+
+    /**
+     * Shared episode ordering: numbered episodes ascending first (ep1 →
+     * ep2 → …), un-numbered tasks (movies, direct links, epNum 0) after
+     * them in enqueue order. Stable sort, so equal keys keep the engine
+     * snapshot's order — same result as the old insertion order for a
+     * movie-only show, numeric for a series.
+     */
+    internal val EPISODE_ORDER: Comparator<DownloadTask> =
+        compareBy<DownloadTask> { if (it.episodeNum > 0) it.episodeNum else Int.MAX_VALUE }
+            .thenBy { it.createdAt }
+
+    /**
+     * The Next/Previous playlist the in-app player steps through when a task
+     * is opened: COMPLETED files of the SAME show only, in episode order
+     * (see [EPISODE_ORDER]). Used to be every completed task across every
+     * show in engine order — pressing Next on ep 1 of one series threw you
+     * into a different show's file. Pure so the ordering has a direct test.
+     */
+    fun playerQueueFor(tasks: List<DownloadTask>, showTitle: String): List<String> =
+        tasks.filter {
+            it.status == TaskStatus.COMPLETED &&
+                it.filePath.isNotBlank() &&
+                it.showTitle.ifBlank { "Unknown" } == showTitle.ifBlank { "Unknown" }
+        }
+            .sortedWith(EPISODE_ORDER)
+            .map { it.filePath }
 
     private fun groupStatus(tasks: List<DownloadTask>): List<Pair<String, List<DownloadTask>>> {
         val byStatus: MutableMap<TaskStatus, MutableList<DownloadTask>> = linkedMapOf()

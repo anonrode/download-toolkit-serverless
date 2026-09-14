@@ -15,7 +15,6 @@ import androidx.activity.SystemBarStyle
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import com.anonrode.downloader.data.models.DownloadTask
-import com.anonrode.downloader.data.models.TaskStatus
 import com.anonrode.downloader.ui.components.MediaPlayerContext
 import com.anonrode.downloader.ui.components.MediaPlayerModal
 import androidx.activity.enableEdgeToEdge
@@ -211,16 +210,17 @@ class MainActivity : ComponentActivity() {
                 // the whole window INCLUDING the bottom nav, so a
                 // fillMaxSize Box is genuinely fullscreen and nothing of the
                 // app can bleed around its edges. Queue snapshot happens at
-                // launch (completed set changes only when a download
-                // finishes/deletes; stepping re-reads the engine fresh).
+                // launch: SAME-SHOW completed files in EPISODE order
+                // (DownloadsSorter.playerQueueFor) — ep 1's Next is ep 2,
+                // never another show's file (2026-09-14 fix). Stepping
+                // re-reads the engine fresh.
                 var playerCtx by remember { mutableStateOf<MediaPlayerContext?>(null) }
                 fun openPlayer(task: DownloadTask) {
                     playerCtx = MediaPlayerContext(
                         filePath = task.filePath,
                         title = task.episodeTitle,
-                        queuePeerPaths = viewModel.engine.tasks.value
-                            .filter { it.status == TaskStatus.COMPLETED }
-                            .map { it.filePath },
+                        queuePeerPaths = com.anonrode.downloader.ui.components.DownloadsSorter
+                            .playerQueueFor(viewModel.engine.tasks.value, task.showTitle),
                         onPlayFile = { path ->
                             // Freshest engine snapshot, never null on a miss
                             // (a miss used to close the player mid-Next).
