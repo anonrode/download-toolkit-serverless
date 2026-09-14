@@ -52,6 +52,14 @@ class DownloadEngine(
     // the first park so repeated re-parks cannot reset the clock forever.
     private val parkedAtStamp = ConcurrentHashMap<String, Long>()
 
+    // Earliest auto-re-queue time for a parked task (epoch ms). Every park
+    // pushes this further out (60s x park-cycles, capped): a host that keeps
+    // rejecting us — the vikingfile 429 storm in activity-log-share-5, where
+    // each retry every couple of seconds deepened the rate-limit penalty —
+    // gets seen on a decaying cadence instead of a fresh full resolve chain
+    // per cooldown tick.
+    private val requeueNotBefore = ConcurrentHashMap<String, Long>()
+
     // Cross-provider failover bookkeeping per task: the set of provider sites
     // already tried for this task (original site + every failover target), so
     // the failover loop walks NEW sites only and cannot ping-pong between two
@@ -181,6 +189,10 @@ class DownloadEngine(
         // (measured from its parkedAt timestamp) is FAILED instead of bounced
         // forever — the Suits batch spent 90 minutes orbiting a host that was
         // never coming back. Manual retry always restarts it cleanly.
+        // EXEMPTION (user rule 2026-09-14, "if a download ever starts there is
+        // no reason to cancel it"): the cap only applies to tasks that NEVER
+        // landed a byte. A parked task with bytes on disk is saved progress —
+        // it waits out the host instead of being failed and forgotten.
         //
         // Trickle requeue: when MANY tasks are parked on the same host, requeue
         // at most a few per tick. Releasing all 18 at once recreates the exact
@@ -196,10 +208,13 @@ class DownloadEngine(
                 var anyRequeued = false
                 parked.forEach { t ->
                     val parkedAt = parkedAtStamp[t.id] ?: 0L
-                    if (parkedAt > 0L && System.currentTimeMillis() - parkedAt > PARKED_LIFETIME_MS) {
+                    if (parkedAt > 0L && System.currentTimeMillis() - parkedAt > PARKED_LIFETIME_MS &&
+                        maxOf(t.downloadedBytes, computeDiskBytes(t)) == 0L
+                    ) {
                         parkedAtStamp.remove(t.id)
                         failoverSites.remove(t.id)
                         parkCycleCounts.remove(t.id)
+                        requeueNotBefore.remove(t.id)
                         val msg = "Download server stayed unreachable for 30+ minutes — gave up. Tap retry once the site is back."
                         repository.update(t.id) { it.copy(status = TaskStatus.FAILED, errorMessage = msg, speedBytesPerSec = 0.0) }
                         com.anonrode.downloader.util.DebugLog.user("park give-up task=${t.id}")
@@ -210,12 +225,17 @@ class DownloadEngine(
                         } catch (_: Exception) {}
                         return@forEach
                     }
+                    // Re-queue floor: parks escalate their wait (see parkFloorMs)
+                    // so a repeatedly-rejected host is probed at most once per
+                    // window instead of every tick.
+                    if (System.currentTimeMillis() < (requeueNotBefore[t.id] ?: 0L)) return@forEach
                     if (com.anonrode.downloader.pipeline.HostHealth.isUsable(t.directUrl)) {
                         // Max 2 requeues per 10s tick: a 18-task batch comes
                         // back over ~90s instead of one thundering herd.
                         if (requeued >= 2) return@forEach
                         requeued++
                         parkedAtStamp.remove(t.id)
+                        requeueNotBefore.remove(t.id)
                         repository.update(t.id) { task -> task.copy(status = TaskStatus.QUEUED, errorMessage = null) }
                         anyRequeued = true
                     }
@@ -574,6 +594,7 @@ class DownloadEngine(
         parkCycleCounts.remove(taskId)
         parkedAtStamp.remove(taskId)
         failoverSites.remove(taskId)
+        requeueNotBefore.remove(taskId)
         processQueue()
     }
 
@@ -886,6 +907,63 @@ class DownloadEngine(
         }
     }
 
+    /**
+     * Bytes this task has actually banked: what the backends reported OR what
+     * is on disk (partials included). The park-vs-fail rule below keys on this.
+     */
+    private fun bytesLanded(task: DownloadTask): Long =
+        maxOf(task.downloadedBytes, computeDiskBytes(task))
+
+    /**
+     * A 429 is an explicit "come back later" — never a reason to destroy a
+     * task. Matches the engine's own vocabulary: the validator rejection
+     * ("Server rejected the link (HTTP 429) — ..."), the Turbo failure
+     * message, and the aria2c/yt-dlp chains that quote the status.
+     */
+    private fun isRateLimitedError(msg: String?): Boolean =
+        msg != null && (msg.contains("429") || msg.contains("Too Many Requests", ignoreCase = true))
+
+    private fun parkFloorMs(cycles: Int): Long =
+        (cycles.toLong() * PARK_REQUEUE_FLOOR_MS).coerceAtMost(PARK_REQUEUE_MAX_MS)
+
+    /**
+     * THE RULE (user, 2026-09-14): a download that has ever moved bytes may
+     * never be FAILED by a host-side hiccup — rate-limit, stall, dead link,
+     * backend teardown. It parks instead: PAUSED with the cooldown-loop
+     * message, partial files untouched (Turbo's .part/.turbo sidecar and
+     * aria2c's control file both resume from where they stopped), and the
+     * existing auto-retry loop re-queues it when the host is usable, on a
+     * per-cycle escalating floor. Tasks that never started (zero banked
+     * bytes and no rate-limit signal) keep the honest-error behavior so a
+     * permanently dead source cannot hold a queue slot hostage forever.
+     *
+     * Returns true when the task was parked (caller must NOT fail/notify).
+     */
+    private fun parkInsteadOfFail(task: DownloadTask, err: String, forcePark: Boolean): Boolean {
+        val landed = bytesLanded(task)
+        if (landed == 0L && !forcePark) return false
+        val cycles = (parkCycleCounts[task.id] ?: 0) + 1
+        parkCycleCounts[task.id] = cycles
+        val now = System.currentTimeMillis()
+        parkedAtStamp.putIfAbsent(task.id, now)
+        val floorMs = parkFloorMs(cycles)
+        requeueNotBefore[task.id] = now + floorMs
+        val mins = maxOf(1L, floorMs / 60_000L)
+        val saved = if (landed > 0) " — ${(landed / (1024L * 1024L)).coerceAtLeast(1)} MB already saved, it will resume" else ""
+        repository.update(task.id) {
+            it.copy(
+                status = TaskStatus.PAUSED,
+                speedBytesPerSec = 0.0,
+                errorMessage = "$PARKED_HOST_MESSAGE — will retry in ~${mins}m$saved"
+            )
+        }
+        com.anonrode.downloader.util.DebugLog.user(
+            "park task=${task.id} (cycle=$cycles, landed=${landed / 1024}KiB, forced=$forcePark) reason=${err.take(140)}"
+        )
+        updateServiceState(force = true)
+        return true
+    }
+
     private fun checkStorageAvailable(): Boolean {
         try {
             val path = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
@@ -1029,6 +1107,14 @@ class DownloadEngine(
         // that stays dead for 30 minutes of cycling loses the task with an
         // honest error instead of holding the queue hostage all afternoon.
         private const val PARKED_LIFETIME_MS = 30 * 60_000L
+
+        // Re-queue floor per park cycle: the 1st park waits 60s, the 2nd 2m,
+        // ... capped at 15m. Rate-limits on these lockers are minutes-long
+        // penalties, and every premature bounce re-triggers them (share-5
+        // log: the 429 storm retried every 2-4 seconds, each retry extending
+        // the block and burning data on failed resolves).
+        private const val PARK_REQUEUE_FLOOR_MS = 60_000L
+        private const val PARK_REQUEUE_MAX_MS = 15 * 60_000L
     }
 
     private var lastNotificationTime: Long = 0L
@@ -1580,6 +1666,7 @@ class DownloadEngine(
                         parkCycleCounts.remove(task.id)
                         parkedAtStamp.remove(task.id)
                         failoverSites.remove(task.id)
+                        requeueNotBefore.remove(task.id)
                         streamUrl = resolved
                     } else if (isKnownLockerHost(streamUrl) || !isDirectMediaUrl(streamUrl)) {
                         if (task.site.isNotBlank()) {
@@ -1615,7 +1702,14 @@ class DownloadEngine(
                                 val mins = maxOf(1L, com.anonrode.downloader.pipeline.HostHealth.remainingBackoffMs(streamUrl) / 60_000L)
                                 com.anonrode.downloader.util.DebugLog.resolve("task=${task.id} host $host in backoff — parking for ~${mins}m")
                                 val cycles = (parkCycleCounts[task.id] ?: 0) + 1
-                                if (cycles > MAX_PARK_CYCLES) {
+                                val landed = bytesLanded(task)
+                                // THE RULE: the cycle cap only ever fires for a
+                                // task with NOTHING banked. Bytes on disk mean
+                                // park forever — the give-up below would cancel
+                                // real saved progress, which the user has ruled
+                                // out ("if the download ever started there is
+                                // no reason to cancel").
+                                if (cycles > MAX_PARK_CYCLES && landed == 0L) {
                                     parkCycleCounts.remove(task.id)
                                     failoverSites.remove(task.id)
                                     throw Exception(
@@ -1625,11 +1719,13 @@ class DownloadEngine(
                                 }
                                 parkCycleCounts[task.id] = cycles
                                 parkedAtStamp.putIfAbsent(task.id, System.currentTimeMillis())
+                                requeueNotBefore[task.id] = System.currentTimeMillis() + parkFloorMs(cycles)
+                                val saved = if (landed > 0) " — ${(landed / (1024L * 1024L)).coerceAtLeast(1)} MB already saved, it will resume" else ""
                                 repository.update(task.id) {
                                     it.copy(
                                         status = TaskStatus.PAUSED,
                                         speedBytesPerSec = 0.0,
-                                        errorMessage = "$PARKED_HOST_MESSAGE — will retry in ~${mins}m"
+                                        errorMessage = "$PARKED_HOST_MESSAGE — will retry in ~${mins}m$saved"
                                     )
                                 }
                                 updateServiceState(force = true)
@@ -1845,17 +1941,23 @@ class DownloadEngine(
                         if (zombie) {
                             val zombieMsg = "Download made no meaningful progress (${(now - watchdogStart) / 1000}s, under 1 MiB) — the source server is throttling or unreachable. Try again later."
                             com.anonrode.downloader.util.DebugLog.engine(
-                                "task=${task.id} zombie cap after ${(now - watchdogStart) / 1000}s with ${((totalBytesNow - (startBytes ?: totalBytesNow)) / 1024)}KiB total — failing"
+                                "task=${task.id} zombie cap after ${(now - watchdogStart) / 1000}s with ${((totalBytesNow - (startBytes ?: totalBytesNow)) / 1024)}KiB total"
                             )
                             YoutubeDlDownloader.killProcess(task.id)
                             TurboDownloader.cancelTask(task.id)
-                            repository.update(task.id) {
-                                it.copy(
-                                    status = TaskStatus.FAILED,
-                                    errorMessage = zombieMsg
-                                )
+                            // Park, don't fail: a task that banked bytes in an
+                            // EARLIER run before this run went zombie keeps the
+                            // partial and retries later (THE RULE). Only a
+                            // task with nothing banked gets the honest failure.
+                            if (!parkInsteadOfFail(t, zombieMsg, forcePark = false)) {
+                                repository.update(task.id) {
+                                    it.copy(
+                                        status = TaskStatus.FAILED,
+                                        errorMessage = zombieMsg
+                                    )
+                                }
+                                com.anonrode.downloader.service.DownloadService.notifyFailed(context, task.id, t.episodeTitle, zombieMsg)
                             }
-                            com.anonrode.downloader.service.DownloadService.notifyFailed(context, task.id, t.episodeTitle, zombieMsg)
                             activeJobs[task.id]?.cancel()
                             break
                         }
@@ -1909,10 +2011,19 @@ class DownloadEngine(
                                 } else {
                                     "Download throttled to ${(windowBps / 1024).toLong().coerceAtLeast(0L)} KiB/s after a healthy start — killed and re-sourced $stallKills times without recovery"
                                 }
-                                repository.update(task.id) {
-                                    it.copy(status = TaskStatus.FAILED, errorMessage = stallMsg)
+                                // THE RULE: the whole point of the park system.
+                                // A task that banked bytes through these kills
+                                // (the vikingfile 429 case: 64 MiB in, then
+                                // every relaunch met a rate-limit) waits with
+                                // its partials instead of being failed; the
+                                // cooldown loop resumes it when the host heals.
+                                // Zero-byte tasks keep the loud failure.
+                                if (!parkInsteadOfFail(t, stallMsg, forcePark = isRateLimitedError(stallMsg))) {
+                                    repository.update(task.id) {
+                                        it.copy(status = TaskStatus.FAILED, errorMessage = stallMsg)
+                                    }
+                                    com.anonrode.downloader.service.DownloadService.notifyFailed(context, task.id, t.episodeTitle, stallMsg)
                                 }
-                                com.anonrode.downloader.service.DownloadService.notifyFailed(context, task.id, t.episodeTitle, stallMsg)
                                 activeJobs[task.id]?.cancel()
                                 break
                             }
@@ -2094,7 +2205,13 @@ class DownloadEngine(
                         }
                     }
 
-                    if (producedFile == null && coroutineContext.isActive) {
+                    // Rate-limited (429)? Do NOT relaunch the fallback chain.
+                    // Every fresh connection to a server that just said "too
+                    // many requests" deepens the block and burns mobile data —
+                    // this handoff+aria2c retry is what turned the vikingfile
+                    // 429 into a 12-requests-in-11-seconds storm (share-5).
+                    // The completion gate parks the task instead.
+                    if (producedFile == null && turboFailure?.httpStatus != 429 && coroutineContext.isActive) {
                         // Turbo → aria2c resume handoff: hand over the longest contiguous
                         // prefix so the fallback continues instead of restarting. yt-dlp's
                         // aria2c is fed "-o stem.%(ext)s" where ext comes from the URL, so
@@ -2159,8 +2276,9 @@ class DownloadEngine(
 
                     // aria2c → Turbo rescue: resume from whichever state is freshest on
                     // disk — Turbo's own sidecar, or aria2c's control file converted to
-                    // Turbo's piece map. Only when nothing else produced a file yet.
-                    if (producedFile == null && coroutineContext.isActive) {
+                    // Turbo's piece map. Only when nothing else produced a file yet, and
+                    // never against a 429 (see the handoff gate above).
+                    if (producedFile == null && turboFailure?.httpStatus != 429 && coroutineContext.isActive) {
                         try {
                             // The fallback wrote "stem.%(ext)s" with the URL's extension,
                             // which can differ from the task's .mkv target name — look
@@ -2455,15 +2573,32 @@ class DownloadEngine(
                 } else {
                     val errReason = when {
                         producedFile != null && looksLikeHtml(producedFile) -> "Server returned an HTML page instead of the file"
-                        !validation.first -> validation.second
+                        // Null-check the transfer outcome BEFORE the generic
+                        // validation pair: with no file, validation.second is
+                        // always "File missing", which used to swallow every
+                        // real HTTP status the backends captured (the 429 storm
+                        // was logged as a bare "File missing").
                         producedFile == null && turboFailure?.htmlPage == true -> "Server returned an HTML page instead of the file — the link expired; retry to refresh it"
                         producedFile == null && turboFailure?.httpStatus != null -> "Download rejected by server (HTTP ${turboFailure.httpStatus}) — retry to refresh the link"
                         producedFile == null -> "Download failed — the server never produced a file"
+                        !validation.first -> validation.second
                         else -> "Output file was too small or corrupted"
                     }
-                    repository.update(task.id) { it.copy(status = TaskStatus.FAILED, errorMessage = errReason) }
-                    com.anonrode.downloader.util.DebugLog.write("failed task=${task.id} reason=$errReason")
-                    com.anonrode.downloader.service.DownloadService.notifyFailed(context, task.id, task.episodeTitle, errReason)
+                    // THE RULE: a transfer that never produced a file parks
+                    // when bytes are banked (partials stay on disk, the
+                    // cooldown loop resumes them) or when the server explicitly
+                    // said 429. A file that DID land but is garbage (HTML
+                    // decoy, too-small output) must still fail loudly — its
+                    // bytes are not banked progress, and parking on them would
+                    // re-fetch the same garbage forever.
+                    val live = repository.find(task.id) ?: task
+                    val parked = producedFile == null &&
+                        parkInsteadOfFail(live, errReason, forcePark = isRateLimitedError(errReason))
+                    if (!parked) {
+                        repository.update(task.id) { it.copy(status = TaskStatus.FAILED, errorMessage = errReason) }
+                        com.anonrode.downloader.util.DebugLog.write("failed task=${task.id} reason=$errReason")
+                        com.anonrode.downloader.service.DownloadService.notifyFailed(context, task.id, task.episodeTitle, errReason)
+                    }
                 }
             } catch (e: CancellationException) {
                 // Cancelled. Nothing may outlive its job: kill the native
@@ -2498,8 +2633,16 @@ class DownloadEngine(
             } catch (e: Exception) {
                 if (coroutineContext.isActive) {
                     val errMsg = e.message ?: "Download error"
-                    repository.update(task.id) { it.copy(status = TaskStatus.FAILED, errorMessage = errMsg) }
-                    com.anonrode.downloader.service.DownloadService.notifyFailed(context, task.id, task.episodeTitle, errMsg)
+                    // THE RULE again: any backend chain that finally threw —
+                    // including the "yt-dlp failed after 3 attempt(s)" wrap of
+                    // a 429 storm — parks when bytes are banked or the server
+                    // explicitly asked us to wait (StreamValidator's
+                    // "HTTP 429" rejection throws into this catch).
+                    val live = repository.find(task.id) ?: task
+                    if (!parkInsteadOfFail(live, errMsg, forcePark = isRateLimitedError(errMsg))) {
+                        repository.update(task.id) { it.copy(status = TaskStatus.FAILED, errorMessage = errMsg) }
+                        com.anonrode.downloader.service.DownloadService.notifyFailed(context, task.id, task.episodeTitle, errMsg)
+                    }
                 } else {
                     // Cancelled (pause/cancel/network park): native-process teardown can surface
                     // as a plain exception, so never report that as FAILED. Also unwedge a task
@@ -2594,6 +2737,7 @@ class DownloadEngine(
             parkCycleCounts.remove(taskId)
             parkedAtStamp.remove(taskId)
             failoverSites.remove(taskId)
+            requeueNotBefore.remove(taskId)
         }
         processQueue()
         updateServiceState(force = true)
