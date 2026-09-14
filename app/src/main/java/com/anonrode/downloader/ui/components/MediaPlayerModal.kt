@@ -92,7 +92,6 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
-import androidx.media3.common.Format
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
@@ -125,6 +124,19 @@ data class MediaPlayerContext(
     val queuePeerPaths: List<String> = emptyList(),
     val onPlayFile: (String) -> Unit = {}
 )
+
+/**
+ * PiP bridge (mini player): MainActivity overrides the PLATFORM
+ * Activity.onPictureInPictureModeChanged callback — the one API that is
+ * guaranteed present at minSdk 26 and dispatched on every OS version —
+ * and writes the state here; the player reads it and strips all chrome
+ * while the activity renders inside the pip bubble. Written via a
+ * Compose snapshot state so any recomposition observing it re-renders.
+ */
+internal object PlayerPipState {
+    var inPip by mutableStateOf(false)
+        internal set
+}
 
 private val SIDECAR_SUBTITLE_EXTS = listOf("srt", "vtt", "ass", "ssa")
 private val AUDIO_EXTS = listOf("mp3", "m4a", "aac", "wav", "flac", "opus", "ogg")
@@ -385,7 +397,9 @@ private fun MediaPlayerModalImpl(
     var isLandscape by remember { mutableStateOf(false) }
     // True while the activity is in picture-in-picture (mini-player): all
     // chrome must be out of the pip frame, only the video surface renders.
-    var inPip by remember { mutableStateOf(false) }
+    // Observed through PlayerPipState (see its doc) — MainActivity's
+    // platform callback is the only writer.
+    val inPip = PlayerPipState.inPip
     // Display framing cycle: FIT (letterbox, default) -> ZOOM (center-crop
     // to fill) -> STRETCH (FILL — distorts the aspect to fill the frame)
     // -> back to FIT. Display-only: the file is never re-encoded or
@@ -590,7 +604,7 @@ private fun MediaPlayerModalImpl(
                                 SubTrackInfo(
                                     language = f.language,
                                     label = f.label,
-                                    isDefault = f.selectionFlags and Format.SELECTION_FLAG_DEFAULT != 0
+                                    isDefault = f.selectionFlags and C.SELECTION_FLAG_DEFAULT != 0
                                 )
                             },
                             preferredSubLang
@@ -666,22 +680,11 @@ private fun MediaPlayerModalImpl(
         }
     }
 
-    // PiP (mini-player) mode tracker: the SYSTEM drives in/out (close-X,
-    // tap-to-expand), so state is read from the lifecycle callback, never
-    // from the button. While in, every chrome element leaves composition
-    // so the pip frame carries nothing but video.
-    DisposableEffect(componentActivity) {
-        val ca = componentActivity
-        if (ca == null) {
-            onDispose {}
-        } else {
-            val pipListener = androidx.activity.OnPictureInPictureModeChangedListener { pip, _ ->
-                inPip = pip
-                if (!pip) showControls = true
-            }
-            ca.addOnPictureInPictureModeChangedListener(pipListener)
-            onDispose { ca.removeOnPictureInPictureModeChangedListener(pipListener) }
-        }
+    // Returning from the pip bubble (tap to expand / close → app): bring
+    // the controls up so the user lands on a usable player, not a bare
+    // video with a hidden overlay.
+    LaunchedEffect(inPip) {
+        if (!inPip) showControls = true
     }
 
     // Enter mini-player: aspect ratio follows the video (falls back to the

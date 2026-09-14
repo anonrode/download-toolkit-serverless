@@ -348,6 +348,24 @@ class MainActivity : ComponentActivity() {
         handleShareIntent(intent)
     }
 
+    /**
+     * The player's Mini-button enters picture-in-picture; the SYSTEM owns
+     * all further transitions (tap-to-expand, close-X), so the player can
+     * only learn the state through this callback. The two-argument platform
+     * signature is deliberately chosen: it is dispatched on every API from
+     * 26 up (the 34+ info overload's default implementation routes here),
+     * so the bridge works with zero listener-API guessing. The player reads
+     * PlayerPipState and strips its chrome while the window is the bubble.
+     */
+    @Suppress("OVERRIDE_DEPRECATION")
+    override fun onPictureInPictureModeChanged(
+        isInPictureInPictureMode: Boolean,
+        newConfig: Configuration
+    ) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        com.anonrode.downloader.ui.components.PlayerPipState.inPip = isInPictureInPictureMode
+    }
+
     private fun handleShareIntent(intent: Intent?) {
         if (intent?.action == Intent.ACTION_SEND && intent.type == "text/plain") {
             val sharedText = intent.getStringExtra(Intent.EXTRA_TEXT) ?: return
