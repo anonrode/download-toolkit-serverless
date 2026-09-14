@@ -41,6 +41,25 @@ object TurboDownloader {
     internal var retryBaseDelayMs: Long = 1000L
 
     /**
+     * Rate-limit ladder. HTTP 429 (and 503) are "come back later" answers, and
+     * a desktop download manager (IDM/1DM) survives them simply by WAITING.
+     * The old policy burned the normal 5-attempt / ~15s piece budget per
+     * socket on a 429 — 16 sockets × 5 relaunches is itself a request storm
+     * that kept the limiter tripped, and when the budget ran out the WHOLE
+     * segmented download died and the engine handed the angry URL to aria2c
+     * (activity-log-share-5: 64 MiB banked at ~26 MB/s, then FAILED).
+     * Rate-limits are now waits, not attempts: one shared escalating cooldown
+     * (base ×2 per cycle, capped at 5 min), every socket sits it out, and the
+     * active worker count halves per cycle (16→8→4→2) so the resumed traffic
+     * is the gentle shape that never provokes the host again.
+     */
+    private const val THROTTLE_BASE_MS = 15_000L
+    private const val THROTTLE_MAX_MS = 5 * 60_000L
+
+    /** Test hook: collapses rate-limit cooldowns so throttle tests run fast. */
+    internal var throttleBaseDelayMs: Long = THROTTLE_BASE_MS
+
+    /**
      * In-flight OkHttp calls per task id. The engine's stall watchdog calls
      * [cancelTask] so a trickling-but-alive transfer can be interrupted even
      * though Turbo has no native process to kill.
@@ -54,6 +73,25 @@ object TurboDownloader {
      */
     fun cancelTask(taskId: String) {
         activeCalls.remove(taskId)?.forEach { it.cancel() }
+    }
+
+    /**
+     * taskId → epoch-millis until which the run is deliberately sitting out a
+     * server rate-limit. Bytes will NOT move while a deadline is live — the
+     * download is alive and waiting (the "1DM freezes the bar, then resumes"
+     * behavior). The engine's stall watchdog consults [throttleRemainingMs]
+     * and refuses every kill decision while a cooldown is live, so the
+     * in-session wait can never be cut short into a FAILED card. Entries
+     * live exactly as long as the run that set them (removed in the
+     * segmented()/single() finally blocks).
+     */
+    private val throttleDeadlines = ConcurrentHashMap<String, Long>()
+
+    /** Milliseconds left on the task's live rate-limit cooldown (0 if none). */
+    fun throttleRemainingMs(taskId: String): Long {
+        if (taskId.isEmpty()) return 0L
+        val deadline = throttleDeadlines[taskId] ?: return 0L
+        return (deadline - System.currentTimeMillis()).coerceAtLeast(0L)
     }
 
     /** Registers a call against [taskId] (empty = untracked, e.g. tests). */
@@ -320,6 +358,25 @@ object TurboDownloader {
         val done = AtomicLong(initialBytes)
         val failed = AtomicBoolean(false)
         val nextPiece = AtomicInteger(0)
+        // Rate-limit coordination: one shared cooldown deadline every socket
+        // sits out (the limiter is per-IP — only a PAUSE heals it; retrying
+        // now deepens it), a cycle counter driving the escalating ladder, and
+        // a worker cap halved per cycle; the shared piece queue lets the
+        // survivors drain everything the departed workers would have claimed.
+        val throttleUntil = AtomicLong(0L)
+        val throttleCycles = AtomicInteger(0)
+        val maxWorkers = AtomicInteger(sockets)
+        fun enterRateLimit() {
+            val cycle = throttleCycles.incrementAndGet()
+            val waitMs = (throttleBaseDelayMs shl (cycle - 1).coerceAtMost(5)).coerceAtMost(THROTTLE_MAX_MS)
+            val until = System.currentTimeMillis() + waitMs
+            throttleUntil.set(until)
+            if (taskId.isNotEmpty()) throttleDeadlines[taskId] = until
+            maxWorkers.set(maxOf(2, maxWorkers.get() / 2))
+            com.anonrode.downloader.util.DebugLog.backend(
+                "task=$taskId rate limited (cycle $cycle): all sockets cooling ${waitMs / 1000}s, workers→${maxWorkers.get()}"
+            )
+        }
 
         RandomAccessFile(dest, "rw").use { raf ->
             if (raf.length() != total) raf.setLength(total)
@@ -363,18 +420,30 @@ object TurboDownloader {
                 }
 
                 /**
-                 * Download one piece, retrying with exponential backoff. Each retry
-                 * re-requests from the piece's committed offset, so a mid-body drop
-                 * resumes the piece instead of restarting it. The global failure flag
-                 * is only set once a piece exhausts all attempts, so a single hiccup
-                 * never aborts the siblings.
+                 * Download one piece. NETWORK failures follow the normal
+                 * policy: 5 attempts with exponential backoff, each retry
+                 * re-requesting from the piece's committed offset so a mid-body
+                 * drop resumes instead of restarting. RATE-LIMIT answers
+                 * (429/503) never consume an attempt — they park the whole
+                 * socket pool in the shared cooldown (enterRateLimit) and the
+                 * piece retries after the host calmed down. The global failure
+                 * flag is only set once a piece exhausts attempts on REAL
+                 * failures, so a single hiccup never aborts the siblings.
                  */
                 suspend fun downloadPiece(chunk: TurboChunk): Boolean {
                     var attempt = 0
-                    while (attempt < MAX_ATTEMPTS) {
-                        attempt++
+                    while (true) {
                         if (failed.get() || !coroutineContext.isActive) return false
+                        // Sit out a live cooldown in ≤2s slices so pause/kill
+                        // stays responsive; a cancellation here escapes as the
+                        // CancellationException the worker handler commits on.
+                        while (System.currentTimeMillis() < throttleUntil.get()) {
+                            if (failed.get() || !coroutineContext.isActive) return false
+                            delay((throttleUntil.get() - System.currentTimeMillis()).coerceIn(0L, 2_000L))
+                        }
+                        if (attempt >= MAX_ATTEMPTS) break
                         var completed = false
+                        var rateLimited = false
                         try {
                             val req = Request.Builder().url(url).apply {
                                 header("User-Agent", headers["User-Agent"] ?: HttpClient.DEFAULT_UA)
@@ -417,12 +486,23 @@ object TurboDownloader {
                                     completed = pos > chunk.end
                                 } else {
                                     failureStatus.compareAndSet(0, res.code)
+                                    if (res.code == 429 || res.code == 503) rateLimited = true
                                 }
                                 }
                                 } finally {
                                     untrackCall(taskId, call)
                                 }
                             if (completed) return true
+                            if (rateLimited) {
+                                // The server told us to come back later: come
+                                // back later. This is NOT one of the piece's
+                                // 5 tries — counting 429s against the budget
+                                // is what turned a 26 MB/s healthy stream into
+                                // a corpse in share-5.
+                                enterRateLimit()
+                                continue
+                            }
+                            attempt++
                             if (failed.get() || !coroutineContext.isActive) return false
                             failureMessage.compareAndSet(
                                 null,
@@ -432,6 +512,7 @@ object TurboDownloader {
                             state.commit(plan, total, force = true)
                             return false
                         } catch (e: Exception) {
+                            attempt++
                             failureMessage.compareAndSet(null, e.message ?: e.javaClass.simpleName)
                             // Persist the mid-piece position so a pause after this
                             // failure resumes from here instead of the piece start.
@@ -444,10 +525,15 @@ object TurboDownloader {
                 }
 
                 coroutineScope {
-                    repeat(minOf(sockets, plan.size)) {
+                    repeat(minOf(sockets, plan.size)) { i ->
                         launch {
                             try {
                                 while (isActive && !failed.get()) {
+                                    // Concurrency downshift: after a rate-limit
+                                    // cycle only the first maxWorkers sockets
+                                    // keep claiming; the shared queue routes the
+                                    // rest of the pieces to the survivors.
+                                    if (i >= maxWorkers.get()) break
                                     val idx = claimNext() ?: break
                                     if (!downloadPiece(plan[idx])) break
                                 }
@@ -462,6 +548,7 @@ object TurboDownloader {
         } finally {
             telemetryTicker.cancel()
             onProgress(committed(), total, speed.getSpeed())
+            if (taskId.isNotEmpty()) throttleDeadlines.remove(taskId)
         }
 
         if (failed.get()) return@coroutineScope false
@@ -495,8 +582,14 @@ object TurboDownloader {
 
         var success = false
         var attemptCount = 0
+        // Rate-limit state for the single-stream path — same ladder as the
+        // segmented worker pool, no cross-worker sharing needed (one socket).
+        var lastRateLimited = false
+        var throttleUntil = 0L
+        var throttleCycles = 0
         try {
             suspend fun attempt(): Boolean {
+                lastRateLimited = false
                 try {
                     val resumeAt = if (dest.exists()) dest.length() else 0L
                     val req = Request.Builder().url(url).apply {
@@ -511,6 +604,7 @@ object TurboDownloader {
                         call.execute().use { res ->
                             if (!res.isSuccessful) {
                                 failureStatus.compareAndSet(0, res.code)
+                                lastRateLimited = res.code == 429 || res.code == 503
                                 return false
                             }
                             val resuming = res.code == 206
@@ -548,12 +642,31 @@ object TurboDownloader {
                 }
             }
 
-            while (attemptCount < MAX_ATTEMPTS && !success) {
-                attemptCount++
+            while (!success) {
+                // Sit out a live cooldown in ≤2s slices; a pause surfaces as
+                // the CancellationException caught below (a paused job never
+                // looks like a failure).
+                while (System.currentTimeMillis() < throttleUntil) {
+                    delay((throttleUntil - System.currentTimeMillis()).coerceIn(0L, 2_000L))
+                }
+                if (attemptCount >= MAX_ATTEMPTS) break
                 if (attempt()) {
                     success = true
-                } else if (attemptCount < MAX_ATTEMPTS) {
-                    delay(backoffMillis(attemptCount))
+                } else if (lastRateLimited) {
+                    // "Too Many Requests" is a WAIT instruction, not a failed
+                    // attempt: the next request resumes from dest.length() via
+                    // the Range header, after an escalating pause.
+                    throttleCycles++
+                    val waitMs = (throttleBaseDelayMs shl (throttleCycles - 1).coerceAtMost(5))
+                        .coerceAtMost(THROTTLE_MAX_MS)
+                    throttleUntil = System.currentTimeMillis() + waitMs
+                    if (taskId.isNotEmpty()) throttleDeadlines[taskId] = throttleUntil
+                    com.anonrode.downloader.util.DebugLog.backend(
+                        "task=$taskId single stream rate limited (cycle $throttleCycles): cooling ${waitMs / 1000}s"
+                    )
+                } else {
+                    attemptCount++
+                    if (attemptCount < MAX_ATTEMPTS) delay(backoffMillis(attemptCount))
                 }
             }
         } catch (_: CancellationException) {
@@ -563,6 +676,7 @@ object TurboDownloader {
         } finally {
             telemetryTicker.cancel()
             onProgress(if (dest.exists()) dest.length() else 0L, if (total > 0) total else 0L, speed.getSpeed())
+            if (taskId.isNotEmpty()) throttleDeadlines.remove(taskId)
         }
         return@coroutineScope success
     }
