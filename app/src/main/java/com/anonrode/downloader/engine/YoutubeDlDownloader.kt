@@ -30,6 +30,10 @@ object YoutubeDlDownloader {
         "http://tracker.anirena.com:80/announce"
     ).joinToString(",")
 
+    /** File extensions that are never the produced media artifact (subtitle
+     *  sidecars written by the embed-subs pass). */
+    private val SUBTITLE_ARTIFACT_EXTS = setOf("srt", "vtt", "ass", "ssa", "ttml", "json3", "srv3")
+
     suspend fun download(
         context: Context,
         taskId: String,
@@ -59,7 +63,13 @@ object YoutubeDlDownloader {
         privacyMode: Boolean = false,
         // Locally rewritten HLS master (scheme-relative segment URLs fixed to
         // absolute https) — yt-dlp is fed the file instead of the original URL.
-        hlsMasterFile: String? = null
+        hlsMasterFile: String? = null,
+        // Seal-parity subtitles (2026-09-14): when true (and not audio-only),
+        // extractor downloads fetch subtitles in [subLang] (manual + auto-
+        // generated), convert them to SRT and EMBED them in the merged MP4 —
+        // one artifact, subs visible in this player and any external one.
+        downloadSubs: Boolean = false,
+        subLang: String = "en"
     ): File? {
         if (!targetDir.exists()) targetDir.mkdirs()
 
@@ -172,6 +182,21 @@ object YoutubeDlDownloader {
                     addOption("-f", "bestvideo[height<=$height][ext=mp4]+bestaudio[ext=m4a]/best[height<=$height][ext=mp4]/best[height<=$height]/best")
                     addOption("-S", "height~$height,+size,+br")
                     addOption("--merge-output-format", "mp4")
+                    if (downloadSubs) {
+                        // Seal parity (2026-09-14): manual AND auto-generated
+                        // captions for the configured language, normalized to
+                        // SRT (mp4 mov_text) and embedded by the bundled
+                        // ffmpeg during the merge pass — the artifact stays a
+                        // single file, so the workdir move logic and the
+                        // gallery scan never learn about sidecars. Videos
+                        // without subtitles are unaffected (yt-dlp just
+                        // reports "no subtitles" and moves on).
+                        addOption("--write-subs")
+                        addOption("--write-auto-subs")
+                        addOption("--sub-langs", subLang.ifBlank { "en" })
+                        addOption("--convert-subs", "srt")
+                        addOption("--embed-subs")
+                    }
                 }
                 addOption("--no-playlist")
                 // Embed/watch-page cracks (nepu, social, etc.) often resolve to HLS.
@@ -364,6 +389,10 @@ object YoutubeDlDownloader {
             // truncated file that the structure tier then blesses.
             fun isFinal(f: File) = (f.length() > 0 || f.isDirectory) &&
                 !f.name.endsWith(".aria2") && !f.name.endsWith(".part") && !f.name.endsWith(".ytdl") &&
+                // Subtitle sidecars (write-subs/embed-subs output; embed
+                // normally deletes them, a half-finished pass may not) were
+                // never artifacts.
+                f.extension.lowercase() !in SUBTITLE_ARTIFACT_EXTS &&
                 !formatShard.containsMatchIn(f.name) &&
                 !(f.isFile && File(f.absolutePath + ".aria2").exists())
 

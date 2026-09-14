@@ -117,7 +117,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val clipboard: Boolean,
         val notifications: Boolean,
         val debugLog: Boolean,
-        val logRetention: Int
+        val logRetention: Int,
+        val downloadSubs: Boolean,
+        val subLang: String
     )
 
     private var pendingSettings: SettingsSnapshot? = null
@@ -152,7 +154,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             clipboard = snapshot.clipboard,
             notifications = snapshot.notifications,
             debugLog = snapshot.debugLog,
-            logRetention = snapshot.logRetention
+            logRetention = snapshot.logRetention,
+            downloadSubs = snapshot.downloadSubs,
+            subLang = snapshot.subLang
         )
         com.anonrode.downloader.util.DebugLog.user(
             "settings saved (sockets=${snapshot.parallelSockets} quality=${snapshot.quality} stall=${snapshot.stallTimeout}s hls=${snapshot.hlsFragments} peers=${snapshot.peers} speedLimit=${snapshot.speedLimit})"
@@ -560,7 +564,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         clipboard: Boolean = true,
         notifications: Boolean = true,
         debugLog: Boolean = false,
-        logRetention: Int = 7
+        logRetention: Int = 7,
+        downloadSubs: Boolean = true,
+        subLang: String = "en"
     ) {
         // Coalesce: hold the latest snapshot and flush once 500ms after the
         // last change (see the SettingsSnapshot note above). No persistence
@@ -585,7 +591,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             clipboard = clipboard,
             notifications = notifications,
             debugLog = debugLog,
-            logRetention = logRetention
+            logRetention = logRetention,
+            downloadSubs = downloadSubs,
+            subLang = subLang
         )
         settingsSaveJob?.cancel()
         settingsSaveJob = viewModelScope.launch {
