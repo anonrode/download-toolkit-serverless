@@ -326,6 +326,16 @@ object TurboDownloader {
         }
 
         val speed = SpeedMeter(initialBytes)
+        // Progress truth = bytes committed to the file, NOT bytes received.
+        // `done` counts every socket's reads; with out-of-order pieces the
+        // received total runs ahead of what the resume map holds — the Suits
+        // download (activity-log-share-5) showed the bar pinned at 100% for
+        // 2+ minutes while one slow socket still held the committed prefix
+        // 60 MiB short. The engine's watchdog disk feed (computeDiskBytes)
+        // reads exactly this sidecar sum, so reporting it here keeps the bar,
+        // the watchdog and a future resume all on the same number. Speed
+        // still samples `done`: displayed speed is the real transfer rate.
+        fun committed(): Long = plan.sumOf { (it.current - it.start).coerceAtLeast(0L) }
         onProgress(initialBytes, total, 0L)
 
         // Decoupled Telemetry Dispatcher: Ticks every 250ms with smoothed EMA speed
@@ -334,7 +344,7 @@ object TurboDownloader {
                 delay(250)
                 val currentDone = done.get()
                 val currentSpeed = speed.sample(currentDone)
-                onProgress(currentDone, total, currentSpeed)
+                onProgress(committed(), total, currentSpeed)
             }
         }
 
@@ -451,7 +461,7 @@ object TurboDownloader {
             }
         } finally {
             telemetryTicker.cancel()
-            onProgress(done.get(), total, speed.getSpeed())
+            onProgress(committed(), total, speed.getSpeed())
         }
 
         if (failed.get()) return@coroutineScope false
