@@ -46,7 +46,14 @@ jobs:
           java-version: '17'
 
       - name: Set up Android SDK
+        # 2026-09-14: Google removed the deprecated legacy 'tools' package
+        # from the SDK repository; setup-android@v3's DEFAULT package list
+        # still asks for it, so every run died with "Failed to find package
+        # 'tools'" before compiling anything. Pin the packages we actually
+        # need (emulator-runner installs its own emulator + system images).
         uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools cmdline-tools;latest'
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
@@ -81,6 +88,8 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools cmdline-tools;latest'   # legacy 'tools' removed by Google 09-2026
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
@@ -267,6 +276,8 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools cmdline-tools;latest'   # legacy 'tools' removed by Google 09-2026
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
