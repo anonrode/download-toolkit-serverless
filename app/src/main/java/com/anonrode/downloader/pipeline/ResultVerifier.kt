@@ -85,6 +85,21 @@ object ResultVerifier {
 
     private val verdicts = ConcurrentHashMap<String, Verdict>()
     private val snapshot = MutableStateFlow<Map<String, Verdict>>(emptyMap())
+    // Episode URL -> its proven Live verdict (secondary index): the tap
+    // handoff asks "did we JUST prove THIS episode serves bytes?" — the card
+    // verdict only covers the one representative episode it cracked.
+    private val liveByEpisode = ConcurrentHashMap<String, Verdict.Live>()
+
+    /** The instant-tap lookup: fresh Live direct URL for an episode, else
+     *  null (engine resolves normally — this is a shortcut, never a gate). */
+    fun verifiedDirect(episodeUrl: String, now: Long = System.currentTimeMillis()): String? {
+        val v = liveByEpisode[VerdictPolicy.keyFor(episodeUrl)] ?: return null
+        return if (VerdictPolicy.isPreresolvable(v, now)) v.directUrl else null
+    }
+
+    internal fun indexLive(v: Verdict.Live) {
+        liveByEpisode[VerdictPolicy.keyFor(v.episodeUrl)] = v
+    }
 
     /** Everything the UI needs: one immutable map keyed by [VerdictPolicy.keyFor]. */
     fun updates(): StateFlow<Map<String, Verdict>> = snapshot
@@ -176,6 +191,7 @@ object ResultVerifier {
                 Verdict.Unreachable("crash:${e.javaClass.simpleName}", System.currentTimeMillis())
             }
             verdicts[key] = verdict
+            if (verdict is Verdict.Live) indexLive(verdict)
             publish()
             DebugLog.resolve(
                 "oracle: " + when (verdict) {
@@ -234,6 +250,7 @@ object ResultVerifier {
             when (outcome) {
                 is ProbeOutcome.Live -> return Verdict.Live(
                     directUrl = direct,
+                    episodeUrl = ep.url,
                     totalBytes = outcome.bytes,
                     episodeCount = episodes.size,
                     verifiedAtMs = System.currentTimeMillis()
@@ -270,7 +287,7 @@ object ResultVerifier {
 
     /** Tests only — production never clears (process death does). */
     internal fun resetForTests() {
-        verdicts.clear(); queue.clear(); queuedKeys.clear(); lastQueryId = null
+        verdicts.clear(); liveByEpisode.clear(); queue.clear(); queuedKeys.clear(); lastQueryId = null
         remainingBudget = MAX_CARDS_PER_QUERY
         job?.cancel(); job = null
         publish()

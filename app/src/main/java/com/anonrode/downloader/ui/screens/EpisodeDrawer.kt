@@ -296,7 +296,8 @@ fun EpisodeDrawer(
                                     isDirect = false,
                                     backend = "aria2c",
                                     site = ep.site.ifBlank { show.site },
-                                    parallelSockets = viewModel.engine.parallelSocketsPerFile
+                                    parallelSockets = viewModel.engine.parallelSocketsPerFile,
+                                    verifiedDirectUrl = com.anonrode.downloader.pipeline.ResultVerifier.verifiedDirect(ep.url)
                                 )
                             }
                             onDismiss()
@@ -396,7 +397,8 @@ fun EpisodeDrawer(
                                     isDirect = false,
                                     backend = "aria2c",
                                     site = ep.site.ifBlank { show.site },
-                                    parallelSockets = viewModel.engine.parallelSocketsPerFile
+                                    parallelSockets = viewModel.engine.parallelSocketsPerFile,
+                                    verifiedDirectUrl = com.anonrode.downloader.pipeline.ResultVerifier.verifiedDirect(ep.url)
                                 )
                                 onDismiss()
                             }
@@ -457,7 +459,8 @@ fun EpisodeDrawer(
                                         isDirect = false,
                                         backend = "aria2c",
                                         site = ep.site.ifBlank { show.site },
-                                        parallelSockets = viewModel.engine.parallelSocketsPerFile
+                                        parallelSockets = viewModel.engine.parallelSocketsPerFile,
+                                        verifiedDirectUrl = com.anonrode.downloader.pipeline.ResultVerifier.verifiedDirect(ep.url)
                                     )
                                 }
                                 onDismiss()

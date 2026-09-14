@@ -17,7 +17,13 @@ class VerdictPolicyTest {
 
     private val now = 1_000_000_000_000L
     private fun live(bytes: Long? = 220_000_000, eps: Int = 1, age: Long = 0) =
-        Verdict.Live("https://cdn.x/f?pt=abc", bytes, eps, now - age)
+        Verdict.Live(
+            directUrl = "https://cdn.x/f?pt=abc",
+            episodeUrl = "https://nk.test/ep1",
+            totalBytes = bytes,
+            episodeCount = eps,
+            verifiedAtMs = now - age
+        )
     private fun unreach(age: Long = 0) = Verdict.Unreachable("429", now - age)
     private fun dead(age: Long = 0) = Verdict.Dead("terminal-404x2", now - age)
 
