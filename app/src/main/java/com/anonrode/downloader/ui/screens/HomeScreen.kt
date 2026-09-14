@@ -34,6 +34,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.SubcomposeAsyncImage
 import com.anonrode.downloader.data.models.ShowCard
+import com.anonrode.downloader.pipeline.VerdictPolicy
 import com.anonrode.downloader.providers.CategoryFeed
 import com.anonrode.downloader.ui.theme.*
 import com.anonrode.downloader.util.UrlExtractor
@@ -375,7 +376,7 @@ fun HomeScreen(
             // else holds its place exactly as before. Absence of a verdict
             // is never a hide: unverified ≠ unverifiable-looking.
             val visibleResults = remember(uiState.searchResults, uiState.verdicts) {
-                com.anonrode.downloader.pipeline.VerdictPolicy.visibleOrdered(
+                VerdictPolicy.visibleOrdered(
                     uiState.searchResults, uiState.verdicts, System.currentTimeMillis()
                 )
             }
@@ -460,9 +461,9 @@ fun HomeScreen(
                         ShowCardItem(
                             show = show,
                             showPosters = viewModel.engine.showPostersInResults,
-                            verifiedCaption = com.anonrode.downloader.pipeline.VerdictPolicy
-                                .captionFor(uiState.verdicts[com.anonrode.downloader.pipeline
-                                    .VerdictPolicy.keyFor(show.url)]),
+                            verifiedCaption = VerdictPolicy.captionFor(
+                                uiState.verdicts[VerdictPolicy.keyFor(show.url)]
+                            ),
                             onClick = { viewModel.openEpisodeDrawer(show) }
                         )
                     }

@@ -195,9 +195,8 @@ object ResultVerifier {
             publish()
             DebugLog.resolve(
                 "oracle: " + when (verdict) {
-                    is Verdict.Live -> "LIVE '${card.title.take(40)}' ${
-                        (verdict.totalBytes ?: 0L) / 1_048_576L}MB eps=${verdict.episodeCount}"
-                    }
+                    is Verdict.Live -> "LIVE '" + card.title.take(40) + "' " +
+                        ((verdict.totalBytes ?: 0L) / 1_048_576L) + "MB eps=" + verdict.episodeCount
                     is Verdict.Dead -> "DEAD '${card.title.take(40)}' ${verdict.reason}"
                     is Verdict.Unreachable -> "UNREACHABLE '${card.title.take(40)}' ${verdict.reason}"
                 }

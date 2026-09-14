@@ -16,11 +16,11 @@ class TrendingFeedParseTest {
 
     private fun post(title: String, link: String, body: String, poster: String? = null, embed: Boolean = false): String {
         val posterField = when {
-            poster != null && !embed -> ""","jetpack_featured_media_url":"$poster""""
-            embed -> ""","_embedded":{"wp:featuredmedia":[{"source_url":"$poster"}]}"""
+            poster != null && !embed -> ",\"jetpack_featured_media_url\":\"$poster\""
+            embed -> ",\"_embedded\":{\"wp:featuredmedia\":[{\"source_url\":\"$poster\"}]}"
             else -> ""
         }
-        return """{"title":{"rendered":"$title"},"link":"$link","content":{"rendered":"$body"}$posterField}"""
+        return "{\"title\":{\"rendered\":\"$title\"},\"link\":\"$link\",\"content\":{\"rendered\":\"$body\"}$posterField}"
     }
 
     @Test
