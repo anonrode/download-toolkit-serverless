@@ -80,14 +80,39 @@ object TrendingFeed {
      * posters (5/5 and 3/3), so CategoryFeed rows and the Home genre tiles
      * get real artwork from those two sites only through this path.
      */
-    internal suspend fun fetchWpRest(site: String, query: String? = null, limit: Int = PER_SITE_LIMIT): List<ShowCard> {
-        val base = DynamicRulesManager.getBaseUrl(site).trimEnd('/')
-        if (base.isBlank()) return emptyList()
+    internal suspend fun fetchWpRest(site: String, query: String? = null, limit: Int = PER_SITE_LIMIT): List<ShowCard> =
+        fetchWpRestFrom(DynamicRulesManager.getBaseUrl(site), site, query, limit)
+
+    /** Same fetch against an explicit base host — NkiriProvider.search uses
+     *  this to run its ISP-block mirror failover over the REST endpoint. */
+    internal suspend fun fetchWpRestFrom(
+        base: String,
+        site: String,
+        query: String?,
+        limit: Int,
+        extraParams: String = "",
+        tag: String = "trending"
+    ): List<ShowCard> {
+        val url = wpRestUrl(base, query, limit, extraParams) ?: return emptyList()
+        val json = HttpClient.getText(url, referer = "${base.trimEnd('/')}/", tag = tag) ?: return emptyList()
+        return gateWpRest(parseWpRestPosts(json, site))
+    }
+
+    /** Pure endpoint assembly — shape live-verified 2026-09-14 on nkiri.top
+     *  and naijavault (`orderby=relevance` accepted WITH a search param). */
+    internal fun wpRestUrl(base: String, query: String?, limit: Int, extraParams: String = ""): String? {
+        val clean = base.trimEnd('/')
+        if (clean.isBlank()) return null
         val search = if (query == null) "" else "&search=${java.net.URLEncoder.encode(query, "UTF-8")}"
-        val url = "$base/wp-json/wp/v2/posts?per_page=$limit$search&_embed=1"
-        val json = HttpClient.getText(url, referer = "$base/", tag = "trending") ?: return emptyList()
-        val out = mutableListOf<ShowCard>()
-        val noLinks = mutableListOf<ShowCard>()
+        return "$clean/wp-json/wp/v2/posts?per_page=$limit$search$extraParams&_embed=1"
+    }
+
+    /** A parsed card plus the rendered post body it came from (gate input). */
+    internal data class RestPost(val card: ShowCard, val body: String)
+
+    /** Pure WP-REST parse — JSON in, cards out, no network, JVM-testable. */
+    internal fun parseWpRestPosts(json: String, site: String): List<RestPost> {
+        val out = mutableListOf<RestPost>()
         try {
             val array = org.json.JSONArray(json)
             for (i in 0 until array.length()) {
@@ -103,13 +128,23 @@ object TrendingFeed {
                     }
                 }
                 if (title.isNotBlank() && link.isNotBlank()) {
-                    val card = ShowCard(title = title, url = link, posterUrl = poster, site = site)
-                    val content = item.optJSONObject("content")?.optString("rendered") ?: ""
-                    if (DownloadLinkGate.hasDownloadLink(content)) out.add(card) else noLinks.add(card)
+                    out.add(
+                        RestPost(
+                            card = ShowCard(title = title, url = link, posterUrl = poster, site = site),
+                            body = item.optJSONObject("content")?.optString("rendered") ?: ""
+                        )
+                    )
                 }
             }
         } catch (_: Exception) {}
-        return if (out.isEmpty()) noLinks else out
+        return out
+    }
+
+    /** Stub-drop with the caller-keeps-its-fallback policy shared with
+     *  [fetchRss]: all-miss (unknown locker family) keeps the ungated batch. */
+    internal fun gateWpRest(posts: List<RestPost>): List<ShowCard> {
+        val out = posts.filter { DownloadLinkGate.hasDownloadLink(it.body) }.map { it.card }
+        return if (out.isEmpty()) posts.map { it.card } else out
     }
 
     /** WordPress front-page RSS: latest posts, poster scraped from the
