@@ -38,7 +38,15 @@ data class HomeUiState(
     // failed fetch shows a Retry affordance instead of silently hiding it.
     val trending: List<ShowCard> = emptyList(),
     val isTrendingLoading: Boolean = false,
-    val trendingFailed: Boolean = false
+    val trendingFailed: Boolean = false,
+    // Category sections (chips under Trending). activeCategory is the open
+    // page's Category (null = Home shows the normal landing). rows/loading/
+    // failed are the fetch trio for whatever page is open — same shape as the
+    // trending trio above, reused per category via a process cache.
+    val activeCategory: com.anonrode.downloader.providers.CategoryFeed.Category? = null,
+    val categoryRows: List<com.anonrode.downloader.providers.CategoryFeed.CategoryRow> = emptyList(),
+    val isCategoryLoading: Boolean = false,
+    val categoryFailed: Boolean = false
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -52,6 +60,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var debounceJob: Job? = null
     private var episodesJob: Job? = null
     private var trendingJob: Job? = null
+    private var categoryJob: Job? = null
+    // Genre-label -> fetched rows. Like trending, a category is fetched once
+    // per process (the data is "what's up this week" and re-crawling on every
+    // chip tap burns metered data for near-identical rows). Retry forces.
+    private val categoryCache = mutableMapOf<String, List<com.anonrode.downloader.providers.CategoryFeed.CategoryRow>>()
     private var searchSequence = 0L
     // Last query+filter actually launched; an identical search while it is
     // still running is a duplicate keystroke, not a new request.
@@ -167,6 +180,82 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             } catch (e: Exception) {
                 com.anonrode.downloader.util.DebugLog.error("trending: fetch failed ${e.message}")
                 _uiState.update { it.copy(isTrendingLoading = false, trendingFailed = true) }
+            }
+        }
+    }
+
+    /** Open a category's full-page of per-site rows. Cached rows render with
+     *  no loading flash; a first tap shows the spinner while fetching. A
+     *  still-running load for a DIFFERENT category belongs to a page the user
+     *  already left and is cancelled (the fetch itself label-guards its
+     *  state writes, so a late arrival can never bleed into another page). */
+    fun openCategory(category: com.anonrode.downloader.providers.CategoryFeed.Category) {
+        if (categoryJob?.isActive == true && _uiState.value.activeCategory?.label != category.label) {
+            categoryJob?.cancel()
+        }
+        val cached = categoryCache[category.label]
+        _uiState.update {
+            it.copy(
+                activeCategory = category,
+                categoryRows = cached ?: emptyList(),
+                isCategoryLoading = cached == null,
+                categoryFailed = cached?.isEmpty() == true
+            )
+        }
+        if (cached != null) return
+        loadCategory(category)
+    }
+
+    /** Close the page; cancels any in-flight crawl (partials stay in the
+     *  process cache only on success — a cancelled fetch caches nothing, so
+     *  reopening refetches). */
+    fun closeCategory() {
+        categoryJob?.cancel()
+        categoryJob = null
+        _uiState.update {
+            it.copy(
+                activeCategory = null,
+                categoryRows = emptyList(),
+                isCategoryLoading = false,
+                categoryFailed = false
+            )
+        }
+    }
+
+    /** Same contract as [loadTrending]: one fetch per category per process,
+     *  force=true (the Retry tap) always re-crawls. */
+    fun loadCategory(
+        category: com.anonrode.downloader.providers.CategoryFeed.Category,
+        force: Boolean = false
+    ) {
+        if (categoryJob?.isActive == true) return
+        val cached = categoryCache[category.label]
+        if (!force && cached != null) {
+            _uiState.update {
+                it.copy(categoryRows = cached, isCategoryLoading = false, categoryFailed = cached.isEmpty())
+            }
+            return
+        }
+        categoryJob = viewModelScope.launch {
+            _uiState.update { it.copy(isCategoryLoading = true, categoryFailed = false) }
+            com.anonrode.downloader.util.DebugLog.user("category '${category.label}': fetch started")
+            try {
+                val rows = withContext(Dispatchers.IO) {
+                    com.anonrode.downloader.providers.CategoryFeed.fetch(category)
+                }
+                categoryCache[category.label] = rows
+                if (_uiState.value.activeCategory?.label == category.label) {
+                    _uiState.update {
+                        it.copy(categoryRows = rows, isCategoryLoading = false, categoryFailed = rows.isEmpty())
+                    }
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                com.anonrode.downloader.util.DebugLog.error("category '${category.label}': fetch failed ${e.message}")
+                if (_uiState.value.activeCategory?.label == category.label) {
+                    _uiState.update { it.copy(isCategoryLoading = false, categoryFailed = true) }
+                }
             }
         }
     }

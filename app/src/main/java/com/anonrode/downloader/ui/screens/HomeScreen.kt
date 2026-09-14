@@ -2,6 +2,7 @@ package com.anonrode.downloader.ui.screens
 
 import android.content.ClipboardManager
 import android.content.Context
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -14,6 +15,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.rounded.*
@@ -32,6 +34,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.SubcomposeAsyncImage
 import com.anonrode.downloader.data.models.ShowCard
+import com.anonrode.downloader.providers.CategoryFeed
 import com.anonrode.downloader.ui.theme.*
 import com.anonrode.downloader.util.UrlExtractor
 import com.anonrode.downloader.viewmodel.MainViewModel
@@ -416,16 +419,22 @@ fun HomeScreen(
             } else if (uiState.searchResults.isEmpty()) {
                 // Blank-query state: the trending row IS the landing content
                 // (feature request: show what's trending on open, scrolling
-                // left to right, not top to bottom).
-                TrendingSection(
-                    modifier = Modifier.weight(1f),
-                    items = uiState.trending,
-                    isLoading = uiState.isTrendingLoading,
-                    failed = uiState.trendingFailed,
-                    showPosters = viewModel.engine.showPostersInResults,
-                    onRetry = { viewModel.loadTrending(force = true) },
-                    onOpen = { viewModel.openEpisodeDrawer(it) }
-                )
+                // left to right, not top to bottom). Category chips sit
+                // directly under it (feature request: "sections like Action
+                // below trending, tapping brings up 3 per-site rows") —
+                // they belong to the landing state only, never over results.
+                Column(modifier = Modifier.weight(1f)) {
+                    TrendingSection(
+                        items = uiState.trending,
+                        isLoading = uiState.isTrendingLoading,
+                        failed = uiState.trendingFailed,
+                        showPosters = viewModel.engine.showPostersInResults,
+                        onRetry = { viewModel.loadTrending(force = true) },
+                        onOpen = { viewModel.openEpisodeDrawer(it) }
+                    )
+                    Spacer(modifier = Modifier.height(Spacing.lg))
+                    CategoryChipsRow { category -> viewModel.openCategory(category) }
+                }
             } else {
                 LazyColumn(
                     verticalArrangement = Arrangement.spacedBy(Spacing.md),
@@ -440,6 +449,23 @@ fun HomeScreen(
                     }
                 }
             }
+        }
+
+        // Category page: a full-page overlay in THIS window's root Box — the
+        // b5cdf99 lesson says page-level content never rides a Dialog window.
+        // Composed BEFORE the drawer block so tapping a row card stacks the
+        // EpisodeDrawer on top, exactly like it does over the landing state.
+        uiState.activeCategory?.let { category ->
+            CategoryPage(
+                category = category,
+                rows = uiState.categoryRows,
+                isLoading = uiState.isCategoryLoading,
+                failed = uiState.categoryFailed,
+                showPosters = viewModel.engine.showPostersInResults,
+                onBack = { viewModel.closeCategory() },
+                onRetry = { viewModel.loadCategory(category, force = true) },
+                onOpen = { viewModel.openEpisodeDrawer(it) }
+            )
         }
 
         // Episode Drawer Modal
@@ -609,6 +635,187 @@ private fun TrendingCard(
             fontSize = 10.sp,
             fontWeight = FontWeight.Bold
         )
+    }
+}
+
+/** Display names for the CategoryFeed row headers (mirrors the filter chips). */
+private val CATEGORY_SITE_LABELS = mapOf(
+    "nkiri" to "NKiri",
+    "9jarocks" to "9jaRocks",
+    "naijaprey" to "NaijaPrey",
+    "naijavault" to "NaijaVault"
+)
+
+/**
+ * Genre chips under the trending row (blank-query landing only). The chips
+ * NAVIGATE (openCategory) — they deliberately never take a selected state:
+ * unlike the site filter chips above the search field they are not filters.
+ */
+@Composable
+private fun CategoryChipsRow(onOpen: (CategoryFeed.Category) -> Unit) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Text(
+            text = "Browse by Genre",
+            color = TextPrimary,
+            fontSize = 15.sp,
+            fontWeight = FontWeight.Bold
+        )
+        Spacer(modifier = Modifier.height(Spacing.md))
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(Spacing.xs)
+        ) {
+            CategoryFeed.CATEGORIES.forEach { category ->
+                FilterChip(
+                    selected = false,
+                    onClick = { onOpen(category) },
+                    label = {
+                        Text(
+                            text = category.label,
+                            fontSize = 12.sp,
+                            color = TextSecondary
+                        )
+                    },
+                    colors = FilterChipDefaults.filterChipColors(
+                        containerColor = SurfaceCard
+                    ),
+                    border = FilterChipDefaults.filterChipBorder(
+                        enabled = true,
+                        selected = false,
+                        borderColor = BorderHairline
+                    ),
+                    shape = RoundedCornerShape(Radius.full)
+                )
+            }
+            Spacer(modifier = Modifier.width(Spacing.md))
+        }
+    }
+}
+
+/**
+ * Full-page genre view: up to three stacked rows, each one site's latest
+ * posts for the genre ("Action on NKiri", "Action on 9jaRocks", …). Cards
+ * are the trending cards verbatim; a tap opens the same EpisodeDrawer
+ * (it composes above this page in HomeScreen's root Box). Rendered as a
+ * root-level overlay in the activity's own window — never a Dialog window.
+ */
+@Composable
+private fun CategoryPage(
+    category: CategoryFeed.Category,
+    rows: List<CategoryFeed.CategoryRow>,
+    isLoading: Boolean,
+    failed: Boolean,
+    showPosters: Boolean,
+    onBack: () -> Unit,
+    onRetry: () -> Unit,
+    onOpen: (ShowCard) -> Unit
+) {
+    BackHandler(onBack = onBack)
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(BackgroundDark)
+            .statusBarsPadding()
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = Spacing.lg, vertical = Spacing.md),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(
+                onClick = onBack,
+                modifier = Modifier
+                    .size(48.dp)
+                    .background(SurfaceElevated, CircleShape)
+                    .border(1.dp, BorderHairline, CircleShape)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.ArrowBack,
+                    contentDescription = "Back",
+                    tint = TextPrimary,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+            Spacer(modifier = Modifier.width(Spacing.md))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = category.label.uppercase(),
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Black,
+                    color = TextPrimary,
+                    letterSpacing = 1.sp
+                )
+                Text(
+                    text = if (rows.isNotEmpty()) "LATEST ${rows.size} SITE${if (rows.size > 1) "S" else ""}" else "Latest genre posts, by site",
+                    fontSize = 11.sp,
+                    color = TextMuted
+                )
+            }
+        }
+        when {
+            isLoading && rows.isEmpty() -> Box(
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    CircularProgressIndicator(color = AccentPrimary, strokeWidth = 2.dp)
+                    Spacer(modifier = Modifier.height(Spacing.md))
+                    Text("Loading ${category.label.lowercase()}...", color = TextSecondary, fontSize = 13.sp)
+                }
+            }
+            rows.isEmpty() -> Box(
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("${category.label} is unavailable right now", color = TextSecondary, fontSize = 14.sp)
+                    Spacer(modifier = Modifier.height(Spacing.xs))
+                    Text(
+                        text = if (failed) "All sources timed out" else "No ${category.label.lowercase()} posts found",
+                        color = TextMuted,
+                        fontSize = 12.sp
+                    )
+                    Spacer(modifier = Modifier.height(Spacing.xs))
+                    TextButton(onClick = onRetry) {
+                        Text("Retry", color = AccentPrimary, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                    }
+                }
+            }
+            else -> LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                verticalArrangement = Arrangement.spacedBy(Spacing.xl),
+                contentPadding = PaddingValues(bottom = Spacing.xl)
+            ) {
+                items(rows, key = { it.site }) { row ->
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        Text(
+                            text = "${category.label} on ${CATEGORY_SITE_LABELS[row.site] ?: row.site.uppercase()}",
+                            color = TextPrimary,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = Spacing.lg)
+                        )
+                        Spacer(modifier = Modifier.height(Spacing.sm))
+                        LazyRow(
+                            horizontalArrangement = Arrangement.spacedBy(Spacing.md),
+                            contentPadding = PaddingValues(horizontal = Spacing.lg),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            items(row.items, key = { it.url }) { show ->
+                                TrendingCard(
+                                    show = show,
+                                    showPosters = showPosters,
+                                    onClick = { onOpen(show) }
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
