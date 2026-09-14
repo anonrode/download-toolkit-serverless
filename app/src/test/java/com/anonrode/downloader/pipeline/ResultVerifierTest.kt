@@ -192,14 +192,16 @@ class ResultVerifierTest {
         // Six nkiri cards rank above the single drama pick: the straight
         // rank-order budget verified 6 nkiri and 0 drama — yet the drama/
         // anime sites have no free body gate, so the oracle is their ONLY
-        // pre-tap proof. Site-fair must spend a slot on the drama card.
+        // pre-tap proof. Site-fair must spend a slot on the drama card —
+        // and STILL emit in rank order (the late site never jumps the
+        // queue head; it only guarantees presence).
         val ranked = (1..6).map { cardOn("nkiri", it) } + cardOn("anitaku", 7)
         val picked = ResultVerifier.selectForBudget(ranked, budget = 6) { false }
         assertEquals(
             listOf(
-                "https://nkiri.test/post1/", "https://anitaku.test/post7/",
-                "https://nkiri.test/post2/", "https://nkiri.test/post3/",
-                "https://nkiri.test/post4/", "https://nkiri.test/post5/"
+                "https://nkiri.test/post1/", "https://nkiri.test/post2/",
+                "https://nkiri.test/post3/", "https://nkiri.test/post4/",
+                "https://nkiri.test/post5/", "https://anitaku.test/post7/"
             ),
             picked.map { it.url }
         )
