@@ -1037,40 +1037,10 @@ class DownloadEngine(
 
         private val STREAMING_QUERY_PATTERN = Regex("""[?&][^=&]*=(?:mpd|dash|hls)(?:&|$)""")
 
-        // Locker hosts whose URLs are pages to crack, not direct files. Hoisted
-        // out of isKnownLockerHost so the list is built once instead of on
-        // every call (it runs per resolve attempt).
-        private val KNOWN_LOCKER_HOSTS = listOf(
-            "downloadwella.com",
-            "loadedfiles.",
-            "wetafiles.com",
-            "vikingfile.com",
-            "lulacloud.com",
-            "waffi",
-            "dood.",
-            "streamwish.",
-            "strwsh.",
-            "stwish.",
-            "sfastwish.",
-            "vidhide.",
-            "kissorgrab.com",
-            // nkiserv.com REMOVED: naijavault drawers hand out direct
-            // ds2.nkiserv.com/TV/*.mkv files (nkiri's own CDN). Listing it as
-            // a locker made the engine try to 'crack' a finished direct file
-            // and fail cleanly every time (live log 23:23:03).
-            "wildshare.net",
-            "vidmoly.",
-            "mixdrop.",
-            "mixdrp.",
-            "streamtape.",
-            "pixeldrain.com",
-            "vidbasic.",
-            "vidb.top",
-            "lightdl.cc",
-            "5play.cc",
-            "megaplay.",
-            "blogger.com"
-        )
+        // KNOWN_LOCKER_HOSTS + the isKnownLockerHost/isProvablyDirectFile
+        // classifiers moved to pipeline.LinkResolver (2026-09-14) so the
+        // search-verify oracle proves results with the SAME ladder downloads
+        // use. The thin delegates below keep this file's ~20 call sites intact.
 
         // Stall handling: a window must move at least this many bytes to count
         // as live progress (HLS CDNs throttle to ~1 KB/s instead of dying; the
@@ -1217,108 +1187,24 @@ class DownloadEngine(
         }
     }
 
-    /**
-     * A URL that is provably a direct file rather than a page to crack, even
-     * when its host appears in [isKnownLockerHost]'s list: pixeldrain's API
-     * endpoint and token-carrying CDN links (?pt= / ?token= / ?download) are
-     * resolver *outputs* — the cracking already happened — so exempting them
-     * lets genuine direct links through instead of discarding them (the probe
-     * in TurboDownloader still rejects any server that lies and serves HTML).
-     */
-    private fun isProvablyDirectFile(url: String): Boolean {
-        val lower = url.lowercase()
-        val path = lower.substringAfter("://", "").substringBefore('?').substringBefore('#')
-        if (path.contains("/api/file/")) return true
-        val query = lower.substringAfter('?', "").substringBefore('#')
-        return query.contains("pt=") || query.contains("token=") || query.contains("download")
-    }
+    /** Moved to pipeline.LinkResolver (2026-09-14, oracle round); delegates
+     *  here so the routing/startTask call sites below are untouched. */
+    private fun isProvablyDirectFile(url: String): Boolean =
+        com.anonrode.downloader.pipeline.LinkResolver.isProvablyDirectFile(url)
 
-    private fun isKnownLockerHost(url: String): Boolean {
-        if (url.isBlank()) return false
-        if (isProvablyDirectFile(url)) return false
-        val lower = url.lowercase()
-        // Host-based, not extension-based: locker pages carry the media filename
-        // in their path (loadedfiles.net/.../Episode.mkv), so a .mkv/.mp4 suffix
-        // must NOT exempt them from resolution — the host decides whether a URL
-        // is a page to crack or a direct file.
-        val host = lower.substringAfter("://", "").substringBefore('/').substringBefore(':')
-        return KNOWN_LOCKER_HOSTS.any { host.contains(it) }
-    }
+    private fun isKnownLockerHost(url: String): Boolean =
+        com.anonrode.downloader.pipeline.LinkResolver.isKnownLockerHost(url)
 
-    private suspend fun resolveStreamUrl(permUrl: String, site: String, defaultQual: String, bypassHealth: Boolean = false): String? {        // Resolver output is TRUSTED: a URL that differs from the input page was
-        // cracked. Locker CDN subdomains legitimately embed the locker's name
-        // (fsmc02.downloadwella.com served nkiri's real .mkv — live-verified), so
-        // isKnownLockerHost must not reject them; it only exists to stop an
-        // UNRESOLVED locker page from being treated as a direct file.
-        //
-        // The poison list is INTENTIONALLY NOT consulted here. A URL that
-        // returned HTML once may serve the real .mkv a second later — token
-        // rotation, edge node assignment, and the server's anti-abuse cooldown
-        // all clear in seconds-to-minutes, and a downloader that gives up
-        // after one HTML response on a token-bearing URL would lose every
-        // locker download the moment a single edge node happens to be rate-
-        // limited. The 11-episode wildshare cascade in app-2026-09-01 fired
-        // because the engine REJECTED wildshare after one HTML page; the right
-        // fix is to retry the source page for a fresh token, not blacklist
-        // the host. Poison is therefore consulted only by the download path
-        // (to keep a known-bad URL out of the bytes-on-disk fetch), never by
-        // the resolver path.
-        fun accept(out: String?): Boolean {
-            if (out.isNullOrBlank()) return false
-            if (out != permUrl) return true
-            return !isKnownLockerHost(out)
-        }
-
-        // 1. Try direct resolution via ResolverRegistry.
-        // This function's semantic is "fetch a FRESH link" (called on token
-        // expiry), so the resolution cache must never serve the dead URL here.
-        com.anonrode.downloader.pipeline.ResolveCache.invalidate(
-            com.anonrode.downloader.pipeline.ResolveCache.keyFor(permUrl, defaultQual)
+    /** Moved verbatim to pipeline.LinkResolver.resolveChain (2026-09-14,
+     *  oracle round). allowCacheHit=false preserves this caller's documented
+     *  semantic: "fetch a FRESH link" — invalidate-first, never serve a
+     *  cached (possibly dead-token) URL on the refresh path. All four
+     *  call sites (startTask + the 401/403/404 self-heal re-resolves) get
+     *  identical behavior to before the move. */
+    private suspend fun resolveStreamUrl(permUrl: String, site: String, defaultQual: String, bypassHealth: Boolean = false): String? =
+        com.anonrode.downloader.pipeline.LinkResolver.resolveChain(
+            permUrl, site, defaultQual, bypassHealth = bypassHealth, allowCacheHit = false
         )
-        var resolved = ResolverRegistry.resolve(permUrl, defaultQual, bypassHealth = bypassHealth)
-        if (accept(resolved)) {
-            return resolved
-        }
-
-        // 2. Try ProviderRegistry
-        if (site.isNotBlank()) {
-            try {
-                val recipe = ProviderRegistry.resolveEpisode(site, permUrl, defaultQual)
-                if (recipe.directUrl.isNotBlank() && recipe.directUrl != permUrl) {
-                    resolved = recipe.directUrl
-                }
-            } catch (_: Exception) {}
-        }
-
-        if (!accept(resolved)) {
-            for (provider in ProviderRegistry.allProviders) {
-                if (provider.canHandle(permUrl)) {
-                    try {
-                        val recipe = provider.resolveEpisode(permUrl, defaultQual)
-                        if (recipe.directUrl.isNotBlank() && recipe.directUrl != permUrl) {
-                            resolved = recipe.directUrl
-                            break
-                        }
-                    } catch (_: Exception) {}
-                }
-            }
-        }
-
-        // 3. Unpack secondary lockers if present. Non-direct URLs that are NOT known
-        // lockers are embed/watch pages (e.g. vidsrc.mov): the registry can't crack
-        // their token-gated chains, so don't waste fetches — startTask routes them
-        // straight to yt-dlp.
-        if (!accept(resolved) && !resolved.isNullOrBlank() && isKnownLockerHost(resolved)) {
-            try {
-                val inner = ResolverRegistry.resolve(resolved, defaultQual)
-                if (accept(inner)) {
-                    resolved = inner
-                }
-            } catch (_: Exception) {}
-        }
-
-        return if (accept(resolved)) resolved else null
-    }
 
     /**
      * Thrown by [preflightHls] when the CDN rejects the playlist with 401/403:
