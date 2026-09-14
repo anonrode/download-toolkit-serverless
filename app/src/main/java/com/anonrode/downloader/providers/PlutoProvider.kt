@@ -268,12 +268,11 @@ object PlutoProvider : SiteProvider {
         return long.startsWith(short)
     }
 
-    /** Cloudflare/JS-challenge pages answer HTTP 200 with no real content. */
-    private fun looksLikeSecurityChallenge(html: String): Boolean {
-        val low = html.lowercase()
-        return low.contains("just a moment") || low.contains("cf-challenge") ||
-            low.contains("challenge-platform") || (low.contains("cloudflare") && low.contains("verify"))
-    }
+    /** Cloudflare/JS-challenge pages answer HTTP 200 with no real content.
+     *  Moved to pipeline.LinkResolver.isSecurityChallenge (2026-09-14) so the
+     *  search-verify oracle treats a challenge as NEVER proof of absence. */
+    private fun looksLikeSecurityChallenge(html: String): Boolean =
+        com.anonrode.downloader.pipeline.LinkResolver.isSecurityChallenge(html)
 
     override suspend fun resolveEpisode(episodeUrl: String, quality: String): DownloadRecipe {
         val direct = ResolverRegistry.resolve(episodeUrl, quality) ?: episodeUrl
