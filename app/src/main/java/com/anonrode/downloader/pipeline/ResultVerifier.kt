@@ -37,9 +37,10 @@ import java.util.concurrent.LinkedBlockingDeque
  *    Only proof hides.
  *
  * Budgets are intentionally conservative for a metered phone: 6 cards per
- * query (rank order), 3 episode attempts per card, 20s per card, 4 workers,
- * ~1-2 MB worst case cold, ~0 on re-search (verdict cache + the drawer's
- * own loadEpisodes cache make verified cards' taps instant AND free).
+ * query (site-fair — one slot per site first, then rank order), 3 episode
+ * attempts per card, 20s per card, 4 workers, ~1-2 MB worst case cold, ~0
+ * on re-search (verdict cache + the drawer's own loadEpisodes cache make
+ * verified cards' taps instant AND free).
  */
 object ResultVerifier {
 
@@ -121,7 +122,8 @@ object ResultVerifier {
 
     /**
      * Called from the VM per ranked snapshot. Verifies the top
-     * [MAX_CARDS_PER_QUERY] not-yet-proven cards, in rank order. A different
+     * [MAX_CARDS_PER_QUERY] not-yet-proven cards with a site-fair budget
+     * (see [selectForBudget]). A different
      * [queryId] swaps the pending queue (un-started work for cards no longer
      * on screen is data we must not spend) and cancels in-flight verify
      * calls via the shared tagged-cancel primitive.
@@ -139,21 +141,24 @@ object ResultVerifier {
             }
             HttpClient.cancelTagged(HTTP_TAG)
         }
-        val toAdd = ArrayList<ShowCard>()
-        if (remainingBudget > 0) {
-            for (card in ranked) {
-                if (remainingBudget <= 0) break
+        val toAdd = if (remainingBudget > 0) {
+            selectForBudget(ranked, remainingBudget) { card ->
                 val key = VerdictPolicy.keyFor(card.url)
-                if (key.isEmpty()) continue
-                val existing = verdicts[key]
-                if (existing != null && VerdictPolicy.isFresh(existing, now)) continue
-                if (!queuedKeys.add(key)) continue
-                toAdd.add(card)
+                val v = verdicts[key]
+                queuedKeys.contains(key) || (v != null && VerdictPolicy.isFresh(v, now))
+            }
+        } else emptyList()
+        var enqueued = 0
+        for (card in toAdd) {
+            // add() returns false for a URL duplicated in the ranked list —
+            // a duplicate must not double-spend the budget.
+            if (queuedKeys.add(VerdictPolicy.keyFor(card.url))) {
+                queue.add(card)
                 remainingBudget--
+                enqueued++
             }
         }
-        if (toAdd.isEmpty()) { publish(); return }
-        queue.addAll(toAdd)
+        if (enqueued == 0) { publish(); return }
         if (job?.isActive != true) {
             job = scope.launch {
                 kotlinx.coroutines.coroutineScope {
@@ -161,6 +166,41 @@ object ResultVerifier {
                 }
             }
         }
+    }
+
+    /**
+     * Site-fair budget selection (pure — [submit] applies it): pass 0
+     * claims a slot for the FIRST card of each site in rank order, pass 1
+     * spends what remains in straight rank order. The naija sites are gated
+     * for free at search time (post bodies carry locker markers); the
+     * drama/anime sites (admin-ajax JSON, TMDB-style APIs) have no body to
+     * gate — the oracle is their ONLY pre-tap proof, and a straight
+     * rank-order budget let one heavily-ranked provider starve every other
+     * site out of the 6 slots. [skip] reports cards that are already
+     * queued or hold a fresh verdict.
+     */
+    internal fun selectForBudget(
+        ranked: List<ShowCard>,
+        budget: Int,
+        skip: (ShowCard) -> Boolean
+    ): List<ShowCard> {
+        val chosen = HashSet<String>()
+        val considered = HashSet<String>()
+        val seenSites = HashSet<String>()
+        for (pass in 0..1) {
+            for (card in ranked) {
+                if (chosen.size >= budget) break
+                val key = VerdictPolicy.keyFor(card.url)
+                if (key.isEmpty() || !considered.add(key)) continue
+                if (pass == 0 && !seenSites.add(card.site)) continue
+                if (skip(card)) continue
+                chosen.add(key)
+            }
+        }
+        if (chosen.isEmpty()) return emptyList()
+        // Emit in RANK order (selection order would let a late-ranked site
+        // win the head of the verify queue over the user's #1 result).
+        return ranked.filter { chosen.contains(VerdictPolicy.keyFor(it.url)) }
     }
 
     /** Move a still-queued card to the head (user tapped — verify it NOW). */

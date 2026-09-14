@@ -181,4 +181,46 @@ class ResultVerifierTest {
         ResultVerifier.resetForTests()
         assertEquals(null, ResultVerifier.verifiedDirect("https://nk.test/epH"))
     }
+
+    // -- site-fair budget (2026-09-14) ----------------------------------------
+
+    private fun cardOn(site: String, n: Int) =
+        ShowCard(title = "$site pick $n", url = "https://$site.test/post$n/", site = site)
+
+    @Test
+    fun budgetReservesAFirstSlotForEverySiteBeforeBackfill() {
+        // Six nkiri cards rank above the single drama pick: the straight
+        // rank-order budget verified 6 nkiri and 0 drama — yet the drama/
+        // anime sites have no free body gate, so the oracle is their ONLY
+        // pre-tap proof. Site-fair must spend a slot on the drama card.
+        val ranked = (1..6).map { cardOn("nkiri", it) } + cardOn("anitaku", 7)
+        val picked = ResultVerifier.selectForBudget(ranked, budget = 6) { false }
+        assertEquals(
+            listOf(
+                "https://nkiri.test/post1/", "https://anitaku.test/post7/",
+                "https://nkiri.test/post2/", "https://nkiri.test/post3/",
+                "https://nkiri.test/post4/", "https://nkiri.test/post5/"
+            ),
+            picked.map { it.url }
+        )
+    }
+
+    @Test
+    fun budgetBackfillsRankOrderWithinASingleSite() {
+        val ranked = (1..8).map { cardOn("nkiri", it) }
+        val picked = ResultVerifier.selectForBudget(ranked, budget = 6) { false }
+        assertEquals(ranked.take(6).map { it.url }, picked.map { it.url })
+    }
+
+    @Test
+    fun budgetSkipsQueuedAndAlreadyProvenCards() {
+        val ranked = listOf(cardOn("nkiri", 1), cardOn("nkiri", 2), cardOn("nepu", 3))
+        val picked = ResultVerifier.selectForBudget(ranked, budget = 2) { card ->
+            card.url == "https://nkiri.test/post1/" // queued/proven marker
+        }
+        assertEquals(
+            listOf("https://nkiri.test/post2/", "https://nepu.test/post3/"),
+            picked.map { it.url }
+        )
+    }
 }
