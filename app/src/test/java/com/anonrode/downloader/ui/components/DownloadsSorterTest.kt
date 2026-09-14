@@ -256,4 +256,84 @@ class DownloadsSorterTest {
         assertEquals("SMALL", DownloadsSorter.sizeBucketLabel(399L * 1024L * 1024L))
         assertEquals("MEDIUM", DownloadsSorter.sizeBucketLabel(400L * 1024L * 1024L))
     }
+
+    // -- episode ordering (2026-09-14: group-by-show ep1 → Next ep2) ---------
+
+    private fun ep(
+        id: String,
+        showTitle: String = "Squid Game",
+        episodeNum: Int,
+        status: TaskStatus = TaskStatus.COMPLETED,
+        createdAt: Long = 0L,
+        path: String = "/storage/emulated/0/Download/Anon/$showTitle/$id.mp4"
+    ): DownloadTask = DownloadTask(
+        id = id,
+        showTitle = showTitle,
+        episodeNum = episodeNum,
+        episodeTitle = "Episode $episodeNum",
+        directUrl = "https://example.invalid/$id.mp4",
+        status = status,
+        filePath = path,
+        createdAt = createdAt
+    )
+
+    @Test
+    fun libraryMode_ordersEpisodesNumericallyWithinShow() {
+        // Enqueued newest-episode-first (a "download all" on a site that
+        // lists ep24 at the top): the GROUP must still render 1,2,3.
+        val e2 = ep("e2", episodeNum = 2)
+        val e1 = ep("e1", episodeNum = 1)
+        val e3 = ep("e3", episodeNum = 3)
+
+        val groups = DownloadsSorter.sortDownloads(
+            listOf(e2, e1, e3),
+            DownloadsSorter.SORT_LIBRARY
+        )
+        assertEquals(1, groups.size)
+        assertEquals(listOf("e1", "e2", "e3"), groups[0].second.map { it.id })
+    }
+
+    @Test
+    fun libraryMode_unnumberedTasksKeepEnqueueOrder() {
+        // Movies / direct links carry episodeNum 0: they sort AFTER numbered
+        // episodes, among themselves by createdAt ascending (enqueue order).
+        val movieLate = ep("m2", episodeNum = 0, createdAt = 200L)
+        val ep5 = ep("x5", episodeNum = 5)
+        val movieEarly = ep("m1", episodeNum = 0, createdAt = 100L)
+
+        val groups = DownloadsSorter.sortDownloads(
+            listOf(movieLate, ep5, movieEarly),
+            DownloadsSorter.SORT_LIBRARY
+        )
+        assertEquals(listOf("x5", "m1", "m2"), groups[0].second.map { it.id })
+    }
+
+    @Test
+    fun playerQueueFor_sameShowEpisodeOrderOnly() {
+        // The bug this pins: Next on ep1 used to hop into ANOTHER show's
+        // file (queue was every completed task in engine order).
+        val sg3 = ep("sg3", showTitle = "Squid Game", episodeNum = 3)
+        val sg1 = ep("sg1", showTitle = "Squid Game", episodeNum = 1)
+        val at2 = ep("at2", showTitle = "Attack Titan", episodeNum = 2)
+        val sg2 = ep("sg2", showTitle = "Squid Game", episodeNum = 2)
+        val sgPending = ep("sg4", showTitle = "Squid Game", episodeNum = 4,
+            status = TaskStatus.DOWNLOADING)
+
+        val queue = DownloadsSorter.playerQueueFor(
+            listOf(sg3, sg1, at2, sg2, sgPending),
+            "Squid Game"
+        )
+        assertEquals(
+            listOf(sg1.filePath, sg2.filePath, sg3.filePath),
+            queue
+        )
+    }
+
+    @Test
+    fun playerQueueFor_blankShowUsesUnknownBucket() {
+        val a = ep("a", showTitle = "", episodeNum = 1)
+        val b = ep("b", showTitle = "", episodeNum = 2)
+        assertEquals(listOf(a.filePath, b.filePath),
+            DownloadsSorter.playerQueueFor(listOf(b, a), ""))
+    }
 }
