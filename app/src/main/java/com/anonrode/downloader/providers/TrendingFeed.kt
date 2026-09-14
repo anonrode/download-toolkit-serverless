@@ -42,8 +42,8 @@ object TrendingFeed {
         val perSite = listOf(
             async { withTimeoutOrNull(TIMEOUT_MS) { fetchWpRest("naijavault") } ?: emptyList() },
             async { withTimeoutOrNull(TIMEOUT_MS) { fetchWpRest("nkiri") } ?: emptyList() },
-            async { withTimeoutOrNull(TIMEOUT_MS) { fetchRss("naijaprey") } ?: emptyList() },
-            async { withTimeoutOrNull(TIMEOUT_MS) { fetchRss("9jarocks") } ?: emptyList() }
+            async { withTimeoutOrNull(TIMEOUT_MS) { fetchRss("naijaprey", "/feed/") } ?: emptyList() },
+            async { withTimeoutOrNull(TIMEOUT_MS) { fetchRss("9jarocks", "/feed/") } ?: emptyList() }
         ).map { it.await() }
 
         // Round-robin interleave so the row leads with variety instead of
@@ -105,11 +105,17 @@ object TrendingFeed {
     }
 
     /** WordPress front-page RSS: latest posts, poster scraped from the
-     *  description HTML (same technique NaijaPreyProvider.search uses). */
-    private suspend fun fetchRss(site: String): List<ShowCard> {
+     *  description HTML (same technique NaijaPreyProvider.search uses).
+     *
+     * [path] is the feed endpoint under the base URL. CategoryFeed calls this
+     * with the site's WP *search* feed (`/search/<q>/feed/…`) so the two
+     * features share one RSS parser — poster sniffing, the NAV_GARBAGE filter
+     * and the DownloadLinkGate stub-drop fallback exist once, not twice.
+     */
+    internal suspend fun fetchRss(site: String, path: String): List<ShowCard> {
         val base = DynamicRulesManager.getBaseUrl(site).trimEnd('/')
         if (base.isBlank()) return emptyList()
-        val xml = HttpClient.getText("$base/feed/", referer = "$base/", tag = "trending") ?: return emptyList()
+        val xml = HttpClient.getText("$base$path", referer = "$base/", tag = "trending") ?: return emptyList()
         val out = mutableListOf<ShowCard>()
         val noLinks = mutableListOf<ShowCard>()
         try {
