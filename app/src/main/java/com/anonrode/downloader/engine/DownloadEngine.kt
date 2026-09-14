@@ -1081,6 +1081,17 @@ class DownloadEngine(
         // retries 3x, then the engine re-resolves a fresh URL (rotating token
         // and edge node) for another 3 attempts — the recovery chain needs room.
         private const val MAX_STALL_KILLS = 8
+        /**
+         * How long a live Turbo rate-limit cooldown (TurboDownloader.
+         * throttleRemainingMs) holds the stall watchdog's hand. The
+         * in-session wait IS the fix for the share-5 storm: bytes freeze for
+         * minutes while the host calms down, then the same session resumes —
+         * the download never dies mid-stream just because a CDN got polite.
+         * This cap keeps a permanently blackholed host from holding a queue
+         * slot forever in DOWNLOADING; past it the normal kill→park ladder
+         * resumes and THE RULE parks the task with its partials.
+         */
+        private const val THROTTLE_SESSION_CAP_MS = 15 * 60_000L
 
         // Hard ceiling on the link-cracking phase. Without it a slow site kept
         // a task in RESOLVING forever while the user's mobile data trickled
@@ -1790,6 +1801,10 @@ class DownloadEngine(
                     var lastActivity = System.currentTimeMillis()
                     var lastKillTime = 0L
                     var stallKills = 0
+                    // Epoch of the CURRENT rate-limit stagnation episode (0 =
+                    // none). Reset whenever real bytes move; drives the
+                    // THROTTLE_SESSION_CAP_MS grace below.
+                    var throttleFirstSeen = 0L
                     // Crawl detection: some HLS CDNs (vidsrc edge nodes) throttle a
                     // connection to ~1 KB/s instead of dying. Bytes still move, so
                     // lastActivity stays fresh and the download would otherwise
@@ -1842,7 +1857,24 @@ class DownloadEngine(
                         val parsedGrew = parsed > lastParsed
                         if (diskGrew) lastDisk = disk
                         if (parsedGrew) lastParsed = parsed
-                        if (diskGrew || parsedGrew) lastActivity = now
+                        if (diskGrew || parsedGrew) {
+                            lastActivity = now
+                            throttleFirstSeen = 0L
+                        }
+                        // A Turbo rate-limit cooldown (429/503) is INTENTIONAL
+                        // idle-waiting, not a stall: bytes will not move because
+                        // the transfer is politely waiting — the exact behavior
+                        // that keeps 1DM alive on the same host. No kill signal
+                        // fires while a cooldown is live; the grace is capped so
+                        // a fully-blackholed host cannot hold a queue slot
+                        // forever, after which the normal kill→park ladder
+                        // resumes and THE RULE parks the task with its partials.
+                        if (TurboDownloader.throttleRemainingMs(task.id) > 0L) {
+                            if (throttleFirstSeen == 0L) throttleFirstSeen = now
+                            lastActivity = now
+                        }
+                        val throttleGrace = throttleFirstSeen > 0L &&
+                            now - throttleFirstSeen <= THROTTLE_SESSION_CAP_MS
                         // Periodic progress beacon: the log recorded nothing
                         // between start and kill, so a stalled task and a slow
                         // one were indistinguishable (audit finding). Emit every
@@ -1938,7 +1970,7 @@ class DownloadEngine(
                             windowBps < bestWindowBps * 0.5 &&
                             windowBps < floorBps &&
                             windowSecs >= 30
-                        if (zombie) {
+                        if (zombie && !throttleGrace) {
                             val zombieMsg = "Download made no meaningful progress (${(now - watchdogStart) / 1000}s, under 1 MiB) — the source server is throttling or unreachable. Try again later."
                             com.anonrode.downloader.util.DebugLog.engine(
                                 "task=${task.id} zombie cap after ${(now - watchdogStart) / 1000}s with ${((totalBytesNow - (startBytes ?: totalBytesNow)) / 1024)}KiB total"
@@ -1989,7 +2021,7 @@ class DownloadEngine(
                         // Magnet exemption unchanged.
                         val attemptBoundary = stallKills * STALL_TIMEOUT_MS * 2
                         val stalledLong = now - lastActivity > STALL_TIMEOUT_MS
-                        if (!magnetTask && (stalledLong || throttled) && (now - watchdogStart) > attemptBoundary && (stallKills == 0 || now - lastKillTime > STALL_TIMEOUT_MS)) {
+                        if (!magnetTask && !throttleGrace && (stalledLong || throttled) && (now - watchdogStart) > attemptBoundary && (stallKills == 0 || now - lastKillTime > STALL_TIMEOUT_MS)) {
                             stallKills++
                             com.anonrode.downloader.util.DebugLog.engine(
                                 "task=${task.id} watchdog kill #$stallKills (idle=${(now - lastActivity) / 1000}s crawl=$crawlStalled throttled=$throttled window=${(moved / 1024).toInt()}KiB best=${(bestWindowBps / 1024).toInt()}KiB/s)"

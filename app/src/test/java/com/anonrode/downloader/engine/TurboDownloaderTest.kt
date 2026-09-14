@@ -34,6 +34,7 @@ class TurboDownloaderTest {
     @Before
     fun setUp() {
         TurboDownloader.retryBaseDelayMs = 1L
+        TurboDownloader.throttleBaseDelayMs = 1L
         dir = createTempDirectory("turbo-test").toFile()
         server = MockWebServer()
         server.start()
@@ -46,6 +47,7 @@ class TurboDownloaderTest {
     @After
     fun tearDown() {
         TurboDownloader.retryBaseDelayMs = 1000L
+        TurboDownloader.throttleBaseDelayMs = 15_000L
         server.shutdown()
         dir.deleteRecursively()
     }
@@ -137,6 +139,37 @@ class TurboDownloaderTest {
         assertFalse("no partial file should be created", File(dir, "video.mp4.part").exists())
     }
 
+    @Test
+    fun segmentedDownload_waitsOutRateLimitStormInsteadOfFailing() {
+        // The share-5 regression case: a CDN that 429s mid-download. The OLD
+        // policy counted every 429 against the piece's 5-attempt budget —
+        // ~80 requests across 4 sockets in 15s — then set the global failure
+        // flag and killed the whole download. Rate-limits are WAITS now, not
+        // attempts: after 40 rejections the host calms down and the same
+        // session finishes the file.
+        val payload = payload(20 * 1024 * 1024)
+        server.dispatcher = RateLimitedRangeServer(payload, rejectFirstRanges = 40)
+        val result = downloadTo("video.mp4")
+        assertTrue("expected Success, got $result", result is TurboDownloader.TurboResult.Success)
+        val success = result as TurboDownloader.TurboResult.Success
+        assertTrue(success.segmented)
+        assertTrue(File(dir, "video.mp4").readBytes().contentEquals(payload))
+    }
+
+    @Test
+    fun singleDownload_waitsOutRateLimitInsteadOfFailing() {
+        // Same rule on the single-stream path: 10 consecutive 429s exceed the
+        // 5-attempt budget the old loop would have exhausted in seconds; now
+        // none of them consumes an attempt and the body lands once served.
+        val payload = payload(2 * 1024 * 1024)
+        server.dispatcher = RateLimitedRangeServer(payload, rejectFirstFullGets = 10)
+        val result = downloadTo("video.mp4")
+        assertTrue("expected Success, got $result", result is TurboDownloader.TurboResult.Success)
+        val success = result as TurboDownloader.TurboResult.Success
+        assertFalse(success.segmented)
+        assertTrue(File(dir, "video.mp4").readBytes().contentEquals(payload))
+    }
+
     private fun downloadTo(destName: String): TurboDownloader.TurboResult = runBlocking {
         TurboDownloader.download(
             url = server.url("/video.mp4").toString(),
@@ -196,5 +229,48 @@ private class FlakyRangeServer(
             .setHeader("Content-Length", end - start + 1)
             .setBody(Buffer().write(content, start, end - start + 1))
             .apply { if (n <= failFirstRanges) setSocketPolicy(SocketPolicy.DISCONNECT_DURING_RESPONSE_BODY) }
+    }
+}
+
+/**
+ * Mock server that answers the first N range (or full-GET) requests with
+ * HTTP 429 — a rate-limiting CDN that calms down when given room — then
+ * serves like FlakyRangeServer. HEAD always succeeds so the probe never
+ * burns the rejection budget.
+ */
+private class RateLimitedRangeServer(
+    private val content: ByteArray,
+    private val rejectFirstRanges: Int = 0,
+    private val rejectFirstFullGets: Int = 0
+) : Dispatcher() {
+
+    private val rangeRequests = AtomicInteger(0)
+    private val fullGets = AtomicInteger(0)
+
+    override fun dispatch(request: RecordedRequest): MockResponse {
+        if (request.method == "HEAD") {
+            return MockResponse()
+                .setHeader("Content-Length", content.size)
+                .setHeader("Accept-Ranges", "bytes")
+        }
+        val range = request.getHeader("Range")
+        if (range == null) {
+            val n = fullGets.incrementAndGet()
+            if (n <= rejectFirstFullGets) return MockResponse().setResponseCode(429)
+            return MockResponse()
+                .setHeader("Content-Type", "application/octet-stream")
+                .setBody(Buffer().write(content))
+        }
+        val n = rangeRequests.incrementAndGet()
+        if (n <= rejectFirstRanges) return MockResponse().setResponseCode(429)
+        val spec = range.removePrefix("bytes=")
+        val parts = spec.split('-')
+        val start = parts[0].toInt()
+        val end = parts.getOrNull(1)?.takeIf { it.isNotBlank() }?.toInt() ?: (content.size - 1)
+        return MockResponse()
+            .setResponseCode(206)
+            .setHeader("Content-Range", "bytes $start-$end/${content.size}")
+            .setHeader("Content-Length", end - start + 1)
+            .setBody(Buffer().write(content, start, end - start + 1))
     }
 }
