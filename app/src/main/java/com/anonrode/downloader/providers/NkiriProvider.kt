@@ -32,57 +32,80 @@ object NkiriProvider : SiteProvider {
         // networks while the Cloudflare mirror works — try each host in order
         // (live-verified 2026-08-22: thenkiri.com full catalog, nkiri.top
         // partial but reachable everywhere).
-        for (base in DynamicRulesManager.getBaseUrls(name)) {
+        //
+        // REST FIRST (measured 2026-09-14): the HTML `?s=` page shows top posts
+        // with no download link at all — 3 of 5 sampled cards were tap-dead
+        // stubs (60%), and no body gate is possible there because the search
+        // page never carries the post body. WP-REST search DOES carry it, so
+        // the same DownloadLinkGate the other three sites run applies here for
+        // free. `orderby=relevance` live-verified 2026-09-14 on nkiri.top
+        // (200, bodies + featured media); date order stays for the discovery
+        // feeds — a typed query wants its best match, not its newest post.
+        val bases = DynamicRulesManager.getBaseUrls(name)
+        for ((idx, base) in bases.withIndex()) {
             if (base.isBlank()) continue
-            try {
-                val searchUrl = "$base/?s=$encoded"
-                val html = HttpClient.getText(searchUrl, referer = "$base/", tag = "search")
-                if (!html.isNullOrBlank()) {
-                    val doc = Jsoup.parse(html, searchUrl)
-                    val articles = doc.select("article, .post-item, .elementor-post, h2.entry-title a")
-
-                    for (art in articles) {
-                        val linkElem = if (art.tagName() == "a") art else art.selectFirst("h2 a, .entry-title a, a")
-                        if (linkElem == null) continue
-                        val title = linkElem.text().trim()
-                        val rawLink = linkElem.attr("abs:href").ifBlank { linkElem.attr("href") }
-                        val link = rawLink.substringBefore("?")
-
-                        if (link.isBlank() || title.isBlank() || link.contains("/category/") || link.contains("/how-to-") || link.contains("/page/")) {
-                            continue
-                        }
-
-                        val posterElem = art.selectFirst("img")
-                        val poster = posterElem?.attr("abs:src")?.ifBlank { posterElem.attr("src") } ?: ""
-
-                        val lowerTitle = title.lowercase()
-                        val cat = when {
-                            lowerTitle.contains("korean") || lowerTitle.contains("kdrama") || lowerTitle.contains("c-drama") || lowerTitle.contains("drama") || lowerTitle.contains("series") || lowerTitle.contains("season") -> "Asian Drama"
-                            lowerTitle.contains("nollywood") || lowerTitle.contains("yoruba") -> "Nollywood"
-                            else -> "Asian Drama & Movies"
-                        }
-
-                        if (results.none { it.url == link }) {
-                            results.add(
-                                ShowCard(
-                                    title = title,
-                                    url = link,
-                                    posterUrl = poster,
-                                    site = name,
-                                    category = cat
-                                )
-                            )
-                        }
-                    }
-                }
-            } catch (_: Exception) {}
+            val cards = TrendingFeed.fetchWpRestFrom(
+                base, name, query, REST_LIMIT,
+                extraParams = "&orderby=relevance", tag = "search"
+            ).map { it.copy(category = categoryForTitle(it.title)) }
+            for (c in cards) if (results.none { it.url == c.url }) results.add(c)
             // A host that answered with content is authoritative — the mirror
             // only kicks in when the primary is unreachable or empty.
-            if (results.isNotEmpty() || base == DynamicRulesManager.getBaseUrls(name).last()) {
-                break
-            }
+            if (results.isNotEmpty() || idx == bases.lastIndex) break
         }
+        if (results.isNotEmpty()) return results
+
+        // HTML-scrape fallback, reached only when REST failed on EVERY base.
+        // These cards skip the body gate (the page has no bodies); the search
+        // verify oracle confirms or silently keeps them (ResultVerifier).
+        try {
+            val searchUrl = "$mainUrl/?s=$encoded"
+            val html = HttpClient.getText(searchUrl, referer = "$mainUrl/", tag = "search")
+            if (!html.isNullOrBlank()) {
+                val doc = Jsoup.parse(html, searchUrl)
+                val articles = doc.select("article, .post-item, .elementor-post, h2.entry-title a")
+
+                for (art in articles) {
+                    val linkElem = if (art.tagName() == "a") art else art.selectFirst("h2 a, .entry-title a, a")
+                    if (linkElem == null) continue
+                    val title = linkElem.text().trim()
+                    val rawLink = linkElem.attr("abs:href").ifBlank { linkElem.attr("href") }
+                    val link = rawLink.substringBefore("?")
+
+                    if (link.isBlank() || title.isBlank() || link.contains("/category/") || link.contains("/how-to-") || link.contains("/page/")) {
+                        continue
+                    }
+
+                    val posterElem = art.selectFirst("img")
+                    val poster = posterElem?.attr("abs:src")?.ifBlank { posterElem.attr("src") } ?: ""
+
+                    if (results.none { it.url == link }) {
+                        results.add(
+                            ShowCard(
+                                title = title,
+                                url = link,
+                                posterUrl = poster,
+                                site = name,
+                                category = categoryForTitle(title)
+                            )
+                        )
+                    }
+                }
+            }
+        } catch (_: Exception) {}
         return results
+    }
+
+    private const val REST_LIMIT = 15
+
+    /** The site's own title conventions, unchanged from the HTML path. */
+    internal fun categoryForTitle(title: String): String {
+        val lowerTitle = title.lowercase()
+        return when {
+            lowerTitle.contains("korean") || lowerTitle.contains("kdrama") || lowerTitle.contains("c-drama") || lowerTitle.contains("drama") || lowerTitle.contains("series") || lowerTitle.contains("season") -> "Asian Drama"
+            lowerTitle.contains("nollywood") || lowerTitle.contains("yoruba") -> "Nollywood"
+            else -> "Asian Drama & Movies"
+        }
     }
 
     override suspend fun loadEpisodes(showUrl: String): ShowDetails {
