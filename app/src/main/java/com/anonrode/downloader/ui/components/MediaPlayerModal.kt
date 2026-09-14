@@ -43,13 +43,13 @@ import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Subtitles
 import androidx.compose.material.icons.rounded.AspectRatio
 import androidx.compose.material.icons.rounded.Forward10
-import androidx.compose.material.icons.rounded.Fullscreen
-import androidx.compose.material.icons.rounded.FullscreenExit
 import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.Pause
+import androidx.compose.material.icons.rounded.PictureInPictureAlt
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Replay10
+import androidx.compose.material.icons.rounded.ScreenRotation
 import androidx.compose.material.icons.rounded.SkipNext
 import androidx.compose.material.icons.rounded.SkipPrevious
 import androidx.compose.material.icons.rounded.Speed
@@ -92,6 +92,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
+import androidx.media3.common.Format
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
@@ -114,7 +115,8 @@ import java.io.File
 
 /**
  * The public context the player needs beyond the single file being opened.
- * [queuePeerPaths] is the Next/Previous list (Downloads screen order);
+ * [queuePeerPaths] is the Next/Previous list — the completed files of the
+ * SAME show, in episode order (DownloadsSorter.playerQueueFor);
  * [onPlayFile] asks the parent to point its active task at a peer path.
  */
 data class MediaPlayerContext(
@@ -124,9 +126,77 @@ data class MediaPlayerContext(
     val onPlayFile: (String) -> Unit = {}
 )
 
-private val SIDECAR_SUBTITLE_EXTS = listOf("srt", "vtt")
+private val SIDECAR_SUBTITLE_EXTS = listOf("srt", "vtt", "ass", "ssa")
 private val AUDIO_EXTS = listOf("mp3", "m4a", "aac", "wav", "flac", "opus", "ogg")
 private val PLAYBACK_SPEEDS = listOf(0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 1.75f, 2.0f)
+
+/**
+ * One candidate embedded/sidecar subtitle track, flattened to the fields
+ * the auto-pick rule needs (kept away from Media3 types so the rule is
+ * JVM-testable without Robolectric).
+ */
+data class SubTrackInfo(val language: String?, val label: String?, val isDefault: Boolean)
+
+// 639-1 codes (yt-dlp / settings) -> every spelling a container track may
+// carry: 639-2/T, the obsolete 639-2/B bibliographic codes MKVs love
+// ("fre"/"chi"), and the plain English name labels fansubs write.
+private val LANG_ALIASES = mapOf(
+    "en" to setOf("en", "eng", "english"),
+    "es" to setOf("es", "spa", "spanish", "espanol", "castellano"),
+    "fr" to setOf("fr", "fra", "fre", "french", "francais", "français"),
+    "pt" to setOf("pt", "por", "portuguese", "portugues", "português"),
+    "ar" to setOf("ar", "ara", "arabic", "العربية"),
+    "hi" to setOf("hi", "hin", "hindi"),
+    "zh" to setOf("zh", "zho", "chi", "chinese", "mandarin", "中文", "国语"),
+    "ja" to setOf("ja", "jpn", "japanese", "日本語"),
+    "ko" to setOf("ko", "kor", "korean", "한국어")
+)
+
+/**
+ * Which subtitle track to switch ON automatically when the user never
+ * picked one (2026-09-14: "the player should read the subtitles for MKV
+ * videos" — embedded tracks already existed but ExoPlayer leaves text
+ * OFF until told, so subs were invisible unless the user hunted the
+ * sheet). Order of trust: the user's preferred language wins over the
+ * container's own DEFAULT flag; a language match beats everything.
+ * Returns an index into [tracks], or -1 for "stay off".
+ */
+internal fun autoPickSubtitleIndex(tracks: List<SubTrackInfo>, preferredLang: String): Int {
+    if (tracks.isEmpty()) return -1
+    val pref = preferredLang.trim().lowercase()
+    if (pref == "all") {
+        // Any language is fine: the muxer's DEFAULT track first, else #1.
+        tracks.indexOfFirst { it.isDefault }.let { if (it >= 0) return it }
+        return 0
+    }
+    val aliases = LANG_ALIASES[pref] ?: setOf(pref)
+    fun matches(info: SubTrackInfo): Boolean {
+        val lang = info.language?.trim()?.lowercase()
+        if (lang != null && lang.isNotEmpty() && aliases.any { lang == it || lang.startsWith("$it-") }) return true
+        val label = info.label?.trim()?.lowercase() ?: return false
+        // "English", "eng", "English (CC)", "movie_en.srt" — compare whole
+        // alphanumeric tokens, never a bare substring ("Frederick" must not
+        // match "fr"). Char-code tokenizer, not a \p{...} regex: the device
+        // regex engine is stricter than the JVM's (crash saga, 2026-09-13).
+        val tokens = ArrayList<String>(4)
+        val cur = StringBuilder()
+        for (ch in label) {
+            if (Character.isLetterOrDigit(ch)) cur.append(ch)
+            else {
+                if (cur.isNotEmpty()) { tokens.add(cur.toString()); cur.setLength(0) }
+            }
+        }
+        if (cur.isNotEmpty()) tokens.add(cur.toString())
+        return tokens.any { aliases.contains(it) } ||
+            aliases.any { label == it || label.startsWith("$it ") || label.contains(" $it ") }
+    }
+    // 1) preferred language AND default-flagged; 2) preferred language;
+    // 3) no match at all -> OFF (showing Vietnamese when the user said
+    // English is how players get untrusted).
+    tracks.indexOfFirst { it.isDefault && matches(it) }.let { if (it >= 0) return it }
+    tracks.indexOfFirst { matches(it) }.let { if (it >= 0) return it }
+    return -1
+}
 
 // The player is a permanently BLACK canvas regardless of app theme — the
 // theme tokens invert on it in Light mode, so the palette is pinned here.
@@ -134,6 +204,17 @@ private val PlayerAccent = Color(0xFFFFFFFF)
 private val PlayerTextSecondary = Color(0xFF94A3B8)
 private val PlayerSurface = Color(0xFF101216)
 private val PlayerSurfaceElevated = Color(0xFF181B22)
+
+/** "movie.en.srt" next to "movie.mkv" -> "en"; "movie.final.srt" -> "und".
+ *  Region tags are dropped ("pt-BR" -> "pt") because Format.language wants
+ *  a bare 639 code, not an IETF tag. Pure so the tag rule is JVM-testable. */
+internal fun sidecarLanguageHint(fileName: String, videoStem: String): String {
+    val stem = fileName.substringAfterLast('/').substringBeforeLast('.')
+    if (videoStem.isEmpty() || !stem.startsWith(videoStem)) return "und"
+    val tag = stem.removePrefix(videoStem).trim('.', '_', '-', ' ')
+        .substringBefore('-')
+    return if (Regex("^[a-zA-Z]{2,3}$").matches(tag)) tag.lowercase() else "und"
+}
 
 /**
  * Full-screen in-app player, rebuilt around one rule: ONE ExoPlayer instance
@@ -146,9 +227,13 @@ private val PlayerSurfaceElevated = Color(0xFF181B22)
  * The UI is deliberately basic: one layout for every orientation — black
  * surface, letterboxed video, tap anywhere to toggle controls, auto-hide
  * after 3s. Transport (prev / -10s / play / +10s / next), a seek bar, and
- * four chips: speed (tap to cycle), audio track, subtitles, and a
- * display-framing cycle (Fit -> Crop -> Stretch). No PiP, no
- * brightness/volume sliders — hardware keys and the system handle those.
+ * five chips on the bottom row: speed (tap to cycle), audio track,
+ * subtitles (auto-enabled from the Settings language — embedded MKV tracks
+ * and .srt/.vtt/.ass/.ssa sidecars), the display-framing cycle
+ * (Fit -> Crop -> Stretch), and the Rotate chip (landscape <-> portrait);
+ * the top bar carries a Mini-player button that shrinks the video into
+ * picture-in-picture (2026-09-14 user spec: rotation moved from the old
+ * top-bar fullscreen toggle to the chip row; the PiP slot took its place).
  */
 @OptIn(UnstableApi::class)
 @Composable
@@ -280,11 +365,27 @@ private fun MediaPlayerModalImpl(
     var currentAudioLabel by remember { mutableStateOf<String?>(null) }
     var subtitleOptions by remember { mutableStateOf<List<String>>(emptyList()) }
     var currentSubtitleLabel by remember { mutableStateOf<String?>(null) }
+    // Auto-pick (2026-09-14): embedded MKV subs must APPEAR without the
+    // user hunting the sheet — the first file with a preferred-language
+    // track switches it on. Once the user has driven the sheet in this
+    // session (including "Off"), we never auto-touch again.
+    var subtitleUserDecided by remember { mutableStateOf(false) }
+    val preferredSubLang = remember {
+        runCatching { com.anonrode.downloader.data.settings.AppSettings.load(context).subtitleLanguage }
+            .getOrDefault("en")
+    }
     var showAudioSheet by remember { mutableStateOf(false) }
     var showSubtitleSheet by remember { mutableStateOf(false) }
     var tracksLoaded by remember { mutableStateOf(false) }
-    // Fullscreen: rotate to landscape + hide system bars, YouTube-style.
-    var isFullscreen by remember { mutableStateOf(false) }
+    // Rotation state (user-driven via the Rotate chip): true = force
+    // SENSOR_LANDSCAPE, false = force PORTRAIT. The system bars are hidden
+    // for the modal's whole life either way — rotation and immersion are
+    // separate decisions now (2026-09-14: the old single "Fullscreen"
+    // toggle conflated them; its button slot became the PiP mini-player).
+    var isLandscape by remember { mutableStateOf(false) }
+    // True while the activity is in picture-in-picture (mini-player): all
+    // chrome must be out of the pip frame, only the video surface renders.
+    var inPip by remember { mutableStateOf(false) }
     // Display framing cycle: FIT (letterbox, default) -> ZOOM (center-crop
     // to fill) -> STRETCH (FILL — distorts the aspect to fill the frame)
     // -> back to FIT. Display-only: the file is never re-encoded or
@@ -339,8 +440,17 @@ private fun MediaPlayerModalImpl(
             val sibling = File(file.parentFile, "${file.nameWithoutExtension}.$extName")
             if (sibling.exists() && sibling.canRead()) {
                 MediaItem.SubtitleConfiguration.Builder(Uri.fromFile(sibling))
-                    .setMimeType(if (extName == "vtt") "text/vtt" else "application/x-subrip")
-                    .setLanguage("und")
+                    .setMimeType(
+                        when (extName) {
+                            "vtt" -> "text/vtt"
+                            "ass", "ssa" -> "application/x-ssa"
+                            else -> "application/x-subrip"
+                        }
+                    )
+                    // "movie.en.srt" carries a real language tag: feeding it
+                    // lets the auto-pick rule below treat a sidecar exactly
+                    // like an embedded EN track instead of "und".
+                    .setLanguage(sidecarLanguageHint(sibling.name, file.nameWithoutExtension))
                     .setLabel(sibling.name)
                     .setSelectionFlags(0)
                     .build()
@@ -461,9 +571,36 @@ private fun MediaPlayerModalImpl(
                         ?: "Track ${fmt.id}"
                 }
                 subtitleOptions = subLabels
-                // Apply the remembered subtitle pick once per file.
-                if (currentSubtitleLabel != null && !tracksLoaded) {
-                    applySubtitleByLabel(exoPlayer, tracks, currentSubtitleLabel!!, enable = true)
+                if (!tracksLoaded) {
+                    val remembered = currentSubtitleLabel
+                    if (remembered != null &&
+                        applySubtitleByLabel(exoPlayer, tracks, remembered, enable = true)
+                    ) {
+                        // Remembered pick applied (once per file).
+                    } else if (!subtitleUserDecided) {
+                        if (remembered != null) currentSubtitleLabel = null
+                        // Nothing chosen by the user in this session (and
+                        // none persisted): MKV/MP4 embedded tracks surface
+                        // here DISABLED by ExoPlayer default — auto-enable
+                        // the preferred-language one so subtitles "just
+                        // read" (2026-09-14 request).
+                        val pick = autoPickSubtitleIndex(
+                            subGroups.map { g ->
+                                val f = g.mediaTrackGroup.getFormat(0)
+                                SubTrackInfo(
+                                    language = f.language,
+                                    label = f.label,
+                                    isDefault = f.selectionFlags and Format.SELECTION_FLAG_DEFAULT != 0
+                                )
+                            },
+                            preferredSubLang
+                        )
+                        if (pick >= 0) {
+                            val label = subLabels[pick + 1] // +1: "Off" is index 0
+                            currentSubtitleLabel = label
+                            applySubtitleByLabel(exoPlayer, tracks, label, enable = true)
+                        }
+                    }
                 }
                 tracksLoaded = true
             }
@@ -503,27 +640,67 @@ private fun MediaPlayerModalImpl(
         }
     }
 
-    // Fullscreen toggle: SENSOR_LANDSCAPE (not USER_LANDSCAPE) so the tap
-    // works even with system rotation locked. MainActivity declares
-    // orientation in configChanges, so the rotation does not recreate the
-    // activity or disturb the player.
-    LaunchedEffect(isFullscreen, activity) {
+    // Rotation (Rotate chip): SENSOR_LANDSCAPE (not USER_LANDSCAPE) so the
+    // tap works even with system rotation locked; PORTRAIT is a hard lock
+    // so "rotate to portrait" means portrait, not "whatever the sensor
+    // says" on a sideways phone. MainActivity declares orientation in
+    // configChanges, so neither flip recreates the activity or disturbs
+    // the player.
+    LaunchedEffect(isLandscape, activity) {
         val act = activity ?: return@LaunchedEffect
         val insetsController = WindowCompat.getInsetsController(act.window, act.window.decorView)
-        if (isFullscreen) {
+        if (isLandscape) {
             showControls = true
             act.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
             insetsController.systemBarsBehavior =
                 WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
             insetsController.hide(WindowInsetsCompat.Type.systemBars())
         } else {
-            act.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
-            // The overlay is immersive for its WHOLE lifetime, not just the
-            // fullscreen mode — the old dialog hid the bars via its own
-            // window; here the only equivalent is re-hiding (running show()
-            // on first composition would also race the DisposableEffect
-            // above and leave the bars up during portrait playback).
+            act.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+            // The overlay is immersive for its WHOLE lifetime, not just one
+            // mode — the old dialog hid the bars via its own window; here
+            // the only equivalent is re-hiding (running show() on first
+            // composition would also race the DisposableEffect above and
+            // leave the bars up during playback).
             insetsController.hide(WindowInsetsCompat.Type.systemBars())
+        }
+    }
+
+    // PiP (mini-player) mode tracker: the SYSTEM drives in/out (close-X,
+    // tap-to-expand), so state is read from the lifecycle callback, never
+    // from the button. While in, every chrome element leaves composition
+    // so the pip frame carries nothing but video.
+    DisposableEffect(componentActivity) {
+        val ca = componentActivity
+        if (ca == null) {
+            onDispose {}
+        } else {
+            val pipListener = androidx.activity.OnPictureInPictureModeChangedListener { pip, _ ->
+                inPip = pip
+                if (!pip) showControls = true
+            }
+            ca.addOnPictureInPictureModeChangedListener(pipListener)
+            onDispose { ca.removeOnPictureInPictureModeChangedListener(pipListener) }
+        }
+    }
+
+    // Enter mini-player: aspect ratio follows the video (falls back to the
+    // frame's own ratio, clamped to the range Android accepts — an
+    // out-of-range Rational throws IllegalArgumentException on some OEMs).
+    val enterPip: () -> Unit = {
+        activity?.let { act ->
+            runCatching {
+                val vs = exoPlayer.videoSize
+                val width = if (vs.width > 0) vs.width else 16
+                val height = if (vs.height > 0) vs.height else 9
+                var ratio = width.toFloat() / height.toFloat()
+                if (ratio < 1f / 2.39f) ratio = 1f / 2.39f
+                if (ratio > 2.39f) ratio = 2.39f
+                val params = android.app.PictureInPictureParams.Builder()
+                    .setAspectRatio(android.util.Rational((ratio * 100).toInt(), 100))
+                    .build()
+                act.enterPictureInPictureMode(params)
+            }
         }
     }
 
@@ -682,7 +859,7 @@ private fun MediaPlayerModalImpl(
             // STATE_BUFFERING the seek bar would otherwise sit frozen at the
             // old position or a dead 0% and the clock reads 0:00 — this says
             // "in flight, no percentage yet" without pretending.
-            if (isBuffering) {
+            if (isBuffering && !inPip) {
                 LinearProgressIndicator(
                     modifier = Modifier
                         .align(Alignment.TopCenter)
@@ -693,7 +870,7 @@ private fun MediaPlayerModalImpl(
             }
 
             AnimatedVisibility(
-                visible = showControls,
+                visible = showControls && !inPip,
                 enter = fadeIn(),
                 exit = fadeOut(),
                 modifier = Modifier.fillMaxSize()
@@ -733,10 +910,16 @@ private fun MediaPlayerModalImpl(
                                 .padding(horizontal = Spacing.md)
                         )
                         if (!isAudio) {
+                            // 2026-09-14 (user spec): this slot used to be
+                            // the fullscreen rotation toggle. Rotation moved
+                            // to the Rotate chip beside Fit; this button now
+                            // shrinks the video into a floating mini-player
+                            // (picture-in-picture) — the YouTube gesture of
+                            // leaving a video while doing something else.
                             PlayerCircleButton(
-                                icon = if (isFullscreen) Icons.Rounded.FullscreenExit else Icons.Rounded.Fullscreen,
-                                contentDescription = if (isFullscreen) "Exit fullscreen" else "Fullscreen",
-                                onClick = { touchControls(); isFullscreen = !isFullscreen }
+                                icon = Icons.Rounded.PictureInPictureAlt,
+                                contentDescription = "Mini player",
+                                onClick = { touchControls(); enterPip() }
                             )
                             Spacer(modifier = Modifier.width(Spacing.xs))
                         }
@@ -940,6 +1123,20 @@ private fun MediaPlayerModalImpl(
                                 },
                                 leading = Icons.Rounded.AspectRatio
                             )
+                            if (!isAudio) {
+                                // Rotation toggle — lives HERE (bottom row,
+                                // beside Fit) per the user's 2026-09-14
+                                // spec: framing controls together.
+                                PlayerChip(
+                                    label = if (isLandscape) "Portrait" else "Landscape",
+                                    selected = isLandscape,
+                                    onClick = {
+                                        touchControls()
+                                        isLandscape = !isLandscape
+                                    },
+                                    leading = Icons.Rounded.ScreenRotation
+                                )
+                            }
                         }
                     }
                 }
@@ -975,6 +1172,7 @@ private fun MediaPlayerModalImpl(
             selected = currentSubtitleLabel,
             onPick = { label ->
                 val off = label == "Off"
+                subtitleUserDecided = true
                 currentSubtitleLabel = if (off) null else label
                 applySubtitleByLabel(exoPlayer, exoPlayer.currentTracks, label, enable = !off)
                 MediaPlayerPrefs.setSubtitleTrack(context, if (off) null else label)
@@ -993,9 +1191,9 @@ private fun applySubtitleByLabel(
     tracks: Tracks,
     label: String,
     enable: Boolean
-) {
+): Boolean {
     val textGroups = tracks.groups.filter { it.type == C.TRACK_TYPE_TEXT }
-    if (textGroups.isEmpty()) return
+    if (textGroups.isEmpty()) return false
     val builder = player.trackSelectionParameters.buildUpon()
         .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, !enable)
     if (enable) {
@@ -1005,11 +1203,12 @@ private fun applySubtitleByLabel(
                 (fmt.label == null && fmt.language?.uppercase() == label) ||
                 ("Track ${fmt.id}" == label)
         }
-        if (matchIdx < 0) return
+        if (matchIdx < 0) return false
         val group = textGroups[matchIdx].mediaTrackGroup
         builder.setOverrideForType(TrackSelectionOverride(group, 0))
     }
     player.trackSelectionParameters = builder.build()
+    return true
 }
 
 /** One circle-button style for the whole player. The OUTER box owns the hit

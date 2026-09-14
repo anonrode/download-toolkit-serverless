@@ -6,6 +6,7 @@ import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
@@ -90,6 +91,11 @@ internal class SettingsState(
     var completionNotifications by mutableStateOf(viewModel.engine.completionNotifications)
     var debugLogging by mutableStateOf(viewModel.engine.debugLogging)
     var logRetention by mutableStateOf(viewModel.engine.logRetentionDays)
+    // Seal-parity subtitle settings (2026-09-14): drive yt-dlp caption
+    // download + embed; the language also pre-selects subtitle tracks in
+    // the built-in player (MKV/embedded subs show up automatically).
+    var downloadSubs by mutableStateOf(viewModel.engine.downloadSubtitles)
+    var subLang by mutableStateOf(viewModel.engine.subtitleLanguage)
 
     var isUpdatingYtDlp by mutableStateOf(false)
     var isSyncingRules by mutableStateOf(false)
@@ -115,7 +121,9 @@ internal class SettingsState(
         clipboard = clipboardDetect,
         notifications = completionNotifications,
         debugLog = debugLogging,
-        logRetention = logRetention
+        logRetention = logRetention,
+        downloadSubs = downloadSubs,
+        subLang = subLang
     )
 
     /** Instant-apply: every control persists the moment the user changes it —
@@ -145,7 +153,9 @@ internal class SettingsState(
             clipboard = s.clipboard,
             notifications = s.notifications,
             debugLog = s.debugLog,
-            logRetention = s.logRetention
+            logRetention = s.logRetention,
+            downloadSubs = s.downloadSubs,
+            subLang = s.subLang
         )
     }
 }
@@ -170,7 +180,9 @@ internal data class SettingsStateSnapshot(
     val clipboard: Boolean,
     val notifications: Boolean,
     val debugLog: Boolean,
-    val logRetention: Int
+    val logRetention: Int,
+    val downloadSubs: Boolean,
+    val subLang: String
 )
 
 @Composable
@@ -739,7 +751,65 @@ internal fun SettingsMediaSection(state: SettingsState) {
             }
         }
     }
+
+    SettingsCard {
+        SettingsSwitchRow(
+            icon = Icons.Rounded.Subtitles,
+            title = "Download Subtitles",
+            subtitle = "Fetches captions for YouTube & social video downloads and embeds them in the file",
+            checked = state.downloadSubs,
+            onCheckedChange = { state.downloadSubs = it; state.persist() }
+        )
+
+        HorizontalDivider(color = BorderHairline, modifier = Modifier.padding(horizontal = Spacing.md))
+
+        Column(modifier = Modifier.padding(Spacing.md)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Rounded.Translate, contentDescription = null, tint = AccentPrimary, modifier = Modifier.size(18.dp))
+                Spacer(modifier = Modifier.width(Spacing.sm))
+                Column {
+                    Text("Subtitle Language", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = TextPrimary)
+                    // 2026-09-14: the same code also drives the player's
+                    // AUTO-selection of an embedded/subtitle track, so an
+                    // English-subbed MKV shows English without a manual pick.
+                    Text("Also picks which embedded track the player shows by default", fontSize = 11.sp, color = TextMuted)
+                }
+            }
+            Spacer(modifier = Modifier.height(Spacing.sm))
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(Spacing.xs)
+            ) {
+                SUBTITLE_LANGS.forEach { (code, label) ->
+                    val isSel = state.subLang == code
+                    FilterChip(
+                        selected = isSel,
+                        onClick = {
+                            state.subLang = code
+                            state.persist()
+                        },
+                        label = { Text(label, fontSize = 12.sp, fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal) },
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = AccentPrimary,
+                            selectedLabelColor = BackgroundDark,
+                            containerColor = SurfaceElevated
+                        )
+                    )
+                }
+            }
+        }
+    }
 }
+
+/** Language codes fed to yt-dlp --sub-langs and matched against embedded
+ *  track languages in the player ("all" is a valid yt-dlp selector). */
+internal val SUBTITLE_LANGS = listOf(
+    "en" to "English", "es" to "Spanish", "fr" to "French", "pt" to "Portuguese",
+    "ar" to "Arabic", "hi" to "Hindi", "zh" to "Chinese", "ja" to "Japanese",
+    "ko" to "Korean", "all" to "All languages"
+)
 
 @Composable
 internal fun SettingsAboutSection(

@@ -29,8 +29,9 @@
             android:name=".MainActivity"
             android:exported="true"
             android:launchMode="singleTask"
-            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode"
             android:supportsPictureInPicture="true"
+            android:resizeableActivity="true"
             android:theme="@style/Theme.AnonDownloader.Splash">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

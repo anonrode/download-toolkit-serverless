@@ -32,7 +32,11 @@ data class AppSettings(
     val clipboardDetect: Boolean = true,
     val completionNotifications: Boolean = true,
     val debugLogging: Boolean = false,
-    val logRetentionDays: Int = 7
+    val logRetentionDays: Int = 7,
+    // Seal-parity subtitles (2026-09-14): yt-dlp caption language + the
+    // player's auto-selected embedded track. Default English.
+    val downloadSubtitles: Boolean = true,
+    val subtitleLanguage: String = "en"
 ) {
     companion object {
         const val PREFS_NAME = "downloader_settings"
@@ -60,7 +64,9 @@ data class AppSettings(
                 clipboardDetect = prefs.getBoolean("pref_clipboard_detect", true),
                 completionNotifications = prefs.getBoolean("pref_completion_notifications", true),
                 debugLogging = prefs.getBoolean("pref_debug_logging", false),
-                logRetentionDays = prefs.getInt("pref_log_retention_days", 7)
+                logRetentionDays = prefs.getInt("pref_log_retention_days", 7),
+                downloadSubtitles = prefs.getBoolean("pref_download_subtitles", true),
+                subtitleLanguage = prefs.getString("pref_subtitle_lang", "en") ?: "en"
             )
         }
 
@@ -86,6 +92,8 @@ data class AppSettings(
                 .putBoolean("pref_completion_notifications", s.completionNotifications)
                 .putBoolean("pref_debug_logging", s.debugLogging)
                 .putInt("pref_log_retention_days", s.logRetentionDays)
+                .putBoolean("pref_download_subtitles", s.downloadSubtitles)
+                .putString("pref_subtitle_lang", s.subtitleLanguage)
                 .apply()
         }
 

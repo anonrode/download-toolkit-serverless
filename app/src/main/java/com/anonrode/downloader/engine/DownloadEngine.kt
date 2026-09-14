@@ -92,6 +92,11 @@ class DownloadEngine(
     var completionNotifications: Boolean = true
     var debugLogging: Boolean = false
     var logRetentionDays: Int = 7
+    // Seal-parity subtitle settings (2026-09-14): yt-dlp extractor downloads
+    // fetch subtitles in this language (default English) and embed them in
+    // the merged file. Both live in downloader_settings like the rest.
+    var downloadSubtitles: Boolean = true
+    var subtitleLanguage: String = "en"
 
     // No byte movement (parsed progress or filesystem bytes) for this long while
     // DOWNLOADING means the backend is hung; the watchdog kills it so the retry
@@ -268,6 +273,8 @@ class DownloadEngine(
         completionNotifications = prefs.getBoolean("pref_completion_notifications", true)
         debugLogging = prefs.getBoolean("pref_debug_logging", false)
         logRetentionDays = prefs.getInt("pref_log_retention_days", 7)
+        downloadSubtitles = prefs.getBoolean("pref_download_subtitles", true)
+        subtitleLanguage = prefs.getString("pref_subtitle_lang", "en") ?: "en"
         // Retention applies at startup, not just when the setting changes.
         com.anonrode.downloader.util.DebugLog.configureRetention(logRetentionDays)
     }
@@ -308,7 +315,9 @@ class DownloadEngine(
         clipboard: Boolean = true,
         notifications: Boolean = true,
         debugLog: Boolean = false,
-        logRetention: Int = 7
+        logRetention: Int = 7,
+        downloadSubs: Boolean = true,
+        subLang: String = "en"
     ) {
         this.maxConcurrentDownloads = maxConcurrent
         this.parallelSocketsPerFile = parallelSockets
@@ -330,6 +339,8 @@ class DownloadEngine(
         this.completionNotifications = notifications
         this.debugLogging = debugLog
         this.logRetentionDays = logRetention.coerceIn(1, 90)
+        this.downloadSubtitles = downloadSubs
+        this.subtitleLanguage = subLang.trim().ifBlank { "en" }
         com.anonrode.downloader.util.DebugLog.configureRetention(this.logRetentionDays)
 
         // A lower limit preempts running tasks NOW (demote back to queue);
@@ -358,6 +369,8 @@ class DownloadEngine(
             .putBoolean("pref_completion_notifications", notifications)
             .putBoolean("pref_debug_logging", debugLog)
             .putInt("pref_log_retention_days", this.logRetentionDays)
+            .putBoolean("pref_download_subtitles", this.downloadSubtitles)
+            .putString("pref_subtitle_lang", this.subtitleLanguage)
             .apply()
     }
 
@@ -2307,6 +2320,8 @@ class DownloadEngine(
                         speedLimitKbs = globalSpeedLimitKbs,
                         torrentPeers = torrentPeers,
                         privacyMode = torrentPrivacyMode,
+                        downloadSubs = downloadSubtitles && isExtractor,
+                        subLang = subtitleLanguage,
                         hlsMasterFile = masterFile?.absolutePath
                     )
 
