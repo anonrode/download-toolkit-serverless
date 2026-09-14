@@ -512,7 +512,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             isDirect = false,
             backend = "aria2c",
             parallelSockets = engine.parallelSocketsPerFile,
-            site = episode.site.ifBlank { show.site }
+            site = episode.site.ifBlank { show.site },
+            // Oracle instant-tap: if verification byte-proved THIS episode's
+            // direct URL seconds ago, the engine skips RESOLVING entirely
+            // (guarded inside enqueue; null/absent = today's exact path).
+            verifiedDirectUrl = com.anonrode.downloader.pipeline.ResultVerifier
+                .verifiedDirect(episode.url)
         )
     }
 
@@ -528,7 +533,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 isDirect = false,
                 backend = "aria2c",
                 parallelSockets = engine.parallelSocketsPerFile,
-                site = ep.site.ifBlank { show.site }
+                site = ep.site.ifBlank { show.site },
+                verifiedDirectUrl = com.anonrode.downloader.pipeline.ResultVerifier
+                    .verifiedDirect(ep.url)
             )
         }
     }

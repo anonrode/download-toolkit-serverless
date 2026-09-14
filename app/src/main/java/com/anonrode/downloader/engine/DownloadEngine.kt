@@ -377,7 +377,16 @@ class DownloadEngine(
         parallelSockets: Int = 16,
         audioOnly: Boolean = false,
         site: String = "",
-        quality: String? = null
+        quality: String? = null,
+        /** Search-verify oracle handoff (2026-09-14): a direct URL the
+         *  ResultVerifier byte-proved <= PRERESOLVED_MAX_AGE_MS ago for THIS
+         *  episode URL. Riding the existing direct-file pipeline (status
+         *  DOWNLOADING immediately, no RESOLVING round-trip) is exactly how
+         *  pasted/share links already work - no new engine branch. sourceUrl
+         *  stays the episode page, so the 401/403/404/HTML self-heal
+         *  re-resolves from scratch if this token aged out between proof and
+         *  tap. Null = the normal path, unchanged. */
+        verifiedDirectUrl: String? = null
     ): String {
         val downloadFolder = getDownloadDirectory(showTitle, createDirs = false)
 
@@ -410,7 +419,17 @@ class DownloadEngine(
                     showTitle = showTitle,
                     episodeNum = episodeNum,
                     episodeTitle = episodeTitle,
-                    directUrl = sourceUrl,
+                    // Handoff ONLY rides when processQueue's own isDirect
+                    // predicate will agree (isDirectMediaUrl + not an
+                    // unresolved locker page) — otherwise the task would sit
+                    // in RESOLVING on a URL the resolvers can't re-crack.
+                    // sourceUrl stays the episode page for the self-heal.
+                    directUrl = if (
+                        !isDirect &&
+                        verifiedDirectUrl != null &&
+                        isDirectMediaUrl(verifiedDirectUrl) &&
+                        !isKnownLockerHost(verifiedDirectUrl)
+                    ) verifiedDirectUrl else sourceUrl,
                     sourceUrl = sourceUrl,
                     filePath = targetFile.absolutePath,
                     status = TaskStatus.QUEUED,

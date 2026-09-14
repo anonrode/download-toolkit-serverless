@@ -26,6 +26,10 @@ import com.anonrode.downloader.data.models.ShowCard
 sealed class Verdict {
     data class Live(
         val directUrl: String,
+        /** The episode URL this direct URL was cracked FROM — the index key
+         *  for the instant-tap handoff (a card's Live verdict covers THIS
+         *  episode, others still resolve normally). */
+        val episodeUrl: String,
         val totalBytes: Long?,
         val episodeCount: Int,
         val verifiedAtMs: Long

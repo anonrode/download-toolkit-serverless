@@ -161,4 +161,24 @@ class ResultVerifierTest {
         val v = runBlocking { ResultVerifier.verifyOne(card()) }
         assertEquals("✓ 24 eps · 230 MB/ep", VerdictPolicy.captionFor(v))
     }
+
+    @Test
+    fun liveHandoffIndexServesFreshSizedVerdictsOnly() {
+        ResultVerifier.resetForTests()
+        val fresh = Verdict.Live(
+            "https://cdn.x/f.mkv", "https://nk.test/epH", 230_000_000, 1,
+            System.currentTimeMillis()
+        )
+        ResultVerifier.indexLive(fresh)
+        assertEquals("https://cdn.x/f.mkv", ResultVerifier.verifiedDirect("https://nk.test/epH"))
+        // Past the 120s window the engine must re-resolve (tokens measured
+        // aging in seconds - the shortcut may never outrun its proof).
+        ResultVerifier.indexLive(fresh.copy(verifiedAtMs = System.currentTimeMillis() - 121_000))
+        assertEquals(null, ResultVerifier.verifiedDirect("https://nk.test/epH"))
+        // Size-less Live (200-chunked terminal) is not a handoff candidate.
+        ResultVerifier.indexLive(fresh.copy(totalBytes = null))
+        assertEquals(null, ResultVerifier.verifiedDirect("https://nk.test/epH"))
+        ResultVerifier.resetForTests()
+        assertEquals(null, ResultVerifier.verifiedDirect("https://nk.test/epH"))
+    }
 }
