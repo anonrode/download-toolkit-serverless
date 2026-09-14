@@ -126,4 +126,24 @@ object VerdictPolicy {
      *  the "cards are only removed by PROOF" rule has a direct test. */
     fun visible(ranked: List<ShowCard>, verdicts: Map<String, Verdict>, now: Long): List<ShowCard> =
         ranked.filter { !hideFromResults(verdicts[keyFor(it.url)], now) }
+
+    /** The user's priority rule (2026-09-14): verified cards come FIRST —
+     *  LIVE cards float to the top in rank order, everything else keeps its
+     *  rank underneath, Dead is gone. Stable within both halves, so a card
+     *  moves at most once (when its verdict lands) — never jitter. */
+    fun visibleOrdered(
+        ranked: List<ShowCard>,
+        verdicts: Map<String, Verdict>,
+        now: Long
+    ): List<ShowCard> {
+        val live = ArrayList<ShowCard>(ranked.size)
+        val rest = ArrayList<ShowCard>(ranked.size)
+        for (card in ranked) {
+            val v = verdicts[keyFor(card.url)]
+            if (hideFromResults(v, now)) continue
+            if (v is Verdict.Live && isFresh(v, now)) live.add(card) else rest.add(card)
+        }
+        live.addAll(rest)
+        return live
+    }
 }

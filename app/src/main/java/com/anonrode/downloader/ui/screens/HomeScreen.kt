@@ -369,8 +369,17 @@ fun HomeScreen(
 
             Spacer(modifier = Modifier.height(Spacing.lg))
 
-            // Live Search Results
-            if (uiState.isSearching && uiState.searchResults.isEmpty()) {
+            // Live Search Results — rendered through the oracle's reveal
+            // policy (2026-09-14): proven-dead cards never appear, LIVE
+            // cards float to the top wearing their ✓ caption, everything
+            // else holds its place exactly as before. Absence of a verdict
+            // is never a hide: unverified ≠ unverifiable-looking.
+            val visibleResults = remember(uiState.searchResults, uiState.verdicts) {
+                com.anonrode.downloader.pipeline.VerdictPolicy.visibleOrdered(
+                    uiState.searchResults, uiState.verdicts, System.currentTimeMillis()
+                )
+            }
+            if (uiState.isSearching && visibleResults.isEmpty()) {
                 Box(
                     modifier = Modifier.fillMaxWidth().weight(1f),
                     contentAlignment = Alignment.Center
@@ -381,7 +390,7 @@ fun HomeScreen(
                         Text("Streaming search across all providers...", color = TextSecondary, fontSize = 13.sp)
                     }
                 }
-            } else if (uiState.searchError != null && uiState.searchResults.isEmpty()) {
+            } else if (uiState.searchError != null && visibleResults.isEmpty()) {
                 // A failed search must be distinguishable from an empty one:
                 // "found nothing" and "couldn't search" are different situations.
                 Box(
@@ -409,14 +418,17 @@ fun HomeScreen(
                         }
                     }
                 }
-            } else if (uiState.searchResults.isEmpty() && uiState.query.trim().length >= 2 && !uiState.isSearching) {
+            } else if (visibleResults.isEmpty() && uiState.query.trim().length >= 2 && !uiState.isSearching) {
+                // Note: keyed off visibleResults, not the raw crawl — when
+                // every returned card was proven dead, the honest message is
+                // "No results", not a blank landing page under a live query.
                 Box(
                     modifier = Modifier.fillMaxWidth().weight(1f),
                     contentAlignment = Alignment.Center
                 ) {
                     Text("No results found for \"${uiState.query}\"", color = TextMuted, fontSize = 14.sp)
                 }
-            } else if (uiState.searchResults.isEmpty()) {
+            } else if (visibleResults.isEmpty()) {
                 // Blank-query state: the trending row IS the landing content
                 // (feature request: show what's trending on open, scrolling
                 // left to right, not top to bottom). Category chips sit
@@ -444,10 +456,13 @@ fun HomeScreen(
                     verticalArrangement = Arrangement.spacedBy(Spacing.md),
                     modifier = Modifier.fillMaxWidth().weight(1f)
                 ) {
-                    items(uiState.searchResults, key = { it.url }) { show ->
+                    items(visibleResults, key = { it.url }) { show ->
                         ShowCardItem(
                             show = show,
                             showPosters = viewModel.engine.showPostersInResults,
+                            verifiedCaption = com.anonrode.downloader.pipeline.VerdictPolicy
+                                .captionFor(uiState.verdicts[com.anonrode.downloader.pipeline
+                                    .VerdictPolicy.keyFor(show.url)]),
                             onClick = { viewModel.openEpisodeDrawer(show) }
                         )
                     }
@@ -866,7 +881,11 @@ private fun CategoryPage(
 fun ShowCardItem(
     show: ShowCard,
     showPosters: Boolean,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    /** Oracle caption for LIVE-proven cards ("✓ 220 MB", "✓ 24 eps · 450 MB/ep").
+     *  Null for every other state — the card renders exactly as it did before
+     *  the oracle existed (badge the winners, never the losers). */
+    verifiedCaption: String? = null
 ) {
     Row(
         modifier = Modifier
@@ -902,7 +921,14 @@ fun ShowCardItem(
             Spacer(modifier = Modifier.height(Spacing.sm))
             Row(horizontalArrangement = Arrangement.spacedBy(Spacing.xs)) {
                 CardBadge(show.site.uppercase(), accent = true)
-                secondaryBadge(show)?.let { CardBadge(it, accent = false) }
+                // A real oracle caption REPLACES the hardcoded "✓ 1080p"
+                // guess — the verified bytes are strictly more honest. With
+                // no verdict, the row is unchanged from before the oracle.
+                if (verifiedCaption != null) {
+                    CardBadge(verifiedCaption, accent = false, verified = true)
+                } else {
+                    secondaryBadge(show)?.let { CardBadge(it, accent = false) }
+                }
             }
 
             Spacer(modifier = Modifier.height(Spacing.md))
@@ -977,7 +1003,7 @@ private fun InitialGlyph(title: String) {
 }
 
 @Composable
-private fun CardBadge(text: String, accent: Boolean) {
+private fun CardBadge(text: String, accent: Boolean, verified: Boolean = false) {
     Box(
         modifier = Modifier
             .clip(RoundedCornerShape(Radius.sm))
@@ -987,7 +1013,11 @@ private fun CardBadge(text: String, accent: Boolean) {
     ) {
         Text(
             text = text,
-            color = if (accent) AccentPrimary else TextSecondary,
+            color = when {
+                verified -> StatusSuccess
+                accent -> AccentPrimary
+                else -> TextSecondary
+            },
             fontSize = 11.sp,
             fontWeight = FontWeight.Bold,
             maxLines = 1,
