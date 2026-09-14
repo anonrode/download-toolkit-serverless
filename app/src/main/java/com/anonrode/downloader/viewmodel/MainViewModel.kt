@@ -51,7 +51,11 @@ data class HomeUiState(
     // per process alongside the trending row. An empty list (or an empty
     // posterUrl) renders the colored name-tile fallback — the row must never
     // disappear over artwork.
-    val genreTiles: List<com.anonrode.downloader.providers.CategoryFeed.GenreTile> = emptyList()
+    val genreTiles: List<com.anonrode.downloader.providers.CategoryFeed.GenreTile> = emptyList(),
+    // Search-verify oracle verdicts keyed by VerdictPolicy.keyFor(card.url).
+    // HomeScreen renders through VerdictPolicy.visibleOrdered: proven-dead
+    // hidden, LIVE first + captioned, everything else exactly as before.
+    val verdicts: Map<String, com.anonrode.downloader.pipeline.Verdict> = emptyMap()
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -159,6 +163,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         refreshStorageInfo()
         loadTrending()
         loadGenreTiles()
+        // Oracle verdicts ride their own stream: a background verification
+        // landing seconds after the search flow completed still re-renders
+        // (floats the card up + captions it) without restarting the crawl.
+        viewModelScope.launch {
+            com.anonrode.downloader.pipeline.ResultVerifier.updates().collect { v ->
+                _uiState.update { it.copy(verdicts = v) }
+            }
+        }
     }
 
     /** One fetch per app process, same rule as the trending row: six
@@ -413,6 +425,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 ProviderRegistry.searchFlow(q, filter).collect { incomingRanked ->
                     _uiState.update { it.copy(searchResults = incomingRanked) }
+                    // Background-verify the best unverified cards (per-query
+                    // budget inside the verifier; fresh verdicts are skipped,
+                    // so streaming snapshots never double-spend).
+                    com.anonrode.downloader.pipeline.ResultVerifier.submit(
+                        viewModelScope, q, incomingRanked
+                    )
                 }
             } catch (e: kotlinx.coroutines.CancellationException) {
                 // A cancelled search (new query, filter change, clear) must not
@@ -434,6 +452,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun openEpisodeDrawer(show: ShowCard) {
+        // If the oracle is still verifying this card, move it to the head so
+        // its verdict (and the cracked direct URL it caches) lands now — the
+        // drawer's own loadEpisodes and the verifier share ProviderRegistry's
+        // 5-min show cache, so the tap is already fast regardless; this just
+        // finishes the badge.
+        com.anonrode.downloader.pipeline.ResultVerifier.prioritize(show)
         _uiState.update {
             it.copy(
                 activeShowForDrawer = show,

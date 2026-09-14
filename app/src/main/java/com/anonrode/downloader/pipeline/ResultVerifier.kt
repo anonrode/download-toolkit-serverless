@@ -98,6 +98,10 @@ object ResultVerifier {
     private val queue = LinkedBlockingDeque<ShowCard>()
     private val queuedKeys = ConcurrentHashMap.newKeySet<String>()
     @Volatile private var lastQueryId: String? = null
+    // Per-QUERY, not per-snapshot: searchStreaming emits one ranked snapshot
+    // per provider arrival, and every emission calls submit(). The budget
+    // resets only when queryId changes.
+    @Volatile private var remainingBudget = MAX_CARDS_PER_QUERY
     private var job: Job? = null
 
     /**
@@ -113,6 +117,7 @@ object ResultVerifier {
         val newQuery = queryId != lastQueryId
         if (newQuery) {
             lastQueryId = queryId
+            remainingBudget = MAX_CARDS_PER_QUERY
             while (true) {
                 val dropped = queue.poll() ?: break
                 queuedKeys.remove(VerdictPolicy.keyFor(dropped.url))
@@ -120,16 +125,17 @@ object ResultVerifier {
             HttpClient.cancelTagged(HTTP_TAG)
         }
         val toAdd = ArrayList<ShowCard>()
-        var budget = MAX_CARDS_PER_QUERY
-        for (card in ranked) {
-            if (budget <= 0) break
-            val key = VerdictPolicy.keyFor(card.url)
-            if (key.isEmpty()) continue
-            val existing = verdicts[key]
-            if (existing != null && VerdictPolicy.isFresh(existing, now)) continue
-            if (!queuedKeys.add(key)) continue
-            toAdd.add(card)
-            budget--
+        if (remainingBudget > 0) {
+            for (card in ranked) {
+                if (remainingBudget <= 0) break
+                val key = VerdictPolicy.keyFor(card.url)
+                if (key.isEmpty()) continue
+                val existing = verdicts[key]
+                if (existing != null && VerdictPolicy.isFresh(existing, now)) continue
+                if (!queuedKeys.add(key)) continue
+                toAdd.add(card)
+                remainingBudget--
+            }
         }
         if (toAdd.isEmpty()) { publish(); return }
         queue.addAll(toAdd)
@@ -265,6 +271,7 @@ object ResultVerifier {
     /** Tests only — production never clears (process death does). */
     internal fun resetForTests() {
         verdicts.clear(); queue.clear(); queuedKeys.clear(); lastQueryId = null
+        remainingBudget = MAX_CARDS_PER_QUERY
         job?.cancel(); job = null
         publish()
     }

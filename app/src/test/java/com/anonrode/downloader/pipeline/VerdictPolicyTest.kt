@@ -78,6 +78,26 @@ class VerdictPolicyTest {
     }
 
     @Test
+    fun `visibleOrdered floats fresh Live cards to the top, stable`() {
+        fun card(u: String) = ShowCard(title = u, url = u, site = "nkiri")
+        val ranked = listOf(card("a"), card("b"), card("c"), card("d"))
+        val verdicts = mapOf(
+            VerdictPolicy.keyFor("c") to live() as Verdict,
+            VerdictPolicy.keyFor("b") to dead() as Verdict,
+            VerdictPolicy.keyFor("d") to unreach() as Verdict
+        )
+        val ordered = VerdictPolicy.visibleOrdered(ranked, verdicts, now)
+        // c LIVE floats to top; b hidden (proven dead); a stays rank-first
+        // of the unverified half; d keeps its place with no badge.
+        assertEquals(listOf("c", "a", "d"), ordered.map { it.url })
+        // stale Live does NOT float (honesty: the bytes were proven 31min ago)
+        val stale = mapOf(VerdictPolicy.keyFor("c") to live(age = VerdictPolicy.LIVE_TTL_MS + 1) as Verdict)
+        assertEquals(listOf("a", "c", "d"), VerdictPolicy.visibleOrdered(
+            ranked.filter { it.url != "b" }, stale, now
+        ).map { it.url })
+    }
+
+    @Test
     fun `preresolved requires fresh live WITH size proof`() {
         assertTrue(VerdictPolicy.isPreresolvable(live(age = 119_000), now))
         assertFalse(VerdictPolicy.isPreresolvable(live(age = 121_000), now))
