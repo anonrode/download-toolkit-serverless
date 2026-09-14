@@ -15,16 +15,15 @@ import kotlinx.coroutines.withTimeoutOrNull
  * "the first 3 sites that actually answered", never a fixed trio with holes.
  *
  * Mechanism (live-probed 2026-09-14, all six genres on all four sites): each
- * row is the site's WordPress SEARCH feed with the genre as query
- * (`/search/<term>/feed/…`). This deliberately is NOT a category taxonomy:
- * these sites' WP categories are REGIONAL (nkiri: K-Drama/TV Series;
- * 9jarocks: Hollywood/Anime; naijaprey: Movie/Series), so there is no
- * `/category/action/` to point at — but their search feeds return genuinely
- * genre-correct posts (Horror → Scream 7, Horror in the High Desert;
- * Romance → A Tailor-Made Romance, Chennai Love Story), and two of the four
- * URL shapes here are already what RocksProvider/NaijaPreyProvider hit for
- * ordinary search. Per-site path differs (rss2 vs plain feed); both were
- * verified 200 returning items.
+ * row is the site's genre listing — WP SEARCH feed (9jarocks, naijaprey) or
+ * WP-REST search with embedded posters (nkiri, naijavault; their search feeds
+ * carry no poster <img> at all). This deliberately is NOT a category
+ * taxonomy: these sites' WP categories are REGIONAL (nkiri: K-Drama/TV
+ * Series; 9jarocks: Hollywood/Anime; naijaprey: Movie/Series), so there is
+ * no `/category/action/` to point at — but genre search returns genuinely
+ * correct posts (Horror → Scream 7, Horror in the High Desert;
+ * Romance → A Tailor-Made Romance, Chennai Love Story), and both feed shapes
+ * are already what the app's own providers hit for ordinary search.
  *
  * Reuses TrendingFeed.fetchRss (its XML parse + poster sniff + stub gate) so
  * a category card is byte-for-byte the same ShowCard shape as a trending one.
@@ -42,7 +41,7 @@ object CategoryFeed {
     private const val TIMEOUT_MS = 7000L
 
     /**
-     * A chip label and the per-site query overrides. [queryTerms] lets one
+     * A tile label and the per-site query overrides. [queryTerms] lets one
      * chip query one site with the term that site's index responds to best;
      * no override ships today (all six bare lowercase genres responded on
      * every site probed), but this is the hook for when one needs
@@ -55,7 +54,7 @@ object CategoryFeed {
     /** One genre row: a source site and its latest cards for the category. */
     data class CategoryRow(val site: String, val items: List<ShowCard>)
 
-    /** Chip order on Home. Every genre here was probe-verified on >=3 sites. */
+    /** Tile order on Home. Every genre here was probe-verified on >=3 sites. */
     val CATEGORIES: List<Category> = listOf(
         Category("Action"),
         Category("Comedy"),
@@ -65,33 +64,50 @@ object CategoryFeed {
         Category("Thriller")
     )
 
+    /** How a site serves genre listings, and whether its posters survive. */
+    internal enum class FeedKind { RSS, WP_REST }
+
     /**
      * Row priority: earlier sites fill the page first, later ones are the
-     * fallback that steps in when an earlier site is slow or empty. Internal
-     * so the JVM test pins the probe-verified set and order.
+     * fallback that steps in when an earlier site is slow or empty.
+     *
+     * Feed kind per site was decided by the 2026-09-14 probe, not taste:
+     * 9jarocks' and naijaprey's search RSS items embed poster <img> tags
+     * (22/22 and 5/5), while nkiri and naijavault serve poster-less text
+     * feeds but answer WP-REST search with embedded featured media (5/5,
+     * 3/3). Both shapes are the same endpoints the app already uses for
+     * those sites' ordinary search/trending — CategoryFeed just points them
+     * at the genre term. Internal so the JVM test pins the probe-verified
+     * set, kinds and order.
      */
-    internal val SITE_PATHS: List<Pair<String, String>> = listOf(
-        // site to its search-feed path template (the %s is the URL-encoded term)
-        "nkiri" to "/search/%s/feed/",
-        "9jarocks" to "/search/%s/feed/rss2/",
-        "naijaprey" to "/search/%s/feed/rss2/",
-        "naijavault" to "/search/%s/feed/"
+    internal val SITE_FEEDS: List<Triple<String, FeedKind, String>> = listOf(
+        // (site, kind, RSS path template — the %s is the URL-encoded term; unused for WP_REST)
+        Triple("nkiri", FeedKind.WP_REST, ""),
+        Triple("9jarocks", FeedKind.RSS, "/search/%s/feed/rss2/"),
+        Triple("naijaprey", FeedKind.RSS, "/search/%s/feed/rss2/"),
+        Triple("naijavault", FeedKind.WP_REST, "")
     )
+
+    /** A Home genre tile: the category plus its current top-post poster. */
+    data class GenreTile(val category: Category, val posterUrl: String)
 
     /**
      * Fetch the genre page. Returns up to [MAX_ROWS] rows, each tagged with
-     * its source site, in SITE_PATHS priority order. Empty only if every site
+     * its source site, in SITE_FEEDS priority order. Empty only if every site
      * failed/timed out — the caller shows a Retry affordance for that.
      */
     suspend fun fetch(category: Category): List<CategoryRow> = coroutineScope {
         // Kick all sites off concurrently; each carries its own timeout, so
         // one slow site never blanks the page.
-        val jobs = SITE_PATHS.map { (site, template) ->
+        val jobs = SITE_FEEDS.map { (site, kind, template) ->
             async {
-                val term = java.net.URLEncoder.encode(category.termFor(site), "UTF-8")
-                val path = String.format(template, term)
                 val cards = withTimeoutOrNull(TIMEOUT_MS) {
-                    TrendingFeed.fetchRss(site, path).take(PER_ROW_LIMIT)
+                    when (kind) {
+                        FeedKind.RSS ->
+                            TrendingFeed.fetchRss(site, String.format(template, encodedTerm(category.termFor(site))))
+                        FeedKind.WP_REST ->
+                            TrendingFeed.fetchWpRest(site, query = category.termFor(site))
+                    }.take(PER_ROW_LIMIT)
                 } ?: emptyList()
                 site to cards
             }
@@ -103,6 +119,31 @@ object CategoryFeed {
         )
         rows
     }
+
+    /**
+     * The Home genre-tile row: each category's CURRENT top post's poster,
+     * fetched from the top-priority site (the same site whose first card the
+     * opened page will show — tile and page lead with the same artwork).
+     * One per_page=1 request per genre; a failure yields an empty posterUrl
+     * and the tile renders as the colored name-tile fallback.
+     */
+    suspend fun tilePosters(): List<GenreTile> = coroutineScope {
+        CATEGORIES.map { category ->
+            async {
+                val poster = withTimeoutOrNull(TIMEOUT_MS) {
+                    val (site, kind, template) = SITE_FEEDS.first()
+                    when (kind) {
+                        FeedKind.RSS ->
+                            TrendingFeed.fetchRss(site, String.format(template, encodedTerm(category.termFor(site))))
+                        FeedKind.WP_REST -> TrendingFeed.fetchWpRest(site, query = category.termFor(site), limit = 1)
+                    }.firstOrNull()?.posterUrl.orEmpty()
+                } ?: ""
+                GenreTile(category, poster)
+            }
+        }.map { it.await() }
+    }
+
+    private fun encodedTerm(term: String): String = java.net.URLEncoder.encode(term, "UTF-8")
 
     /**
      * Pure row assembly over (site, cards) pairs in priority order — kept
