@@ -72,11 +72,19 @@ object TrendingFeed {
         out
     }
 
-    /** WP-REST latest posts with embedded featured media. */
-    private suspend fun fetchWpRest(site: String): List<ShowCard> {
+    /**
+     * WP-REST posts with embedded featured media. [query] switches from the
+     * latest-posts feed to the site's SEARCH endpoint — live-verified
+     * 2026-09-14: nkiri's and naijavault's search *feeds* carry no poster
+     * <img> at all, but REST search answers every genre query with embedded
+     * posters (5/5 and 3/3), so CategoryFeed rows and the Home genre tiles
+     * get real artwork from those two sites only through this path.
+     */
+    internal suspend fun fetchWpRest(site: String, query: String? = null, limit: Int = PER_SITE_LIMIT): List<ShowCard> {
         val base = DynamicRulesManager.getBaseUrl(site).trimEnd('/')
         if (base.isBlank()) return emptyList()
-        val url = "$base/wp-json/wp/v2/posts?per_page=$PER_SITE_LIMIT&_embed=1"
+        val search = if (query == null) "" else "&search=${java.net.URLEncoder.encode(query, "UTF-8")}"
+        val url = "$base/wp-json/wp/v2/posts?per_page=$limit$search&_embed=1"
         val json = HttpClient.getText(url, referer = "$base/", tag = "trending") ?: return emptyList()
         val out = mutableListOf<ShowCard>()
         val noLinks = mutableListOf<ShowCard>()

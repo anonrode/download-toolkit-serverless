@@ -46,7 +46,12 @@ data class HomeUiState(
     val activeCategory: com.anonrode.downloader.providers.CategoryFeed.Category? = null,
     val categoryRows: List<com.anonrode.downloader.providers.CategoryFeed.CategoryRow> = emptyList(),
     val isCategoryLoading: Boolean = false,
-    val categoryFailed: Boolean = false
+    val categoryFailed: Boolean = false,
+    // Home genre tiles: each category's current top-post poster, fetched once
+    // per process alongside the trending row. An empty list (or an empty
+    // posterUrl) renders the colored name-tile fallback — the row must never
+    // disappear over artwork.
+    val genreTiles: List<com.anonrode.downloader.providers.CategoryFeed.GenreTile> = emptyList()
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -153,6 +158,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     init {
         refreshStorageInfo()
         loadTrending()
+        loadGenreTiles()
+    }
+
+    /** One fetch per app process, same rule as the trending row: six
+     *  per_page=1 requests, cached in memory, failure degrades to glyph
+     *  tiles instead of hiding the section. */
+    private var genreTilesJob: Job? = null
+    fun loadGenreTiles() {
+        if (genreTilesJob?.isActive == true || _uiState.value.genreTiles.isNotEmpty()) return
+        genreTilesJob = viewModelScope.launch {
+            try {
+                val tiles = withContext(Dispatchers.IO) {
+                    com.anonrode.downloader.providers.CategoryFeed.tilePosters()
+                }
+                _uiState.update { it.copy(genreTiles = tiles) }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // No throw-up: empty genreTiles already renders as name-tiles.
+            }
+        }
     }
 
     /** One fetch per app process: the row is for the moment of opening, and

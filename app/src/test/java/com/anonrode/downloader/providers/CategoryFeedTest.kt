@@ -100,12 +100,20 @@ class CategoryFeedTest {
     }
 
     @Test
-    fun sitePaths_coverAllFourFeedSites_inPriorityOrder() {
-        // Guarded against silent edits: the four sites whose search feeds were
-        // live-verified 2026-09-14, in the order that fills rows.
-        assertTrue(CategoryFeed.SITE_PATHS.size >= 3)
-        assertEquals(listOf("nkiri", "9jarocks", "naijaprey", "naijavault"), CategoryFeed.SITE_PATHS.map { it.first })
-        // Every path must carry the query placeholder.
-        assertTrue(CategoryFeed.SITE_PATHS.all { "%s" in it.second })
+    fun siteFeeds_coverAllFourSites_withProbeVerifiedKinds() {
+        // Guarded against silent edits: the four sites verified live 2026-09-14,
+        // in the order that fills rows, with the feed kind each site's POSTER
+        // situation forced (nkiri/naijavault search feeds carry no <img>; their
+        // WP-REST search embeds posters).
+        assertEquals(
+            listOf("nkiri", "9jarocks", "naijaprey", "naijavault"),
+            CategoryFeed.SITE_FEEDS.map { it.first }
+        )
+        assertEquals(
+            listOf(CategoryFeed.FeedKind.WP_REST, CategoryFeed.FeedKind.RSS, CategoryFeed.FeedKind.RSS, CategoryFeed.FeedKind.WP_REST),
+            CategoryFeed.SITE_FEEDS.map { it.second }
+        )
+        // Every RSS template must carry the query placeholder.
+        assertTrue(CategoryFeed.SITE_FEEDS.filter { it.second == CategoryFeed.FeedKind.RSS }.all { "%s" in it.third })
     }
 }

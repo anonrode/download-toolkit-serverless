@@ -433,7 +433,11 @@ fun HomeScreen(
                         onOpen = { viewModel.openEpisodeDrawer(it) }
                     )
                     Spacer(modifier = Modifier.height(Spacing.lg))
-                    CategoryChipsRow { category -> viewModel.openCategory(category) }
+                    CategoryTilesRow(
+                        tiles = uiState.genreTiles,
+                        showPosters = viewModel.engine.showPostersInResults,
+                        onOpen = { category -> viewModel.openCategory(category) }
+                    )
                 }
             } else {
                 LazyColumn(
@@ -647,12 +651,20 @@ private val CATEGORY_SITE_LABELS = mapOf(
 )
 
 /**
- * Genre chips under the trending row (blank-query landing only). The chips
- * NAVIGATE (openCategory) — they deliberately never take a selected state:
- * unlike the site filter chips above the search field they are not filters.
+ * Genre poster tiles under the trending row (blank-query landing only). Same
+ * 124dp poster-card geometry as the trending cards; the artwork is that
+ * genre's current top post (CategoryFeed.tilePosters), and a missing poster
+ * degrades to the app's colored initial-glyph tile with the genre name —
+ * the row itself is static structure and never disappears over artwork.
+ * The tiles NAVIGATE (openCategory); they are not filters.
  */
 @Composable
-private fun CategoryChipsRow(onOpen: (CategoryFeed.Category) -> Unit) {
+private fun CategoryTilesRow(
+    tiles: List<CategoryFeed.GenreTile>,
+    showPosters: Boolean,
+    onOpen: (CategoryFeed.Category) -> Unit
+) {
+    val posters = tiles.associate { it.category.label to it.posterUrl }
     Column(modifier = Modifier.fillMaxWidth()) {
         Text(
             text = "Browse by Genre",
@@ -661,36 +673,67 @@ private fun CategoryChipsRow(onOpen: (CategoryFeed.Category) -> Unit) {
             fontWeight = FontWeight.Bold
         )
         Spacer(modifier = Modifier.height(Spacing.md))
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(Spacing.xs)
+        LazyRow(
+            horizontalArrangement = Arrangement.spacedBy(Spacing.md),
+            contentPadding = PaddingValues(end = Spacing.lg),
+            modifier = Modifier.fillMaxWidth()
         ) {
-            CategoryFeed.CATEGORIES.forEach { category ->
-                FilterChip(
-                    selected = false,
-                    onClick = { onOpen(category) },
-                    label = {
-                        Text(
-                            text = category.label,
-                            fontSize = 12.sp,
-                            color = TextSecondary
-                        )
-                    },
-                    colors = FilterChipDefaults.filterChipColors(
-                        containerColor = SurfaceCard
-                    ),
-                    border = FilterChipDefaults.filterChipBorder(
-                        enabled = true,
-                        selected = false,
-                        borderColor = BorderHairline
-                    ),
-                    shape = RoundedCornerShape(Radius.full)
+            items(CategoryFeed.CATEGORIES, key = { it.label }) { category ->
+                GenreTileCard(
+                    label = category.label,
+                    posterUrl = posters[category.label] ?: "",
+                    showPosters = showPosters,
+                    onClick = { onOpen(category) }
                 )
             }
-            Spacer(modifier = Modifier.width(Spacing.md))
         }
+    }
+}
+
+@Composable
+private fun GenreTileCard(
+    label: String,
+    posterUrl: String,
+    showPosters: Boolean,
+    onClick: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .width(124.dp)
+            .clip(RoundedCornerShape(Radius.md))
+            .clickable { onClick() }
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(176.dp)
+                .clip(RoundedCornerShape(Radius.md))
+                .background(tileColor(label))
+                .border(1.dp, BorderHairline, RoundedCornerShape(Radius.md))
+        ) {
+            if (showPosters && posterUrl.isNotBlank()) {
+                SubcomposeAsyncImage(
+                    model = posterUrl,
+                    contentDescription = label,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize(),
+                    loading = { InitialGlyph(label) },
+                    error = { InitialGlyph(label) }
+                )
+            } else {
+                InitialGlyph(label)
+            }
+        }
+        Spacer(modifier = Modifier.height(Spacing.xs))
+        Text(
+            text = label,
+            color = TextPrimary,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Bold,
+            lineHeight = 17.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
     }
 }
 
