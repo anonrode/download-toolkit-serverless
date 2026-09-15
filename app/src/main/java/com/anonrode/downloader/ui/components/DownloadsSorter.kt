@@ -161,6 +161,32 @@ object DownloadsSorter {
             .sortedWith(EPISODE_ORDER)
             .map { it.filePath }
 
+    /**
+     * Sort-aware Next/Previous playlist (v3.1.6). The player used to ALWAYS
+     * queue same-show episodes, which contradicted every non-Library sort:
+     * with the list segregated by date, "Next" jumped back to today's files
+     * instead of walking to the day before (user 2026-09-15: "the only
+     * situation where the next should be [restricted] is when i segregate
+     * by show, so that when im done, it wont next to another series").
+     * So the queue now follows the visible sort:
+     *  - DATE / STATUS → every playable completed file, in the engine's
+     *    own order (newest-first), crossing show boundaries.
+     *  - SIZE → same set ordered largest-first.
+     *  - LIBRARY → the [playerQueueFor] series walk — stops at the boundary.
+     * Pure; [task] only supplies the show title for the Library branch.
+     */
+    fun playQueueFor(tasks: List<DownloadTask>, mode: String, task: DownloadTask): List<String> =
+        when (mode) {
+            SORT_LIBRARY -> playerQueueFor(tasks, task.showTitle)
+            SORT_SIZE ->
+                tasks.filter { it.status == TaskStatus.COMPLETED && it.filePath.isNotBlank() }
+                    .sortedByDescending { it.totalBytes }
+                    .map { it.filePath }
+            else ->
+                tasks.filter { it.status == TaskStatus.COMPLETED && it.filePath.isNotBlank() }
+                    .map { it.filePath }
+        }
+
     private fun groupStatus(tasks: List<DownloadTask>): List<Pair<String, List<DownloadTask>>> {
         val byStatus: MutableMap<TaskStatus, MutableList<DownloadTask>> = linkedMapOf()
         STATUS_ORDER.forEach { byStatus[it] = mutableListOf() }

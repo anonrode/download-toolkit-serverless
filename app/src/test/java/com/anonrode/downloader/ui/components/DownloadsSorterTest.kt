@@ -336,4 +336,79 @@ class DownloadsSorterTest {
         assertEquals(listOf(a.filePath, b.filePath),
             DownloadsSorter.playerQueueFor(listOf(b, a), ""))
     }
+
+    // -- playQueueFor (v3.1.6 sort-aware Next) --------------------------------
+    // The bug this API pins: the player ALWAYS queued same-show files, so
+    // with the list sorted by date "Next" never walked into yesterday's
+    // downloads (user 2026-09-15). Only the LIBRARY sort may restrict.
+
+    private fun playableEp(
+        id: String,
+        showTitle: String = "Squid Game",
+        episodeNum: Int = 1,
+        totalBytes: Long = 0L,
+        status: TaskStatus = TaskStatus.COMPLETED
+    ): DownloadTask = ep(id, showTitle = showTitle, episodeNum = episodeNum, status = status)
+        .copy(totalBytes = totalBytes)
+
+    @Test
+    fun playQueueFor_dateWalksAllShowsInEngineOrder() {
+        // Engine snapshot order (newest-first) IS the date order; the queue
+        // preserves it and crosses show boundaries. Non-completed and
+        // pathless tasks stay out.
+        val todayA = playableEp("todayA", showTitle = "Squid Game")
+        val todayB = playableEp("todayB", showTitle = "Attack Titan")
+        val yesterday = playableEp("yesterday", showTitle = "One Piece")
+        val stillDownloading = playableEp("dl", status = TaskStatus.DOWNLOADING)
+        val noPath = playableEp("np").copy(filePath = "")
+
+        val queue = DownloadsSorter.playQueueFor(
+            listOf(todayA, todayB, yesterday, stillDownloading, noPath),
+            DownloadsSorter.SORT_DATE,
+            todayA
+        )
+        assertEquals(listOf(todayA.filePath, todayB.filePath, yesterday.filePath), queue)
+    }
+
+    @Test
+    fun playQueueFor_statusSharesTheCrossShowBranch() {
+        val x = playableEp("x", showTitle = "A")
+        val y = playableEp("y", showTitle = "B")
+        assertEquals(listOf(y.filePath, x.filePath),
+            DownloadsSorter.playQueueFor(listOf(y, x), DownloadsSorter.SORT_STATUS, x))
+    }
+
+    @Test
+    fun playQueueFor_sizeOrdersLargestFirstAcrossShows() {
+        val small = playableEp("small", showTitle = "A", totalBytes = 100L)
+        val big = playableEp("big", showTitle = "B", totalBytes = 900L)
+        val mid = playableEp("mid", showTitle = "C", totalBytes = 500L)
+        assertEquals(listOf(big.filePath, mid.filePath, small.filePath),
+            DownloadsSorter.playQueueFor(listOf(small, big, mid), DownloadsSorter.SORT_SIZE, small))
+    }
+
+    @Test
+    fun playQueueFor_libraryKeepsTheSeriesWalk() {
+        // The one restricted mode: finish ep 2, Next must be ep 3 of THIS
+        // series — never the other show sitting beside it in the list.
+        val sg2 = playableEp("sg2", episodeNum = 2)
+        val other = playableEp("other", showTitle = "Attack Titan")
+        val sg3 = playableEp("sg3", episodeNum = 3)
+        val sg1 = playableEp("sg1", episodeNum = 1)
+        assertEquals(listOf(sg1.filePath, sg2.filePath, sg3.filePath),
+            DownloadsSorter.playQueueFor(
+                listOf(sg2, other, sg3, sg1),
+                DownloadsSorter.SORT_LIBRARY,
+                sg2
+            ))
+    }
+
+    @Test
+    fun playQueueFor_unknownModeFallsBackToCrossShow() {
+        // A pref written by an older build (or a mode added later) must
+        // never produce an empty queue — default is the cross-show walk.
+        val x = playableEp("x")
+        assertEquals(listOf(x.filePath),
+            DownloadsSorter.playQueueFor(listOf(x), "bogus_mode", x))
+    }
 }
