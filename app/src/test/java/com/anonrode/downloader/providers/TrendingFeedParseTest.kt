@@ -154,11 +154,14 @@ class TrendingFeedParseTest {
 
     @Test
     fun `mergeRoundRobin caps the row at 16`() {
-        val big = (1..10).map { mcard("vault", "V$it") } to
-            (1..10).map { mcard("nkiri", "N$it") } to
-            (1..10).map { mcard("prey", "P$it") } to
-            (1..10).map { mcard("9ja", "J$it") }
-        val merged = TrendingFeed.mergeRoundRobin(listOf(big.first, big.second.first, big.second.second.first, big.second.second.second))
+        val merged = TrendingFeed.mergeRoundRobin(
+            listOf(
+                (1..10).map { mcard("vault", "V$it") },
+                (1..10).map { mcard("nkiri", "N$it") },
+                (1..10).map { mcard("prey", "P$it") },
+                (1..10).map { mcard("9ja", "J$it") }
+            )
+        )
         assertEquals(16, merged.size)
     }
 }
