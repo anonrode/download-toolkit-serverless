@@ -185,13 +185,15 @@ object ResultVerifier {
         skip: (ShowCard) -> Boolean
     ): List<ShowCard> {
         val chosen = HashSet<String>()
-        val considered = HashSet<String>()
         val seenSites = HashSet<String>()
         for (pass in 0..1) {
             for (card in ranked) {
                 if (chosen.size >= budget) break
                 val key = VerdictPolicy.keyFor(card.url)
-                if (key.isEmpty() || !considered.add(key)) continue
+                // Dedupe only against ALREADY-CHOSEN cards: a card pass 0
+                // skipped for site-fairness must stay eligible for pass 1
+                // (a separate "considered" set once poisoned every backfill).
+                if (key.isEmpty() || chosen.contains(key)) continue
                 if (pass == 0 && !seenSites.add(card.site)) continue
                 if (skip(card)) continue
                 chosen.add(key)

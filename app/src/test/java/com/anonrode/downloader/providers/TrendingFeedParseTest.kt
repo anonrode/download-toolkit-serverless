@@ -74,8 +74,11 @@ class TrendingFeedParseTest {
             "https://nv.test/wp-json/wp/v2/posts?per_page=8&_embed=1",
             TrendingFeed.wpRestUrl("https://nv.test", null, 8)
         )
+        // URLEncoder query semantics encode spaces as '+' (WP/PHP decodes it
+        // back to a space — this is the exact form trending/genre have been
+        // shipping in production through this builder).
         assertEquals(
-            "https://nk.test/wp-json/wp/v2/posts?per_page=6&search=the%20rapture&_embed=1",
+            "https://nk.test/wp-json/wp/v2/posts?per_page=6&search=the+rapture&_embed=1",
             TrendingFeed.wpRestUrl("https://nk.test", "the rapture", 6)
         )
         // CategoryFeed tiles rely on per_page=1 — pin that no default limit sneaks in.
