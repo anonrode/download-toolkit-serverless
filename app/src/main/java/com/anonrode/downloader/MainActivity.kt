@@ -38,6 +38,7 @@ import com.anonrode.downloader.ui.components.MainScaffold
 import com.anonrode.downloader.ui.components.MainTab
 import com.anonrode.downloader.ui.screens.SocialModal
 import com.anonrode.downloader.ui.screens.SplashContent
+import com.anonrode.downloader.ui.screens.SplashMotion
 import com.anonrode.downloader.ui.screens.TorrentFilePicker
 import com.anonrode.downloader.ui.screens.TorrentFilePickerDialog
 import com.anonrode.downloader.ui.theme.AccentPrimary
@@ -86,6 +87,14 @@ class MainActivity : ComponentActivity() {
             if (stored == MainTab.SEARCH || stored == MainTab.DOWNLOADS || stored == MainTab.SETTINGS) stored
             else MainTab.DEFAULT
         } ?: MainTab.DEFAULT
+
+        // Which splash cut plays: the FULL identity animation runs ONCE, on the
+        // very first install (the cinematic first impression — user-approved
+        // rev-6 study); every warm start gets the QUICK cut. Flag written now so
+        // a mid-splash crash still doesn't replay the full show.
+        val splashFull = !prefs.getBoolean("splash_full_shown", false)
+        if (splashFull) prefs.edit().putBoolean("splash_full_shown", true).apply()
+        val splashCutMs = if (splashFull) SplashMotion.FULL_MS else SplashMotion.QUICK_MS
 
         setContent {
             var themeMode by remember { mutableStateOf(initialThemeMode) }
@@ -188,20 +197,22 @@ class MainActivity : ComponentActivity() {
                     onDispose { storageLifecycleOwner.lifecycle.removeObserver(observer) }
                 }
 
-                // Guaranteed-visible splash: the system SplashScreen API dismisses
-                // on first frame (never seen on fast devices), so hold a designed
-                // Compose splash for a brief beat before revealing the app. Kept
-                // short on purpose — a long hold read as a slow response when
-                // tapping the app icon. Cold start only: on a config-change
-                // recreation (savedInstanceState != null) the splash would
-                // flash over the live UI for half a second.
+                // The identity animation (SplashMotion — user-approved rev 6):
+                // the FULL 1.7s cut plays ONCE, on the very first install (the
+                // cinematic first impression of the app's selling point), every
+                // warm start gets the 0.95s QUICK cut — the phone never makes
+                // you watch the show twice. Engine init runs in parallel (AnonApp);
+                // the splash only extends when the animation is the longer of the
+                // two. Cold start only: on a config-change recreation
+                // (savedInstanceState != null) the splash would flash over the
+                // live UI.
                 var showSplash by remember { mutableStateOf(savedInstanceState == null) }
                 LaunchedEffect(Unit) {
-                    kotlinx.coroutines.delay(500)
+                    kotlinx.coroutines.delay(splashCutMs.toLong())
                     showSplash = false
                 }
                 if (showSplash) {
-                    SplashContent()
+                    SplashContent(cutMs = splashCutMs)
                     return@AnonDownloaderTheme
                 }
 

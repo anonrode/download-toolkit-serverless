@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- ANONRODE DOWNLOADER brand mark (rev 6, user-approved "squircle · ink"):
+     cyan->teal squircle, ink monogram — an A whose legs land on a line that a
+     download arrow pierces. One asset serves the splash window icon, the home
+     header and any in-app brand slot; the adaptive launcher layers
+     (ic_launcher_background + ic_launcher_foreground) carry the same art.
+     Geometry mirrors designs/2026-09-14-round/splash-motion.html exactly
+     (viewBox 120): body M60 26 L84 78 H72 L60 48 L48 78 H36 Z, landing line
+     y86 (stroke 9), stem 82->94, arrowhead 87->96 (stroke 7). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="120"
+    android:viewportHeight="120">
+    <path android:pathData="M30,6 L90,6 A24,24 0 0 1 114,30 L114,90 A24,24 0 0 1 90,114 L30,114 A24,24 0 0 1 6,90 L6,30 A24,24 0 0 1 30,6 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="linear"
+                android:startX="6" android:startY="6"
+                android:endX="114" android:endY="114">
+                <item android:offset="0" android:color="#FF22D3EE" />
+                <item android:offset="1" android:color="#FF0E7490" />
+            </gradient>
+        </aapt:attr>
+    </path>
+    <!-- A body -->
+    <path
+        android:fillColor="#FF04121A"
+        android:pathData="M60,26 L84,78 L72,78 L60,48 L48,78 L36,78 Z" />
+    <!-- landing line -->
+    <path
+        android:strokeColor="#FF04121A"
+        android:strokeWidth="9"
+        android:strokeLineCap="round"
+        android:pathData="M42,86 L78,86" />
+    <!-- arrow stem + head: the download that passed through the floor -->
+    <path
+        android:strokeColor="#FF04121A"
+        android:strokeWidth="7"
+        android:strokeLineCap="round"
+        android:pathData="M60,82 L60,94" />
+    <path
+        android:strokeColor="#FF04121A"
+        android:strokeWidth="7"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M51,87 L60,96 L69,87" />
+</vector>

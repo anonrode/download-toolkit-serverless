@@ -1,13 +1,37 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- Adaptive launcher foreground: the ink monogram glyph (no tile — the
+     background layer carries the gradient), scaled 0.85 about the mark's
+     centre so it sits inside the 66dp adaptive safe zone (21..87 of 108).
+     Contrast lives inside the icon: dark ink on cyan/teal survives every
+     wallpaper, light or dark. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M54,28 L30,52 L44,52 L44,72 L64,72 L64,52 L78,52 Z" />
-    <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M30,78 L78,78 L78,84 L30,84 Z" />
+    <group
+        android:scaleX="0.85"
+        android:scaleY="0.85"
+        android:translateX="3"
+        android:translateY="2.15">
+        <path
+            android:fillColor="#FF04121A"
+            android:pathData="M60,26 L84,78 L72,78 L60,48 L48,78 L36,78 Z" />
+        <path
+            android:strokeColor="#FF04121A"
+            android:strokeWidth="9"
+            android:strokeLineCap="round"
+            android:pathData="M42,86 L78,86" />
+        <path
+            android:strokeColor="#FF04121A"
+            android:strokeWidth="7"
+            android:strokeLineCap="round"
+            android:pathData="M60,82 L60,94" />
+        <path
+            android:strokeColor="#FF04121A"
+            android:strokeWidth="7"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round"
+            android:pathData="M51,87 L60,96 L69,87" />
+    </group>
 </vector>
