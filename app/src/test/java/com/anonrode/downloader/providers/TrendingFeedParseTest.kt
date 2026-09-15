@@ -95,4 +95,70 @@ class TrendingFeedParseTest {
         assertEquals("Nollywood", NkiriProvider.categoryForTitle("Lagos Money (Yoruba)"))
         assertEquals("Asian Drama & Movies", NkiriProvider.categoryForTitle("Scary Movie (2026) | Download Hollywood Movie"))
     }
+
+    // ---- mergeRoundRobin — the streaming-trending contract (v3.1.6) --------
+    // fetch() publishes partial merges while sites trickle in; the UI is only
+    // correct if a partial merge (a) interleaves variety the same way the
+    // final one does, and (b) is an ORDER-PRESERVING SUBSET of the final
+    // merge — so late sites can only ever ADD cards, never reshuffle or drop
+    // what the user already sees mid-scroll.
+
+    private fun mcard(site: String, title: String) =
+        com.anonrode.downloader.data.models.ShowCard(title = title, url = "https://$site.example/$title", site = site)
+
+    @Test
+    fun `mergeRoundRobin interleaves variety and dedupes by normalized title`() {
+        val a = listOf(mcard("vault", "Alpha One"), mcard("vault", "Shared Title"))
+        val b = listOf(mcard("nkiri", "Beta One"))
+        val d = listOf(mcard("prey", "Shared-Title!")) // same normalization key as A's second
+        val merged = TrendingFeed.mergeRoundRobin(listOf(a, b, emptyList(), d))
+        // Round-robin output order decides the dedupe winner, NOT slot
+        // priority: D0 lands in round 0, before A1's round — so "Shared-Title!"
+        // is kept and A's later "Shared Title" is dropped.
+        assertEquals(listOf("Alpha One", "Beta One", "Shared-Title!"), merged.map { it.title })
+        assertEquals(3, merged.size)
+        assertEquals("prey", merged[2].site)
+    }
+
+    @Test
+    fun `mergeRoundRobin treats unarrived slots as inert`() {
+        val a = listOf(mcard("vault", "One"), mcard("vault", "Two"))
+        val b = listOf(mcard("nkiri", "Three"))
+        assertEquals(
+            TrendingFeed.mergeRoundRobin(listOf(a, b)),
+            TrendingFeed.mergeRoundRobin(listOf(a, b, emptyList(), emptyList()))
+        )
+    }
+
+    @Test
+    fun `mergeRoundRobin partials are order-preserving subsets of the full merge`() {
+        val a = (1..5).map { mcard("vault", "A$it") }
+        val b = (1..5).map { mcard("nkiri", "B$it") }
+        val c = (1..5).map { mcard("prey", "C$it") }
+        val d = (1..5).map { mcard("9ja", "D$it") }
+        val full = TrendingFeed.mergeRoundRobin(listOf(a, b, c, d)).map { it.title }
+        // Every progressively-grown partial must keep the full merge's
+        // relative order of its own cards (no reshuffle under the user).
+        for (partial in listOf(
+            TrendingFeed.mergeRoundRobin(listOf(a, emptyList(), emptyList(), emptyList())),
+            TrendingFeed.mergeRoundRobin(listOf(a, b, emptyList(), emptyList())),
+            TrendingFeed.mergeRoundRobin(listOf(a, b, c, emptyList()))
+        )) {
+            val titles = partial.map { it.title }
+            val projected = full.filter { it in titles }
+            assertEquals(titles, projected)
+        }
+        // And the A+B partial really does appear inside the full order.
+        assertTrue(full.containsAll(listOf("A1", "B1", "A2", "B2")))
+    }
+
+    @Test
+    fun `mergeRoundRobin caps the row at 16`() {
+        val big = (1..10).map { mcard("vault", "V$it") } to
+            (1..10).map { mcard("nkiri", "N$it") } to
+            (1..10).map { mcard("prey", "P$it") } to
+            (1..10).map { mcard("9ja", "J$it") }
+        val merged = TrendingFeed.mergeRoundRobin(listOf(big.first, big.second.first, big.second.second.first, big.second.second.second))
+        assertEquals(16, merged.size)
+    }
 }

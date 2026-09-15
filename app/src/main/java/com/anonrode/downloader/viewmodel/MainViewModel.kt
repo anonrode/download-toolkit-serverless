@@ -265,7 +265,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             com.anonrode.downloader.util.DebugLog.user("trending: fetch started")
             try {
                 val items = withContext(Dispatchers.IO) {
-                    com.anonrode.downloader.providers.TrendingFeed.fetch()
+                    // v3.1.6 streaming: each site re-publishes the partial
+                    // round-robin merge the moment it lands, so the row fills
+                    // while a laggard (9jarocks' RSS) is still crawling —
+                    // v3.1.5 showed a spinner until ALL four sites answered.
+                    // StateFlow.update is thread-safe; the provider serializes
+                    // its own partials, so no torn publishes.
+                    com.anonrode.downloader.providers.TrendingFeed.fetch(
+                        onPartial = { partial ->
+                            if (partial.isNotEmpty()) {
+                                _uiState.update { it.copy(trending = partial) }
+                            }
+                        }
+                    )
                 }
                 _uiState.update {
                     it.copy(
@@ -340,7 +352,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             com.anonrode.downloader.util.DebugLog.user("category '${category.label}': fetch started")
             try {
                 val rows = withContext(Dispatchers.IO) {
-                    com.anonrode.downloader.providers.CategoryFeed.fetch(category)
+                    // Streaming rows (v3.1.6, same shape as trending): fast
+                    // sites render while a laggard crawls. Label-guarded like
+                    // the final write — a partial from a category the user
+                    // already left must never bleed into the open page.
+                    com.anonrode.downloader.providers.CategoryFeed.fetch(category) { partial ->
+                        if (partial.isNotEmpty() &&
+                            _uiState.value.activeCategory?.label == category.label
+                        ) {
+                            _uiState.update { it.copy(categoryRows = partial) }
+                        }
+                    }
                 }
                 categoryCache[category.label] = rows
                 if (_uiState.value.activeCategory?.label == category.label) {

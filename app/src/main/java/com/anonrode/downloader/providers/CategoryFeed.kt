@@ -2,6 +2,7 @@ package com.anonrode.downloader.providers
 
 import com.anonrode.downloader.data.models.ShowCard
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -96,10 +97,18 @@ object CategoryFeed {
      * its source site, in SITE_FEEDS priority order. Empty only if every site
      * failed/timed out — the caller shows a Retry affordance for that.
      */
-    suspend fun fetch(category: Category): List<CategoryRow> = coroutineScope {
+    suspend fun fetch(category: Category, onPartial: (List<CategoryRow>) -> Unit = {}): List<CategoryRow> = coroutineScope {
         // Kick all sites off concurrently; each carries its own timeout, so
-        // one slow site never blanks the page.
-        val jobs = SITE_FEEDS.map { (site, kind, template) ->
+        // one slow site never blanks the page. AND (v3.1.6) never BLOCKS it
+        // either: every site publishes a re-assembly of the arrived-so-far
+        // slots the moment it lands, so the fast rows render while a laggard
+        // is still crawling — the trending-starvation fix, same shape.
+        // assembleRows skips empties, so a partial input is a prefix of the
+        // final rows. One lock serializes writes + publishing (this fetch
+        // runs on Dispatchers.IO; the asyncs finish on different threads).
+        val slots = arrayOfNulls<Pair<String, List<ShowCard>>>(SITE_FEEDS.size)
+        val lock = Any()
+        val jobs = SITE_FEEDS.mapIndexed { i, (site, kind, template) ->
             async {
                 val cards = withTimeoutOrNull(TIMEOUT_MS) {
                     when (kind) {
@@ -109,10 +118,17 @@ object CategoryFeed {
                             TrendingFeed.fetchWpRest(site, query = category.termFor(site))
                     }.take(PER_ROW_LIMIT)
                 } ?: emptyList()
+                synchronized(lock) {
+                    slots[i] = site to cards
+                    if (cards.isNotEmpty()) {
+                        onPartial(assembleRows(slots.map { it ?: ("" to emptyList()) }))
+                    }
+                }
                 site to cards
             }
         }
-        val pairs = jobs.map { it.await() }
+        jobs.awaitAll()
+        val pairs = slots.map { it ?: ("" to emptyList()) }
         val rows = assembleRows(pairs)
         com.anonrode.downloader.util.DebugLog.resolve(
             "category '${category.label}': ${rows.size} rows (${rows.joinToString { it.site + "=" + it.items.size }})"

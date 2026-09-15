@@ -20,12 +20,17 @@ import com.anonrode.downloader.ui.components.MediaPlayerModal
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.*
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
@@ -202,9 +207,8 @@ class MainActivity : ComponentActivity() {
                 // the FULL 1.7s cut plays ONCE, on the very first install (the
                 // cinematic first impression of the app's selling point), every
                 // warm start gets the 0.95s QUICK cut — the phone never makes
-                // you watch the show twice. Engine init runs in parallel (AnonApp);
-                // the splash only extends when the animation is the longer of the
-                // two. Cold start only: on a config-change recreation
+                // you watch the show twice. Engine init runs in parallel (AnonApp).
+                // Cold start only: on a config-change recreation
                 // (savedInstanceState != null) the splash would flash over the
                 // live UI.
                 var showSplash by remember { mutableStateOf(savedInstanceState == null) }
@@ -212,10 +216,14 @@ class MainActivity : ComponentActivity() {
                     kotlinx.coroutines.delay(splashCutMs.toLong())
                     showSplash = false
                 }
-                if (showSplash) {
-                    SplashContent(cutMs = splashCutMs)
-                    return@AnonDownloaderTheme
-                }
+                // v3.1.5 shipped this as `if (showSplash) { Splash(...); return }`
+                // — a GATE. Device feedback: "contents not loading on time" —
+                // with the return, HomeScreen was never composed during the cut,
+                // so the trending + genre fetches started only AFTER the
+                // animation. The splash is now painted as the TOPMOST child
+                // below (an OVERLAY): everything after this point composes and
+                // fetches behind it, so by the time the mark finishes, the home
+                // data has had the full animation duration to arrive.
 
                 // The media player is a ROOT-LEVEL overlay (not a Dialog —
                 // see MediaPlayerModal): emitted after MainScaffold it covers
@@ -361,6 +369,27 @@ class MainActivity : ComponentActivity() {
                             }
                         }
                     )
+                }
+
+                // SPLASH OVERLAY (v3.1.6): composed LAST = painted over
+                // everything (the b5cdf99 stacking precedent — siblings after
+                // MainScaffold cover even the bottom nav). This replaces
+                // v3.1.5's `if (showSplash) { Splash(...); return }` GATE:
+                // the return starved HomeScreen of composition for the whole
+                // cut, so trending/genre fetches only STARTED after the
+                // animation ended — the "contents not loading on time"
+                // device complaint. Behind the overlay they now run IN
+                // PARALLEL with the show. The tap sink swallows touches for
+                // the cut's duration; nothing under a full-screen logo should
+                // be interactive anyway.
+                if (showSplash) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .pointerInput(Unit) { detectTapGestures { } }
+                    ) {
+                        SplashContent(cutMs = splashCutMs)
+                    }
                 }
             }
         }
