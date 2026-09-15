@@ -36,6 +36,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import com.anonrode.downloader.ui.components.MainScaffold
 import com.anonrode.downloader.ui.components.MainTab
+import com.anonrode.downloader.ui.screens.PlaylistPickerSheet
 import com.anonrode.downloader.ui.screens.SocialModal
 import com.anonrode.downloader.ui.screens.SplashContent
 import com.anonrode.downloader.ui.screens.SplashMotion
@@ -285,6 +286,17 @@ class MainActivity : ComponentActivity() {
                         url = url,
                         viewModel = viewModel,
                         onDismiss = { activeSocialTarget.value = null }
+                    )
+                }
+
+                // YouTube playlist picker. Root-level host like SocialModal —
+                // it can open from a paste, a share, or a search tap while the
+                // user is on any tab, so it must not be composed only on Home.
+                val playlistState by viewModel.playlistState.collectAsState()
+                playlistState.url?.let {
+                    PlaylistPickerSheet(
+                        viewModel = viewModel,
+                        onDismiss = { viewModel.closePlaylist() }
                     )
                 }
 

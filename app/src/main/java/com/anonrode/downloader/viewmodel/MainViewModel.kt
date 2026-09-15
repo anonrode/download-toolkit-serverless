@@ -65,6 +65,63 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _uiState = MutableStateFlow(HomeUiState())
     val uiState: StateFlow<HomeUiState> = _uiState.asStateFlow()
 
+    // ---- YouTube playlist picker state (2026-09-15) -------------------------
+    // Separate flow (not HomeUiState): the sheet is a modal surface with its
+    // own lifecycle, and every HomeUiState copy site would need touching
+    // otherwise. url != null means the sheet is open.
+    data class PlaylistUiState(
+        val url: String? = null,
+        val parsed: com.anonrode.downloader.pipeline.PlaylistPicker.ParsedList? = null,
+        val loading: Boolean = false,
+        val meta: com.anonrode.downloader.pipeline.PlaylistPicker.PlaylistMeta? = null,
+        val error: String? = null
+    )
+    private val _playlistState = MutableStateFlow(PlaylistUiState())
+    val playlistState: StateFlow<PlaylistUiState> = _playlistState.asStateFlow()
+    private var playlistJob: Job? = null
+
+    /** Read a playlist's flat metadata. Cheap by design: ONE
+     *  `yt-dlp -J --flat-playlist` dump (no per-video page loads — on a
+     *  capped plan that's the difference between ~10 KB and hundreds). */
+    fun openPlaylist(url: String) {
+        val parsed = com.anonrode.downloader.pipeline.PlaylistPicker.detect(url) ?: return
+        com.anonrode.downloader.util.DebugLog.user("playlist open: ${parsed.listId} kind=${parsed.kind}")
+        _playlistState.value = PlaylistUiState(url = url, parsed = parsed, loading = true)
+        playlistJob?.cancel()
+        playlistJob = viewModelScope.launch {
+            if (!com.anonrode.downloader.AnonApp.ensureReady()) {
+                _playlistState.update { it.copy(loading = false, error = "The downloader core is still starting — try again in a moment.") }
+                return@launch
+            }
+            val json = com.anonrode.downloader.engine.YoutubeDlDownloader.fetchPlaylistJson(
+                getApplication(), parsed.playlistUrl
+            )
+            val meta = json?.let { com.anonrode.downloader.pipeline.PlaylistPicker.parseFlatJson(it) }
+            _playlistState.update {
+                if (meta == null || meta.entries.isEmpty())
+                    it.copy(
+                        loading = false,
+                        error = "Couldn't read this playlist — it may be private, age-restricted, or YouTube is busy. Try again."
+                    )
+                else
+                    it.copy(loading = false, meta = meta)
+            }
+        }
+    }
+
+    fun closePlaylist() {
+        playlistJob?.cancel()
+        _playlistState.value = PlaylistUiState()
+    }
+
+    /** Queue the selection as one grouped show; closes the sheet. */
+    fun confirmPlaylist(indices: List<Int>, audioOnly: Boolean, quality: String?) {
+        val meta = _playlistState.value.meta ?: return
+        val n = engine.enqueuePlaylist(meta, indices, audioOnly, quality)
+        com.anonrode.downloader.util.DebugLog.user("playlist enqueue: $n/${indices.size} under \"${meta.title}\"")
+        closePlaylist()
+    }
+
     private var searchJob: Job? = null
     private var debounceJob: Job? = null
     private var episodesJob: Job? = null
@@ -345,8 +402,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 openEpisodeDrawer(parsed.showCard)
             }
             is ParsedUrl.SocialUrl -> {
-                com.anonrode.downloader.util.DebugLog.user("routed SocialUrl platform=${parsed.platform} instant=${engine.instantSocialDownload}")
-                if (engine.instantSocialDownload) {
+                // A YouTube URL that carries ?list= opens the playlist picker
+                // INSTEAD of the single-video path — even a watch link inside
+                // a playlist (the shape YouTube's own Share button produces).
+                // Seal only reacts to playlist-shaped URLs; this is the first
+                // edge. Instant-download mode does NOT bypass it: silently
+                // queueing N videos from one paste is exactly the surprise
+                // the instant mode promises to avoid.
+                val playlist = com.anonrode.downloader.pipeline.PlaylistPicker.detect(parsed.cleanUrl)
+                if (playlist != null) {
+                    com.anonrode.downloader.util.DebugLog.user("routed SocialUrl -> playlist picker ${playlist.listId}")
+                    openPlaylist(parsed.cleanUrl)
+                } else if (engine.instantSocialDownload) {
+                    com.anonrode.downloader.util.DebugLog.user("routed SocialUrl platform=${parsed.platform} instant=true")
                     engine.enqueue(
                         showTitle = "Social/${parsed.platform}",
                         episodeNum = 1,
@@ -357,6 +425,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         parallelSockets = engine.parallelSocketsPerFile
                     )
                 } else {
+                    com.anonrode.downloader.util.DebugLog.user("routed SocialUrl platform=${parsed.platform} instant=false")
                     onOpenSocial(parsed.platform, parsed.cleanUrl)
                 }
             }

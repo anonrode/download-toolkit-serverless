@@ -467,6 +467,43 @@ class DownloadEngine(
         return taskId
     }
 
+    /**
+     * YouTube playlist batch (2026-09-15): enqueue the selected entries as ONE
+     * group — showTitle = playlist title, episodeNum = position in the list —
+     * so the Downloads group-by-show ordering and the player's episode-ordered
+     * Next queue (DownloadsSorter.EPISODE_ORDER / playerQueueFor) walk the
+     * playlist like a series. That grouping is the structural edge over Seal,
+     * whose playlist tasks are loose singles. Each entry is a normal yt-dlp
+     * extractor task: subtitles, quality, throttle-survival (round 4) and the
+     * active-URL dedupe in enqueue() all apply per item, and a failed entry
+     * never touches the others. Returns how many were queued.
+     */
+    fun enqueuePlaylist(
+        meta: com.anonrode.downloader.pipeline.PlaylistPicker.PlaylistMeta,
+        indices: List<Int>,
+        audioOnly: Boolean,
+        quality: String?
+    ): Int {
+        var queued = 0
+        for (idx in indices) {
+            val entry = meta.entries.getOrNull(idx - 1) ?: continue
+            enqueue(
+                showTitle = meta.title.ifBlank { "YouTube Playlist" },
+                episodeNum = idx,
+                episodeTitle = entry.title,
+                sourceUrl = entry.watchUrl,
+                isDirect = false,
+                backend = "yt-dlp",
+                parallelSockets = parallelSocketsPerFile,
+                audioOnly = audioOnly,
+                site = "youtube",
+                quality = quality
+            )
+            queued++
+        }
+        return queued
+    }
+
     fun pause(taskId: String) {
         activeJobs[taskId]?.cancel()
         activeJobs.remove(taskId)
