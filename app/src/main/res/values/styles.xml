@@ -18,7 +18,13 @@
 
     <style name="Theme.AnonDownloader.Splash" parent="Theme.SplashScreen">
         <item name="windowSplashScreenBackground">@color/splash_background</item>
-        <item name="windowSplashScreenAnimatedIcon">@drawable/ic_launcher_foreground</item>
+        <!-- The FULL brand mark (cyan->teal squircle + ink monogram), not the
+             adaptive FOREGROUND: that layer is now transparent behind the ink
+             glyph, which would render invisible on the pinned-black splash.
+             API 31+ masks the splash icon to a circle — the squircle inside
+             the clip still reads as the badge; the Compose splash that follows
+             runs the full motion with the unclipped tile. -->
+        <item name="windowSplashScreenAnimatedIcon">@drawable/ic_anon_mark</item>
         <item name="postSplashScreenTheme">@style/Theme.AnonDownloader</item>
         <!-- On API 31+ the library's Theme.SplashScreen resolves to
              DeviceDefault.DayNight carrying ONLY the windowSplashScreen*

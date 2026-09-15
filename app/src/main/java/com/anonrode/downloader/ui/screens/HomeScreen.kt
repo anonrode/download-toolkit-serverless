@@ -7,6 +7,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -28,11 +29,13 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.SubcomposeAsyncImage
+import com.anonrode.downloader.R
 import com.anonrode.downloader.data.models.ShowCard
 import com.anonrode.downloader.pipeline.VerdictPolicy
 import com.anonrode.downloader.providers.CategoryFeed
@@ -125,13 +128,22 @@ fun HomeScreen(
                 .statusBarsPadding()
                 .padding(horizontal = Spacing.lg)
         ) {
-            // Header Bar
+            // Header Bar — brand mark + lockup (the same monogram the splash
+            // assembles and the launcher carries; one brand everywhere).
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(top = Spacing.xl, bottom = Spacing.md),
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                Image(
+                    painter = painterResource(R.drawable.ic_anon_mark),
+                    contentDescription = "AnonRode Downloader logo",
+                    modifier = Modifier
+                        .size(34.dp)
+                        .clip(RoundedCornerShape(9.dp))
+                )
+                Spacer(modifier = Modifier.width(Spacing.md))
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = "ANONRODE",
