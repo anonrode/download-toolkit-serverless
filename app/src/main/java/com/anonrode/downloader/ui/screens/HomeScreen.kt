@@ -29,6 +29,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -61,7 +62,7 @@ fun HomeScreen(
 
     val filters = listOf(
         "all" to "All Sites",
-        "torrents" to "🧲 Torrents (TPB)",
+        "torrents" to "Torrents (TPB)",
         "nkiri" to "NKiri",
         "9jarocks" to "9jaRocks",
         "asianc" to "AsianC",
@@ -352,12 +353,13 @@ fun HomeScreen(
 
             Spacer(modifier = Modifier.height(Spacing.lg))
 
-            // Filter Chips Carousel
+            // Filter Chips Carousel — 8dp gaps (v3.1.6 design pass: 4dp
+            // between tap targets is below the mis-touch comfort line).
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(Spacing.xs)
+                horizontalArrangement = Arrangement.spacedBy(Spacing.sm)
             ) {
                 filters.forEach { (key, label) ->
                     val isSelected = uiState.selectedFilter == key
@@ -544,6 +546,31 @@ fun HomeScreen(
  * row — LEFT TO RIGHT, not a vertical list, per the user's explicit wording.
  * Occupies the blank-query landing area; hides the moment a search starts.
  */
+/** Reserve-space height for ONE trending-card row (poster 124dp @ 2:3 =
+ *  186 + 4 gap + two 17lh title lines + 2 + a 10sp site line ≈ 240). Used
+ *  by BOTH the TrendingSection spinner/empty boxes and the catalog's
+ *  per-row placeholder (v3.1.6 design pass: placeholders were 210dp/176dp
+ *  against a ~229dp real row — content jumped ~50dp when data landed). */
+private val TRENDING_ROW_H = 240.dp
+
+/** One cinematic bottom vignette on every poster face (trending card,
+ *  genre tile, grid cell) — depth for flat art rows and a consistent
+ *  language across all three. Poster-only, so it is theme-independent. */
+@Composable
+private fun PosterScrim() {
+    Box(
+        modifier = Modifier
+            .matchParentSize()
+            .background(
+                Brush.verticalGradient(
+                    0f to Color.Transparent,
+                    0.62f to Color.Transparent,
+                    1f to Color.Black.copy(alpha = 0.45f)
+                )
+            )
+    )
+}
+
 @Composable
 private fun TrendingSection(
     modifier: Modifier = Modifier,
@@ -579,11 +606,10 @@ private fun TrendingSection(
             if (items.isNotEmpty() && !isLoading) {
                 // v3.1.6: force-refresh is a first-class affordance, not a
                 // failure consolation — the cache means a painted row can
-                // always be pushed to crawl again with one tap.
-                IconButton(
-                    onClick = onRefresh,
-                    modifier = Modifier.size(36.dp)
-                ) {
+                // always be pushed to crawl again with one tap. Design pass:
+                // no explicit size, so IconButton keeps its 48dp touch box
+                // (36dp was under the line) around the small 18dp glyph.
+                IconButton(onClick = onRefresh) {
                     Icon(
                         imageVector = Icons.Rounded.Refresh,
                         contentDescription = "Refresh trending",
@@ -599,9 +625,10 @@ private fun TrendingSection(
                     fontSize = 13.sp,
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier
+                        .minimumInteractiveComponentSize()
                         .clip(RoundedCornerShape(Radius.full))
                         .clickable { onRetry() }
-                        .padding(horizontal = Spacing.sm, vertical = Spacing.xs)
+                        .padding(horizontal = Spacing.md, vertical = Spacing.sm)
                 )
             }
         }
@@ -609,7 +636,7 @@ private fun TrendingSection(
         when {
             isLoading && items.isEmpty() -> {
                 Box(
-                    modifier = Modifier.fillMaxWidth().height(210.dp),
+                    modifier = Modifier.fillMaxWidth().height(TRENDING_ROW_H),
                     contentAlignment = Alignment.Center
                 ) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -621,7 +648,7 @@ private fun TrendingSection(
             }
             items.isEmpty() -> {
                 Box(
-                    modifier = Modifier.fillMaxWidth().height(210.dp),
+                    modifier = Modifier.fillMaxWidth().height(TRENDING_ROW_H),
                     contentAlignment = Alignment.Center
                 ) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -672,7 +699,9 @@ private fun TrendingCard(
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(176.dp)
+                // Poster geometry unified to 2:3 across every card dialect
+                // (v3.1.6 design pass — the old 124×176 was a third ratio).
+                .aspectRatio(2f / 3f)
                 .clip(RoundedCornerShape(Radius.md))
                 .background(tileColor(show.title))
                 .border(1.dp, BorderHairline, RoundedCornerShape(Radius.md))
@@ -689,6 +718,7 @@ private fun TrendingCard(
             } else {
                 InitialGlyph(show.title)
             }
+            PosterScrim()
         }
         Spacer(modifier = Modifier.height(Spacing.xs))
         Text(
@@ -727,17 +757,19 @@ private fun CategoryTilesGrid(
     onMore: () -> Unit
 ) {
     val posters = tiles.associate { it.category.label to it.posterUrl }
+    // No horizontal padding here: the landing Column already owns the gutter
+    // (v3.1.6 design pass — a second Spacing.lg here inset this section 32dp
+    // while Trending sat at 16dp, so the two headers never lined up).
     Column(modifier = Modifier.fillMaxWidth()) {
         Text(
             text = "Browse by Genre",
             color = TextPrimary,
             fontSize = 15.sp,
-            fontWeight = FontWeight.Bold,
-            modifier = Modifier.padding(horizontal = Spacing.lg)
+            fontWeight = FontWeight.Bold
         )
         Spacer(modifier = Modifier.height(Spacing.md))
         CategoryFeed.CATEGORIES.chunked(3).forEach { rowCats ->
-            Row(modifier = Modifier.fillMaxWidth().padding(horizontal = Spacing.lg)) {
+            Row(modifier = Modifier.fillMaxWidth()) {
                 rowCats.forEachIndexed { i, category ->
                     Box(
                         modifier = Modifier
@@ -757,7 +789,7 @@ private fun CategoryTilesGrid(
             }
             Spacer(modifier = Modifier.height(Spacing.md))
         }
-        Row(modifier = Modifier.fillMaxWidth().padding(horizontal = Spacing.lg)) {
+        Row(modifier = Modifier.fillMaxWidth()) {
             Box(modifier = Modifier.weight(1f)) {
                 ViewMoreTileCard(onClick = onMore)
             }
@@ -838,6 +870,7 @@ private fun GenreTileCard(
             } else {
                 InitialGlyph(label)
             }
+            PosterScrim()
         }
         Spacer(modifier = Modifier.height(Spacing.xs))
         Text(
@@ -1017,6 +1050,7 @@ private fun GridPosterCard(
             } else {
                 InitialGlyph(show.title)
             }
+            PosterScrim()
         }
         Spacer(modifier = Modifier.height(Spacing.xs))
         Text(
@@ -1118,7 +1152,7 @@ private fun CatalogPage(
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(176.dp),
+                                .height(TRENDING_ROW_H),
                             contentAlignment = Alignment.Center
                         ) {
                             CircularProgressIndicator(color = AccentPrimary, strokeWidth = 2.dp, modifier = Modifier.size(20.dp))
@@ -1191,8 +1225,18 @@ fun ShowCardItem(
                 // A real oracle caption REPLACES the hardcoded "✓ 1080p"
                 // guess — the verified bytes are strictly more honest. With
                 // no verdict, the row is unchanged from before the oracle.
+                // (v3.1.6 design pass: the caption is the only LONG badge —
+                // "✓ 24 eps · 450 MB/ep" beside a 10-char site name measured
+                // past the 218dp text column on a 360dp phone. As the row's
+                // only shrinkable child it now ellipsizes instead of being
+                // clipped off the card edge — the leftMetric pattern above.)
                 if (verifiedCaption != null) {
-                    CardBadge(verifiedCaption, accent = false, verified = true)
+                    CardBadge(
+                        verifiedCaption,
+                        accent = false,
+                        verified = true,
+                        modifier = Modifier.weight(1f, fill = false)
+                    )
                 } else {
                     secondaryBadge(show)?.let { CardBadge(it, accent = false) }
                 }
@@ -1270,9 +1314,14 @@ private fun InitialGlyph(title: String) {
 }
 
 @Composable
-private fun CardBadge(text: String, accent: Boolean, verified: Boolean = false) {
+private fun CardBadge(
+    text: String,
+    accent: Boolean,
+    verified: Boolean = false,
+    modifier: Modifier = Modifier
+) {
     Box(
-        modifier = Modifier
+        modifier = modifier
             .clip(RoundedCornerShape(Radius.sm))
             .background(SurfaceElevated)
             .border(1.dp, BorderHairline, RoundedCornerShape(Radius.sm))

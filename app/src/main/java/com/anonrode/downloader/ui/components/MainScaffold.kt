@@ -209,6 +209,10 @@ private fun BottomNavBar(
 ) {
     Surface(
         color = MaterialTheme.colorScheme.surface,
+        // v3.1.6 design pass: surface == background in BOTH palettes, so the
+        // bar edge vanished and cards scrolled behind an invisible boundary —
+        // a theme-aware hairline separates chrome from content.
+        border = androidx.compose.foundation.BorderStroke(1.dp, com.anonrode.downloader.ui.theme.BorderHairline),
         tonalElevation = 0.dp
     ) {
         NavigationBar(

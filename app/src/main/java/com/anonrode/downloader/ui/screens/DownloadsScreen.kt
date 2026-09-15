@@ -423,11 +423,13 @@ private fun SortChip(label: String, onClick: () -> Unit) {
             fontWeight = FontWeight.SemiBold
         )
         Spacer(modifier = Modifier.width(Spacing.xs))
-        Text(
-            text = "▾",
-            color = TextSecondary,
-            fontSize = 11.sp,
-            fontWeight = FontWeight.Bold
+        // A real glyph, not the "▾" text character (design pass): the Unicode
+        // arrow rendered inconsistently and couldn't be tinted per state.
+        Icon(
+            imageVector = Icons.Rounded.ArrowDropDown,
+            contentDescription = null,
+            tint = TextSecondary,
+            modifier = Modifier.size(16.dp)
         )
     }
     }
@@ -613,7 +615,7 @@ fun DownloadCard(
                                     .background(SurfaceElevated)
                                     .padding(horizontal = Spacing.sm, vertical = Spacing.xxs)
                             ) {
-                                Text(text = extText, color = TextPrimary, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                                Text(text = extText, color = TextPrimary, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                             }
                         }
                         // Quality/resolution chip: the real stream resolution
@@ -627,11 +629,11 @@ fun DownloadCard(
                                     .background(SurfaceElevated)
                                     .padding(horizontal = Spacing.sm, vertical = Spacing.xxs)
                             ) {
-                                Text(text = qualityLabel, color = TextSecondary, fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
+                                Text(text = qualityLabel, color = TextSecondary, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
                             }
                         }
                         Text(
-                            text = "$sizeText • Tap to Play In-App",
+                            text = sizeText,
                             color = TextMuted,
                             fontSize = 11.sp,
                             maxLines = 1,

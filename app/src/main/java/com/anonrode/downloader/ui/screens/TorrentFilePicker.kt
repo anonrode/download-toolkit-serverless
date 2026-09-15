@@ -20,6 +20,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.sp
 import com.anonrode.downloader.security.TorrentSecurityShield
@@ -149,7 +150,15 @@ fun TorrentFilePickerDialog(
                                 modifier = Modifier.padding(vertical = Spacing.xs),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Checkbox(checked = false, onCheckedChange = null)
+                                // Disabled on purpose: the shield refused this
+                                // file. A full-opacity enabled-looking checkbox
+                                // says "tap me, nothing will happen" — the M3
+                                // disabled signal is the alpha (design pass).
+                                Checkbox(
+                                    checked = false,
+                                    onCheckedChange = null,
+                                    modifier = Modifier.alpha(0.38f)
+                                )
                                 Column(modifier = Modifier.weight(1f)) {
                                     Text(
                                         file.displayName,

@@ -167,13 +167,14 @@ fun EpisodeDrawer(
             }
 
             if (episodes.isNotEmpty()) {
-                // 1-Tap Batch Season Selector Chips Row
+                // 1-Tap Batch Season Selector Chips Row — 8dp gaps (design
+                // pass: interactive chips need mis-touch breathing room).
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .horizontalScroll(rememberScrollState())
                         .padding(vertical = Spacing.xs),
-                    horizontalArrangement = Arrangement.spacedBy(Spacing.xs)
+                    horizontalArrangement = Arrangement.spacedBy(Spacing.sm)
                 ) {
                     // All Chip
                     val isAllSelected = selectedEpisodes.size == episodes.size
@@ -530,8 +531,10 @@ fun EpisodeRow(
                         checkedColor = AccentPrimary,
                         uncheckedColor = TextMuted,
                         checkmarkColor = BackgroundDark
-                    ),
-                    modifier = Modifier.size(24.dp)
+                    )
+                    // No size() override (design pass): shrinking the box to
+                    // 24dp shrank the touch target too; the row's own click
+                    // still covers the common path.
                 )
 
                 Spacer(modifier = Modifier.width(Spacing.sm))
@@ -561,7 +564,7 @@ fun EpisodeRow(
                 )
             }
 
-            Spacer(modifier = Modifier.width(Spacing.xs))
+            Spacer(modifier = Modifier.width(Spacing.sm))
 
             IconButton(
                 onClick = onDownloadSingle,
@@ -628,7 +631,10 @@ private fun PreviewChip(label: String, value: String, modifier: Modifier = Modif
     Row(
         modifier = modifier
             .clip(RoundedCornerShape(Radius.sm))
-            .background(BackgroundDark.copy(alpha = 0.5f))
+            // SurfaceElevated, not a background token with alpha (design
+            // pass): BackgroundDark.copy(0.5f) inverted into a washed-out
+            // half-white chip the moment the light theme renders it.
+            .background(SurfaceElevated)
             .padding(horizontal = Spacing.sm, vertical = 3.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(4.dp)

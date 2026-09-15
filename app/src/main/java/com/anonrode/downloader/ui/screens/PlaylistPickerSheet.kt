@@ -131,7 +131,7 @@ fun PlaylistPickerSheet(viewModel: MainViewModel, onDismiss: () -> Unit) {
                 ) {
                     Text(
                         text = state.error ?: "Playlist unavailable.",
-                        fontSize = 13.5.sp,
+                        fontSize = 13.sp,
                         color = TextSecondary
                     )
                     Spacer(Modifier.height(Spacing.md))
@@ -188,7 +188,7 @@ fun PlaylistPickerSheet(viewModel: MainViewModel, onDismiss: () -> Unit) {
                 OutlinedTextField(
                     value = query,
                     onValueChange = { query = it },
-                    placeholder = { Text("Filter by title…", fontSize = 12.5.sp, color = TextMuted) },
+                    placeholder = { Text("Filter by title…", fontSize = 12.sp, color = TextMuted) },
                     textStyle = LocalTextStyle.current.copy(fontSize = 13.sp),
                     singleLine = true,
                     modifier = Modifier.weight(1f),
@@ -203,12 +203,12 @@ fun PlaylistPickerSheet(viewModel: MainViewModel, onDismiss: () -> Unit) {
                 TextButton(onClick = {
                     selected.clear()
                     selected.addAll(filtered)
-                }) { Text("Select all", fontSize = 12.5.sp, color = AccentPrimary) }
+                }) { Text("Select all", fontSize = 12.sp, color = AccentPrimary) }
                 TextButton(onClick = {
                     val flipped = filtered.filter { it !in selected }
                     selected.clear()
                     selected.addAll(flipped)
-                }) { Text("Invert", fontSize = 12.5.sp, color = AccentPrimary) }
+                }) { Text("Invert", fontSize = 12.sp, color = AccentPrimary) }
             }
 
             // ---- range spec ----
@@ -217,7 +217,7 @@ fun PlaylistPickerSheet(viewModel: MainViewModel, onDismiss: () -> Unit) {
                 OutlinedTextField(
                     value = rangeSpec,
                     onValueChange = { rangeSpec = it; rangeError = null },
-                    placeholder = { Text("Range e.g. 1-5,8,10-12", fontSize = 12.5.sp, color = TextMuted) },
+                    placeholder = { Text("Range e.g. 1-5,8,10-12", fontSize = 12.sp, color = TextMuted) },
                     textStyle = LocalTextStyle.current.copy(fontSize = 13.sp),
                     singleLine = true,
                     modifier = Modifier.weight(1f),
@@ -233,32 +233,34 @@ fun PlaylistPickerSheet(viewModel: MainViewModel, onDismiss: () -> Unit) {
                     PlaylistPicker.parseRanges(rangeSpec, meta.entries.size)?.let {
                         selected.clear(); selected.addAll(it)
                     } ?: run { rangeError = "Use 1-based numbers like 1-5,8 (max ${meta.entries.size})." }
-                }) { Text("Apply", fontSize = 12.5.sp, color = AccentPrimary) }
+                }) { Text("Apply", fontSize = 12.sp, color = AccentPrimary) }
             }
             rangeError?.let {
                 Text(it, fontSize = 11.sp, color = StatusError)
             }
 
-            // ---- mode row: audio toggle + quality + skip-downloaded ----
+            // ---- mode: audio toggle, then the quality row FULL WIDTH below.
+            // (v3.1.6 design pass: sharing one Row with the ~160dp audio chip
+            // left the four quality chips ~34dp each — "1080p" clipped on
+            // 360-400dp phones. SocialModal already keeps them on separate
+            // rows; this sheet now matches.)
             Spacer(Modifier.height(Spacing.xs))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                FilterChip(
-                    selected = audioOnly,
-                    onClick = { audioOnly = !audioOnly },
-                    label = { Text("Audio only (MP3)", fontSize = 12.sp) },
-                    colors = FilterChipDefaults.filterChipColors(
-                        selectedContainerColor = AccentPrimary,
-                        selectedLabelColor = BackgroundDark
-                    )
+            FilterChip(
+                selected = audioOnly,
+                onClick = { audioOnly = !audioOnly },
+                label = { Text("Audio only (MP3)", fontSize = 12.sp) },
+                colors = FilterChipDefaults.filterChipColors(
+                    selectedContainerColor = AccentPrimary,
+                    selectedLabelColor = BackgroundDark
                 )
-                Spacer(Modifier.width(Spacing.sm))
-                if (!audioOnly) {
-                    QualityChipRow(
-                        options = listOf("480p", "720p", "1080p", "Best"),
-                        selected = selectedQuality,
-                        onSelect = { selectedQuality = it }
-                    )
-                }
+            )
+            if (!audioOnly) {
+                Spacer(Modifier.height(Spacing.sm))
+                QualityChipRow(
+                    options = listOf("480p", "720p", "1080p", "Best"),
+                    selected = selectedQuality,
+                    onSelect = { selectedQuality = it }
+                )
             }
             val downloadedInList = remember(meta, downloaded) {
                 meta.entries.count { it.videoId in downloaded }
@@ -347,7 +349,7 @@ fun PlaylistPickerSheet(viewModel: MainViewModel, onDismiss: () -> Unit) {
                             if (isDownloaded) {
                                 Text(
                                     "✓ on device",
-                                    fontSize = 10.5.sp,
+                                    fontSize = 11.sp,
                                     fontWeight = FontWeight.Bold,
                                     color = StatusSuccess
                                 )
@@ -367,7 +369,7 @@ fun PlaylistPickerSheet(viewModel: MainViewModel, onDismiss: () -> Unit) {
                     item {
                         Text(
                             "No entry matches \"$query\".",
-                            fontSize = 12.5.sp,
+                            fontSize = 12.sp,
                             color = TextMuted,
                             modifier = Modifier.padding(vertical = Spacing.md)
                         )
