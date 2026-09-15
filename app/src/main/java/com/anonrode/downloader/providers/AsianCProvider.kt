@@ -14,7 +14,11 @@ import java.net.URLEncoder
 
 object AsianCProvider : SiteProvider {
     override val name: String = "asianc"
-    override val mainUrl: String = "https://asianc.id"
+    // OTA-movable like every other provider (v3.1.6): the default table maps
+    // "asianc" to exactly the URL that was hardcoded here, so behavior is
+    // identical today — but if the domain ever flips, the playbook can heal
+    // it without an APK update (nepu already could; this closed the gap).
+    override val mainUrl: String get() = com.anonrode.downloader.data.rules.DynamicRulesManager.getBaseUrl(name)
 
     override suspend fun search(query: String): List<ShowCard> {
         val results = mutableListOf<ShowCard>()

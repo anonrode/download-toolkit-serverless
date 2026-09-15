@@ -164,4 +164,146 @@ class TrendingFeedParseTest {
         )
         assertEquals(16, merged.size)
     }
+
+    // ---- genre confirmation (v3.1.6: "i just want the genre to be accurate")
+    // The pollution this fixes: WP search matches BODIES, so a kdrama post
+    // mentioning "sci-fi" landed in Sci-Fi. Confirmation uses the site's own
+    // taxonomy names (already inside the _embed bytes) or the title.
+
+    private fun postWithTerms(
+        title: String,
+        link: String,
+        body: String,
+        termGroups: List<List<String>>
+    ): String {
+        val groups = termGroups.joinToString(",") { g ->
+            "[" + g.joinToString(",") { name -> "{\"name\":\"$name\"}" } + "]"
+        }
+        return "{\"title\":{\"rendered\":\"$title\"},\"link\":\"$link\",\"content\":{\"rendered\":\"$body\"}," +
+            "\"_embedded\":{\"wp:term\":[$groups]}}"
+    }
+
+    @Test
+    fun `parseWpRestPosts harvests category and tag term names from both embeds`() {
+        val json = "[${postWithTerms("Dune 2", "https://nk.test/d2/", "b", listOf(listOf("Sci-Fi", "Movies"), listOf("dune")))}]"
+        assertEquals(listOf("Sci-Fi", "Movies", "dune"), TrendingFeed.parseWpRestPosts(json, "nkiri")[0].terms)
+        // The no-_embedded shape (jetpack poster field) still parses, terms empty.
+        val plain = "[${post("Dune 2", "https://nk.test/d2/", "b", poster = "https://nk.test/p.jpg")}]"
+        assertTrue(TrendingFeed.parseWpRestPosts(plain, "nkiri")[0].terms.isEmpty())
+    }
+
+    @Test
+    fun `normalizeGenre crushes case punctuation and spaces`() {
+        // Aliases are stored post-normalization; a term like "Science Fiction"
+        // must crush to "sciencefiction" to meet the alias check.
+        assertEquals("scifi", TrendingFeed.normalizeGenre("Sci-Fi"))
+        assertEquals("sciencefiction", TrendingFeed.normalizeGenre(" Science Fiction "))
+        assertEquals("martialarts", TrendingFeed.normalizeGenre("Martial Arts!"))
+        assertEquals("", TrendingFeed.normalizeGenre("———"))
+    }
+
+    @Test
+    fun `genreConfirmed accepts title or taxonomy terms and no-aliases is open`() {
+        val scifi = setOf("scifi", "sciencefiction")
+        assertTrue(TrendingFeed.genreConfirmed("Sci-Fi Lovers 2026", emptyList(), scifi))
+        assertTrue(TrendingFeed.genreConfirmed("Dune Prophecy", listOf("Movies", "Science Fiction"), scifi))
+        // Term CONTAINING an alias counts: WP taxonomies get compound names.
+        assertTrue(TrendingFeed.genreConfirmed("X", listOf("Science Fiction & Fantasy"), scifi))
+        // The exact device complaint: anime with no genre signal in title or terms.
+        org.junit.Assert.assertFalse(TrendingFeed.genreConfirmed("Jujutsu Kaisen 03", listOf("Anime"), scifi))
+        // No aliases configured = no objection (non-genre callers).
+        assertTrue(TrendingFeed.genreConfirmed("Anything", emptyList(), emptySet()))
+    }
+
+    @Test
+    fun `gateWpRest genre path confirms via taxonomy and never ungates`() {
+        val confirmed = postWithTerms(
+            "Alien Romulus", "https://nk.test/alien/",
+            "links: https://downloadwella.com/f/1", listOf(listOf("Sci-Fi"))
+        )
+        val bodyNoise = postWithTerms(
+            "Solo Leveling S02", "https://nk.test/sl/",
+            "a sci-fi themed kdrama https://downloadwella.com/f/2", listOf(listOf("Anime", "Kdrama"))
+        )
+        val stubNoGenre = postWithTerms(
+            "Some Trailer", "https://nk.test/tr/",
+            "youtube embed only", listOf(listOf("Sci-Fi"))
+        )
+        val posts = TrendingFeed.parseWpRestPosts("[$confirmed,$bodyNoise,$stubNoGenre]", "nkiri")
+        val aliases = setOf("scifi", "sciencefiction")
+
+        // Ungated (trending/search) behavior UNCHANGED: gate keeps link-holders.
+        assertEquals(listOf("Alien Romulus", "Solo Leveling S02"), TrendingFeed.gateWpRest(posts).map { it.title })
+        // Genre path: taxonomy confirms the real one; the body-mention dies.
+        assertEquals(listOf("Alien Romulus"), TrendingFeed.gateWpRest(posts, aliases).map { it.title })
+        // All-stub genre batch → EMPTY, not the ungated fallback: a genre row
+        // shows nothing over showing noise; the next site fills.
+        assertTrue(TrendingFeed.gateWpRest(listOf(TrendingFeed.parseWpRestPosts("[$stubNoGenre]", "nkiri")[0]), aliases).isEmpty())
+    }
+
+    @Test
+    fun `parseRssItems confirms genre via category names and shares the link gate`() {
+        fun item(title: String, link: String, cat: String, img: String, body: String) =
+            "<item><title><![CDATA[$title]]></title><link>$link</link>" +
+                "<category><![CDATA[$cat]]></category>" +
+                "<content:encoded><![CDATA[<img src=\"$img\">$body]]></content:encoded></item>"
+        val xml = "<rss><channel>" +
+            item("Alien Wave", "https://9ja.test/alien/", "Sci-Fi", "https://9ja.test/a.jpg", "dl https://downloadwella.com/f/9") +
+            item("Kaisen", "https://9ja.test/k/", "Anime", "https://9ja.test/k.jpg", "dl https://downloadwella.com/f/8") +
+            "</channel></rss>"
+        val aliases = setOf("scifi", "sciencefiction")
+        // Ungated (trending-era) parse unaffected: both link-holders pass.
+        assertEquals(listOf("Alien Wave", "Kaisen"), TrendingFeed.parseRssItems(xml, "9jarocks", "https://9ja.test").map { it.title })
+        val gated = TrendingFeed.parseRssItems(xml, "9jarocks", "https://9ja.test", aliases)
+        assertEquals(listOf("Alien Wave"), gated.map { it.title })
+        assertEquals("https://9ja.test/a.jpg", gated.first().posterUrl)
+    }
+
+    // ---- API-JSON genre sources (v3.1.6: nepu + asianc) --------------------
+
+    @Test
+    fun `parseNepuResults builds watch urls and tmdb cdn posters`() {
+        val json = """{"results":[
+            {"id":"123","media_type":"movie","title":"Fight Club 2","poster_path":"/abc.jpg"},
+            {"id":"456","media_type":"tv","name":"War Room","poster_path":null},
+            {"id":"","media_type":"movie","title":"No Id","poster_path":"/x.jpg"},
+            {"id":"789","media_type":"movie","title":"","poster_path":"/y.jpg"}
+        ]}"""
+        val cards = TrendingFeed.parseNepuResults(json, "nepu", "https://nepu.test")
+        assertEquals(2, cards.size) // blank id / blank title dropped
+        assertEquals("Fight Club 2", cards[0].title)
+        assertEquals("https://nepu.test/watch/movie/123", cards[0].url)
+        assertEquals("https://image.tmdb.org/t/p/w342/abc.jpg", cards[0].posterUrl)
+        assertEquals("Movies", cards[0].category)
+        assertEquals("https://nepu.test/watch/tv/456", cards[1].url) // media_type honored
+        assertEquals("", cards[1].posterUrl) // null poster_path -> no poster, tile falls through
+        // Garbage tolerance (deflate/HTML error page arriving as text):
+        assertTrue(TrendingFeed.parseNepuResults("<html>nope", "nepu", "https://nepu.test").isEmpty())
+    }
+
+    @Test
+    fun `parseAsiancResults prefixes relative urls and falls back to value`() {
+        val json = """[
+            {"url":"/drama/my-love/","name":"My Love","cover":"https://ac.test/c1.jpg"},
+            {"url":"https://ac.test/drama/gone/","value":"Gone","cover":""},
+            {"url":"","name":"No Url","cover":""}
+        ]"""
+        val cards = TrendingFeed.parseAsiancResults(json, "asianc", "https://ac.test")
+        assertEquals(2, cards.size)
+        assertEquals("https://ac.test/drama/my-love/", cards[0].url)
+        assertEquals("https://ac.test/c1.jpg", cards[0].posterUrl)
+        assertEquals("Asian Drama", cards[0].category)
+        assertEquals("Gone", cards[1].title) // name -> value fallback
+        assertEquals("https://ac.test/drama/gone/", cards[1].url) // absolute stays absolute
+        assertTrue(TrendingFeed.parseAsiancResults("[]", "asianc", "https://ac.test").isEmpty())
+    }
+
+    @Test
+    fun `wpRestLiteUrl asks for the two fields the tiles actually read`() {
+        assertEquals(
+            "https://nk.test/wp-json/wp/v2/posts?per_page=1&search=comedy&_fields=title,jetpack_featured_media_url",
+            TrendingFeed.wpRestLiteUrl("https://nk.test/", "comedy", 1)
+        )
+        assertEquals(null, TrendingFeed.wpRestLiteUrl("", "comedy", 1))
+    }
 }

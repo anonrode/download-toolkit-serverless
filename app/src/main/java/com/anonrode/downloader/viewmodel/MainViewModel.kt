@@ -39,14 +39,18 @@ data class HomeUiState(
     val trending: List<ShowCard> = emptyList(),
     val isTrendingLoading: Boolean = false,
     val trendingFailed: Boolean = false,
-    // Category sections (chips under Trending). activeCategory is the open
-    // page's Category (null = Home shows the normal landing). rows/loading/
-    // failed are the fetch trio for whatever page is open — same shape as the
-    // trending trio above, reused per category via a process cache.
+    // Category sections (v3.1.6 MIXED redesign). activeCategory is the open
+    // grid page's Category (null = not open); categoryCards is that page's
+    // single mixed list — every site's cards interleaved, no per-site rows,
+    // no site names. catalogOpen shows the "View More" page: one horizontal
+    // mixed row per genre, fed by catalogRows, each row lazy-loading as it
+    // scrolls into view (never six genres × five sites at once).
     val activeCategory: com.anonrode.downloader.providers.CategoryFeed.Category? = null,
-    val categoryRows: List<com.anonrode.downloader.providers.CategoryFeed.CategoryRow> = emptyList(),
+    val categoryCards: List<ShowCard> = emptyList(),
     val isCategoryLoading: Boolean = false,
     val categoryFailed: Boolean = false,
+    val catalogOpen: Boolean = false,
+    val catalogRows: Map<String, List<ShowCard>> = emptyMap(),
     // Home genre tiles: each category's current top-post poster, fetched once
     // per process alongside the trending row. An empty list (or an empty
     // posterUrl) renders the colored name-tile fallback — the row must never
@@ -127,10 +131,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var episodesJob: Job? = null
     private var trendingJob: Job? = null
     private var categoryJob: Job? = null
-    // Genre-label -> fetched rows. Like trending, a category is fetched once
-    // per process (the data is "what's up this week" and re-crawling on every
-    // chip tap burns metered data for near-identical rows). Retry forces.
-    private val categoryCache = mutableMapOf<String, List<com.anonrode.downloader.providers.CategoryFeed.CategoryRow>>()
+    // Genre-label -> mixed cards. L2 in-process cache layered over FeedCache
+    // (disk L1, 30-min TTL): a fetched genre never re-crawls within the
+    // process, and across restarts the disk snapshot paints first while a
+    // stale group refetches silently. Retry/refresh force through both.
+    private val categoryCache = mutableMapOf<String, List<com.anonrode.downloader.data.models.ShowCard>>()
+    // Genres whose catalog row scrolled into view WHILE another genre's
+    // single-flight crawl was running. Without this queue those rows would
+    // sit as spinners until the user scrolls away and back (their
+    // LaunchedEffect won't re-fire) — the queue drains after each crawl so
+    // every row that was ever seen eventually loads, still one at a time.
+    private val pendingCatalogGenres = mutableSetOf<String>()
     private var searchSequence = 0L
     // Last query+filter actually launched; an identical search while it is
     // still running is a duplicate keystroke, not a new request.
@@ -222,6 +233,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         refreshStorageInfo()
+        // v3.1.6: paint the LAST session's feeds from disk before anything
+        // touches the network (user: "close it and open again, the last
+        // stuff will still be there"). The loaders below then refetch
+        // silently only when a group is stale (>30 min) or forced.
+        val cached = com.anonrode.downloader.providers.FeedCache.snapshot
+        if (cached.trending.isNotEmpty() || cached.categories.isNotEmpty()) {
+            categoryCache.putAll(cached.categories.mapValues { it.value.cards })
+            val tiles = cached.tiles.mapNotNull { t ->
+                com.anonrode.downloader.providers.CategoryFeed.CATEGORIES
+                    .firstOrNull { it.label == t.label }
+                    ?.let { com.anonrode.downloader.providers.CategoryFeed.GenreTile(it, t.posterUrl) }
+            }
+            _uiState.update {
+                it.copy(
+                    trending = cached.trending,
+                    genreTiles = tiles,
+                    catalogRows = cached.categories.mapValues { e -> e.value.cards }
+                )
+            }
+        }
         loadTrending()
         loadGenreTiles()
         // Oracle verdicts ride their own stream: a background verification
@@ -236,16 +267,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     /** One fetch per app process, same rule as the trending row: six
      *  per_page=1 requests, cached in memory, failure degrades to glyph
-     *  tiles instead of hiding the section. */
+     *  tiles instead of hiding the section. Disk-fresh (v3.1.6): zero
+     *  network — the hydrated tiles from FeedCache already render. */
     private var genreTilesJob: Job? = null
-    fun loadGenreTiles() {
-        if (genreTilesJob?.isActive == true || _uiState.value.genreTiles.isNotEmpty()) return
+    fun loadGenreTiles(force: Boolean = false) {
+        if (genreTilesJob?.isActive == true) return
+        if (!force && _uiState.value.genreTiles.isNotEmpty() &&
+            com.anonrode.downloader.providers.FeedCache.isTilesFresh()
+        ) return
         genreTilesJob = viewModelScope.launch {
             try {
                 val tiles = withContext(Dispatchers.IO) {
                     com.anonrode.downloader.providers.CategoryFeed.tilePosters()
                 }
-                _uiState.update { it.copy(genreTiles = tiles) }
+                if (tiles.any { it.posterUrl.isNotBlank() }) {
+                    _uiState.update { it.copy(genreTiles = tiles) }
+                    com.anonrode.downloader.providers.FeedCache.saveTiles(
+                        tiles.map { com.anonrode.downloader.providers.TilePoster(it.category.label, it.posterUrl) }
+                    )
+                }
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (_: Exception) {
@@ -254,23 +294,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /** One fetch per app process: the row is for the moment of opening, and
-     *  re-fetching on every tab return would burn data for near-identical
-     *  cards. force=true (Retry tap) always re-crawls. */
+    /** v3.1.6 cache-first: a disk-fresh row (<=30 min) painted at init means
+     *  ZERO network this launch. Stale → refetch SILENTLY behind the painted
+     *  cards (spinner only when there is nothing to show); success rewrites
+     *  memory + disk. force=true (the header Refresh tap) always crawls. */
     fun loadTrending(force: Boolean = false) {
         if (trendingJob?.isActive == true) return
-        if (!force && _uiState.value.trending.isNotEmpty()) return
+        if (!force && _uiState.value.trending.isNotEmpty() &&
+            com.anonrode.downloader.providers.FeedCache.isTrendingFresh()
+        ) return
         trendingJob = viewModelScope.launch {
-            _uiState.update { it.copy(isTrendingLoading = true, trendingFailed = false) }
+            val showSpinner = _uiState.value.trending.isEmpty()
+            if (showSpinner) _uiState.update { it.copy(isTrendingLoading = true, trendingFailed = false) }
             com.anonrode.downloader.util.DebugLog.user("trending: fetch started")
             try {
                 val items = withContext(Dispatchers.IO) {
-                    // v3.1.6 streaming: each site re-publishes the partial
+                    // Streaming: each site re-publishes the partial
                     // round-robin merge the moment it lands, so the row fills
-                    // while a laggard (9jarocks' RSS) is still crawling —
-                    // v3.1.5 showed a spinner until ALL four sites answered.
-                    // StateFlow.update is thread-safe; the provider serializes
-                    // its own partials, so no torn publishes.
+                    // while a laggard (9jarocks' RSS) is still crawling.
                     com.anonrode.downloader.providers.TrendingFeed.fetch(
                         onPartial = { partial ->
                             if (partial.isNotEmpty()) {
@@ -279,95 +320,174 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         }
                     )
                 }
-                _uiState.update {
-                    it.copy(
-                        trending = items,
-                        isTrendingLoading = false,
-                        trendingFailed = items.isEmpty()
-                    )
+                if (items.isNotEmpty()) {
+                    _uiState.update {
+                        it.copy(trending = items, isTrendingLoading = false, trendingFailed = false)
+                    }
+                    com.anonrode.downloader.providers.FeedCache.saveTrending(items)
+                } else {
+                    // Nothing new: keep whatever is painted; only the empty
+                    // state earns the failure banner + Retry.
+                    _uiState.update {
+                        it.copy(isTrendingLoading = false, trendingFailed = it.trending.isEmpty())
+                    }
                 }
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {
                 com.anonrode.downloader.util.DebugLog.error("trending: fetch failed ${e.message}")
-                _uiState.update { it.copy(isTrendingLoading = false, trendingFailed = true) }
+                _uiState.update {
+                    it.copy(isTrendingLoading = false, trendingFailed = it.trending.isEmpty())
+                }
             }
         }
     }
 
-    /** Open a category's full-page of per-site rows. Cached rows render with
-     *  no loading flash; a first tap shows the spinner while fetching. A
-     *  still-running load for a DIFFERENT category belongs to a page the user
-     *  already left and is cancelled (the fetch itself label-guards its
-     *  state writes, so a late arrival can never bleed into another page). */
+    /** Open a genre's MIXED grid page. Disk/memory cards render instantly
+     *  (no blank, no flash); a stale or missing group refetches silently in
+     *  the background, streaming its growing mix into the open page. A
+     *  still-running load for a DIFFERENT genre is cancelled — its page is
+     *  gone, and label-guarded writes already prevent bleed. */
     fun openCategory(category: com.anonrode.downloader.providers.CategoryFeed.Category) {
         if (categoryJob?.isActive == true && _uiState.value.activeCategory?.label != category.label) {
             categoryJob?.cancel()
         }
         val cached = categoryCache[category.label]
+            ?.ifEmpty { com.anonrode.downloader.providers.FeedCache.categoryCards(category.label) }
+            ?: com.anonrode.downloader.providers.FeedCache.categoryCards(category.label)
+        if (cached.isNotEmpty()) categoryCache[category.label] = cached
         _uiState.update {
             it.copy(
                 activeCategory = category,
-                categoryRows = cached ?: emptyList(),
-                isCategoryLoading = cached == null,
-                categoryFailed = cached?.isEmpty() == true
+                categoryCards = cached,
+                isCategoryLoading = cached.isEmpty(),
+                categoryFailed = false
             )
         }
-        if (cached != null) return
+        if (cached.isNotEmpty() && com.anonrode.downloader.providers.FeedCache.isCategoryFresh(category.label)) return
         loadCategory(category)
     }
 
-    /** Close the page; cancels any in-flight crawl (partials stay in the
-     *  process cache only on success — a cancelled fetch caches nothing, so
-     *  reopening refetches). */
+    /** The "View More" catalog page: one horizontal mixed row per genre,
+     *  each row lazy-loading via [ensureCategoryCards] as it scrolls into
+     *  view — opening the page NEVER stamps all six genres at once. */
+    fun openCatalog() {
+        _uiState.update { it.copy(catalogOpen = true) }
+    }
+
+    fun closeCatalog() {
+        _uiState.update { it.copy(catalogOpen = false) }
+    }
+
+    /** Close the genre grid; cancels its crawl (successful partials stay in
+     *  the caches — a cancelled fetch caches nothing, so reopening refetches).
+     *  If the catalog is open underneath, the back gesture lands there. */
     fun closeCategory() {
         categoryJob?.cancel()
         categoryJob = null
         _uiState.update {
             it.copy(
                 activeCategory = null,
-                categoryRows = emptyList(),
+                categoryCards = emptyList(),
                 isCategoryLoading = false,
                 categoryFailed = false
             )
         }
     }
 
-    /** Same contract as [loadTrending]: one fetch per category per process,
-     *  force=true (the Retry tap) always re-crawls. */
+    /** Catalog row loader: no-op while a genre is cached and disk-fresh, so
+     *  scrolling the catalog costs bandwidth only for genres not yet seen. */
+    fun ensureCategoryCards(category: com.anonrode.downloader.providers.CategoryFeed.Category) {
+        val cached = categoryCache[category.label] ?: emptyList()
+        if (cached.isNotEmpty() &&
+            com.anonrode.downloader.providers.FeedCache.isCategoryFresh(category.label)
+        ) return
+        if (categoryJob?.isActive == true) {
+            pendingCatalogGenres.add(category.label)
+            return
+        }
+        loadCategory(category)
+    }
+
+    /** Process the queue left by [ensureCategoryCards] skips. Runs in its
+     *  own coroutine: called from the finally of a finishing crawl, where
+     *  [categoryJob] still reads active until that coroutine completes. */
+    private fun drainCatalogQueue() {
+        if (pendingCatalogGenres.isEmpty()) return
+        viewModelScope.launch {
+            while (pendingCatalogGenres.isNotEmpty()) {
+                if (categoryJob?.isActive == true) return@launch
+                val label = pendingCatalogGenres.first()
+                pendingCatalogGenres.remove(label)
+                val cat = com.anonrode.downloader.providers.CategoryFeed.CATEGORIES
+                    .firstOrNull { it.label == label } ?: continue
+                ensureCategoryCards(cat)
+            }
+        }
+    }
+
+    /** Fetch a genre's MIXED cards: memory+disk first, silent refetch when
+     *  stale, force=true (Refresh/Retry taps) always crawls. Success writes
+     *  the process cache, the disk cache, the open grid page (label-guarded)
+     *  AND the catalog row map. */
     fun loadCategory(
         category: com.anonrode.downloader.providers.CategoryFeed.Category,
         force: Boolean = false
     ) {
         if (categoryJob?.isActive == true) return
         val cached = categoryCache[category.label]
-        if (!force && cached != null) {
+            ?: com.anonrode.downloader.providers.FeedCache.categoryCards(category.label)
+        if (!force && cached.isNotEmpty() &&
+            com.anonrode.downloader.providers.FeedCache.isCategoryFresh(category.label)
+        ) {
             _uiState.update {
-                it.copy(categoryRows = cached, isCategoryLoading = false, categoryFailed = cached.isEmpty())
+                it.copy(
+                    categoryCards = if (it.activeCategory?.label == category.label) cached else it.categoryCards,
+                    catalogRows = it.catalogRows + (category.label to cached),
+                    isCategoryLoading = false
+                )
             }
             return
         }
         categoryJob = viewModelScope.launch {
-            _uiState.update { it.copy(isCategoryLoading = true, categoryFailed = false) }
+            if (cached.isEmpty() && _uiState.value.activeCategory?.label == category.label) {
+                _uiState.update { it.copy(isCategoryLoading = true, categoryFailed = false) }
+            }
             com.anonrode.downloader.util.DebugLog.user("category '${category.label}': fetch started")
             try {
-                val rows = withContext(Dispatchers.IO) {
-                    // Streaming rows (v3.1.6, same shape as trending): fast
-                    // sites render while a laggard crawls. Label-guarded like
-                    // the final write — a partial from a category the user
+                val cards = withContext(Dispatchers.IO) {
+                    // Streaming mixed partials (same contract as trending):
+                    // fast sites paint while a laggard crawls. Label-guarded
+                    // like the final write — a partial from a genre the user
                     // already left must never bleed into the open page.
                     com.anonrode.downloader.providers.CategoryFeed.fetch(category) { partial ->
-                        if (partial.isNotEmpty() &&
-                            _uiState.value.activeCategory?.label == category.label
-                        ) {
-                            _uiState.update { it.copy(categoryRows = partial) }
+                        if (partial.isNotEmpty()) {
+                            _uiState.update {
+                                it.copy(
+                                    categoryCards = if (it.activeCategory?.label == category.label) partial else it.categoryCards,
+                                    catalogRows = it.catalogRows + (category.label to partial)
+                                )
+                            }
                         }
                     }
                 }
-                categoryCache[category.label] = rows
-                if (_uiState.value.activeCategory?.label == category.label) {
+                if (cards.isNotEmpty()) {
+                    categoryCache[category.label] = cards
+                    com.anonrode.downloader.providers.FeedCache.saveCategory(category.label, cards)
                     _uiState.update {
-                        it.copy(categoryRows = rows, isCategoryLoading = false, categoryFailed = rows.isEmpty())
+                        it.copy(
+                            categoryCards = if (it.activeCategory?.label == category.label) cards else it.categoryCards,
+                            catalogRows = it.catalogRows + (category.label to cards),
+                            isCategoryLoading = false,
+                            categoryFailed = false
+                        )
+                    }
+                } else {
+                    _uiState.update {
+                        it.copy(
+                            isCategoryLoading = false,
+                            categoryFailed = it.activeCategory?.label == category.label && it.categoryCards.isEmpty()
+                        )
                     }
                 }
             } catch (e: kotlinx.coroutines.CancellationException) {
@@ -375,8 +495,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             } catch (e: Exception) {
                 com.anonrode.downloader.util.DebugLog.error("category '${category.label}': fetch failed ${e.message}")
                 if (_uiState.value.activeCategory?.label == category.label) {
-                    _uiState.update { it.copy(isCategoryLoading = false, categoryFailed = true) }
+                    _uiState.update {
+                        it.copy(isCategoryLoading = false, categoryFailed = it.categoryCards.isEmpty())
+                    }
                 }
+            } finally {
+                drainCatalogQueue()
             }
         }
     }

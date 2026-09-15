@@ -12,6 +12,9 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -448,25 +451,28 @@ fun HomeScreen(
                 }
             } else if (visibleResults.isEmpty()) {
                 // Blank-query state: the trending row IS the landing content
-                // (feature request: show what's trending on open, scrolling
-                // left to right, not top to bottom). Category chips sit
-                // directly under it (feature request: "sections like Action
-                // below trending, tapping brings up 3 per-site rows") —
-                // they belong to the landing state only, never over results.
+                // (left/right — its established gesture). The genre tiles
+                // below it WRAP three-per-row and drop down (v3.1.6, user:
+                // "browse my genre shouldnt be scrollable left and right, it
+                // should drop down… 3 per row"), ending with the View More
+                // tile that opens the catalog. Landing state only, never
+                // over results.
                 Column(modifier = Modifier.weight(1f)) {
                     TrendingSection(
                         items = uiState.trending,
                         isLoading = uiState.isTrendingLoading,
                         failed = uiState.trendingFailed,
                         showPosters = viewModel.engine.showPostersInResults,
+                        onRefresh = { viewModel.loadTrending(force = true) },
                         onRetry = { viewModel.loadTrending(force = true) },
                         onOpen = { viewModel.openEpisodeDrawer(it) }
                     )
                     Spacer(modifier = Modifier.height(Spacing.lg))
-                    CategoryTilesRow(
+                    CategoryTilesGrid(
                         tiles = uiState.genreTiles,
                         showPosters = viewModel.engine.showPostersInResults,
-                        onOpen = { category -> viewModel.openCategory(category) }
+                        onOpen = { category -> viewModel.openCategory(category) },
+                        onMore = { viewModel.openCatalog() }
                     )
                 }
             } else {
@@ -488,19 +494,31 @@ fun HomeScreen(
             }
         }
 
-        // Category page: a full-page overlay in THIS window's root Box — the
-        // b5cdf99 lesson says page-level content never rides a Dialog window.
-        // Composed BEFORE the drawer block so tapping a row card stacks the
-        // EpisodeDrawer on top, exactly like it does over the landing state.
+        // Genre grid page (ONE mixed list) and the View More catalog (one
+        // mixed row per genre): full-page overlays in THIS window's root Box
+        // — the b5cdf99 lesson says page content never rides a Dialog window.
+        // Composed BEFORE the drawer block so tapping a card stacks the
+        // EpisodeDrawer on top. The catalog hides while a genre page is open
+        // and reappears on its back gesture (grid → catalog → home).
         uiState.activeCategory?.let { category ->
             CategoryPage(
                 category = category,
-                rows = uiState.categoryRows,
+                cards = uiState.categoryCards,
                 isLoading = uiState.isCategoryLoading,
                 failed = uiState.categoryFailed,
                 showPosters = viewModel.engine.showPostersInResults,
                 onBack = { viewModel.closeCategory() },
-                onRetry = { viewModel.loadCategory(category, force = true) },
+                onRefresh = { viewModel.loadCategory(category, force = true) },
+                onOpen = { viewModel.openEpisodeDrawer(it) }
+            )
+        }
+        if (uiState.catalogOpen && uiState.activeCategory == null) {
+            CatalogPage(
+                catalogRows = uiState.catalogRows,
+                showPosters = viewModel.engine.showPostersInResults,
+                onBack = { viewModel.closeCatalog() },
+                onOpenGenre = { viewModel.openCategory(it) },
+                onEnsureGenre = { viewModel.ensureCategoryCards(it) },
                 onOpen = { viewModel.openEpisodeDrawer(it) }
             )
         }
@@ -533,6 +551,7 @@ private fun TrendingSection(
     isLoading: Boolean,
     failed: Boolean,
     showPosters: Boolean,
+    onRefresh: () -> Unit,
     onRetry: () -> Unit,
     onOpen: (ShowCard) -> Unit
 ) {
@@ -557,6 +576,22 @@ private fun TrendingSection(
                 fontWeight = FontWeight.Bold,
                 modifier = Modifier.weight(1f)
             )
+            if (items.isNotEmpty() && !isLoading) {
+                // v3.1.6: force-refresh is a first-class affordance, not a
+                // failure consolation — the cache means a painted row can
+                // always be pushed to crawl again with one tap.
+                IconButton(
+                    onClick = onRefresh,
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Refresh,
+                        contentDescription = "Refresh trending",
+                        tint = TextSecondary,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+            }
             if (failed && items.isEmpty() && !isLoading) {
                 Text(
                     text = "Retry",
@@ -675,27 +710,21 @@ private fun TrendingCard(
     }
 }
 
-/** Display names for the CategoryFeed row headers (mirrors the filter chips). */
-private val CATEGORY_SITE_LABELS = mapOf(
-    "nkiri" to "NKiri",
-    "9jarocks" to "9jaRocks",
-    "naijaprey" to "NaijaPrey",
-    "naijavault" to "NaijaVault"
-)
-
 /**
- * Genre poster tiles under the trending row (blank-query landing only). Same
- * 124dp poster-card geometry as the trending cards; the artwork is that
- * genre's current top post (CategoryFeed.tilePosters), and a missing poster
- * degrades to the app's colored initial-glyph tile with the genre name —
- * the row itself is static structure and never disappears over artwork.
- * The tiles NAVIGATE (openCategory); they are not filters.
+ * Genre poster tiles under the trending row (blank-query landing only),
+ * v3.1.6: a WRAPPING grid, three per row, dropping down — the sideways
+ * LazyRow is gone (user: "browse my genre shouldnt be scrollable left and
+ * right, it should drop down… 3 per row"). Same poster-card language as
+ * before (live top-post artwork, colored initial-glyph fallback, the row
+ * never disappears over artwork); the trailing View More tile opens the
+ * per-genre catalog. The tiles NAVIGATE — they are not filters.
  */
 @Composable
-private fun CategoryTilesRow(
+private fun CategoryTilesGrid(
     tiles: List<CategoryFeed.GenreTile>,
     showPosters: Boolean,
-    onOpen: (CategoryFeed.Category) -> Unit
+    onOpen: (CategoryFeed.Category) -> Unit,
+    onMore: () -> Unit
 ) {
     val posters = tiles.associate { it.category.label to it.posterUrl }
     Column(modifier = Modifier.fillMaxWidth()) {
@@ -703,20 +732,73 @@ private fun CategoryTilesRow(
             text = "Browse by Genre",
             color = TextPrimary,
             fontSize = 15.sp,
-            fontWeight = FontWeight.Bold
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.padding(horizontal = Spacing.lg)
         )
         Spacer(modifier = Modifier.height(Spacing.md))
-        LazyRow(
-            horizontalArrangement = Arrangement.spacedBy(Spacing.md),
-            contentPadding = PaddingValues(end = Spacing.lg),
-            modifier = Modifier.fillMaxWidth()
+        CategoryFeed.CATEGORIES.chunked(3).forEach { rowCats ->
+            Row(modifier = Modifier.fillMaxWidth().padding(horizontal = Spacing.lg)) {
+                rowCats.forEachIndexed { i, category ->
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(start = if (i == 0) 0.dp else Spacing.sm)
+                    ) {
+                        GenreTileCard(
+                            label = category.label,
+                            posterUrl = posters[category.label] ?: "",
+                            showPosters = showPosters,
+                            onClick = { onOpen(category) }
+                        )
+                    }
+                }
+                // Keep columns aligned when the last row is partial.
+                repeat(3 - rowCats.size) { Spacer(modifier = Modifier.weight(1f)) }
+            }
+            Spacer(modifier = Modifier.height(Spacing.md))
+        }
+        Row(modifier = Modifier.fillMaxWidth().padding(horizontal = Spacing.lg)) {
+            Box(modifier = Modifier.weight(1f)) {
+                ViewMoreTileCard(onClick = onMore)
+            }
+            Spacer(modifier = Modifier.weight(2f))
+        }
+    }
+}
+
+/** The 7th cell: opens the per-genre catalog. Deliberately NOT a poster —
+ *  a dashed accent frame + plus glyph, so it reads as "more of this" and
+ *  never masquerades as a genre with missing artwork. */
+@Composable
+private fun ViewMoreTileCard(onClick: () -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(Radius.md))
+            .clickable { onClick() },
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(2f / 3f)
+                .clip(RoundedCornerShape(Radius.md))
+                .border(1.5.dp, AccentPrimary, RoundedCornerShape(Radius.md)),
+            contentAlignment = Alignment.Center
         ) {
-            items(CategoryFeed.CATEGORIES, key = { it.label }) { category ->
-                GenreTileCard(
-                    label = category.label,
-                    posterUrl = posters[category.label] ?: "",
-                    showPosters = showPosters,
-                    onClick = { onOpen(category) }
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Icon(
+                    imageVector = Icons.Rounded.Add,
+                    contentDescription = null,
+                    tint = AccentPrimary,
+                    modifier = Modifier.size(26.dp)
+                )
+                Spacer(modifier = Modifier.height(Spacing.xs))
+                Text(
+                    text = "View More",
+                    color = AccentPrimary,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold
                 )
             }
         }
@@ -732,14 +814,14 @@ private fun GenreTileCard(
 ) {
     Column(
         modifier = Modifier
-            .width(124.dp)
+            .fillMaxWidth()
             .clip(RoundedCornerShape(Radius.md))
             .clickable { onClick() }
     ) {
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(176.dp)
+                .aspectRatio(2f / 3f)
                 .clip(RoundedCornerShape(Radius.md))
                 .background(tileColor(label))
                 .border(1.dp, BorderHairline, RoundedCornerShape(Radius.md))
@@ -771,21 +853,22 @@ private fun GenreTileCard(
 }
 
 /**
- * Full-page genre view: up to three stacked rows, each one site's latest
- * posts for the genre ("Action on NKiri", "Action on 9jaRocks", …). Cards
- * are the trending cards verbatim; a tap opens the same EpisodeDrawer
- * (it composes above this page in HomeScreen's root Box). Rendered as a
- * root-level overlay in the activity's own window — never a Dialog window.
+ * Full-page genre view (v3.1.6 redesign): ONE mixed grid — every candidate
+ * site's confirmed cards interleaved round-robin, three posters per row,
+ * scroll down only. No site names anywhere on the page (the drawer still
+ * shows provenance after a tap). Cards use the trending visual language at
+ * the grid cell's own width. Root-level overlay in the activity's own
+ * window — never a Dialog window.
  */
 @Composable
 private fun CategoryPage(
     category: CategoryFeed.Category,
-    rows: List<CategoryFeed.CategoryRow>,
+    cards: List<ShowCard>,
     isLoading: Boolean,
     failed: Boolean,
     showPosters: Boolean,
     onBack: () -> Unit,
-    onRetry: () -> Unit,
+    onRefresh: () -> Unit,
     onOpen: (ShowCard) -> Unit
 ) {
     BackHandler(onBack = onBack)
@@ -825,14 +908,31 @@ private fun CategoryPage(
                     letterSpacing = 1.sp
                 )
                 Text(
-                    text = if (rows.isNotEmpty()) "LATEST ${rows.size} SITE${if (rows.size > 1) "S" else ""}" else "Latest genre posts, by site",
+                    text = if (cards.isNotEmpty())
+                        "${cards.size} titles, every source mixed"
+                    else
+                        "Latest ${category.label.lowercase()} posts",
                     fontSize = 11.sp,
                     color = TextMuted
                 )
             }
+            IconButton(
+                onClick = onRefresh,
+                modifier = Modifier
+                    .size(48.dp)
+                    .background(SurfaceElevated, CircleShape)
+                    .border(1.dp, BorderHairline, CircleShape)
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Refresh,
+                    contentDescription = "Refresh",
+                    tint = TextPrimary,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
         }
         when {
-            isLoading && rows.isEmpty() -> Box(
+            isLoading && cards.isEmpty() -> Box(
                 modifier = Modifier.fillMaxSize(),
                 contentAlignment = Alignment.Center
             ) {
@@ -842,7 +942,7 @@ private fun CategoryPage(
                     Text("Loading ${category.label.lowercase()}...", color = TextSecondary, fontSize = 13.sp)
                 }
             }
-            rows.isEmpty() -> Box(
+            cards.isEmpty() -> Box(
                 modifier = Modifier.fillMaxSize(),
                 contentAlignment = Alignment.Center
             ) {
@@ -850,37 +950,186 @@ private fun CategoryPage(
                     Text("${category.label} is unavailable right now", color = TextSecondary, fontSize = 14.sp)
                     Spacer(modifier = Modifier.height(Spacing.xs))
                     Text(
-                        text = if (failed) "All sources timed out" else "No ${category.label.lowercase()} posts found",
+                        text = if (failed) "All sources timed out" else "No confirmed ${category.label.lowercase()} posts found",
                         color = TextMuted,
                         fontSize = 12.sp
                     )
                     Spacer(modifier = Modifier.height(Spacing.xs))
-                    TextButton(onClick = onRetry) {
+                    TextButton(onClick = onRefresh) {
                         Text("Retry", color = AccentPrimary, fontWeight = FontWeight.Bold, fontSize = 13.sp)
                     }
                 }
             }
-            else -> LazyColumn(
+            else -> LazyVerticalGrid(
+                columns = GridCells.Fixed(3),
                 modifier = Modifier.fillMaxSize(),
-                verticalArrangement = Arrangement.spacedBy(Spacing.xl),
-                contentPadding = PaddingValues(bottom = Spacing.xl)
+                contentPadding = PaddingValues(
+                    start = Spacing.lg, end = Spacing.lg, bottom = Spacing.xl
+                ),
+                horizontalArrangement = Arrangement.spacedBy(Spacing.sm),
+                verticalArrangement = Arrangement.spacedBy(Spacing.md)
             ) {
-                items(rows, key = { it.site }) { row ->
-                    Column(modifier = Modifier.fillMaxWidth()) {
+                gridItems(cards, key = { it.url }) { show ->
+                    GridPosterCard(
+                        show = show,
+                        showPosters = showPosters,
+                        onClick = { onOpen(show) }
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** Grid cell of the genre page: the trending card's language (colored
+ *  ground, Crop poster, initial-glyph fallback, one-line bold title) sized
+ *  to the cell — three across on every phone, never a fixed dp width that
+ *  overflows a small one. */
+@Composable
+private fun GridPosterCard(
+    show: ShowCard,
+    showPosters: Boolean,
+    onClick: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(Radius.md))
+            .clickable { onClick() }
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(2f / 3f)
+                .clip(RoundedCornerShape(Radius.md))
+                .background(tileColor(show.title))
+                .border(1.dp, BorderHairline, RoundedCornerShape(Radius.md))
+        ) {
+            if (showPosters && show.posterUrl.isNotBlank()) {
+                SubcomposeAsyncImage(
+                    model = show.posterUrl,
+                    contentDescription = show.title,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize(),
+                    loading = { InitialGlyph(show.title) },
+                    error = { InitialGlyph(show.title) }
+                )
+            } else {
+                InitialGlyph(show.title)
+            }
+        }
+        Spacer(modifier = Modifier.height(Spacing.xs))
+        Text(
+            text = show.title,
+            color = TextPrimary,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Bold,
+            lineHeight = 14.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
+/**
+ * The "View More" catalog (v3.1.6): the old page shape, transposed — each
+ * horizontal row is a GENRE (headers name genres, never sites), cards mixed
+ * across sources. Rows lazy-load as they scroll into view ([onEnsureGenre])
+ * so opening this page never crawls six genres at once; a tapped header
+ * opens that genre's full mixed grid.
+ */
+@Composable
+private fun CatalogPage(
+    catalogRows: Map<String, List<ShowCard>>,
+    showPosters: Boolean,
+    onBack: () -> Unit,
+    onOpenGenre: (CategoryFeed.Category) -> Unit,
+    onEnsureGenre: (CategoryFeed.Category) -> Unit,
+    onOpen: (ShowCard) -> Unit
+) {
+    BackHandler(onBack = onBack)
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(BackgroundDark)
+            .statusBarsPadding()
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = Spacing.lg, vertical = Spacing.md),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(
+                onClick = onBack,
+                modifier = Modifier
+                    .size(48.dp)
+                    .background(SurfaceElevated, CircleShape)
+                    .border(1.dp, BorderHairline, CircleShape)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.ArrowBack,
+                    contentDescription = "Back",
+                    tint = TextPrimary,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+            Spacer(modifier = Modifier.width(Spacing.md))
+            Text(
+                text = "ALL GENRES",
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Black,
+                color = TextPrimary,
+                letterSpacing = 1.sp
+            )
+        }
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            verticalArrangement = Arrangement.spacedBy(Spacing.lg),
+            contentPadding = PaddingValues(bottom = Spacing.xl)
+        ) {
+            items(CategoryFeed.CATEGORIES, key = { it.label }) { category ->
+                LaunchedEffect(category.label) { onEnsureGenre(category) }
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = Spacing.lg)
+                            .clickable { onOpenGenre(category) },
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
                         Text(
-                            text = "${category.label} on ${CATEGORY_SITE_LABELS[row.site] ?: row.site.uppercase()}",
+                            text = category.label.uppercase(),
                             color = TextPrimary,
                             fontSize = 14.sp,
                             fontWeight = FontWeight.Bold,
-                            modifier = Modifier.padding(horizontal = Spacing.lg)
+                            modifier = Modifier.weight(1f)
                         )
-                        Spacer(modifier = Modifier.height(Spacing.sm))
+                        Text(
+                            text = "SEE ALL",
+                            color = AccentPrimary,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(Spacing.sm))
+                    val cards = catalogRows[category.label] ?: emptyList()
+                    if (cards.isEmpty()) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(176.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            CircularProgressIndicator(color = AccentPrimary, strokeWidth = 2.dp, modifier = Modifier.size(20.dp))
+                        }
+                    } else {
                         LazyRow(
                             horizontalArrangement = Arrangement.spacedBy(Spacing.md),
                             contentPadding = PaddingValues(horizontal = Spacing.lg),
                             modifier = Modifier.fillMaxWidth()
                         ) {
-                            items(row.items, key = { it.url }) { show ->
+                            items(cards.take(12), key = { it.url }) { show ->
                                 TrendingCard(
                                     show = show,
                                     showPosters = showPosters,

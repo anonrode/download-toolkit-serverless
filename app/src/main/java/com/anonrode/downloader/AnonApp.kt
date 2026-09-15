@@ -32,6 +32,9 @@ class AnonApp : Application(), ImageLoaderFactory {
         com.anonrode.downloader.data.rules.DynamicRulesManager.init(this)
         // Per-host health ledger (backoff windows + playbook knownDead seeds).
         com.anonrode.downloader.pipeline.HostHealth.init(this)
+        // Home-feed disk memory (v3.1.6): trending/genre rows + tile posters
+        // survive restarts; the VM paints from it before touching the network.
+        com.anonrode.downloader.providers.FeedCache.init(this)
         engine = DownloadEngine(this, repository, com.anonrode.downloader.util.NetworkObserver(this))
         // Torrent selective-file picker: the engine suspends on this callback
         // while the Compose dialog (HomeScreen) shows the swarm's file list.
