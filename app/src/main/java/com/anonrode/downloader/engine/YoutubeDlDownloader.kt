@@ -34,6 +34,43 @@ object YoutubeDlDownloader {
      *  sidecars written by the embed-subs pass). */
     private val SUBTITLE_ARTIFACT_EXTS = setOf("srt", "vtt", "ass", "ssa", "ttml", "json3", "srv3")
 
+    /**
+     * Flat playlist metadata dump: `yt-dlp -J --flat-playlist` over the whole
+     * list WITHOUT resolving any video page (one paginated metadata call),
+     * capped at [cap] entries so a 10k-video mix can't melt the phone. The
+     * JSON arrives line-by-line through the progress callback and is stitched
+     * back; any failure (binary missing, network, timeout, non-zero exit)
+     * returns null — the picker shows an honest error + Retry, and per the
+     * round-4 doctrine nothing here hammers the host on its own.
+     */
+    suspend fun fetchPlaylistJson(context: Context, url: String, cap: Int = 1000): String? =
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            val out = StringBuilder()
+            try {
+                val request = YoutubeDLRequest(url).apply {
+                    addOption("-J")
+                    addOption("--flat-playlist")
+                    addOption("--playlist-items", "1-$cap")
+                    addOption("--no-warnings")
+                    addOption("--retries", "1")
+                    addOption("--socket-timeout", "15")
+                    addOption("--user-agent", com.anonrode.downloader.data.net.HttpClient.DEFAULT_UA)
+                }
+                withTimeoutOrNull(90_000L) {
+                    try {
+                        YoutubeDL.getInstance().execute(request, "playlist-meta") { _, _, line ->
+                            out.append(line).append('\n')
+                        }
+                    } catch (ce: CancellationException) {
+                        throw ce
+                    }
+                    out.toString()
+                }
+            } catch (_: Throwable) {
+                null
+            }
+        }
+
     suspend fun download(
         context: Context,
         taskId: String,
