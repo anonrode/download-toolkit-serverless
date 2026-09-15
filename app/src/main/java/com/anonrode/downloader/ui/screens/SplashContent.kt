@@ -37,7 +37,9 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.anonrode.downloader.ui.theme.SplashBackground
@@ -55,10 +57,19 @@ import kotlin.math.roundToInt
  * [SplashMotion.QUICK_MS] on warm starts (MainActivity decides). Devices with
  * the system animation scale at 0 render the final pose statically.
  *
- * Sizing is screen-relative on purpose — phone widths vary a lot: mark = 42%
- * of the width (clamped 150..216dp) and the wordmark type rides the same
- * factor, so the composition never crowds a small device or floats tiny on a
- * large one. The "100% SERVERLESS" tagline was removed by user decision.
+ * Sizing is screen-relative on purpose — phone widths vary a lot. v3.1.5
+ * shipped two sizing mistakes the device caught ("the logo is literally
+ * going to the edge of the splash screen"): (1) a 150.dp FLOOR on the mark
+ * size — 42% of width only ever SHRINKS below 150dp, and the floor then
+ * INFLATES the lockup to ~47% of a small phone's width; (2) the wordmark
+ * used SP, which multiplies by the user's system font-scale setting, so a
+ * large-font device scaled the 30sp ANONRODE well past the mockup's design
+ * while the dp-based mark stayed fixed — the lockup sprawled edge to edge.
+ * Now: the mark is simply 42% of width capped at 216dp (proportional, never
+ * inflated, never tiny on a big phone), and the type divides its sp by
+ * fontScale so the cinematic lockup renders identically on every device
+ * regardless of the reading-size preference. The "100% SERVERLESS" tagline
+ * was removed by user decision.
  */
 @Composable
 fun SplashContent(cutMs: Float = SplashMotion.FULL_MS) {
@@ -86,9 +97,16 @@ fun SplashContent(cutMs: Float = SplashMotion.FULL_MS) {
     val pose = remember(t) { SplashMotion.poseAt(t, cutMs) }
 
     // One scale factor drives mark + type together on every screen size.
+    // 42% of width, capped at the mockup's design size — NO floor: a floor
+    // can only ever inflate the logo on small screens (v3.1.5 bug).
     val screenWidthDp = LocalConfiguration.current.screenWidthDp.toFloat()
-    val markSize = (screenWidthDp * 0.42f).roundToInt().dp.coerceIn(150.dp, 216.dp)
+    val markSize = (screenWidthDp * 0.42f).coerceAtMost(216f).roundToInt().dp
     val typeFactor = markSize.value / 216f
+    // The splash lockup is brand art, not body copy: it must NOT scale with
+    // the user's accessibility font size (that's what pushed v3.1.5's wordmark
+    // edge-to-edge on large-font devices). Dividing the sp by fontScale pins
+    // the on-screen size to the design; real text elsewhere still respects it.
+    val fontScale = LocalDensity.current.fontScale.takeIf { it > 0.1f } ?: 1f
 
     Box(
         modifier = Modifier
@@ -258,9 +276,12 @@ fun SplashContent(cutMs: Float = SplashMotion.FULL_MS) {
             Text(
                 text = "ANONRODE",
                 color = SplashOnBackground.copy(alpha = pose.name1),
-                fontSize = (30f * typeFactor).sp,
+                fontSize = (30f * typeFactor / fontScale).sp,
                 fontWeight = FontWeight.Black,
-                letterSpacing = (3f * typeFactor).sp,
+                letterSpacing = (3f * typeFactor / fontScale).sp,
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Clip,
                 modifier = Modifier
                     .offset(y = ((1f - pose.name1) * 10f * typeFactor).dp)
                     .padding(top = (14f * typeFactor).dp)
@@ -268,9 +289,12 @@ fun SplashContent(cutMs: Float = SplashMotion.FULL_MS) {
             Text(
                 text = "DOWNLOADER",
                 color = Color(0xFF22D3EE).copy(alpha = pose.name2),
-                fontSize = (11f * typeFactor).sp,
+                fontSize = (11f * typeFactor / fontScale).sp,
                 fontWeight = FontWeight.ExtraBold,
-                letterSpacing = (6f * typeFactor).sp,
+                letterSpacing = (6f * typeFactor / fontScale).sp,
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Clip,
                 modifier = Modifier
                     .offset(y = ((1f - pose.name2) * 8f * typeFactor).dp)
                     .padding(top = (7f * typeFactor).dp)

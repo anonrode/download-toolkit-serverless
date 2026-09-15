@@ -4,6 +4,7 @@ import com.anonrode.downloader.data.models.ShowCard
 import com.anonrode.downloader.data.net.HttpClient
 import com.anonrode.downloader.data.rules.DynamicRulesManager
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withTimeoutOrNull
 import org.jsoup.Jsoup
@@ -38,16 +39,50 @@ object TrendingFeed {
         RegexOption.IGNORE_CASE
     )
 
-    suspend fun fetch(): List<ShowCard> = coroutineScope {
-        val perSite = listOf(
-            async { withTimeoutOrNull(TIMEOUT_MS) { fetchWpRest("naijavault") } ?: emptyList() },
-            async { withTimeoutOrNull(TIMEOUT_MS) { fetchWpRest("nkiri") } ?: emptyList() },
-            async { withTimeoutOrNull(TIMEOUT_MS) { fetchRss("naijaprey", "/feed/") } ?: emptyList() },
-            async { withTimeoutOrNull(TIMEOUT_MS) { fetchRss("9jarocks", "/feed/") } ?: emptyList() }
-        ).map { it.await() }
+    suspend fun fetch(onPartial: (List<ShowCard>) -> Unit = {}): List<ShowCard> = coroutineScope {
+        // Per-site result slots in the CANONICAL order (naijavault, nkiri,
+        // naijaprey, 9jarocks). Each site publishes a re-merge the moment it
+        // lands — v3.1.5 awaited ALL sites before showing anything, so one
+        // slow feed (9jarocks' RSS is the usual laggard, up to its full 7 s
+        // timeout) starved cards that had already arrived: the device saw
+        // "content not loading" while bytes sat unseen. Callers may run this
+        // on Dispatchers.IO, where the four asyncs finish on different
+        // threads — one lock serializes slot writes + partial publishing so
+        // observers never see a torn or out-of-order merge.
+        val slots = arrayOfNulls<List<ShowCard>>(4)
+        val lock = Any()
+        suspend fun fetchSlot(i: Int, block: suspend () -> List<ShowCard>) {
+            val cards = withTimeoutOrNull(TIMEOUT_MS) { block() } ?: emptyList()
+            synchronized(lock) {
+                slots[i] = cards
+                if (cards.isNotEmpty()) onPartial(mergeRoundRobin(slots.map { it ?: emptyList() }))
+            }
+        }
+        listOf(
+            async { fetchSlot(0) { fetchWpRest("naijavault") } },
+            async { fetchSlot(1) { fetchWpRest("nkiri") } },
+            async { fetchSlot(2) { fetchRss("naijaprey", "/feed/") } },
+            async { fetchSlot(3) { fetchRss("9jarocks", "/feed/") } }
+        ).awaitAll()
+        val perSite = slots.map { it ?: emptyList() }
 
-        // Round-robin interleave so the row leads with variety instead of
-        // four NaijaVault posts before the first nkiri card.
+        // Final merge == the same pure function, so the last publish and the
+        // return value are consistent by construction.
+        val out = mergeRoundRobin(perSite)
+        com.anonrode.downloader.util.DebugLog.resolve(
+            "trending feed: ${out.size} cards (per-site ${perSite.map { it.size }})"
+        )
+        out
+    }
+
+    /**
+     * Round-robin interleave so the row leads with variety instead of
+     * four NaijaVault posts before the first nkiri card. PURE + deterministic
+     * (unit-tested); works on PARTIAL inputs too — unarrived sites are
+     * simply empty lists, so a two-site merge is a prefix-consistent preview
+     * of the four-site merge.
+     */
+    internal fun mergeRoundRobin(perSite: List<List<ShowCard>>): List<ShowCard> {
         val out = mutableListOf<ShowCard>()
         val seenTitles = mutableSetOf<String>()
         var idx = 0
@@ -66,10 +101,7 @@ object TrendingFeed {
             if (!advanced) break
             idx++
         }
-        com.anonrode.downloader.util.DebugLog.resolve(
-            "trending feed: ${out.size} cards (per-site ${perSite.map { it.size }})"
-        )
-        out
+        return out
     }
 
     /**
@@ -169,6 +201,13 @@ object TrendingFeed {
                 val link = item.selectFirst("link")?.text()?.trim() ?: ""
                 val desc = item.selectFirst("content|encoded")?.text()
                     ?: item.selectFirst("description")?.text() ?: ""
+                // First <img> = the _Poster.jpg, and it STAYS that way on
+                // purpose: live-measured 2026-09-15 on 9jarocks, the later
+                // "_thumb.jpg" variant is BIGGER than the poster (372 KB vs
+                // 224 KB — their "thumb" is a 540p episode still). Rewriting
+                // towards any *thumb* URL would make image loading slower,
+                // not faster. The real laggard is the shared host itself;
+                // the fix there is streaming (fetch/onPartial), not URLs.
                 val poster = Regex(
                     """<img[^>]+src=["']([^"']+\.(?:jpg|jpeg|png|webp)[^"']*)["']""",
                     RegexOption.IGNORE_CASE
