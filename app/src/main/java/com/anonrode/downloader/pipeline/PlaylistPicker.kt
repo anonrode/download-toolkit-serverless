@@ -186,9 +186,17 @@ object PlaylistPicker {
             .map { it.index + 1 }
     }
 
-    /** Video id inside any URL shape (watch, youtu.be, embed) — string ops. */
+    /**
+     * Video id inside any YOUTUBE URL shape (watch, youtu.be, embed) —
+     * string ops. Non-YouTube URLs always answer "": every caller maps
+     * this onto the YouTube id space (downloadedIds), and a foreign
+     * ?v=VALUE could otherwise collide with a real video id and badge a
+     * never-downloaded entry "✓ on device", silently skipping it.
+     * (Caught by this repo's own CI test round 2026-09-15.)
+     */
     fun videoIdOf(url: String): String {
         val lower = url.lowercase()
+        if (!lower.contains("youtu.be/") && !lower.contains("youtube.com")) return ""
         if (lower.contains("youtu.be/")) {
             return url.substringAfter("youtu.be/").substringBefore('?').substringBefore('#')
         }
