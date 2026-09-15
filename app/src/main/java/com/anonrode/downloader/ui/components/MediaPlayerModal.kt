@@ -42,6 +42,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Subtitles
 import androidx.compose.material.icons.rounded.AspectRatio
+import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Forward10
 import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.OpenInNew
@@ -59,6 +60,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
+import androidx.compose.material3.ripple
 import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
@@ -239,13 +241,16 @@ internal fun sidecarLanguageHint(fileName: String, videoStem: String): String {
  * The UI is deliberately basic: one layout for every orientation — black
  * surface, letterboxed video, tap anywhere to toggle controls, auto-hide
  * after 3s. Transport (prev / -10s / play / +10s / next), a seek bar, and
- * five chips on the bottom row: speed (tap to cycle), audio track,
- * subtitles (auto-enabled from the Settings language — embedded MKV tracks
- * and .srt/.vtt/.ass/.ssa sidecars), the display-framing cycle
- * (Fit -> Crop -> Stretch), and the Rotate chip (landscape <-> portrait);
+ * five chips on the bottom row: speed (tap to cycle), the Rotate chip
+ * (landscape <-> portrait, hidden for audio files), subtitles
+ * (auto-enabled from the Settings language — embedded MKV tracks and
+ * .srt/.vtt/.ass/.ssa sidecars), the display-framing cycle
+ * (Fit -> Crop -> Stretch), and the audio-track picker;
  * the top bar carries a Mini-player button that shrinks the video into
  * picture-in-picture (2026-09-14 user spec: rotation moved from the old
- * top-bar fullscreen toggle to the chip row; the PiP slot took its place).
+ * top-bar fullscreen toggle to the chip row; the PiP slot took its place.
+ * 2026-09-15 user spec: audio and rotation swapped slots — rotate sits
+ * second now, the audio picker closes the row).
  */
 @OptIn(UnstableApi::class)
 @Composable
@@ -924,7 +929,7 @@ private fun MediaPlayerModalImpl(
                                 contentDescription = "Mini player",
                                 onClick = { touchControls(); enterPip() }
                             )
-                            Spacer(modifier = Modifier.width(Spacing.xs))
+                            Spacer(modifier = Modifier.width(Spacing.sm))
                         }
                         PlayerCircleButton(
                             icon = Icons.Rounded.OpenInNew,
@@ -1075,7 +1080,7 @@ private fun MediaPlayerModalImpl(
                                 // without scroll the fixed four-chip row pushed the
                                 // Subtitles/Fit chips off the right edge on a 360dp phone.
                                 .horizontalScroll(rememberScrollState()),
-                            horizontalArrangement = Arrangement.spacedBy(Spacing.xs)
+                            horizontalArrangement = Arrangement.spacedBy(Spacing.sm)
                         ) {
                             PlayerChip(
                                 label = formatSpeed(playbackSpeed),
@@ -1091,12 +1096,24 @@ private fun MediaPlayerModalImpl(
                                 },
                                 leading = Icons.Rounded.Speed
                             )
-                            PlayerChip(
-                                label = currentAudioLabel ?: "Audio",
-                                selected = false,
-                                onClick = { touchControls(); showAudioSheet = true },
-                                leading = Icons.Filled.GraphicEq
-                            )
+                            if (!isAudio) {
+                                // Rotation toggle — swapped from the row's END
+                                // to the second slot (2026-09-15 user: "swap
+                                // the position of audio track with the
+                                // portrait/landscape mode"): framing is the
+                                // second-most-touched control during playback
+                                // and the audio picker usually rides at the
+                                // far end where the sheet scroll can reach it.
+                                PlayerChip(
+                                    label = if (isLandscape) "Portrait" else "Landscape",
+                                    selected = isLandscape,
+                                    onClick = {
+                                        touchControls()
+                                        isLandscape = !isLandscape
+                                    },
+                                    leading = Icons.Rounded.ScreenRotation
+                                )
+                            }
                             PlayerChip(
                                 label = currentSubtitleLabel ?: "Subtitles",
                                 selected = currentSubtitleLabel != null,
@@ -1126,20 +1143,15 @@ private fun MediaPlayerModalImpl(
                                 },
                                 leading = Icons.Rounded.AspectRatio
                             )
-                            if (!isAudio) {
-                                // Rotation toggle — lives HERE (bottom row,
-                                // beside Fit) per the user's 2026-09-14
-                                // spec: framing controls together.
-                                PlayerChip(
-                                    label = if (isLandscape) "Portrait" else "Landscape",
-                                    selected = isLandscape,
-                                    onClick = {
-                                        touchControls()
-                                        isLandscape = !isLandscape
-                                    },
-                                    leading = Icons.Rounded.ScreenRotation
-                                )
-                            }
+                            PlayerChip(
+                                label = currentAudioLabel ?: "Audio",
+                                selected = false,
+                                onClick = { touchControls(); showAudioSheet = true },
+                                leading = Icons.Filled.GraphicEq
+                            )
+                            // (the Rotate chip moved to slot 2 in this row per
+                            // the 2026-09-15 audio/rotation swap — Audio now
+                            // closes the row where Rotate used to sit)
                         }
                     }
                 }
@@ -1233,7 +1245,11 @@ private fun PlayerCircleButton(
             .clip(CircleShape)
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
-                indication = null,
+                // v3.1.6 design pass: every control answers the tap. The old
+                // null indication left Close/PiP/skip with zero feedback
+                // (the pro-rules "tap feedback" line). The clip above keeps
+                // the ripple inside the circle.
+                indication = ripple(),
                 enabled = enabled,
                 onClick = onClick
             ),
@@ -1274,7 +1290,7 @@ private fun PlayerChip(
             .clip(RoundedCornerShape(50))
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
-                indication = null,
+                indication = ripple(),
                 onClick = onClick
             ),
         contentAlignment = Alignment.Center
@@ -1358,7 +1374,7 @@ private fun BottomChoiceSheet(
                                 .background(if (isSelected) PlayerSurfaceElevated else Color.Transparent)
                                 .clickable(
                                     interactionSource = remember { MutableInteractionSource() },
-                                    indication = null,
+                                    indication = ripple(),
                                     onClick = { onPick(opt) }
                                 )
                                 .padding(horizontal = Spacing.md, vertical = Spacing.md),
@@ -1367,8 +1383,20 @@ private fun BottomChoiceSheet(
                             Text(
                                 text = opt,
                                 color = if (isSelected) PlayerAccent else Color.White,
-                                fontSize = 14.sp
+                                fontSize = 14.sp,
+                                modifier = Modifier.weight(1f)
                             )
+                            if (isSelected) {
+                                // v3.1.6 design pass: the selected row used to
+                                // differ only by a faint fill — a color-only
+                                // signal. The check makes the state explicit.
+                                Icon(
+                                    imageVector = Icons.Rounded.Check,
+                                    contentDescription = "Selected",
+                                    tint = PlayerAccent,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
                         }
                     }
                 }

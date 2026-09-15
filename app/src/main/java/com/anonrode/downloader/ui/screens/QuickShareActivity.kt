@@ -195,7 +195,7 @@ class QuickShareActivity : ComponentActivity() {
                                     prefs.edit().putBoolean("pref_instant_social", false).apply()
                                 }
                                 dispatchDownload(parsed, sharedText, quality, audioOnly, engineOverride)
-                                Toast.makeText(this@QuickShareActivity, "🚀 Download queued in background", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(this@QuickShareActivity, "Download queued in background", Toast.LENGTH_SHORT).show()
                                 finish()
                                 true
                             }
@@ -238,7 +238,7 @@ class QuickShareActivity : ComponentActivity() {
             is ParsedUrl.DramaUrl -> parsed.site
             else -> "Media"
         }
-        Toast.makeText(this, "🚀 $label download started in background", Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, "$label download started in background", Toast.LENGTH_SHORT).show()
     }
 
     private fun dispatchDownload(parsed: ParsedUrl, rawUrl: String, quality: String, audioOnly: Boolean, engineOverride: String = "auto") {

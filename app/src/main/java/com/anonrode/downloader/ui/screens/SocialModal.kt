@@ -157,7 +157,10 @@ fun SocialModal(
                         .clip(RoundedCornerShape(Radius.full))
                         .background(if (!audioOnly) AccentPrimary else Color.Transparent)
                         .clickable { audioOnly = false }
-                        .padding(vertical = Spacing.sm),
+                        // 48dp tall like QuickShare's identical segment control
+                        // (design pass): the ~36dp padding-only version was
+                        // the sub-minimum half of a two-implementations bug.
+                        .height(48.dp),
                     contentAlignment = Alignment.Center
                 ) {
                     Row(
@@ -172,7 +175,7 @@ fun SocialModal(
                         )
                         Text(
                             text = "Video (MP4)",
-                            fontSize = 12.5.sp,
+                            fontSize = 12.sp,
                             fontWeight = if (!audioOnly) FontWeight.Bold else FontWeight.Normal,
                             color = if (!audioOnly) BackgroundDark else TextSecondary
                         )
@@ -186,7 +189,7 @@ fun SocialModal(
                         .clip(RoundedCornerShape(Radius.full))
                         .background(if (audioOnly) AccentPrimary else Color.Transparent)
                         .clickable { audioOnly = true }
-                        .padding(vertical = Spacing.sm),
+                        .height(48.dp),
                     contentAlignment = Alignment.Center
                 ) {
                     Row(
@@ -201,7 +204,7 @@ fun SocialModal(
                         )
                         Text(
                             text = "Audio Only (MP3)",
-                            fontSize = 12.5.sp,
+                            fontSize = 12.sp,
                             fontWeight = if (audioOnly) FontWeight.Bold else FontWeight.Normal,
                             color = if (audioOnly) BackgroundDark else TextSecondary
                         )

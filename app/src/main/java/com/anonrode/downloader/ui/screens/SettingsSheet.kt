@@ -506,7 +506,7 @@ internal fun SettingsAppearanceSection(
                 }
             }
 
-            Row(horizontalArrangement = Arrangement.spacedBy(Spacing.xs)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(Spacing.sm)) {
                 listOf("Dark" to "dark", "Light" to "light", "Auto" to "system").forEach { (label, mode) ->
                     val isSel = state.themeMode.equals(mode, ignoreCase = true)
                     // selectable() + RadioButton role: the chips used to be
@@ -727,7 +727,7 @@ internal fun SettingsMediaSection(state: SettingsState) {
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(Spacing.xs)
+                horizontalArrangement = Arrangement.spacedBy(Spacing.sm)
             ) {
                 listOf("480p", "720p", "1080p").forEach { q ->
                     val isSel = state.quality == q
@@ -780,7 +780,7 @@ internal fun SettingsMediaSection(state: SettingsState) {
                 modifier = Modifier
                     .fillMaxWidth()
                     .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(Spacing.xs)
+                horizontalArrangement = Arrangement.spacedBy(Spacing.sm)
             ) {
                 SUBTITLE_LANGS.forEach { (code, label) ->
                     val isSel = state.subLang == code
