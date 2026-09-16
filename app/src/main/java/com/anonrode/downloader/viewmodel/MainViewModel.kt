@@ -29,6 +29,9 @@ data class HomeUiState(
     val searchError: String? = null,
     val activeShowForDrawer: ShowCard? = null,
     val drawerEpisodes: List<EpisodeItem> = emptyList(),
+    // PL-6: the story blurb every provider already parses (ShowDetails.synopsis)
+    // and the UI used to drop. Rendered in the drawer header; empty = hidden.
+    val drawerSynopsis: String = "",
     val isEpisodesLoading: Boolean = false,
     val episodesError: String? = null,
     val freeStorageGb: Long = 0L,
@@ -681,6 +684,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             it.copy(
                 activeShowForDrawer = show,
                 drawerEpisodes = emptyList(),
+                drawerSynopsis = "",
                 isEpisodesLoading = true,
                 episodesError = null
             )
@@ -698,6 +702,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _uiState.update {
                     it.copy(
                         drawerEpisodes = details.episodes,
+                        drawerSynopsis = details.synopsis.trim(),
                         isEpisodesLoading = false,
                         episodesError = if (details.episodes.isEmpty()) "No episodes found on this page" else null
                     )
@@ -717,7 +722,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun closeEpisodeDrawer() {
         episodesJob?.cancel()
-        _uiState.update { it.copy(activeShowForDrawer = null, drawerEpisodes = emptyList()) }
+        _uiState.update { it.copy(activeShowForDrawer = null, drawerEpisodes = emptyList(), drawerSynopsis = "") }
     }
 
     fun downloadEpisode(episode: EpisodeItem) {
