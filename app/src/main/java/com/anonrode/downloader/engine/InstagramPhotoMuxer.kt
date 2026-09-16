@@ -166,7 +166,15 @@ object InstagramPhotoMuxer {
         // never fabricate a still from it — let yt-dlp's own error stand.
         if (hasVideo) return MediaParts("", "", 0, null, null, null, hasVideo = true)
 
-        val photoUrl = bestCandidate(m.optJSONObject("image_versions2")?.optJSONArray("candidates")) ?: return null
+        // A photo carousel keeps its images in `carousel_media` CHILDREN while
+        // the music_metadata rides the post itself — gallery-dl reads them
+        // from exactly those two places (`post["carousel_media"]` items +
+        // `post["music_metadata"]`, instagram.py). Requiring both on one
+        // object made every carousel-with-music unmuxable; the first photo
+        // child becomes the cover instead.
+        val photoUrl = bestCandidate(m.optJSONObject("image_versions2")?.optJSONArray("candidates"))
+            ?: firstCarouselPhoto(m)
+            ?: return null
         val audio = musicAssetInfo(m) ?: return null
         val audioUrl = audio.optString("progressive_download_url").takeIf { it.isNotBlank() } ?: return null
         val durationMs = audio.optLong("duration_in_ms", 0L).coerceAtLeast(0L)
@@ -190,6 +198,20 @@ object InstagramPhotoMuxer {
             if (w > bestW) { bestW = w; best = url }
         }
         return best
+    }
+
+    /** First PHOTO child of a carousel — video children are skipped on the
+     *  same principle as the top-level hasVideo guard: a real video is not a
+     *  still, so it can never serve as the fabricated cover. */
+    private fun firstCarouselPhoto(m: JSONObject): String? {
+        val carousel = m.optJSONArray("carousel_media") ?: return null
+        for (i in 0 until carousel.length()) {
+            val child = carousel.optJSONObject(i) ?: continue
+            val v = child.optJSONArray("video_versions")
+            if (v != null && v.length() > 0) continue
+            bestCandidate(child.optJSONObject("image_versions2")?.optJSONArray("candidates"))?.let { return it }
+        }
+        return null
     }
 
     /** music_metadata.music_info.music_asset_info, with the consumption-info
@@ -266,10 +288,13 @@ object InstagramPhotoMuxer {
         if (pk != null) {
             val restHeaders = LinkedHashMap<String, String>().apply {
                 put("X-IG-App-ID", "936619743392459")          // web app id, as gallery-dl sends
+                put("X-ASBD-ID", "129477")                     // gallery-dl's v1 API pair for the app id
                 put("X-Requested-With", "XMLHttpRequest")
                 put("Accept", "application/json, text/plain, */*")
                 HttpClient.cookieValue("csrftoken", "www.instagram.com")?.let { put("X-CSRFToken", it) }
-                HttpClient.cookieValue("www-claim", "www.instagram.com")?.let { put("X-IG-WWW-Claim", it) }
+                // Logged-out default is the literal "0" (gallery-dl Extractor
+                // init); a real cookie value, when we have one, supersedes it.
+                put("X-IG-WWW-Claim", HttpClient.cookieValue("www-claim", "www.instagram.com") ?: "0")
             }
             val rest = HttpClient.getText(restInfoUrl(pk), referer = url, headers = restHeaders,
                 tag = "instagram", maxBytes = HttpClient.MAX_TEXT_BYTES)
