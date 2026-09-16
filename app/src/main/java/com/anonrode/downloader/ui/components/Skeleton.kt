@@ -27,6 +27,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
@@ -219,5 +220,36 @@ fun SearchRowSkeleton(x: Float) {
             Spacer(modifier = Modifier.height(Spacing.lg))
             SkeletonBox(modifier = Modifier.width(64.dp).height(18.dp), x = x)
         }
+    }
+}
+
+/** Episode-row skeleton: the drawer's own 44dp row rhythm (20dp square + one
+ *  bar), so the list box keeps its height when the scrape lands. */
+@Composable
+fun EpisodeRowSkeleton(x: Float) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(44.dp)
+            .clearAndSetSemantics { },
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(Spacing.md)
+    ) {
+        SkeletonBox(
+            modifier = Modifier.size(20.dp),
+            shape = RoundedCornerShape(Radius.xs),
+            x = x
+        )
+        SkeletonBox(modifier = Modifier.fillMaxWidth(0.62f).height(11.dp), x = x)
+    }
+}
+
+/** Ready-made episode/playlist placeholder: the drawer and the playlist sheet
+ *  both read as "a list is coming" rather than a lone spinner. */
+@Composable
+fun EpisodeListSkeleton(rows: Int = 6) {
+    val x = rememberShimmerX(rememberReduceMotion())
+    Column(modifier = Modifier.fillMaxWidth()) {
+        repeat(rows) { EpisodeRowSkeleton(x) }
     }
 }

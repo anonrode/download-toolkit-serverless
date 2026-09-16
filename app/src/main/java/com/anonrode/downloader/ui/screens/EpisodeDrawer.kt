@@ -33,6 +33,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.anonrode.downloader.data.models.EpisodeItem
 import com.anonrode.downloader.data.models.ShowCard
+import com.anonrode.downloader.ui.components.EpisodeListSkeleton
 import com.anonrode.downloader.ui.theme.*
 import com.anonrode.downloader.viewmodel.MainViewModel
 import com.anonrode.downloader.ui.util.confirmHaptic
@@ -342,21 +343,18 @@ fun EpisodeDrawer(
 
             // Episodes List
             if (isLoading) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(200.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        CircularProgressIndicator(
-                            color = AccentPrimary,
-                            strokeWidth = 3.dp,
-                            modifier = Modifier.size(32.dp)
-                        )
-                        Spacer(modifier = Modifier.height(Spacing.sm))
-                        Text("Scraping episode locker streams...", color = TextSecondary, fontSize = Type.label.fontSize)
-                    }
+                // Skeleton rows in the drawer's own 44dp rhythm, with the honest
+                // one-line status kept above them (UI research round): a
+                // multi-hop locker scrape outlasts a spinner's usefulness, and
+                // the copy is what says "this is still working".
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        "Scraping episode locker streams…",
+                        color = TextSecondary,
+                        fontSize = Type.label.fontSize
+                    )
+                    Spacer(modifier = Modifier.height(Spacing.sm))
+                    EpisodeListSkeleton()
                 }
             } else if (episodes.isEmpty()) {
                 Box(

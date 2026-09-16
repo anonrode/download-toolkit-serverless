@@ -1222,13 +1222,12 @@ private fun CatalogPage(
                     Spacer(modifier = Modifier.height(Spacing.sm))
                     val cards = catalogRows[category.label] ?: emptyList()
                     if (cards.isEmpty()) {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(TRENDING_ROW_H),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            CircularProgressIndicator(color = AccentPrimary, strokeWidth = 2.dp, modifier = Modifier.size(20.dp))
+                        // Same skeleton as the trending row (UI research round):
+                        // the row's real geometry stands in for the spinner, and
+                        // the fixed box keeps the page from jumping when a
+                        // genre's cards land.
+                        Box(modifier = Modifier.fillMaxWidth().height(TRENDING_ROW_H)) {
+                            TrendingRowSkeleton()
                         }
                     } else {
                         LazyRow(
