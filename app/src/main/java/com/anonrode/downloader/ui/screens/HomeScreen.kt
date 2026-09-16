@@ -614,7 +614,7 @@ private val TRENDING_ROW_H = 240.dp
  *  genre tile, grid cell) — depth for flat art rows and a consistent
  *  language across all three. Poster-only, so it is theme-independent. */
 @Composable
-private fun PosterScrim() {
+private fun BoxScope.PosterScrim() {
     Box(
         modifier = Modifier
             .matchParentSize()

@@ -156,13 +156,17 @@ fun SearchListSkeleton() {
  *  at 2:3, two title lines, one site line) so the row never changes height. */
 @Composable
 fun TrendingCardSkeleton(x: Float) {
+    // SurfaceElevated/SurfaceCard are @Composable getters, so they can only be
+    // read in a composable body — not inside the drawBehind lambda below.
+    val base = SurfaceElevated
+    val highlight = SurfaceCard
     Column(modifier = Modifier.width(124.dp)) {
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .aspectRatio(2f / 3f)
                 .clip(RoundedCornerShape(Radius.md))
-                .background(SurfaceElevated)
+                .background(base)
                 .drawBehind {
                     val w = size.width
                     if (w > 0f) {
@@ -170,7 +174,7 @@ fun TrendingCardSkeleton(x: Float) {
                         val start = (x * (w + sweep)) - sweep
                         drawRect(
                             brush = Brush.linearGradient(
-                                colors = listOf(SurfaceElevated, SurfaceCard, SurfaceElevated),
+                                colors = listOf(base, highlight, base),
                                 start = Offset(start, 0f),
                                 end = Offset(start + sweep, 0f),
                                 tileMode = TileMode.Clamp
