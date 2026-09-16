@@ -951,9 +951,14 @@ internal fun SettingsAboutSection(
                             color = AccentPrimary,
                             fontSize = Type.caption.fontSize,
                             fontWeight = FontWeight.SemiBold,
+                            // 11sp text + 12dp padding is a ~39dp target; the
+                            // modifier raises it to the 48dp minimum without
+                            // changing how the pill looks (same idiom as the
+                            // Downloads sort chips).
                             modifier = Modifier
                                 .clip(RoundedCornerShape(Radius.xs))
                                 .clickable { UpdateChecker.openInBrowser(context, checkState.url) }
+                                .minimumInteractiveComponentSize()
                                 .padding(horizontal = Spacing.sm, vertical = Spacing.md)
                         )
                     }
@@ -972,6 +977,7 @@ internal fun SettingsAboutSection(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(Radius.xs))
                                 .clickable { runUpdateCheck() }
+                                .minimumInteractiveComponentSize()
                                 .padding(horizontal = Spacing.sm, vertical = Spacing.md)
                         )
                     }
@@ -984,6 +990,7 @@ internal fun SettingsAboutSection(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(Radius.xs))
                                 .clickable { runUpdateCheck() }
+                                .minimumInteractiveComponentSize()
                                 .padding(horizontal = Spacing.sm, vertical = Spacing.md)
                         )
                     }
@@ -1006,6 +1013,7 @@ internal fun SettingsAboutSection(
                     modifier = Modifier
                         .clip(RoundedCornerShape(Radius.xs))
                         .clickable { UpdateChecker.openInBrowser(context, UpdateChecker.RELEASES_PAGE) }
+                        .minimumInteractiveComponentSize()
                         .padding(horizontal = Spacing.sm, vertical = Spacing.md)
                 )
             }
