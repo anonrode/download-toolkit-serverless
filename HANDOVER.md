@@ -109,6 +109,36 @@ c623e18 docs — HANDOVER current-state rewrite (§2 + item 11 protocol)
 1653e20 PL-6 synopsis — drawer-header STORY block, 3-line clamp + Read
         more, hidden when empty; zero new network (providers already parsed
         it, the UI dropped it).
+15a8e78 docs — the three entries above recorded in this file.
+1e073dc ENGINE AUDIT ROUND (two read-only audit agents; full reports kept
+        OUTSIDE the repo at ~/.zcode/workspace/default/engine-audit-A.md and
+        -B.md). Fixed, all re-verified against the code by hand:
+        * user-pause could be silently undone — the requeue loops filtered
+          on a SNAPSHOT of userPaused and wrote QUEUED unconditionally, and
+          processQueue started any QUEUED task; all four requeue transforms
+          + the provider-failover write now re-check inside the repository
+          transform, and processQueue skips QUEUED+userPaused.
+        * Turbo→aria2c handoff truncated the .part BEFORE the rename — a
+          failed rename left the sidecar claiming vanished pieces, and the
+          next segmented run re-padded zeros past every completion tier.
+          Now rename → truncate → drop sidecar; also refuses a target
+          another task reserved.
+        * TurboDownloader's non-segmented branch trusted a pre-allocated
+          .part length as a resume offset (416 storms / clamped holey 206).
+          It now shrinks to the sidecar's contiguous prefix first.
+        * a corrupt download_tasks.json was DELETED with the list emptied
+          (mirror ignored, then overwritten) — now set aside as .corrupt and
+          the mirror recovers; persist() no longer ignores a failed rename.
+        * status-guarded pauseAll / enforceConcurrencyLimit / cancelAll
+          (a completion landing mid-sweep is never re-queued, re-paused or
+          deleted); purgeTaskArtifacts covers the URL-extension sibling
+          family (never another task's target); HLS scratch sweep moved to
+          the job's finally; a failed yt-dlp move-out of the workdir now
+          throws honest instead of reporting a hidden file COMPLETED;
+          ProgressParser zero-fragment-index guard; notification ids from a
+          reserved allocator (could previously land on the foreground id);
+          positional FileChannel writes drain fully.
+        * 2 new tests (repository recovery, zero-fragment pin). P0s found: 0.
 ```
 
 Tag `v3.1.6` sits on the UNPUBLISHED red `93398b5` (NO GitHub Release exists for it — verified 09-15): on GO, push master, force-repoint the tag to the green tip (the retag-retired rule guards PUBLISHED tags only), then CI ≈17-18 min. **Budget one compile-fix round** — CI is the first compiler on ~1,700 fresh lines; the fresh-never-compiled suspects are `androidx.compose.material3.ripple()` (needs material3 ≥1.3.0 — BOM 2024.09.00 maps to 1.3.0, unverified), `minimumInteractiveComponentSize` in files newly using it, and the `items as gridItems` grid imports. All static gates (ktregexflags/bracecheck/balance repo-wide) are 0-problems locally.
