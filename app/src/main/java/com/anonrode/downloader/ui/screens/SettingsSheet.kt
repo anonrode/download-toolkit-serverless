@@ -261,7 +261,7 @@ fun SettingsScreen(
                     Text(
                         text = "Settings",
                         fontWeight = FontWeight.Black,
-                        fontSize = 18.sp,
+                        fontSize = Type.screenTitle.fontSize,
                         color = TextPrimary
                     )
                 },
@@ -389,7 +389,7 @@ internal fun SettingsSelfHealingSection(
                         },
                         colors = ButtonDefaults.filledTonalButtonColors(containerColor = SurfaceElevated, contentColor = AccentPrimary)
                     ) {
-                        Text("Sync Now", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        Text("Sync Now", fontSize = Type.caption.fontSize, fontWeight = FontWeight.Bold)
                     }
                 }
             }
@@ -443,7 +443,7 @@ internal fun SettingsSelfHealingSection(
                         },
                         colors = ButtonDefaults.filledTonalButtonColors(containerColor = SurfaceElevated, contentColor = AccentPrimary)
                     ) {
-                        Text("Update Core", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        Text("Update Core", fontSize = Type.caption.fontSize, fontWeight = FontWeight.Bold)
                     }
                 }
             }
@@ -490,7 +490,7 @@ internal fun SettingsAppearanceSection(
                 Column {
                     Text(
                         text = "App Theme",
-                        fontSize = 14.sp,
+                        fontSize = Type.rowTitle.fontSize,
                         fontWeight = FontWeight.Bold,
                         color = TextPrimary
                     )
@@ -500,7 +500,7 @@ internal fun SettingsAppearanceSection(
                             "dark" -> "Dark Mode (OLED)"
                             else -> "System Default"
                         },
-                        fontSize = 11.sp,
+                        fontSize = Type.caption.fontSize,
                         color = TextSecondary
                     )
                 }
@@ -531,7 +531,7 @@ internal fun SettingsAppearanceSection(
                     ) {
                         Text(
                             text = label,
-                            fontSize = 11.sp,
+                            fontSize = Type.caption.fontSize,
                             fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal,
                             color = if (isSel) (if (AnonTheme.colors.isDark) Color.Black else Color.White) else TextSecondary
                         )
@@ -597,11 +597,11 @@ internal fun SettingsEngineSection(state: SettingsState) {
                     Icon(Icons.Rounded.Speed, contentDescription = null, tint = AccentPrimary, modifier = Modifier.size(18.dp))
                     Spacer(modifier = Modifier.width(Spacing.sm))
                     Column {
-                        Text("Aria2c Parallel Sockets", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = TextPrimary)
-                        Text("High-speed segmented CDN connections", fontSize = 11.sp, color = TextMuted)
+                        Text("Aria2c Parallel Sockets", fontSize = Type.body.fontSize, fontWeight = FontWeight.SemiBold, color = TextPrimary)
+                        Text("High-speed segmented CDN connections", fontSize = Type.caption.fontSize, color = TextMuted)
                     }
                 }
-                Text("${state.sockets} conns", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AccentPrimary)
+                Text("${state.sockets} conns", fontSize = Type.label.fontSize, fontWeight = FontWeight.Bold, color = AccentPrimary)
             }
 
             Slider(
@@ -631,11 +631,11 @@ internal fun SettingsEngineSection(state: SettingsState) {
                     Icon(Icons.Rounded.Layers, contentDescription = null, tint = AccentPrimary, modifier = Modifier.size(18.dp))
                     Spacer(modifier = Modifier.width(Spacing.sm))
                     Column {
-                        Text("Max Concurrent Downloads", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = TextPrimary)
-                        Text("Parallel batch download queue limit", fontSize = 11.sp, color = TextMuted)
+                        Text("Max Concurrent Downloads", fontSize = Type.body.fontSize, fontWeight = FontWeight.SemiBold, color = TextPrimary)
+                        Text("Parallel batch download queue limit", fontSize = Type.caption.fontSize, color = TextMuted)
                     }
                 }
-                Text("${state.maxConcurrent} tasks", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AccentPrimary)
+                Text("${state.maxConcurrent} tasks", fontSize = Type.label.fontSize, fontWeight = FontWeight.Bold, color = AccentPrimary)
             }
 
             Slider(
@@ -665,11 +665,11 @@ internal fun SettingsEngineSection(state: SettingsState) {
                     Icon(Icons.Rounded.Security, contentDescription = null, tint = AccentPrimary, modifier = Modifier.size(18.dp))
                     Spacer(modifier = Modifier.width(Spacing.sm))
                     Column {
-                        Text("Storage Protection Guard", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = TextPrimary)
-                        Text("Auto-pause downloads if disk free space is low", fontSize = 11.sp, color = TextMuted)
+                        Text("Storage Protection Guard", fontSize = Type.body.fontSize, fontWeight = FontWeight.SemiBold, color = TextPrimary)
+                        Text("Auto-pause downloads if disk free space is low", fontSize = Type.caption.fontSize, color = TextMuted)
                     }
                 }
-                Text("${String.format("%.1f", state.storageGuard)} GB", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AccentPrimary)
+                Text("${String.format("%.1f", state.storageGuard)} GB", fontSize = Type.label.fontSize, fontWeight = FontWeight.Bold, color = AccentPrimary)
             }
 
             Slider(
@@ -718,8 +718,8 @@ internal fun SettingsMediaSection(state: SettingsState) {
                 Icon(Icons.Rounded.HighQuality, contentDescription = null, tint = AccentPrimary, modifier = Modifier.size(18.dp))
                 Spacer(modifier = Modifier.width(Spacing.sm))
                 Column {
-                    Text("Preferred Stream Resolution", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = TextPrimary)
-                    Text("Default video quality for drama & anime streams", fontSize = 11.sp, color = TextMuted)
+                    Text("Preferred Stream Resolution", fontSize = Type.body.fontSize, fontWeight = FontWeight.SemiBold, color = TextPrimary)
+                    Text("Default video quality for drama & anime streams", fontSize = Type.caption.fontSize, color = TextMuted)
                 }
             }
 
@@ -739,7 +739,7 @@ internal fun SettingsMediaSection(state: SettingsState) {
                             // the new resolution without a Save tap.
                             state.persist()
                         },
-                        label = { Text(q, fontSize = 12.sp, fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal) },
+                        label = { Text(q, fontSize = Type.label.fontSize, fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal) },
                         colors = FilterChipDefaults.filterChipColors(
                             selectedContainerColor = AccentPrimary,
                             selectedLabelColor = BackgroundDark,
@@ -768,11 +768,11 @@ internal fun SettingsMediaSection(state: SettingsState) {
                 Icon(Icons.Rounded.Translate, contentDescription = null, tint = AccentPrimary, modifier = Modifier.size(18.dp))
                 Spacer(modifier = Modifier.width(Spacing.sm))
                 Column {
-                    Text("Subtitle Language", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = TextPrimary)
+                    Text("Subtitle Language", fontSize = Type.body.fontSize, fontWeight = FontWeight.SemiBold, color = TextPrimary)
                     // 2026-09-14: the same code also drives the player's
                     // AUTO-selection of an embedded/subtitle track, so an
                     // English-subbed MKV shows English without a manual pick.
-                    Text("Also picks which embedded track the player shows by default", fontSize = 11.sp, color = TextMuted)
+                    Text("Also picks which embedded track the player shows by default", fontSize = Type.caption.fontSize, color = TextMuted)
                 }
             }
             Spacer(modifier = Modifier.height(Spacing.sm))
@@ -790,7 +790,7 @@ internal fun SettingsMediaSection(state: SettingsState) {
                             state.subLang = code
                             state.persist()
                         },
-                        label = { Text(label, fontSize = 12.sp, fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal) },
+                        label = { Text(label, fontSize = Type.label.fontSize, fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal) },
                         colors = FilterChipDefaults.filterChipColors(
                             selectedContainerColor = AccentPrimary,
                             selectedLabelColor = BackgroundDark,
@@ -871,7 +871,7 @@ internal fun SettingsAboutSection(
                         Text(
                             text = "Open →",
                             color = AccentPrimary,
-                            fontSize = 11.sp,
+                            fontSize = Type.caption.fontSize,
                             fontWeight = FontWeight.SemiBold,
                             modifier = Modifier
                                 .clip(RoundedCornerShape(Radius.xs))
@@ -880,16 +880,16 @@ internal fun SettingsAboutSection(
                         )
                     }
                     UpdateUiState.UpToDate -> {
-                        Text("Up to date", color = TextMuted, fontSize = 11.sp)
+                        Text("Up to date", color = TextMuted, fontSize = Type.caption.fontSize)
                     }
                     UpdateUiState.Checking -> {
-                        Text("Checking…", color = TextMuted, fontSize = 11.sp)
+                        Text("Checking…", color = TextMuted, fontSize = Type.caption.fontSize)
                     }
                     UpdateUiState.Error -> {
                         Text(
                             text = "Retry",
                             color = StatusWarning,
-                            fontSize = 11.sp,
+                            fontSize = Type.caption.fontSize,
                             fontWeight = FontWeight.SemiBold,
                             modifier = Modifier
                                 .clip(RoundedCornerShape(Radius.xs))
@@ -901,7 +901,7 @@ internal fun SettingsAboutSection(
                         Text(
                             text = "Check",
                             color = AccentPrimary,
-                            fontSize = 11.sp,
+                            fontSize = Type.caption.fontSize,
                             fontWeight = FontWeight.SemiBold,
                             modifier = Modifier
                                 .clip(RoundedCornerShape(Radius.xs))
@@ -923,7 +923,7 @@ internal fun SettingsAboutSection(
                 Text(
                     text = "Open",
                     color = AccentPrimary,
-                    fontSize = 11.sp,
+                    fontSize = Type.caption.fontSize,
                     fontWeight = FontWeight.SemiBold,
                     modifier = Modifier
                         .clip(RoundedCornerShape(Radius.xs))
@@ -969,11 +969,11 @@ internal fun SettingsNetworkSection(state: SettingsState) {
                     Icon(Icons.Rounded.Speed, contentDescription = null, tint = AccentPrimary, modifier = Modifier.size(18.dp))
                     Spacer(modifier = Modifier.width(Spacing.sm))
                     Column {
-                        Text("Global Speed Limit", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = TextPrimary)
-                        Text("Per-task transfer cap (0 = unlimited)", fontSize = 11.sp, color = TextMuted)
+                        Text("Global Speed Limit", fontSize = Type.body.fontSize, fontWeight = FontWeight.SemiBold, color = TextPrimary)
+                        Text("Per-task transfer cap (0 = unlimited)", fontSize = Type.caption.fontSize, color = TextMuted)
                     }
                 }
-                Text(if (state.speedLimit > 0) "${state.speedLimit} KB/s" else "∞", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AccentPrimary)
+                Text(if (state.speedLimit > 0) "${state.speedLimit} KB/s" else "∞", fontSize = Type.label.fontSize, fontWeight = FontWeight.Bold, color = AccentPrimary)
             }
             Slider(
                 value = state.speedLimit.toFloat(),
@@ -1006,11 +1006,11 @@ internal fun SettingsTorrentsSection(state: SettingsState) {
                     Icon(Icons.Rounded.Hub, contentDescription = null, tint = AccentPrimary, modifier = Modifier.size(18.dp))
                     Spacer(modifier = Modifier.width(Spacing.sm))
                     Column {
-                        Text("Peer Connections", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = TextPrimary)
-                        Text(if (state.torrentPeers == -1) "Auto (RAM-detected) — more = faster, $ battery" else "Torrent file-sharing limit", fontSize = 11.sp, color = TextMuted)
+                        Text("Peer Connections", fontSize = Type.body.fontSize, fontWeight = FontWeight.SemiBold, color = TextPrimary)
+                        Text(if (state.torrentPeers == -1) "Auto (RAM-detected) — more = faster, $ battery" else "Torrent file-sharing limit", fontSize = Type.caption.fontSize, color = TextMuted)
                     }
                 }
-                Text(if (state.torrentPeers == -1) "Auto" else "${state.torrentPeers}", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AccentPrimary)
+                Text(if (state.torrentPeers == -1) "Auto" else "${state.torrentPeers}", fontSize = Type.label.fontSize, fontWeight = FontWeight.Bold, color = AccentPrimary)
             }
             Slider(
                 value = if (state.torrentPeers == -1) 0f else state.torrentPeers.toFloat(),
@@ -1049,11 +1049,11 @@ internal fun SettingsTorrentsSection(state: SettingsState) {
                     Icon(Icons.Rounded.Timer, contentDescription = null, tint = AccentPrimary, modifier = Modifier.size(18.dp))
                     Spacer(modifier = Modifier.width(Spacing.sm))
                     Column {
-                        Text("Stall Timeout", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = TextPrimary)
-                        Text("Abandon stalled download after N seconds", fontSize = 11.sp, color = TextMuted)
+                        Text("Stall Timeout", fontSize = Type.body.fontSize, fontWeight = FontWeight.SemiBold, color = TextPrimary)
+                        Text("Abandon stalled download after N seconds", fontSize = Type.caption.fontSize, color = TextMuted)
                     }
                 }
-                Text("${state.stallTimeout}s", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AccentPrimary)
+                Text("${state.stallTimeout}s", fontSize = Type.label.fontSize, fontWeight = FontWeight.Bold, color = AccentPrimary)
             }
             Slider(
                 value = state.stallTimeout.toFloat(),
@@ -1082,14 +1082,14 @@ internal fun SettingsTorrentsSection(state: SettingsState) {
                     Icon(Icons.Rounded.Replay, contentDescription = null, tint = AccentPrimary, modifier = Modifier.size(18.dp))
                     Spacer(modifier = Modifier.width(Spacing.sm))
                     Column {
-                        Text("Download Retry Count", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = TextPrimary)
-                        Text("Magnet / yt-dlp retries before giving up", fontSize = 11.sp, color = TextMuted)
+                        Text("Download Retry Count", fontSize = Type.body.fontSize, fontWeight = FontWeight.SemiBold, color = TextPrimary)
+                        Text("Magnet / yt-dlp retries before giving up", fontSize = Type.caption.fontSize, color = TextMuted)
                     }
                 }
-                Text("${state.magnetRetries} / ${state.ytdlpRetries}", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AccentPrimary)
+                Text("${state.magnetRetries} / ${state.ytdlpRetries}", fontSize = Type.label.fontSize, fontWeight = FontWeight.Bold, color = AccentPrimary)
             }
             Spacer(modifier = Modifier.height(Spacing.sm))
-            Text("Magnet retries", fontSize = 10.sp, color = TextMuted)
+            Text("Magnet retries", fontSize = Type.micro.fontSize, color = TextMuted)
             Slider(
                 value = state.magnetRetries.toFloat(),
                 onValueChange = { state.magnetRetries = it.toInt() },
@@ -1103,7 +1103,7 @@ internal fun SettingsTorrentsSection(state: SettingsState) {
                     inactiveTrackColor = SurfaceElevated
                 )
             )
-            Text("yt-dlp retries", fontSize = 10.sp, color = TextMuted)
+            Text("yt-dlp retries", fontSize = Type.micro.fontSize, color = TextMuted)
             Slider(
                 value = state.ytdlpRetries.toFloat(),
                 onValueChange = { state.ytdlpRetries = it.toInt() },
@@ -1131,11 +1131,11 @@ internal fun SettingsTorrentsSection(state: SettingsState) {
                     Icon(Icons.Rounded.FeaturedPlayList, contentDescription = null, tint = AccentPrimary, modifier = Modifier.size(18.dp))
                     Spacer(modifier = Modifier.width(Spacing.sm))
                     Column {
-                        Text("HLS Fragment Concurrency", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = TextPrimary)
-                        Text("Parallel HLS segments per stream", fontSize = 11.sp, color = TextMuted)
+                        Text("HLS Fragment Concurrency", fontSize = Type.body.fontSize, fontWeight = FontWeight.SemiBold, color = TextPrimary)
+                        Text("Parallel HLS segments per stream", fontSize = Type.caption.fontSize, color = TextMuted)
                     }
                 }
-                Text("${state.hlsFragments}", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AccentPrimary)
+                Text("${state.hlsFragments}", fontSize = Type.label.fontSize, fontWeight = FontWeight.Bold, color = AccentPrimary)
             }
             Slider(
                 value = state.hlsFragments.toFloat(),
@@ -1170,11 +1170,11 @@ internal fun SettingsDiagnosticsSection(state: SettingsState) {
                     Icon(Icons.Rounded.History, contentDescription = null, tint = AccentPrimary, modifier = Modifier.size(18.dp))
                     Spacer(modifier = Modifier.width(Spacing.sm))
                     Column {
-                        Text("Keep Activity Logs", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = TextPrimary)
-                        Text("Days of history before old log files are deleted", fontSize = 11.sp, color = TextMuted)
+                        Text("Keep Activity Logs", fontSize = Type.body.fontSize, fontWeight = FontWeight.SemiBold, color = TextPrimary)
+                        Text("Days of history before old log files are deleted", fontSize = Type.caption.fontSize, color = TextMuted)
                     }
                 }
-                Text("${state.logRetention} days", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AccentPrimary)
+                Text("${state.logRetention} days", fontSize = Type.label.fontSize, fontWeight = FontWeight.Bold, color = AccentPrimary)
             }
             Slider(
                 value = state.logRetention.toFloat(),
@@ -1275,10 +1275,10 @@ internal fun SettingsDiagnosticsSection(state: SettingsState) {
             )
             Spacer(modifier = Modifier.width(Spacing.sm))
             Column(modifier = Modifier.weight(1f)) {
-                Text("Share Activity Log", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = TextPrimary)
-                Text("Everything the app did — send it for diagnosis", fontSize = 11.sp, color = TextMuted)
+                Text("Share Activity Log", fontSize = Type.body.fontSize, fontWeight = FontWeight.SemiBold, color = TextPrimary)
+                Text("Everything the app did — send it for diagnosis", fontSize = Type.caption.fontSize, color = TextMuted)
             }
-            Text("SHARE", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AccentPrimary)
+            Text("SHARE", fontSize = Type.label.fontSize, fontWeight = FontWeight.Bold, color = AccentPrimary)
         }
     }
 }
@@ -1287,7 +1287,7 @@ internal fun SettingsDiagnosticsSection(state: SettingsState) {
 fun SettingsCategoryHeader(title: String) {
     Text(
         text = title.uppercase(),
-        fontSize = 11.sp,
+        fontSize = Type.caption.fontSize,
         fontWeight = FontWeight.Bold,
         color = TextMuted,
         letterSpacing = 0.8.sp,
@@ -1341,8 +1341,8 @@ fun SettingsSwitchRow(
             Icon(icon, contentDescription = null, tint = AccentPrimary, modifier = Modifier.size(18.dp))
             Spacer(modifier = Modifier.width(Spacing.sm))
             Column {
-                Text(title, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = TextPrimary)
-                Text(subtitle, fontSize = 11.sp, color = TextMuted)
+                Text(title, fontSize = Type.body.fontSize, fontWeight = FontWeight.SemiBold, color = TextPrimary)
+                Text(subtitle, fontSize = Type.caption.fontSize, color = TextMuted)
             }
         }
 
@@ -1380,8 +1380,8 @@ fun SettingsActionRow(
             Icon(icon, contentDescription = null, tint = AccentPrimary, modifier = Modifier.size(18.dp))
             Spacer(modifier = Modifier.width(Spacing.sm))
             Column {
-                Text(title, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = TextPrimary)
-                Text(subtitle, fontSize = 11.sp, color = TextMuted)
+                Text(title, fontSize = Type.body.fontSize, fontWeight = FontWeight.SemiBold, color = TextPrimary)
+                Text(subtitle, fontSize = Type.caption.fontSize, color = TextMuted)
             }
         }
 

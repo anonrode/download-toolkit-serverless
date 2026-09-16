@@ -116,7 +116,7 @@ fun TorrentFilePickerDialog(
                     "Season pack: choose what to grab. Downloading only the wanted " +
                         "episodes is much faster than the whole batch.",
                     color = TextSecondary,
-                    fontSize = 13.sp
+                    fontSize = Type.body.fontSize
                 )
                 LazyColumn(modifier = Modifier.padding(top = Spacing.sm)) {
                     items(safeFiles, key = { it.index }) { file ->
@@ -135,11 +135,11 @@ fun TorrentFilePickerDialog(
                                 selected = if (it) selected + file.index else selected - file.index
                             })
                             Column(modifier = Modifier.weight(1f)) {
-                                Text(file.displayName, maxLines = 1, overflow = TextOverflow.Ellipsis, color = TextPrimary, fontSize = 13.sp)
+                                Text(file.displayName, maxLines = 1, overflow = TextOverflow.Ellipsis, color = TextPrimary, fontSize = Type.body.fontSize)
                                 Text(
                                     "%.1f MB".format(file.length / 1048576.0),
                                     color = TextMuted,
-                                    fontSize = 12.sp
+                                    fontSize = Type.label.fontSize
                                 )
                             }
                         }
@@ -165,12 +165,12 @@ fun TorrentFilePickerDialog(
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis,
                                         color = StatusError,
-                                        fontSize = 13.sp
+                                        fontSize = Type.body.fontSize
                                     )
                                     Text(
                                         "Blocked by security shield (${file.length / 1048576} MB)",
                                         color = StatusError.copy(alpha = 0.7f),
-                                        fontSize = 12.sp
+                                        fontSize = Type.label.fontSize
                                     )
                                 }
                             }
@@ -181,7 +181,7 @@ fun TorrentFilePickerDialog(
                     Text(
                         "No safe files found — the whole torrent is blocked.",
                         color = StatusError,
-                        fontSize = 13.sp
+                        fontSize = Type.body.fontSize
                     )
                 }
             }

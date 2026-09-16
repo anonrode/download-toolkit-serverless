@@ -139,7 +139,7 @@ fun EpisodeDrawer(
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = show.title,
-                        fontSize = 17.sp,
+                        fontSize = Type.screenTitle.fontSize,
                         fontWeight = FontWeight.Bold,
                         color = TextPrimary,
                         maxLines = 1,
@@ -147,7 +147,7 @@ fun EpisodeDrawer(
                     )
                     Text(
                         text = "${show.site.uppercase()} • ${episodes.size} Total Episodes",
-                        fontSize = 12.sp,
+                        fontSize = Type.label.fontSize,
                         color = TextSecondary
                     )
                 }
@@ -201,7 +201,7 @@ fun EpisodeDrawer(
                         onClick = {
                             selectedEpisodes = if (isAllSelected) emptySet() else episodes.toSet()
                         },
-                        label = { Text("All (${episodes.size})", fontSize = 11.sp, fontWeight = FontWeight.SemiBold) },
+                        label = { Text("All (${episodes.size})", fontSize = Type.caption.fontSize, fontWeight = FontWeight.SemiBold) },
                         colors = FilterChipDefaults.filterChipColors(
                             selectedContainerColor = AccentPrimary,
                             selectedLabelColor = BackgroundDark,
@@ -229,7 +229,7 @@ fun EpisodeDrawer(
                                         selectedEpisodes + sEps.toSet()
                                     }
                                 },
-                                label = { Text("Season $sNum (${sEps.size})", fontSize = 11.sp) },
+                                label = { Text("Season $sNum (${sEps.size})", fontSize = Type.caption.fontSize) },
                                 colors = FilterChipDefaults.filterChipColors(
                                     selectedContainerColor = AccentViolet,
                                     selectedLabelColor = Color.White,
@@ -251,7 +251,7 @@ fun EpisodeDrawer(
                         FilterChip(
                             selected = false,
                             onClick = { selectedEpisodes = emptySet() },
-                            label = { Text("Clear (${selectedEpisodes.size})", fontSize = 11.sp, color = StatusError) },
+                            label = { Text("Clear (${selectedEpisodes.size})", fontSize = Type.caption.fontSize, color = StatusError) },
                             colors = FilterChipDefaults.filterChipColors(containerColor = SurfaceCard),
                             border = FilterChipDefaults.filterChipBorder(
                                 borderColor = StatusError.copy(alpha = 0.4f),
@@ -276,7 +276,7 @@ fun EpisodeDrawer(
                             rangeText = it
                             applyRange(it)
                         },
-                        placeholder = { Text("Range (e.g. 1-5, 8, 10)", color = TextMuted, fontSize = 11.sp) },
+                        placeholder = { Text("Range (e.g. 1-5, 8, 10)", color = TextMuted, fontSize = Type.caption.fontSize) },
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(
                             keyboardType = KeyboardType.Text,
@@ -333,7 +333,7 @@ fun EpisodeDrawer(
                         // a toast. The button never enqueued "all"; the count
                         // lives on the sticky batch bar so the two bars don't
                         // mirror each other.
-                        Text("Download", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        Text("Download", fontSize = Type.label.fontSize, fontWeight = FontWeight.Bold)
                     }
                 }
             }
@@ -355,7 +355,7 @@ fun EpisodeDrawer(
                             modifier = Modifier.size(32.dp)
                         )
                         Spacer(modifier = Modifier.height(Spacing.sm))
-                        Text("Scraping episode locker streams...", color = TextSecondary, fontSize = 12.sp)
+                        Text("Scraping episode locker streams...", color = TextSecondary, fontSize = Type.label.fontSize)
                     }
                 }
             } else if (episodes.isEmpty()) {
@@ -370,14 +370,14 @@ fun EpisodeDrawer(
                             Text(
                                 text = uiState.episodesError ?: "No stream links found",
                                 color = StatusError,
-                                fontSize = 13.sp,
+                                fontSize = Type.body.fontSize,
                                 maxLines = 3,
                                 overflow = TextOverflow.Ellipsis
                             )
                             Spacer(modifier = Modifier.height(Spacing.xs))
-                            Text("Close and try again", color = TextMuted, fontSize = 11.sp)
+                            Text("Close and try again", color = TextMuted, fontSize = Type.caption.fontSize)
                         } else {
-                            Text("No stream links found for this title.", color = TextMuted, fontSize = 13.sp)
+                            Text("No stream links found for this title.", color = TextMuted, fontSize = Type.body.fontSize)
                         }
                     }
                 }
@@ -453,13 +453,13 @@ fun EpisodeDrawer(
                             Text(
                                 text = "${selectedEpisodes.size} Selected",
                                 color = TextPrimary,
-                                fontSize = 13.sp,
+                                fontSize = Type.body.fontSize,
                                 fontWeight = FontWeight.Bold
                             )
                             Text(
                                 text = "Ready to queue",
                                 color = TextSecondary,
-                                fontSize = 11.sp
+                                fontSize = Type.caption.fontSize
                             )
                         }
 
@@ -495,7 +495,7 @@ fun EpisodeDrawer(
                         ) {
                             Icon(Icons.Rounded.Download, contentDescription = null, modifier = Modifier.size(16.dp))
                             Spacer(modifier = Modifier.width(Spacing.xs))
-                            Text("Download (${selectedEpisodes.size})", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                            Text("Download (${selectedEpisodes.size})", fontWeight = FontWeight.Bold, fontSize = Type.label.fontSize)
                         }
                     }
                 }
@@ -563,7 +563,7 @@ fun EpisodeRow(
                 Text(
                     text = episode.title,
                     color = if (isSelected) TextPrimary else TextSecondary,
-                    fontSize = 13.sp,
+                    fontSize = Type.body.fontSize,
                     fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
@@ -620,7 +620,7 @@ fun EpisodeRow(
                 Text(
                     text = "Queue now, or check this link on a browser first.",
                     color = TextMuted,
-                    fontSize = 10.sp,
+                    fontSize = Type.micro.fontSize,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
@@ -666,7 +666,7 @@ private fun SynopsisBlock(synopsis: String) {
         Text(
             text = "STORY",
             color = TextMuted,
-            fontSize = 10.sp,
+            fontSize = Type.micro.fontSize,
             fontWeight = FontWeight.Bold,
             letterSpacing = 1.sp
         )
@@ -674,7 +674,7 @@ private fun SynopsisBlock(synopsis: String) {
         Text(
             text = synopsis,
             color = TextSecondary,
-            fontSize = 12.sp,
+            fontSize = Type.label.fontSize,
             lineHeight = 17.sp,
             maxLines = if (expanded) Int.MAX_VALUE else 3,
             overflow = TextOverflow.Ellipsis
@@ -684,7 +684,7 @@ private fun SynopsisBlock(synopsis: String) {
             Text(
                 text = if (expanded) "Show less" else "Read more",
                 color = AccentPrimary,
-                fontSize = 12.sp,
+                fontSize = Type.label.fontSize,
                 fontWeight = FontWeight.Bold,
                 modifier = Modifier
                     .minimumInteractiveComponentSize()
@@ -707,11 +707,11 @@ private fun PreviewChip(label: String, value: String, modifier: Modifier = Modif
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(4.dp)
     ) {
-        Text(label.uppercase(), color = TextMuted, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+        Text(label.uppercase(), color = TextMuted, fontSize = Type.micro.fontSize, fontWeight = FontWeight.Bold)
         Text(
             value,
             color = TextSecondary,
-            fontSize = 11.sp,
+            fontSize = Type.caption.fontSize,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
         )

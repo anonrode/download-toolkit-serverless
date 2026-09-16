@@ -112,10 +112,10 @@ fun PlaylistPickerSheet(viewModel: MainViewModel, onDismiss: () -> Unit) {
                 ) {
                     CircularProgressIndicator(color = AccentPrimary, modifier = Modifier.size(28.dp))
                     Spacer(Modifier.height(Spacing.md))
-                    Text("Reading the playlist…", fontSize = 14.sp, color = TextSecondary)
+                    Text("Reading the playlist…", fontSize = Type.rowTitle.fontSize, color = TextSecondary)
                     Text(
                         "one metadata call, no video pages",
-                        fontSize = 11.sp,
+                        fontSize = Type.caption.fontSize,
                         color = TextMuted
                     )
                     Spacer(Modifier.height(Spacing.lg))
@@ -131,7 +131,7 @@ fun PlaylistPickerSheet(viewModel: MainViewModel, onDismiss: () -> Unit) {
                 ) {
                     Text(
                         text = state.error ?: "Playlist unavailable.",
-                        fontSize = 13.sp,
+                        fontSize = Type.body.fontSize,
                         color = TextSecondary
                     )
                     Spacer(Modifier.height(Spacing.md))
@@ -151,7 +151,7 @@ fun PlaylistPickerSheet(viewModel: MainViewModel, onDismiss: () -> Unit) {
             // ---- header ----
             Text(
                 text = meta.title.ifBlank { "YouTube playlist" },
-                fontSize = 17.sp,
+                fontSize = Type.screenTitle.fontSize,
                 fontWeight = FontWeight.Bold,
                 color = TextPrimary,
                 maxLines = 2,
@@ -163,7 +163,7 @@ fun PlaylistPickerSheet(viewModel: MainViewModel, onDismiss: () -> Unit) {
                     meta.uploader.takeIf { it.isNotBlank() }?.let { append(it).append(" · ") }
                     append("${meta.entries.size} videos · ${PlaylistPicker.formatDuration(totalSec)} total")
                 },
-                fontSize = 12.sp,
+                fontSize = Type.label.fontSize,
                 color = TextSecondary
             )
             if (state.parsed?.kind == PlaylistPicker.ListKind.MIX) {
@@ -176,7 +176,7 @@ fun PlaylistPickerSheet(viewModel: MainViewModel, onDismiss: () -> Unit) {
                 ) {
                     Text(
                         "Auto-mix — YouTube regenerates these lists, so entries can differ from the app's order.",
-                        fontSize = 11.sp,
+                        fontSize = Type.caption.fontSize,
                         color = AccentViolet
                     )
                 }
@@ -188,8 +188,8 @@ fun PlaylistPickerSheet(viewModel: MainViewModel, onDismiss: () -> Unit) {
                 OutlinedTextField(
                     value = query,
                     onValueChange = { query = it },
-                    placeholder = { Text("Filter by title…", fontSize = 12.sp, color = TextMuted) },
-                    textStyle = LocalTextStyle.current.copy(fontSize = 13.sp),
+                    placeholder = { Text("Filter by title…", fontSize = Type.label.fontSize, color = TextMuted) },
+                    textStyle = LocalTextStyle.current.copy(fontSize = Type.body.fontSize),
                     singleLine = true,
                     modifier = Modifier.weight(1f),
                     shape = RoundedCornerShape(Radius.md),
@@ -203,12 +203,12 @@ fun PlaylistPickerSheet(viewModel: MainViewModel, onDismiss: () -> Unit) {
                 TextButton(onClick = {
                     selected.clear()
                     selected.addAll(filtered)
-                }) { Text("Select all", fontSize = 12.sp, color = AccentPrimary) }
+                }) { Text("Select all", fontSize = Type.label.fontSize, color = AccentPrimary) }
                 TextButton(onClick = {
                     val flipped = filtered.filter { it !in selected }
                     selected.clear()
                     selected.addAll(flipped)
-                }) { Text("Invert", fontSize = 12.sp, color = AccentPrimary) }
+                }) { Text("Invert", fontSize = Type.label.fontSize, color = AccentPrimary) }
             }
 
             // ---- range spec ----
@@ -217,8 +217,8 @@ fun PlaylistPickerSheet(viewModel: MainViewModel, onDismiss: () -> Unit) {
                 OutlinedTextField(
                     value = rangeSpec,
                     onValueChange = { rangeSpec = it; rangeError = null },
-                    placeholder = { Text("Range e.g. 1-5,8,10-12", fontSize = 12.sp, color = TextMuted) },
-                    textStyle = LocalTextStyle.current.copy(fontSize = 13.sp),
+                    placeholder = { Text("Range e.g. 1-5,8,10-12", fontSize = Type.label.fontSize, color = TextMuted) },
+                    textStyle = LocalTextStyle.current.copy(fontSize = Type.body.fontSize),
                     singleLine = true,
                     modifier = Modifier.weight(1f),
                     shape = RoundedCornerShape(Radius.md),
@@ -233,10 +233,10 @@ fun PlaylistPickerSheet(viewModel: MainViewModel, onDismiss: () -> Unit) {
                     PlaylistPicker.parseRanges(rangeSpec, meta.entries.size)?.let {
                         selected.clear(); selected.addAll(it)
                     } ?: run { rangeError = "Use 1-based numbers like 1-5,8 (max ${meta.entries.size})." }
-                }) { Text("Apply", fontSize = 12.sp, color = AccentPrimary) }
+                }) { Text("Apply", fontSize = Type.label.fontSize, color = AccentPrimary) }
             }
             rangeError?.let {
-                Text(it, fontSize = 11.sp, color = StatusError)
+                Text(it, fontSize = Type.caption.fontSize, color = StatusError)
             }
 
             // ---- mode: audio toggle, then the quality row FULL WIDTH below.
@@ -248,7 +248,7 @@ fun PlaylistPickerSheet(viewModel: MainViewModel, onDismiss: () -> Unit) {
             FilterChip(
                 selected = audioOnly,
                 onClick = { audioOnly = !audioOnly },
-                label = { Text("Audio only (MP3)", fontSize = 12.sp) },
+                label = { Text("Audio only (MP3)", fontSize = Type.label.fontSize) },
                 colors = FilterChipDefaults.filterChipColors(
                     selectedContainerColor = AccentPrimary,
                     selectedLabelColor = BackgroundDark
@@ -277,7 +277,7 @@ fun PlaylistPickerSheet(viewModel: MainViewModel, onDismiss: () -> Unit) {
                     )
                     Text(
                         "Skip $downloadedInList already-on-device video${if (downloadedInList > 1) "s" else ""}",
-                        fontSize = 12.sp,
+                        fontSize = Type.label.fontSize,
                         color = TextSecondary
                     )
                 }
@@ -330,7 +330,7 @@ fun PlaylistPickerSheet(viewModel: MainViewModel, onDismiss: () -> Unit) {
                                 ) {
                                     Text(
                                         PlaylistPicker.formatDuration(d),
-                                        fontSize = 9.sp,
+                                        fontSize = Type.micro.fontSize,
                                         color = Color.White
                                     )
                                 }
@@ -340,7 +340,7 @@ fun PlaylistPickerSheet(viewModel: MainViewModel, onDismiss: () -> Unit) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
                                 text = "$idx · ${entry.title}",
-                                fontSize = 13.sp,
+                                fontSize = Type.body.fontSize,
                                 fontWeight = FontWeight.Medium,
                                 color = TextPrimary,
                                 maxLines = 2,
@@ -349,7 +349,7 @@ fun PlaylistPickerSheet(viewModel: MainViewModel, onDismiss: () -> Unit) {
                             if (isDownloaded) {
                                 Text(
                                     "✓ on device",
-                                    fontSize = 11.sp,
+                                    fontSize = Type.caption.fontSize,
                                     fontWeight = FontWeight.Bold,
                                     color = StatusSuccess
                                 )
@@ -369,7 +369,7 @@ fun PlaylistPickerSheet(viewModel: MainViewModel, onDismiss: () -> Unit) {
                     item {
                         Text(
                             "No entry matches \"$query\".",
-                            fontSize = 12.sp,
+                            fontSize = Type.label.fontSize,
                             color = TextMuted,
                             modifier = Modifier.padding(vertical = Spacing.md)
                         )
@@ -403,7 +403,7 @@ fun PlaylistPickerSheet(viewModel: MainViewModel, onDismiss: () -> Unit) {
                         if (audioOnly) append(" · MP3")
                     },
                     fontWeight = FontWeight.Bold,
-                    fontSize = 14.sp
+                    fontSize = Type.rowTitle.fontSize
                 )
             }
             Spacer(Modifier.height(Spacing.lg))
