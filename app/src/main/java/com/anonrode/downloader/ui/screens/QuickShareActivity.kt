@@ -406,13 +406,13 @@ fun QuickShareCard(
                     Column {
                         Text(
                             text = "Download with Anon",
-                            fontSize = 17.sp,
+                            fontSize = Type.screenTitle.fontSize,
                             fontWeight = FontWeight.Bold,
                             color = TextPrimary
                         )
                         Text(
                             text = platformName,
-                            fontSize = 12.sp,
+                            fontSize = Type.label.fontSize,
                             fontWeight = FontWeight.Medium,
                             color = TextMuted
                         )
@@ -465,7 +465,7 @@ fun QuickShareCard(
                 Text(
                     text = rawUrl,
                     fontFamily = FontFamily.Monospace,
-                    fontSize = 12.sp,
+                    fontSize = Type.label.fontSize,
                     color = TextSecondary,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -579,14 +579,14 @@ fun QuickShareCard(
                 )
                 Text(
                     text = "Always download instantly",
-                    fontSize = 13.sp,
+                    fontSize = Type.body.fontSize,
                     fontWeight = FontWeight.Medium,
                     color = TextSecondary
                 )
                 Spacer(modifier = Modifier.weight(1f))
                 Text(
                     text = "Skip this dialog",
-                    fontSize = 12.sp,
+                    fontSize = Type.label.fontSize,
                     color = TextMuted
                 )
             }
@@ -629,7 +629,7 @@ fun QuickShareCard(
                 ) {
                     Icon(Icons.Rounded.Download, null, modifier = Modifier.size(18.dp))
                     Spacer(modifier = Modifier.width(Spacing.sm))
-                    Text("Download", fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                    Text("Download", fontWeight = FontWeight.Bold, fontSize = Type.sectionTitle.fontSize)
                 }
             }
         }
@@ -640,7 +640,7 @@ fun QuickShareCard(
 private fun SectionLabel(text: String) {
     Text(
         text = text,
-        fontSize = 11.sp,
+        fontSize = Type.caption.fontSize,
         fontWeight = FontWeight.SemiBold,
         letterSpacing = 1.sp,
         color = TextMuted
@@ -675,7 +675,7 @@ private fun FormatSegment(
         Spacer(modifier = Modifier.width(Spacing.sm))
         Text(
             text = label,
-            fontSize = 14.sp,
+            fontSize = Type.rowTitle.fontSize,
             fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
             color = if (selected) AccentViolet else TextSecondary
         )
@@ -710,7 +710,7 @@ private fun EngineSegment(
         Spacer(modifier = Modifier.width(Spacing.sm))
         Text(
             text = label,
-            fontSize = 14.sp,
+            fontSize = Type.rowTitle.fontSize,
             fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
             color = if (selected) AccentViolet else TextSecondary
         )

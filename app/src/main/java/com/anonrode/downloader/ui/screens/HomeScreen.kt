@@ -160,7 +160,7 @@ fun HomeScreen(
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = "ANONRODE",
-                        fontSize = 22.sp,
+                        fontSize = Type.brand.fontSize,
                         fontWeight = FontWeight.Black,
                         color = TextPrimary,
                         letterSpacing = 1.sp
@@ -168,7 +168,7 @@ fun HomeScreen(
                     Spacer(modifier = Modifier.height(Spacing.xxs))
                     Text(
                         text = "100% Serverless • Native Multi-Provider Engine",
-                        fontSize = 11.sp,
+                        fontSize = Type.caption.fontSize,
                         color = TextMuted,
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis
@@ -220,7 +220,7 @@ fun HomeScreen(
                             Text(
                                 text = "Search series, anime, movies, torrents...",
                                 color = TextMuted,
-                                fontSize = 14.sp,
+                                fontSize = Type.rowTitle.fontSize,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )
@@ -250,7 +250,7 @@ fun HomeScreen(
                             singleLine = true,
                             textStyle = androidx.compose.ui.text.TextStyle(
                                 color = TextPrimary,
-                                fontSize = 14.sp,
+                                fontSize = Type.rowTitle.fontSize,
                                 fontWeight = FontWeight.Medium
                             ),
                             cursorBrush = androidx.compose.ui.graphics.SolidColor(AccentPrimary),
@@ -346,12 +346,12 @@ fun HomeScreen(
                                 "Paste link: $head"
                             },
                             color = TextPrimary,
-                            fontSize = 12.sp,
+                            fontSize = Type.label.fontSize,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
                     }
-                    Text("Download", color = AccentPrimary, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    Text("Download", color = AccentPrimary, fontSize = Type.label.fontSize, fontWeight = FontWeight.Bold)
                 }
             }
 
@@ -373,7 +373,7 @@ fun HomeScreen(
                         label = {
                             Text(
                                 text = label,
-                                fontSize = 12.sp,
+                                fontSize = Type.label.fontSize,
                                 fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
                                 color = if (isSelected) BackgroundDark else TextSecondary
                             )
@@ -421,7 +421,7 @@ fun HomeScreen(
                     Text(
                         text = "Searching all sources…",
                         color = TextSecondary,
-                        fontSize = 13.sp
+                        fontSize = Type.body.fontSize
                     )
                     Spacer(modifier = Modifier.height(Spacing.md))
                     SearchListSkeleton()
@@ -439,18 +439,18 @@ fun HomeScreen(
                         Text(
                             text = uiState.searchError ?: "Search failed",
                             color = StatusError,
-                            fontSize = 14.sp,
+                            fontSize = Type.rowTitle.fontSize,
                             maxLines = 3,
                             overflow = TextOverflow.Ellipsis
                         )
                         Spacer(modifier = Modifier.height(Spacing.sm))
-                        Text("Check your connection and try again", color = TextMuted, fontSize = 12.sp)
+                        Text("Check your connection and try again", color = TextMuted, fontSize = Type.label.fontSize)
                         // The hint said "try again" but the only way to try
                         // again was perturbing the query — mirror the
                         // trending panel and offer the retry as a button.
                         Spacer(modifier = Modifier.height(Spacing.xs))
                         TextButton(onClick = { viewModel.search() }) {
-                            Text("Retry", color = AccentPrimary, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                            Text("Retry", color = AccentPrimary, fontWeight = FontWeight.Bold, fontSize = Type.body.fontSize)
                         }
                     }
                 }
@@ -475,14 +475,14 @@ fun HomeScreen(
                     Text(
                         text = "No matches for \u201C${uiState.query.trim()}\u201D",
                         color = TextPrimary,
-                        fontSize = 15.sp,
+                        fontSize = Type.sectionTitle.fontSize,
                         fontWeight = FontWeight.SemiBold
                     )
                     Spacer(modifier = Modifier.height(Spacing.xs))
                     Text(
                         text = "Every source answered \u2014 try a shorter title or check the spelling.",
                         color = TextMuted,
-                        fontSize = 12.sp
+                        fontSize = Type.label.fontSize
                     )
                     Spacer(modifier = Modifier.height(Spacing.lg))
                     TextButton(onClick = { viewModel.onQueryChanged("") }) {
@@ -652,7 +652,7 @@ private fun TrendingSection(
             Text(
                 text = "Trending Now",
                 color = TextPrimary,
-                fontSize = 15.sp,
+                fontSize = Type.sectionTitle.fontSize,
                 fontWeight = FontWeight.Bold,
                 modifier = Modifier.weight(1f)
             )
@@ -675,7 +675,7 @@ private fun TrendingSection(
                 Text(
                     text = "Retry",
                     color = AccentPrimary,
-                    fontSize = 13.sp,
+                    fontSize = Type.body.fontSize,
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier
                         .minimumInteractiveComponentSize()
@@ -701,9 +701,9 @@ private fun TrendingSection(
                     contentAlignment = Alignment.Center
                 ) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text("Trending is unavailable right now", color = TextSecondary, fontSize = 14.sp)
+                        Text("Trending is unavailable right now", color = TextSecondary, fontSize = Type.rowTitle.fontSize)
                         Spacer(modifier = Modifier.height(Spacing.xs))
-                        Text("Tap Retry to load it again", color = TextMuted, fontSize = 12.sp)
+                        Text("Tap Retry to load it again", color = TextMuted, fontSize = Type.label.fontSize)
                     }
                 }
             }
@@ -737,7 +737,7 @@ private fun TrendingSection(
                 Text(
                     text = "Tap a title to pick episodes · or search above",
                     color = TextMuted,
-                    fontSize = 12.sp
+                    fontSize = Type.label.fontSize
                 )
             }
         }
@@ -785,7 +785,7 @@ private fun TrendingCard(
         Text(
             text = show.title,
             color = TextPrimary,
-            fontSize = 13.sp,
+            fontSize = Type.body.fontSize,
             fontWeight = FontWeight.SemiBold,
             lineHeight = 17.sp,
             maxLines = 2,
@@ -795,7 +795,7 @@ private fun TrendingCard(
         Text(
             text = show.site.uppercase(),
             color = AccentPrimary,
-            fontSize = 10.sp,
+            fontSize = Type.micro.fontSize,
             fontWeight = FontWeight.Bold
         )
     }
@@ -825,7 +825,7 @@ private fun CategoryTilesGrid(
         Text(
             text = "Browse by Genre",
             color = TextPrimary,
-            fontSize = 15.sp,
+            fontSize = Type.sectionTitle.fontSize,
             fontWeight = FontWeight.Bold
         )
         Spacer(modifier = Modifier.height(Spacing.md))
@@ -890,7 +890,7 @@ private fun ViewMoreTileCard(onClick: () -> Unit) {
                 Text(
                     text = "View More",
                     color = AccentPrimary,
-                    fontSize = 12.sp,
+                    fontSize = Type.label.fontSize,
                     fontWeight = FontWeight.Bold
                 )
             }
@@ -937,7 +937,7 @@ private fun GenreTileCard(
         Text(
             text = label,
             color = TextPrimary,
-            fontSize = 13.sp,
+            fontSize = Type.body.fontSize,
             fontWeight = FontWeight.Bold,
             lineHeight = 17.sp,
             maxLines = 1,
@@ -996,7 +996,7 @@ private fun CategoryPage(
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = category.label.uppercase(),
-                    fontSize = 18.sp,
+                    fontSize = Type.screenTitle.fontSize,
                     fontWeight = FontWeight.Black,
                     color = TextPrimary,
                     letterSpacing = 1.sp
@@ -1006,7 +1006,7 @@ private fun CategoryPage(
                         "${cards.size} titles, every source mixed"
                     else
                         "Latest ${category.label.lowercase()} posts",
-                    fontSize = 11.sp,
+                    fontSize = Type.caption.fontSize,
                     color = TextMuted
                 )
             }
@@ -1033,7 +1033,7 @@ private fun CategoryPage(
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     CircularProgressIndicator(color = AccentPrimary, strokeWidth = 2.dp)
                     Spacer(modifier = Modifier.height(Spacing.md))
-                    Text("Loading ${category.label.lowercase()}...", color = TextSecondary, fontSize = 13.sp)
+                    Text("Loading ${category.label.lowercase()}...", color = TextSecondary, fontSize = Type.body.fontSize)
                 }
             }
             cards.isEmpty() -> Box(
@@ -1041,16 +1041,16 @@ private fun CategoryPage(
                 contentAlignment = Alignment.Center
             ) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("${category.label} is unavailable right now", color = TextSecondary, fontSize = 14.sp)
+                    Text("${category.label} is unavailable right now", color = TextSecondary, fontSize = Type.rowTitle.fontSize)
                     Spacer(modifier = Modifier.height(Spacing.xs))
                     Text(
                         text = if (failed) "All sources timed out" else "No confirmed ${category.label.lowercase()} posts found",
                         color = TextMuted,
-                        fontSize = 12.sp
+                        fontSize = Type.label.fontSize
                     )
                     Spacer(modifier = Modifier.height(Spacing.xs))
                     TextButton(onClick = onRefresh) {
-                        Text("Retry", color = AccentPrimary, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                        Text("Retry", color = AccentPrimary, fontWeight = FontWeight.Bold, fontSize = Type.body.fontSize)
                     }
                 }
             }
@@ -1129,7 +1129,7 @@ private fun GridPosterCard(
         Text(
             text = show.title,
             color = TextPrimary,
-            fontSize = 11.sp,
+            fontSize = Type.caption.fontSize,
             fontWeight = FontWeight.Bold,
             lineHeight = 14.sp,
             maxLines = 1,
@@ -1184,7 +1184,7 @@ private fun CatalogPage(
             Spacer(modifier = Modifier.width(Spacing.md))
             Text(
                 text = "ALL GENRES",
-                fontSize = 18.sp,
+                fontSize = Type.screenTitle.fontSize,
                 fontWeight = FontWeight.Black,
                 color = TextPrimary,
                 letterSpacing = 1.sp
@@ -1208,14 +1208,14 @@ private fun CatalogPage(
                         Text(
                             text = category.label.uppercase(),
                             color = TextPrimary,
-                            fontSize = 14.sp,
+                            fontSize = Type.rowTitle.fontSize,
                             fontWeight = FontWeight.Bold,
                             modifier = Modifier.weight(1f)
                         )
                         Text(
                             text = "SEE ALL",
                             color = AccentPrimary,
-                            fontSize = 10.sp,
+                            fontSize = Type.micro.fontSize,
                             fontWeight = FontWeight.Bold
                         )
                     }
@@ -1290,7 +1290,7 @@ fun ShowCardItem(
             Text(
                 text = show.title,
                 color = TextPrimary,
-                fontSize = 16.sp,
+                fontSize = Type.itemTitle.fontSize,
                 fontWeight = FontWeight.SemiBold,
                 lineHeight = 21.sp,
                 maxLines = 2,
@@ -1300,7 +1300,7 @@ fun ShowCardItem(
             Text(
                 text = specLine(show),
                 color = TextSecondary,
-                fontSize = 13.sp,
+                fontSize = Type.body.fontSize,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
@@ -1337,7 +1337,7 @@ fun ShowCardItem(
                 Text(
                     text = leftMetric(show),
                     color = TextSecondary,
-                    fontSize = 13.sp,
+                    fontSize = Type.body.fontSize,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f, fill = false)
@@ -1353,7 +1353,7 @@ fun ShowCardItem(
                     Text(
                         text = rightMetric(show),
                         color = StatusSuccess,
-                        fontSize = 13.sp,
+                        fontSize = Type.body.fontSize,
                         fontWeight = FontWeight.SemiBold,
                         maxLines = 1
                     )
@@ -1398,7 +1398,7 @@ private fun InitialGlyph(title: String) {
         Text(
             text = title.trim().firstOrNull()?.uppercaseChar()?.toString() ?: "?",
             color = glyphColor,
-            fontSize = 34.sp,
+            fontSize = Type.displayPoster.fontSize,
             fontWeight = FontWeight.Black
         )
     }
@@ -1425,7 +1425,7 @@ private fun CardBadge(
                 accent -> AccentPrimary
                 else -> TextSecondary
             },
-            fontSize = 11.sp,
+            fontSize = Type.caption.fontSize,
             fontWeight = FontWeight.Bold,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis

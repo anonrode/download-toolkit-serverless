@@ -1,5 +1,7 @@
 package com.anonrode.downloader
 
+import com.anonrode.downloader.ui.theme.Type
+
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -331,7 +333,7 @@ class MainActivity : ComponentActivity() {
                         titleContentColor = TextPrimary,
                         textContentColor = TextSecondary,
                         title = {
-                            Text("Storage access needed", fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+                            Text("Storage access needed", fontWeight = FontWeight.SemiBold, fontSize = Type.itemTitle.fontSize)
                         },
                         text = {
                             Text(
@@ -342,7 +344,7 @@ class MainActivity : ComponentActivity() {
                                 else
                                     "Anon Downloader saves downloads to your Downloads folder. " +
                                         "Grant storage permission so downloads can be written there.",
-                                fontSize = 13.sp
+                                fontSize = Type.body.fontSize
                             )
                         },
                         confirmButton = {

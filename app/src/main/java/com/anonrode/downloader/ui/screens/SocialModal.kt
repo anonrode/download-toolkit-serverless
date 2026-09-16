@@ -85,13 +85,13 @@ fun SocialModal(
                         Text(
                             text = cleanPlatform,
                             color = AccentViolet,
-                            fontSize = 12.sp,
+                            fontSize = Type.label.fontSize,
                             fontWeight = FontWeight.Bold
                         )
                     }
                     Text(
                         text = "Quick Download",
-                        fontSize = 17.sp,
+                        fontSize = Type.screenTitle.fontSize,
                         fontWeight = FontWeight.Bold,
                         color = TextPrimary
                     )
@@ -131,7 +131,7 @@ fun SocialModal(
             ) {
                 Text(
                     text = url,
-                    fontSize = 12.sp,
+                    fontSize = Type.label.fontSize,
                     color = TextSecondary,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis
@@ -175,7 +175,7 @@ fun SocialModal(
                         )
                         Text(
                             text = "Video (MP4)",
-                            fontSize = 12.sp,
+                            fontSize = Type.label.fontSize,
                             fontWeight = if (!audioOnly) FontWeight.Bold else FontWeight.Normal,
                             color = if (!audioOnly) BackgroundDark else TextSecondary
                         )
@@ -204,7 +204,7 @@ fun SocialModal(
                         )
                         Text(
                             text = "Audio Only (MP3)",
-                            fontSize = 12.sp,
+                            fontSize = Type.label.fontSize,
                             fontWeight = if (audioOnly) FontWeight.Bold else FontWeight.Normal,
                             color = if (audioOnly) BackgroundDark else TextSecondary
                         )
@@ -238,7 +238,7 @@ fun SocialModal(
                 )
                 Text(
                     text = "Always download instantly (skip this dialog)",
-                    fontSize = 12.sp,
+                    fontSize = Type.label.fontSize,
                     color = TextSecondary
                 )
             }

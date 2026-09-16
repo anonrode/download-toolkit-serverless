@@ -1,5 +1,7 @@
 package com.anonrode.downloader.ui.components
 
+import com.anonrode.downloader.ui.theme.Type
+
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.WindowInsets
@@ -242,7 +244,7 @@ private fun BottomNavBar(
                 label = {
                     Text(
                         text = "Search",
-                        fontSize = 11.sp,
+                        fontSize = Type.caption.fontSize,
                         fontWeight = FontWeight.SemiBold
                     )
                 },
@@ -255,7 +257,7 @@ private fun BottomNavBar(
                 label = {
                     Text(
                         text = "Downloads",
-                        fontSize = 11.sp,
+                        fontSize = Type.caption.fontSize,
                         fontWeight = FontWeight.SemiBold
                     )
                 },
@@ -273,7 +275,7 @@ private fun BottomNavBar(
                 label = {
                     Text(
                         text = "Settings",
-                        fontSize = 11.sp,
+                        fontSize = Type.caption.fontSize,
                         fontWeight = FontWeight.SemiBold
                     )
                 },
@@ -312,7 +314,7 @@ private fun DownloadsBadge(viewModel: MainViewModel) {
             ) {
                 Text(
                     text = if (badgeCount > 99) "99+" else badgeCount.toString(),
-                    fontSize = 10.sp,
+                    fontSize = Type.micro.fontSize,
                     fontWeight = FontWeight.Black
                 )
             }

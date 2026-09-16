@@ -102,7 +102,7 @@ fun DownloadsScreen(
                     "Every queued, running and paused download will be stopped and " +
                         "its partial files removed. This cannot be undone.",
                     color = TextSecondary,
-                    fontSize = 13.sp
+                    fontSize = Type.body.fontSize
                 )
             },
             confirmButton = {
@@ -137,7 +137,7 @@ fun DownloadsScreen(
                     "\"${task.episodeTitle}\" will be removed from storage. " +
                         "This cannot be undone.",
                     color = TextSecondary,
-                    fontSize = 13.sp,
+                    fontSize = Type.body.fontSize,
                     maxLines = 4,
                     overflow = TextOverflow.Ellipsis
                 )
@@ -243,14 +243,14 @@ fun DownloadsScreen(
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = "DOWNLOADS & MEDIA",
-                    fontSize = 18.sp,
+                    fontSize = Type.screenTitle.fontSize,
                     fontWeight = FontWeight.Black,
                     color = TextPrimary,
                     letterSpacing = 1.sp
                 )
                 Text(
                     text = "${tasks.size} Total Items",
-                    fontSize = 11.sp,
+                    fontSize = Type.caption.fontSize,
                     color = TextSecondary
                 )
             }
@@ -358,11 +358,11 @@ fun DownloadsScreen(
                         modifier = Modifier.size(48.dp)
                     )
                     Spacer(modifier = Modifier.height(Spacing.sm))
-                    Text("No active or completed downloads", color = TextSecondary, fontSize = 14.sp)
+                    Text("No active or completed downloads", color = TextSecondary, fontSize = Type.rowTitle.fontSize)
                     // The empty state should say what to do NEXT, not just
                     // name the void — one tap back to the search tab.
                     TextButton(onClick = onBack) {
-                        Text("Find something to download", color = AccentPrimary, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                        Text("Find something to download", color = AccentPrimary, fontSize = Type.body.fontSize, fontWeight = FontWeight.Bold)
                     }
                 }
             }
@@ -376,7 +376,7 @@ fun DownloadsScreen(
                         Text(
                             text = "$header · ${items.size}",
                             color = TextMuted,
-                            fontSize = 11.sp,
+                            fontSize = Type.caption.fontSize,
                             fontWeight = FontWeight.Bold,
                             letterSpacing = 1.sp,
                             modifier = Modifier.padding(top = Spacing.sm, bottom = Spacing.xxs)
@@ -427,7 +427,7 @@ private fun SortChip(label: String, onClick: () -> Unit) {
         Text(
             text = label,
             color = TextSecondary,
-            fontSize = 11.sp,
+            fontSize = Type.caption.fontSize,
             fontWeight = FontWeight.SemiBold
         )
         Spacer(modifier = Modifier.width(Spacing.xs))
@@ -469,7 +469,7 @@ private fun BulkActionChip(label: String, icon: ImageVector, accent: Color = Acc
         Text(
             text = label,
             color = accent,
-            fontSize = 11.sp,
+            fontSize = Type.caption.fontSize,
             fontWeight = FontWeight.SemiBold
         )
     }
@@ -510,14 +510,14 @@ private fun StatChip(label: String, value: Int, accentError: Boolean = false) {
         Text(
             text = value.toString(),
             color = accent,
-            fontSize = 12.sp,
+            fontSize = Type.label.fontSize,
             fontWeight = FontWeight.Black
         )
         Spacer(modifier = Modifier.width(Spacing.xs))
         Text(
             text = label,
             color = TextMuted,
-            fontSize = 11.sp
+            fontSize = Type.caption.fontSize
         )
     }
 }
@@ -562,7 +562,7 @@ fun DownloadCard(
                     Text(
                         text = task.episodeTitle,
                         color = TextPrimary,
-                        fontSize = 14.sp,
+                        fontSize = Type.rowTitle.fontSize,
                         fontWeight = FontWeight.SemiBold,
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis
@@ -571,7 +571,7 @@ fun DownloadCard(
                     Text(
                         text = if (task.showTitle != "Direct Downloads") task.showTitle else "Direct Media",
                         color = TextSecondary,
-                        fontSize = 11.sp,
+                        fontSize = Type.caption.fontSize,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
@@ -623,7 +623,7 @@ fun DownloadCard(
                                     .background(SurfaceElevated)
                                     .padding(horizontal = Spacing.sm, vertical = Spacing.xxs)
                             ) {
-                                Text(text = extText, color = TextPrimary, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                Text(text = extText, color = TextPrimary, fontSize = Type.caption.fontSize, fontWeight = FontWeight.Bold)
                             }
                         }
                         // Quality/resolution chip: the real stream resolution
@@ -637,13 +637,13 @@ fun DownloadCard(
                                     .background(SurfaceElevated)
                                     .padding(horizontal = Spacing.sm, vertical = Spacing.xxs)
                             ) {
-                                Text(text = qualityLabel, color = TextSecondary, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                                Text(text = qualityLabel, color = TextSecondary, fontSize = Type.caption.fontSize, fontWeight = FontWeight.SemiBold)
                             }
                         }
                         Text(
                             text = sizeText,
                             color = TextMuted,
-                            fontSize = 11.sp,
+                            fontSize = Type.caption.fontSize,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f)
@@ -711,7 +711,7 @@ fun DownloadCard(
                     Text(
                         text = task.validationNote,
                         color = StatusWarning,
-                        fontSize = 10.sp,
+                        fontSize = Type.micro.fontSize,
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.padding(start = Spacing.xs, top = 2.dp)
@@ -872,7 +872,7 @@ fun DownloadCard(
                             task.status == TaskStatus.RESOLVING || task.status == TaskStatus.VALIDATING -> AccentPrimary
                             else -> TextMuted
                         },
-                        fontSize = 11.sp,
+                        fontSize = Type.caption.fontSize,
                         maxLines = 2,
                         // Churning states (percent/size/speed/ETA all mutate
                         // every tick) reserve BOTH lines: otherwise the
@@ -936,7 +936,7 @@ fun StatusBadge(status: TaskStatus) {
             .background(bg)
             .padding(horizontal = Spacing.sm, vertical = Spacing.xxs)
     ) {
-        Text(text = text, color = fg, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+        Text(text = text, color = fg, fontSize = Type.micro.fontSize, fontWeight = FontWeight.Bold)
     }
 }
 

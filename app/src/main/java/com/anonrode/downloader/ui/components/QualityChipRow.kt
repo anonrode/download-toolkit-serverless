@@ -1,5 +1,7 @@
 package com.anonrode.downloader.ui.components
 
+import com.anonrode.downloader.ui.theme.Type
+
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -69,7 +71,7 @@ fun QualityChipRow(
             ) {
                 Text(
                     text = option,
-                    fontSize = 13.sp,
+                    fontSize = Type.body.fontSize,
                     fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
                     color = if (isSelected) Color.White else TextSecondary
                 )

@@ -1,5 +1,7 @@
 package com.anonrode.downloader.ui.components
 
+import com.anonrode.downloader.ui.theme.Type
+
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
@@ -849,7 +851,7 @@ private fun MediaPlayerModalImpl(
                     Text(
                         text = ctx.title,
                         color = Color.White,
-                        fontSize = 18.sp,
+                        fontSize = Type.screenTitle.fontSize,
                         fontWeight = FontWeight.Bold,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
@@ -858,7 +860,7 @@ private fun MediaPlayerModalImpl(
                     Text(
                         text = "Audio • " + ext.uppercase(),
                         color = PlayerTextSecondary,
-                        fontSize = 12.sp
+                        fontSize = Type.label.fontSize
                     )
                 }
             }
@@ -909,7 +911,7 @@ private fun MediaPlayerModalImpl(
                         Text(
                             text = ctx.title,
                             color = Color.White,
-                            fontSize = 14.sp,
+                            fontSize = Type.rowTitle.fontSize,
                             fontWeight = FontWeight.SemiBold,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
@@ -1032,13 +1034,13 @@ private fun MediaPlayerModalImpl(
                                     if (isDragging) (dragFrac * duration).toLong() else currentPosition
                                 ),
                                 color = Color.White,
-                                fontSize = 12.sp,
+                                fontSize = Type.label.fontSize,
                                 fontWeight = FontWeight.Medium
                             )
                             Text(
                                 text = formatDuration(duration),
                                 color = PlayerTextSecondary,
-                                fontSize = 12.sp,
+                                fontSize = Type.label.fontSize,
                                 fontWeight = FontWeight.Medium
                             )
                         }
@@ -1312,7 +1314,7 @@ private fun PlayerChip(
         Text(
             text = label,
             color = fg,
-            fontSize = 11.sp,
+            fontSize = Type.caption.fontSize,
             fontWeight = FontWeight.SemiBold,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
@@ -1355,7 +1357,7 @@ private fun BottomChoiceSheet(
                 Text(
                     text = title,
                     color = Color.White,
-                    fontSize = 16.sp,
+                    fontSize = Type.itemTitle.fontSize,
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier.padding(bottom = Spacing.md)
                 )
@@ -1383,7 +1385,7 @@ private fun BottomChoiceSheet(
                             Text(
                                 text = opt,
                                 color = if (isSelected) PlayerAccent else Color.White,
-                                fontSize = 14.sp,
+                                fontSize = Type.rowTitle.fontSize,
                                 modifier = Modifier.weight(1f)
                             )
                             if (isSelected) {
