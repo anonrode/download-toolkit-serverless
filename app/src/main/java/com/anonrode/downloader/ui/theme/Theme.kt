@@ -180,18 +180,44 @@ fun AnonDownloaderTheme(
 }
 
 /**
- * The one M3 component default this app overrides to inherit its own scale.
+ * M3 component defaults, mapped onto this app's scale (UI research round).
  *
- * `headlineSmall` is what AlertDialog uses for its title (material3 1.3.0
- * AlertDialog.kt:325 -> MaterialTheme.typography.headlineSmall), so dialog
- * titles were rendering at 24sp — larger than the page title above them and
- * the biggest text in a dense utility screen. `Type.itemTitle` (16/21 SemiBold)
- * is what this scale calls a dialog title.
+ * Why this is needed at all: the app sets `fontSize` on almost every `Text`,
+ * but Material 3 components style their own internal text from the typography,
+ * so without this the two halves of the UI disagree. The visible consequences
+ * were AlertDialog titles at 24sp — bigger than the page title above them — and
+ * DropdownMenuItem labels at 16sp against 13sp everywhere else.
  *
- * The wider mapping the UI research proposed (bodyLarge/label* -> the scale)
- * is deliberately NOT applied yet: it reaches every composed default and every
- * `Text` without an explicit size (about 37 of 225 in ui/), which is a
- * look-at-it-on-a-device change, not a mechanical one. DropdownMenuItem's
- * internal style token also could not be verified for material3 1.3.0.
+ * Blast radius, enumerated before applying (tools/typolist.py, which paren-
+ * matches every `Text(` and skips any call that sets `fontSize` or `style`):
+ *   - 18 `Text` calls inherit the default. Nearly all sit inside stock buttons;
+ *     the rest are dialog action labels ("Cancel all", "Keep file", "Retry"…).
+ *   - 26 Button/TextButton/FilledTonalButton labels -> labelLarge (14sp -> 12sp),
+ *     which is the size this app's own in-card actions already use, so the
+ *     buttons stop being the odd ones out.
+ *   - 1 DropdownMenuItem (the Downloads sort menu) -> bodyLarge (16sp -> 13sp),
+ *     the reported defect.
+ *   - NavigationBarItem labels (11sp), the nav badge (10sp), FilterChip labels
+ *     (11-12sp) and the one TopAppBar title all set their own size, so the
+ *     titleLarge/labelMedium/labelSmall mappings change nothing today — they
+ *     are here so a future bare Material component lands on the scale instead
+ *     of on the baseline.
+ *
+ * Judgement call worth naming: stock button labels get smaller (14 -> 12sp).
+ * That is deliberate — consistency with the app's own chips and action rows —
+ * and buttons keep their 40dp minimum height, so nothing shrinks but the type.
+ * If it reads too small on device, `labelLarge = Type.rowTitle` restores 14sp
+ * without touching anything else.
  */
-val AnonTypography = Typography(headlineSmall = Type.itemTitle)
+val AnonTypography = Typography(
+    headlineSmall = Type.itemTitle,   // AlertDialog titles (was 24sp)
+    titleLarge = Type.screenTitle,
+    titleMedium = Type.itemTitle,
+    titleSmall = Type.rowTitle,
+    bodyLarge = Type.body,            // DropdownMenuItem labels (was 16sp)
+    bodyMedium = Type.body,
+    bodySmall = Type.label,
+    labelLarge = Type.label,          // every Button/TextButton label
+    labelMedium = Type.caption,
+    labelSmall = Type.micro
+)
