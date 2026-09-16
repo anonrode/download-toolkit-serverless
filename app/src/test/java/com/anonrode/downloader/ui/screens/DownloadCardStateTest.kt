@@ -162,7 +162,11 @@ class DownloadCardStateTest {
         )
         // The note is the engine's own string, chained through verbatim.
         composeRule.onNodeWithText(VALIDATION_NOTE).assertExists()
-        composeRule.onNodeWithText("200.0 MB • Tap to Play In-App").assertExists()
+        // The completed card renders its size beside the extension/quality
+        // chips and offers a Play icon button (asserted below). This used to
+        // expect "200.0 MB • Tap to Play In-App", a combined hint line the
+        // redesigned card no longer renders.
+        composeRule.onNodeWithText("200.0 MB").assertExists()
         composeRule.onNodeWithText("DONE").assertExists()
         composeRule.onNodeWithContentDescription("Play").assertExists()
     }
@@ -178,7 +182,7 @@ class DownloadCardStateTest {
         )
         // Null validationNote = verified clean: the warning must not appear.
         composeRule.onNodeWithText(VALIDATION_NOTE).assertDoesNotExist()
-        composeRule.onNodeWithText("200.0 MB • Tap to Play In-App").assertExists()
+        composeRule.onNodeWithText("200.0 MB").assertExists()
         composeRule.onNodeWithContentDescription("Play").assertExists()
     }
 
