@@ -93,6 +93,22 @@ bf19b1c DESIGN PASS (ui-ux-pro-max audit): genre tiles' double-inset (32dp
         (surface==background in BOTH palettes had erased its edge); check
         glyph in the player's choice sheet; 9→11sp chips; ▾→ArrowDropDown;
         emoji out of labels/toasts; 12.5/13.5/10.5sp → integer ramp
+c623e18 docs — HANDOVER current-state rewrite (§2 + item 11 protocol)
+12da8c1 PLAYBOOK SIGNED v2026.09.12.3 — the committed .enc had been stale
+        since 09-02 (terminal recipes for nkiri/dramakey/naijavault,
+        sectionGrouping never reached a device). Signing "blocked" only
+        because HANDOVER documented a pre-wipe key path; real keypair at
+        ANON TOOLS/anon-serverless-app-maintenance-build; cryptography pip
+        package installed; envelope re-verified (signature + schema) after
+        writing. HANDOVER's keys section corrected.
+9fc68db IG-1 carousel fix — music rides the POST, images live in
+        carousel_media CHILDREN; cover falls back to the first PHOTO child.
+        Headers now match gallery-dl's v1 set (X-ASBD-ID 129477;
+        X-IG-WWW-Claim literal "0" logged out). Seal research: it has NO
+        Instagram code (pure yt-dlp GUI; yt-dlp refuses photos by ruling).
+1653e20 PL-6 synopsis — drawer-header STORY block, 3-line clamp + Read
+        more, hidden when empty; zero new network (providers already parsed
+        it, the UI dropped it).
 ```
 
 Tag `v3.1.6` sits on the UNPUBLISHED red `93398b5` (NO GitHub Release exists for it — verified 09-15): on GO, push master, force-repoint the tag to the green tip (the retag-retired rule guards PUBLISHED tags only), then CI ≈17-18 min. **Budget one compile-fix round** — CI is the first compiler on ~1,700 fresh lines; the fresh-never-compiled suspects are `androidx.compose.material3.ripple()` (needs material3 ≥1.3.0 — BOM 2024.09.00 maps to 1.3.0, unverified), `minimumInteractiveComponentSize` in files newly using it, and the `items as gridItems` grid imports. All static gates (ktregexflags/bracecheck/balance repo-wide) are 0-problems locally.
@@ -221,6 +237,9 @@ The classify gate belongs ONLY where the design intends: NaijaVault's download-l
    - **Player layout**: bottom chip row reads **Speed → Landscape/Portrait → Subtitles → Fit/Crop/Stretch → Audio** (the 09-15 swap); every control ripples on tap (close, PiP, ±10s, skips, chips, sheet rows); the audio picker's selected row shows a check mark.
    - **Home alignment/polish**: the genre tiles' LEFT edge lines up with the "Trending Now" header (16dp gutter); long verified captions on search result cards ellipsize with "…" instead of clipping; the bottom nav bar has a visible hairline above it.
    - **Playlists (v3.1.5 carryover, still unverified)**: paste a YouTube playlist/watch-with-list URL → picker opens fast, watch link pre-ticks its own video, subset enqueues as ONE grouped show, player Next walks the playlist, already-on-device entries show "✓ on device" and skip.
+   - **Synopsis (PL-6, new)**: open any show's drawer → a STORY block sits under the title, collapsed to three lines with Read more/Show less where the blurb is long; no story block at all when a provider returns none.
+   - **Instagram photos (IG-1, new)**: share an IG photo post or a photo CAROUSEL with music → it downloads as an mp4 (cover + the licensed audio). A photo post with no music still fails cleanly with yt-dlp's message — that is honest, not a bug.
+   - **OTA rules (new)**: the playbook envelope is now signed v2026.09.12.3 (it had been stale since 09-02). After the update installs, nkiri/dramakey/naijavault drawer behaviour rides the newer recipes for the first time — watch for literal `{1}`/`{season}` tokens in episode titles (a missed stray-brace site) and for sectionGrouped season accordions on dramakey.
    - If anything misbehaves: Settings → Share Activity Log is the evidence channel; the crash file leads with `CAUSE 1:`.
 
 ---
