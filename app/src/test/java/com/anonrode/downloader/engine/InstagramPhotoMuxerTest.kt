@@ -194,6 +194,79 @@ class InstagramPhotoMuxerTest {
         assertTrue(objs.isEmpty())
     }
 
+    // ---- carousel (2026-09-15 — gallery-dl reference read) -----------------
+    // Music rides the POST object; images live in carousel_media CHILDREN.
+    // Requiring both on ONE object (the pre-fix shape) made every
+    // carousel-with-music post unmuxable — the parser had to learn the split.
+
+    private fun carouselWithMusic(): JSONObject = JSONObject(
+        """
+        {
+          "pk": "700777",
+          "code": "CAROUSEL1",
+          "taken_at": 1700000000,
+          "media_type": 8,
+          "carousel_media": [
+            { "media_type": 1, "image_versions2": { "candidates": [
+                { "url": "https://lookaside.fbsbx.com/slide1.jpg", "width": 1080 } ] } },
+            { "media_type": 2, "video_versions": [ { "url": "https://x/v.mp4" } ],
+              "image_versions2": { "candidates": [
+                { "url": "https://lookaside.fbsbx.com/vidthumb.jpg", "width": 720 } ] } },
+            { "media_type": 1, "image_versions2": { "candidates": [
+                { "url": "https://lookaside.fbsbx.com/slide3.jpg", "width": 1080 } ] } }
+          ],
+          "caption": { "text": "Carousel day" },
+          "music_metadata": { "music_info": { "music_asset_info": {
+             "progressive_download_url": "https://cdn.fbsbx.com/carousel.m4a",
+             "duration_in_ms": 15000,
+             "title": "Song",
+             "display_artist": "Artist"
+          }}}
+        }
+        """
+    )
+
+    @Test
+    fun pickMuxable_carousel_musicOnPost_photoFromFirstChild() {
+        val parts = InstagramPhotoMuxer.pickMuxable(listOf(carouselWithMusic()))
+        assertNotNull(parts)
+        assertEquals("https://lookaside.fbsbx.com/slide1.jpg", parts!!.photoUrl)
+        assertEquals("https://cdn.fbsbx.com/carousel.m4a", parts.audioUrl)
+        assertEquals("Carousel day", parts.caption)
+        assertFalse(parts.hasVideo)
+    }
+
+    @Test
+    fun pickMuxable_carousel_skipsVideoChildForCover() {
+        // First child is a VIDEO (with a thumbnail): the cover must come from
+        // the first PHOTO child — a video still can never be the fabricated
+        // cover, same rule as the top-level hasVideo guard.
+        val m = carouselWithMusic()
+        val kids = m.getJSONArray("carousel_media")
+        val videoChild = kids.getJSONObject(1)
+        kids.remove(1)
+        kids.put(0, videoChild)
+        val parts = InstagramPhotoMuxer.pickMuxable(listOf(m))
+        assertNotNull(parts)
+        assertEquals("https://lookaside.fbsbx.com/slide3.jpg", parts!!.photoUrl)
+    }
+
+    @Test
+    fun pickMuxable_carousel_allVideo_isNotMuxable() {
+        val m = carouselWithMusic()
+        m.put("carousel_media", org.json.JSONArray().put(
+            JSONObject("""{"media_type":2,"video_versions":[{"url":"https://x/a.mp4"}]}""")
+        ))
+        assertNull(InstagramPhotoMuxer.pickMuxable(listOf(m)))
+    }
+
+    @Test
+    fun pickMuxable_carousel_withoutMusic_isNotMuxable() {
+        val m = carouselWithMusic()
+        m.remove("music_metadata")
+        assertNull(InstagramPhotoMuxer.pickMuxable(listOf(m)))
+    }
+
     // ---- filename ----------------------------------------------------------
 
     @Test
