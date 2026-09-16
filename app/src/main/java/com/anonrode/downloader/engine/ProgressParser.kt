@@ -155,11 +155,15 @@ internal fun parseProgressTick(line: String?, libraryProgress: Float, lastDl: Lo
                                 dlBytes = dlFromStr
                                 if (totFromStr > 0L) {
                                     totBytes = totFromStr
-                                } else if (fi != null && fc != null && fc > 0) {
+                                } else if (fi != null && fi > 0 && fc != null && fc > 0) {
                                     // HLS with downloaded bytes but no total:
                                     // derive a total estimate from fragment
                                     // progress.  Monolith parity
                                     // (download.py:_ytdlp_parse_progress L2951).
+                                    // fi > 0 is REQUIRED (engine-audit P2): a
+                                    // fragment_index of 0 divided to +Infinity
+                                    // and Long.MAX_VALUE as the total, pinning
+                                    // the card at 0% for the rest of the job.
                                     totBytes = (dlFromStr.toDouble() * fc / fi).toLong()
                                 }
                             }

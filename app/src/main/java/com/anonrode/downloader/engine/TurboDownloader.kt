@@ -245,6 +245,23 @@ object TurboDownloader {
                 } else failure(failureStatus, failureMessage)
             } else failure(failureStatus, failureMessage)
         } else {
+            // Cross-mode resume guard (engine-audit P1): a `.part` left by a
+            // SEGMENTED run is pre-allocated to the FULL length, so its length
+            // is not a proven prefix — single() resumes from dest.length() and
+            // would either 416 forever (conforming server) or append a short
+            // tail onto a file of zero holes and report Success. When a valid
+            // sidecar describes the file, shrink it to the contiguous prefix
+            // the sidecar vouches for; a null prefix (no/unreadable sidecar)
+            // leaves the length as the only evidence — the sequential-write
+            // case the old behavior was built for.
+            if (partFile.exists() && partFile.length() > 0L) {
+                val prefix = state.contiguousPrefixBytes()
+                if (prefix != null && prefix < partFile.length()) {
+                    try {
+                        RandomAccessFile(partFile, "rw").use { it.setLength(prefix) }
+                    } catch (_: Throwable) {}
+                }
+            }
             state.delete()
             if (single(safe, partFile, headers, total, failureStatus, failureMessage, onProgress, effectiveClient, taskId)) {
                 state.delete()
@@ -469,7 +486,23 @@ object TurboDownloader {
                                         if (n == -1) break
 
                                         synchronized(channel) {
-                                            channel.write(ByteBuffer.wrap(buf, 0, n), pos)
+                                            // FileChannel.write MAY write fewer bytes than
+                                            // requested (legal per contract). Ignoring the
+                                            // return value left permanent zero holes that the
+                                            // sidecar still reported as downloaded, so the
+                                            // piece was never retried and the run could end
+                                            // "Success" over a corrupt file (engine-audit
+                                            // P2). Drain the buffer; treat a stall as a real
+                                            // failure so the retry policy owns it.
+                                            val bb = ByteBuffer.wrap(buf, 0, n)
+                                            var w = 0
+                                            while (bb.hasRemaining()) {
+                                                val k = channel.write(bb, pos + w)
+                                                if (k <= 0) throw java.io.IOException(
+                                                    "short positional write at ${pos + w}"
+                                                )
+                                                w += k
+                                            }
                                         }
 
                                         pos += n

@@ -152,11 +152,21 @@ class DownloadEngine(
                     // undone by a network event.
                     repository.tasks.value
                         .filter { it.status == TaskStatus.PAUSED && !it.userPaused && it.errorMessage == NETWORK_PAUSE_MESSAGE }
-                        .forEach { repository.update(it.id) { t -> t.copy(status = TaskStatus.QUEUED, errorMessage = null) } }
+                        .forEach { repository.update(it.id) { t ->
+                            // Re-check INSIDE the transform (engine-audit P1): the
+                            // filter above froze userPaused at snapshot time, so a
+                            // pause landing between snapshot and write would be
+                            // overwritten and the download would resume anyway.
+                            if (t.userPaused || t.status != TaskStatus.PAUSED) t
+                            else t.copy(status = TaskStatus.QUEUED, errorMessage = null)
+                        } }
                     // Wi-Fi-gated torrents resume only once an actual Wi-Fi network is back
                     repository.tasks.value
                         .filter { it.status == TaskStatus.PAUSED && !it.userPaused && it.errorMessage?.startsWith("Waiting for Wi-Fi") == true && net.isWifi }
-                        .forEach { repository.update(it.id) { t -> t.copy(status = TaskStatus.QUEUED, errorMessage = null) } }
+                        .forEach { repository.update(it.id) { t ->
+                            if (t.userPaused || t.status != TaskStatus.PAUSED) t
+                            else t.copy(status = TaskStatus.QUEUED, errorMessage = null)
+                        } }
                     processQueue()
                 } else {
                     // Park active jobs so a reconnect resumes them instead of failing them
@@ -179,7 +189,10 @@ class DownloadEngine(
                     it.status == TaskStatus.PAUSED && !it.userPaused && it.errorMessage?.startsWith("Storage limit reached") == true
                 }
                 if (parked.isNotEmpty()) {
-                    parked.forEach { repository.update(it.id) { t -> t.copy(status = TaskStatus.QUEUED, errorMessage = null) } }
+                    parked.forEach { repository.update(it.id) { t ->
+                        if (t.userPaused || t.status != TaskStatus.PAUSED) t
+                        else t.copy(status = TaskStatus.QUEUED, errorMessage = null)
+                    } }
                     processQueue()
                 }
             }
@@ -241,7 +254,10 @@ class DownloadEngine(
                         requeued++
                         parkedAtStamp.remove(t.id)
                         requeueNotBefore.remove(t.id)
-                        repository.update(t.id) { task -> task.copy(status = TaskStatus.QUEUED, errorMessage = null) }
+                        repository.update(t.id) { task ->
+                            if (task.userPaused || task.status != TaskStatus.PAUSED) task
+                            else task.copy(status = TaskStatus.QUEUED, errorMessage = null)
+                        }
                         anyRequeued = true
                     }
                 }
@@ -568,7 +584,16 @@ class DownloadEngine(
             activeJobs.remove(t.id)
             YoutubeDlDownloader.killProcess(t.id)
             TurboDownloader.cancelTask(t.id)
-            repository.update(t.id) { it.copy(status = TaskStatus.QUEUED, speedBytesPerSec = 0.0, errorMessage = null) }
+            repository.update(t.id) { task ->
+                // Only demote a task that is STILL active (engine-audit P2):
+                // the `actives` list is a snapshot, and a task whose completion
+                // landed in the window must not be re-queued — that re-downloaded
+                // a finished file over the same path on metered data.
+                if (task.status == TaskStatus.DOWNLOADING || task.status == TaskStatus.RESOLVING ||
+                    task.status == TaskStatus.VALIDATING
+                ) task.copy(status = TaskStatus.QUEUED, speedBytesPerSec = 0.0, errorMessage = null)
+                else task
+            }
         }
         updateServiceState(force = true)
         processQueue()
@@ -637,11 +662,31 @@ class DownloadEngine(
     private fun purgeTaskArtifacts(task: DownloadTask) {
         try {
             val target = File(task.filePath)
-            target.deleteRecursively()
-            File(task.filePath + ".part").delete()
-            File(task.filePath + ".ytdl").delete()
-            File(task.filePath + ".aria2").delete()
-            File(task.filePath + ".turbo").delete()
+            // The Turbo→aria2c handoff and the aria2c→Turbo rescue write a
+            // URL-extension sibling ("Ep 1.mkv" task, "Ep 1.mp4" artifact +
+            // its .aria2/.part/.turbo) — engine-audit P2: purging only the
+            // task's own extension family left those partial bytes in the
+            // user's folder (the "8 GB left after cancel" shape).
+            val urlExt = task.directUrl.substringBefore('?').substringBefore('#')
+                .substringAfterLast('/').substringAfterLast('.', "")
+            val sibling = if (urlExt.isNotBlank() && urlExt.length <= 5 && urlExt.all { it.isLetterOrDigit() }) {
+                File(target.parentFile, "${target.nameWithoutExtension}.$urlExt")
+                    .takeIf { it.absolutePath != target.absolutePath }
+            } else null
+            // Never touch a path that belongs to a DIFFERENT task: the sibling
+            // family can coincide with a sibling task's real target name.
+            val otherTargets = repository.tasks.value
+                .filter { it.id != task.id }
+                .map { it.filePath }
+                .toSet()
+            val bases = listOfNotNull(target, sibling).filter { it.absolutePath !in otherTargets }
+            for (base in bases) {
+                base.deleteRecursively()
+                File(base.absolutePath + ".part").delete()
+                File(base.absolutePath + ".ytdl").delete()
+                File(base.absolutePath + ".aria2").delete()
+                File(base.absolutePath + ".turbo").delete()
+            }
             target.parentFile?.let { parent ->
                 File(parent, ".work-${task.id}").deleteRecursively()
             }
@@ -791,7 +836,11 @@ class DownloadEngine(
                 File(File(task.filePath).parentFile, ".work-" + task.id).deleteRecursively()
             } catch (_: Throwable) {}
             repository.update(task.id) {
-                it.copy(
+                // A pause that landed while the provider search was in flight
+                // must win (engine-audit P1) — same rule as every other
+                // auto-requeue site: user intent is never overwritten.
+                if (it.userPaused) it
+                else it.copy(
                     sourceUrl = newUrl,
                     directUrl = newUrl,
                     site = card.site,
@@ -1223,7 +1272,11 @@ class DownloadEngine(
 
             if (activeCount >= maxConcurrentDownloads) return
 
-            val nextTask = currentTasks.firstOrNull { it.status == TaskStatus.QUEUED } ?: return
+            // Never start a task the user explicitly paused (engine-audit P1:
+            // no legitimate state is QUEUED + userPaused — only retry()/
+            // resumeAll() clear the flag, and they set QUEUED themselves, so
+            // this predicate can only ever reject a pause that raced a requeue).
+            val nextTask = currentTasks.firstOrNull { it.status == TaskStatus.QUEUED && !it.userPaused } ?: return
 
             if (!checkStorageAvailable()) {
                 // Park every queued task, not just the head, so the whole queue drains to PAUSED
@@ -2215,12 +2268,31 @@ class DownloadEngine(
                                 .substringAfterLast('/').substringAfterLast('.', "")
                             if (urlExt.isNotBlank() && urlExt.length <= 5 && urlExt.all { it.isLetterOrDigit() }) {
                                 val handoffTarget = File(targetFolder, "${File(task.filePath).nameWithoutExtension}.$urlExt")
-                                if (!handoffTarget.exists() && !File(handoffTarget.absolutePath + ".aria2").exists()) {
+                                // Also refuse a target another task has RESERVED: two tasks
+                                // for the same episode from different providers differ only
+                                // in extension, and a mid-flight sibling has .part yet no
+                                // final name, so exists() alone cannot see it
+                                // (engine-audit P2 — renaming onto a sibling's target
+                                // lets one task adopt the other's bytes).
+                                val reservedByOther = repository.tasks.value.any {
+                                    it.id != task.id && it.filePath == handoffTarget.absolutePath
+                                }
+                                if (!handoffTarget.exists() && !reservedByOther &&
+                                    !File(handoffTarget.absolutePath + ".aria2").exists()
+                                ) {
                                     val partFile = File(dest.absolutePath + ".part")
                                     val prefix = TurboState(File(dest.absolutePath + ".turbo")).contiguousPrefixBytes()
                                     if (prefix != null && prefix > 0 && partFile.exists() && prefix <= partFile.length()) {
-                                        RandomAccessFile(partFile, "rw").use { it.setLength(prefix) }
+                                        // Rename FIRST, truncate the renamed file, then drop
+                                        // the sidecar (engine-audit P1): truncating before the
+                                        // rename meant a FAILED rename left the .part shortened
+                                        // while the .turbo sidecar still claimed the removed
+                                        // pieces — the next segmented run skipped them, re-padded
+                                        // zeros over the pre-allocated file and passed every
+                                        // completion tier. On a failed rename both files stay
+                                        // untouched, and the next run resumes them correctly.
                                         if (partFile.renameTo(handoffTarget)) {
+                                            RandomAccessFile(handoffTarget, "rw").use { it.setLength(prefix) }
                                             TurboState(File(dest.absolutePath + ".turbo")).delete()
                                             android.util.Log.w("AnonDownload", "Handed ${prefix / 1024 / 1024} MiB prefix to aria2c for resume as ${handoffTarget.name}")
                                         }
@@ -2614,10 +2686,20 @@ class DownloadEngine(
                 // ensureActive passed but before the terminal write) leaves the
                 // status at VALIDATING — rescue it to PAUSED so the card is not
                 // stuck mid-check.
-                repository.update(task.id) { t ->
-                    if (t.status == TaskStatus.DOWNLOADING || t.status == TaskStatus.RESOLVING || t.status == TaskStatus.VALIDATING) {
-                        t.copy(status = TaskStatus.PAUSED, speedBytesPerSec = 0.0)
-                    } else t
+                //
+                // Ownership guard (engine-audit P2): a dying job unwinds AFTER
+                // the queue may already have started its replacement (network
+                // re-tag parks then requeues within the same tick). Writing
+                // PAUSED over the live replacement's DOWNLOADING lied to the
+                // user and silently disabled that run's watchdog. Rescue only
+                // when no NEWER live job owns the task.
+                val owner = activeJobs[task.id]
+                if (owner == null || owner === coroutineContext[Job]) {
+                    repository.update(task.id) { t ->
+                        if (t.status == TaskStatus.DOWNLOADING || t.status == TaskStatus.RESOLVING || t.status == TaskStatus.VALIDATING) {
+                            t.copy(status = TaskStatus.PAUSED, speedBytesPerSec = 0.0)
+                        } else t
+                    }
                 }
             } catch (e: Exception) {
                 if (coroutineContext.isActive) {
@@ -2647,6 +2729,16 @@ class DownloadEngine(
                 if (thisJob != null && activeJobs[task.id] === thisJob) {
                     activeJobs.remove(task.id)
                 }
+                // Rewritten HLS masters live in cacheDir/hls as scratch files
+                // (950+ lines each). The inline sweep only ran on the success
+                // path; a throw or cancel anywhere in the chain leaked them
+                // until the OS reclaimed the cache (engine-audit P2). This
+                // finally covers every exit; scoped by taskId so a concurrent
+                // job for another task is never touched.
+                try {
+                    File(context.cacheDir, "hls").listFiles { f -> f.name.startsWith("hls-${task.id}") }
+                        ?.forEach { it.delete() }
+                } catch (_: Exception) {}
                 updateServiceState(force = true)
                 processQueue()
             }
@@ -2698,7 +2790,15 @@ class DownloadEngine(
             YoutubeDlDownloader.killProcess(taskId)
             TurboDownloader.cancelTask(taskId)
             com.anonrode.downloader.util.DebugLog.user("pause $taskId")
-            repository.update(taskId) { it.copy(status = TaskStatus.PAUSED, speedBytesPerSec = 0.0, errorMessage = null, userPaused = true) }
+            repository.update(taskId) { t ->
+                // Status-guarded (engine-audit P2): a task that COMPLETED inside
+                // the snapshot window must not be stamped PAUSED+userPaused —
+                // that produced a "Paused at 100%" card with no auto-resume.
+                if (t.status == TaskStatus.DOWNLOADING || t.status == TaskStatus.RESOLVING ||
+                    t.status == TaskStatus.VALIDATING || t.status == TaskStatus.QUEUED
+                ) t.copy(status = TaskStatus.PAUSED, speedBytesPerSec = 0.0, errorMessage = null, userPaused = true)
+                else t
+            }
         }
         // pause() sweeps in-flight HTTP only when the last job is gone; with
         // everything paused that condition holds by definition.
@@ -2755,8 +2855,17 @@ class DownloadEngine(
             TurboDownloader.cancelTask(taskId)
             com.anonrode.downloader.util.DebugLog.user("cancel $taskId")
             val live = repository.find(taskId)
-            if (live != null) purgeTaskArtifacts(live)
-            repository.remove(taskId)
+            // Cancel only what is STILL cancellable (engine-audit P2): if the
+            // task completed between the snapshot and here, purging its
+            // artifacts would delete a finished download and remove() would
+            // drop its history entry.
+            if (live != null && (live.status == TaskStatus.QUEUED || live.status == TaskStatus.DOWNLOADING ||
+                    live.status == TaskStatus.RESOLVING || live.status == TaskStatus.VALIDATING ||
+                    live.status == TaskStatus.PAUSED)
+            ) {
+                purgeTaskArtifacts(live)
+                repository.remove(taskId)
+            }
         }
         // Every job was cancelled above, so a global in-flight sweep cannot
         // cross-talk into another task — the condition cancel() relies on.
