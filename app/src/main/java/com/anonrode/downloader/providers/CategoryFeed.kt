@@ -59,7 +59,11 @@ object CategoryFeed {
         val aliases: Set<String> = emptySet()
     ) {
         fun termFor(site: String): String = queryTerms[site] ?: label.lowercase()
-        fun candidateSites(): List<String> = sites.ifEmpty { SITE_FEEDS.map { it.first } }
+        // SITE_FEEDS is already the ordered list of site names, so the fallback
+        // is the list itself (it used to be a list of pairs, and the leftover
+        // `.map { it.first }` made `it` a String — that is a compile error, not
+        // a silent reordering).
+        fun candidateSites(): List<String> = sites.ifEmpty { SITE_FEEDS }
     }
 
     /** Probe-verified 2026-09-15: nepu leads the movie genres, asianc the
