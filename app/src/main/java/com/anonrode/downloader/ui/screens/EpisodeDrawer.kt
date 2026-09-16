@@ -24,6 +24,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -34,6 +35,8 @@ import com.anonrode.downloader.data.models.EpisodeItem
 import com.anonrode.downloader.data.models.ShowCard
 import com.anonrode.downloader.ui.theme.*
 import com.anonrode.downloader.viewmodel.MainViewModel
+import com.anonrode.downloader.ui.util.confirmHaptic
+import com.anonrode.downloader.ui.util.tick
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -46,6 +49,10 @@ fun EpisodeDrawer(
     val episodes = uiState.drawerEpisodes
     val isLoading = uiState.isEpisodesLoading
     val context = LocalContext.current
+    // Haptic engine handle (UI research round): queueing a download is the
+    // app's main commitment moment, and multi-select needs per-item
+    // acknowledgement. Default flags only — the system haptics toggle wins.
+    val hapticView = LocalView.current
 
     var selectedEpisodes by remember(episodes) { mutableStateOf(setOf<EpisodeItem>()) }
     var rangeText by remember { mutableStateOf("") }
@@ -394,6 +401,7 @@ fun EpisodeDrawer(
                             episode = ep,
                             isSelected = isSelected,
                             onToggle = {
+                                hapticView.tick()
                                 selectedEpisodes = if (isSelected) {
                                     selectedEpisodes - ep
                                 } else {
@@ -401,6 +409,7 @@ fun EpisodeDrawer(
                                 }
                             },
                             onDownloadSingle = {
+                                hapticView.confirmHaptic()
                                 viewModel.engine.enqueue(
                                     showTitle = show.title,
                                     episodeNum = ep.episodeNum,
@@ -461,6 +470,7 @@ fun EpisodeDrawer(
                                 // selected episode (duplicate tasks, same filePath).
                                 if (enqueued) return@Button
                                 enqueued = true
+                                hapticView.confirmHaptic()
                                 val sorted = selectedEpisodes.sortedBy { it.episodeNum }
                                 for (ep in sorted) {
                                     viewModel.engine.enqueue(
