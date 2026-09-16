@@ -161,7 +161,9 @@ c3893a4 Seed vdl.np-downloader.com + www.moviereleases.net in lockerHosts; confo
 - **`ui/screens/DownloadsScreen.kt`** — DownloadCard: **NEW resolution chip** (completed) + resolution first in progress string (active) — e.g. `720p • 45% • 320 MB / 710 MB • 2.4 MB/s`.
 
 ### Keys & signing (⚠️ IMPORTANT — moved 2026-08-23)
-- **The OTA signing keypair lives at `C:\Users\Anon\anon-serverless-app-maintenance-build\`** — OUTSIDE both git repos (they are PUBLIC). `ota_signing_private_key.pem` (SECRET) + `ota_signing_public_key.pem` + `README.md` explaining everything.
+- **The OTA signing keypair lives at `C:\Users\user\Anon\ANON TOOLS\anon-serverless-app-maintenance-build\`** — OUTSIDE both git repos (they are PUBLIC). `ota_signing_private_key.pem` (SECRET) + `ota_signing_public_key.pem` + `release-cert.pem` + `keystore-password.txt` + `README.md` explaining everything. (This doc previously said `C:\Users\Anon\anon-serverless-app-maintenance-build\` — a PRE-WIPE path that no longer exists; on 2026-09-15 that stale line caused a false "the key is lost" alarm. The wipe re-created the profile as `C:\Users\user`, and the folder was restored under `ANON TOOLS`. Sign with an explicit key argument to be immune to path drift:
+  `python scripts/encrypt_rules.py --key "/c/Users/user/Anon/ANON TOOLS/anon-serverless-app-maintenance-build/ota_signing_private_key.pem"`.)
+- Signing also needs the `cryptography` pip package on this machine (installed 2026-09-15; CI installs it itself for validation).
 - **GitHub secrets** (serverless repo): `OTA_SIGNING_PRIVATE_KEY` (CI signing), `CONFORMANCE_PUB_B64` (conformance public key).
 - `scripts/encrypt_rules.py` (canonical) + `download-toolkit/probe/encrypt_rules.py` (mirror) — KEY_PATH defaults to `~/anon-serverless-app-maintenance-build/ota_signing_private_key.pem`, overridable via `OTA_SIGNING_KEY_FILE` env var.
 - **AES `RULES_KEY`** (16 bytes hex, in encrypt_rules.py) — obfuscation-grade encryption only; the key ships in the APK. The SIGNATURE (ECDSA P-256) is the real protection.
