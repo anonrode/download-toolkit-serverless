@@ -28,6 +28,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.progressBarRangeInfo
@@ -42,6 +43,7 @@ import com.anonrode.downloader.data.models.TaskStatus
 import com.anonrode.downloader.ui.components.DownloadsSorter
 import com.anonrode.downloader.ui.components.downloadsStats
 import com.anonrode.downloader.ui.theme.*
+import com.anonrode.downloader.ui.util.rejectHaptic
 import com.anonrode.downloader.viewmodel.MainViewModel
 import java.io.File
 
@@ -56,6 +58,10 @@ fun DownloadsScreen(
 ) {
     val tasks by viewModel.engine.tasks.collectAsState()
     val context = LocalContext.current
+    // Destructive confirms get a weighty reject haptic (UI research round):
+    // it is the one place the UI already pauses to ask, so the answer should
+    // land physically. Default flags — a user with haptics off hears nothing.
+    val hapticView = LocalView.current
 
     // Read the persisted sort mode at composition. Default is "date" so
     // a fresh install matches the prototype's default tab.  A missing key
@@ -103,6 +109,7 @@ fun DownloadsScreen(
                 TextButton(
                     onClick = {
                         confirmCancelAll = false
+                        hapticView.rejectHaptic()
                         viewModel.engine.cancelAll()
                     }
                 ) { Text("Cancel all", color = StatusError) }
@@ -139,6 +146,7 @@ fun DownloadsScreen(
                 TextButton(
                     onClick = {
                         pendingDeleteTask = null
+                        hapticView.rejectHaptic()
                         viewModel.engine.cancel(task.id)
                     }
                 ) { Text("Delete", color = StatusError) }

@@ -40,6 +40,7 @@ import com.anonrode.downloader.ui.screens.HomeScreen
 import com.anonrode.downloader.ui.screens.SettingsScreen
 import com.anonrode.downloader.ui.theme.AccentPrimary
 import com.anonrode.downloader.ui.theme.BackgroundDark
+import com.anonrode.downloader.ui.theme.Motion
 import com.anonrode.downloader.ui.theme.SurfaceElevated
 import com.anonrode.downloader.ui.theme.TextMuted
 import com.anonrode.downloader.viewmodel.MainViewModel
@@ -188,11 +189,21 @@ fun MainScaffold(
  *  the block, so the hidden layer never swallows anything. */
 @Composable
 private fun TabPage(active: Boolean, content: @Composable () -> Unit) {
+    // Cross-fade (research: sibling destinations, no hierarchy -> a quick
+    // dissolve; 200ms). zIndex stays INSTANT so the incoming page wins the
+    // touch layer immediately; only alpha animates. animateFloatAsState on
+    // the alpha keeps this a draw-layer change — the pages are never torn
+    // down (see the comment above), so scroll positions still survive.
+    val alpha by androidx.compose.animation.core.animateFloatAsState(
+        targetValue = if (active) 1f else 0f,
+        animationSpec = androidx.compose.animation.core.tween(Motion.DurationFast),
+        label = "tabAlpha"
+    )
     Box(
         modifier = Modifier
             .fillMaxSize()
             .zIndex(if (active) 1f else 0f)
-            .graphicsLayer { alpha = if (active) 1f else 0f }
+            .graphicsLayer { this.alpha = alpha }
             .pointerInput(active) {
                 if (active) detectTapGestures(onTap = {})
             }

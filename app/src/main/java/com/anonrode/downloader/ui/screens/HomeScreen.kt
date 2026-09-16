@@ -3,6 +3,8 @@ package com.anonrode.downloader.ui.screens
 import android.content.ClipboardManager
 import android.content.Context
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -43,6 +45,8 @@ import com.anonrode.downloader.R
 import com.anonrode.downloader.data.models.ShowCard
 import com.anonrode.downloader.pipeline.VerdictPolicy
 import com.anonrode.downloader.providers.CategoryFeed
+import com.anonrode.downloader.ui.components.SearchListSkeleton
+import com.anonrode.downloader.ui.components.TrendingRowSkeleton
 import com.anonrode.downloader.ui.theme.*
 import com.anonrode.downloader.util.UrlExtractor
 import com.anonrode.downloader.viewmodel.MainViewModel
@@ -401,17 +405,26 @@ fun HomeScreen(
                 VerdictPolicy.visibleOrdered(
                     uiState.searchResults, uiState.verdicts, System.currentTimeMillis()
                 )
+                    // Key uniqueness before item animation (UI research round):
+                    // two providers can surface the SAME url for one title, and
+                    // Modifier.animateItem is keyed — a duplicate key is a
+                    // LazyColumn crash, not a cosmetic issue (the drawer hit
+                    // exactly this class and documents it). First occurrence
+                    // wins, so rank order is untouched.
+                    .distinctBy { it.url }
             }
             if (uiState.isSearching && visibleResults.isEmpty()) {
-                Box(
-                    modifier = Modifier.fillMaxWidth().weight(1f),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        CircularProgressIndicator(color = AccentPrimary, strokeWidth = 2.dp)
-                        Spacer(modifier = Modifier.height(Spacing.md))
-                        Text("Streaming search across all providers...", color = TextSecondary, fontSize = 13.sp)
-                    }
+                // Skeleton rows + honest progress copy (UI research round):
+                // searches can exceed 1s across the source fan-out, so the
+                // list's real shape stands in for a spinner.
+                Column(modifier = Modifier.fillMaxWidth().weight(1f)) {
+                    Text(
+                        text = "Searching all sources…",
+                        color = TextSecondary,
+                        fontSize = 13.sp
+                    )
+                    Spacer(modifier = Modifier.height(Spacing.md))
+                    SearchListSkeleton()
                 }
             } else if (uiState.searchError != null && visibleResults.isEmpty()) {
                 // A failed search must be distinguishable from an empty one:
@@ -444,12 +457,37 @@ fun HomeScreen(
             } else if (visibleResults.isEmpty() && uiState.query.trim().length >= 2 && !uiState.isSearching) {
                 // Note: keyed off visibleResults, not the raw crawl — when
                 // every returned card was proven dead, the honest message is
-                // "No results", not a blank landing page under a live query.
-                Box(
+                // "No matches", not a blank landing page under a live query.
+                // UI research round: a real empty state (icon + title + the
+                // explanation + one action) instead of a lone grey sentence.
+                Column(
                     modifier = Modifier.fillMaxWidth().weight(1f),
-                    contentAlignment = Alignment.Center
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
                 ) {
-                    Text("No results found for \"${uiState.query}\"", color = TextMuted, fontSize = 14.sp)
+                    Icon(
+                        imageVector = Icons.Rounded.Search,
+                        contentDescription = null,
+                        tint = TextMuted,
+                        modifier = Modifier.size(40.dp)
+                    )
+                    Spacer(modifier = Modifier.height(Spacing.md))
+                    Text(
+                        text = "No matches for \u201C${uiState.query.trim()}\u201D",
+                        color = TextPrimary,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Spacer(modifier = Modifier.height(Spacing.xs))
+                    Text(
+                        text = "Every source answered \u2014 try a shorter title or check the spelling.",
+                        color = TextMuted,
+                        fontSize = 12.sp
+                    )
+                    Spacer(modifier = Modifier.height(Spacing.lg))
+                    TextButton(onClick = { viewModel.onQueryChanged("") }) {
+                        Text("Clear search", color = AccentPrimary, fontWeight = FontWeight.Bold)
+                    }
                 }
             } else if (visibleResults.isEmpty()) {
                 // Blank-query state: the trending row IS the landing content
@@ -489,7 +527,22 @@ fun HomeScreen(
                             verifiedCaption = VerdictPolicy.captionFor(
                                 uiState.verdicts[VerdictPolicy.keyFor(show.url)]
                             ),
-                            onClick = { viewModel.openEpisodeDrawer(show) }
+                            onClick = { viewModel.openEpisodeDrawer(show) },
+                            // Cards gliding in as sources answer (UI research
+                            // round): fade in on the effects spring, glide to
+                            // a new slot on the spatial spring when a verdict
+                            // re-ranks the list. Items already on screen are
+                            // untouched — animateItem state is per key, so
+                            // partial updates never re-animate anything.
+                            modifier = Modifier.animateItem(
+                                fadeInSpec = spring(
+                                    Motion.EffectsDamping, Motion.EffectsStiffnessDefault
+                                ),
+                                placementSpec = spring(
+                                    Motion.SpatialDamping, Motion.SpatialStiffnessDefault
+                                ),
+                                fadeOutSpec = tween(Motion.DurationFast)
+                            )
                         )
                     }
                 }
@@ -635,15 +688,11 @@ private fun TrendingSection(
         Spacer(modifier = Modifier.height(Spacing.md))
         when {
             isLoading && items.isEmpty() -> {
-                Box(
-                    modifier = Modifier.fillMaxWidth().height(TRENDING_ROW_H),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        CircularProgressIndicator(color = AccentPrimary, strokeWidth = 2.dp)
-                        Spacer(modifier = Modifier.height(Spacing.md))
-                        Text("Loading trending...", color = TextSecondary, fontSize = 13.sp)
-                    }
+                // Skeleton, not a spinner (UI research round): the row's real
+                // shape is on screen while the sources crawl, and the box
+                // keeps TRENDING_ROW_H so nothing shifts when cards land.
+                Box(modifier = Modifier.fillMaxWidth().height(TRENDING_ROW_H)) {
+                    TrendingRowSkeleton()
                 }
             }
             items.isEmpty() -> {
@@ -669,7 +718,18 @@ private fun TrendingSection(
                         TrendingCard(
                             show = show,
                             showPosters = showPosters,
-                            onClick = { onOpen(show) }
+                            onClick = { onOpen(show) },
+                            // New cards fade in as sites answer; nothing
+                            // already on screen re-animates (per-key state).
+                            modifier = Modifier.animateItem(
+                                fadeInSpec = spring(
+                                    Motion.EffectsDamping, Motion.EffectsStiffnessDefault
+                                ),
+                                placementSpec = spring(
+                                    Motion.SpatialDamping, Motion.SpatialStiffnessDefault
+                                ),
+                                fadeOutSpec = tween(Motion.DurationFast)
+                            )
                         )
                     }
                 }
@@ -688,10 +748,11 @@ private fun TrendingSection(
 private fun TrendingCard(
     show: ShowCard,
     showPosters: Boolean,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
     Column(
-        modifier = Modifier
+        modifier = modifier
             .width(124.dp)
             .clip(RoundedCornerShape(Radius.md))
             .clickable { onClick() }
@@ -1006,7 +1067,18 @@ private fun CategoryPage(
                     GridPosterCard(
                         show = show,
                         showPosters = showPosters,
-                        onClick = { onOpen(show) }
+                        onClick = { onOpen(show) },
+                        // The grid streams in per-site partials — cards fade
+                        // in as they arrive, painted ones never move.
+                        modifier = Modifier.animateItem(
+                            fadeInSpec = spring(
+                                Motion.EffectsDamping, Motion.EffectsStiffnessDefault
+                            ),
+                            placementSpec = spring(
+                                Motion.SpatialDamping, Motion.SpatialStiffnessDefault
+                            ),
+                            fadeOutSpec = tween(Motion.DurationFast)
+                        )
                     )
                 }
             }
@@ -1022,10 +1094,11 @@ private fun CategoryPage(
 private fun GridPosterCard(
     show: ShowCard,
     showPosters: Boolean,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
     Column(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(Radius.md))
             .clickable { onClick() }
@@ -1167,7 +1240,18 @@ private fun CatalogPage(
                                 TrendingCard(
                                     show = show,
                                     showPosters = showPosters,
-                                    onClick = { onOpen(show) }
+                                    onClick = { onOpen(show) },
+                                    // Rows fill as their genre loads — cards
+                                    // glide in rather than snapping.
+                                    modifier = Modifier.animateItem(
+                                        fadeInSpec = spring(
+                                            Motion.EffectsDamping, Motion.EffectsStiffnessDefault
+                                        ),
+                                        placementSpec = spring(
+                                            Motion.SpatialDamping, Motion.SpatialStiffnessDefault
+                                        ),
+                                        fadeOutSpec = tween(Motion.DurationFast)
+                                    )
                                 )
                             }
                         }
@@ -1186,10 +1270,12 @@ fun ShowCardItem(
     /** Oracle caption for LIVE-proven cards ("✓ 220 MB", "✓ 24 eps · 450 MB/ep").
      *  Null for every other state — the card renders exactly as it did before
      *  the oracle existed (badge the winners, never the losers). */
-    verifiedCaption: String? = null
+    verifiedCaption: String? = null,
+    /** Caller-owned modifier (list item animation rides here). */
+    modifier: Modifier = Modifier
 ) {
     Row(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(Radius.lg))
             .background(SurfaceCard)
@@ -1303,10 +1389,15 @@ private fun PosterTile(show: ShowCard, showPosters: Boolean) {
 
 @Composable
 private fun InitialGlyph(title: String) {
+    // Theme-aware glyph (UI research round): white@18% over the LIGHT tile
+    // palette is invisible — light tiles carry an ink glyph of similar
+    // subtlety, dark tiles keep the white one.
+    val glyphColor = if (AnonTheme.colors.isDark) Color.White.copy(alpha = 0.18f)
+        else Color.Black.copy(alpha = 0.20f)
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         Text(
             text = title.trim().firstOrNull()?.uppercaseChar()?.toString() ?: "?",
-            color = Color.White.copy(alpha = 0.18f),
+            color = glyphColor,
             fontSize = 34.sp,
             fontWeight = FontWeight.Black
         )
@@ -1342,13 +1433,23 @@ private fun CardBadge(
     }
 }
 
-private val TILE_COLORS = listOf(
+// Poster fallback palette, per theme (UI research round): the old dark-only
+// set made six near-black bricks on the light theme's white page. Same
+// hue-family order, so a title keeps its "colour" across themes.
+private val TILE_COLORS_DARK = listOf(
     Color(0xFF3A1C1C), Color(0xFF2A2A10), Color(0xFF20303A),
     Color(0xFF241A33), Color(0xFF14301F), Color(0xFF33231A)
 )
+private val TILE_COLORS_LIGHT = listOf(
+    Color(0xFFF3E3E3), Color(0xFFF1EFDC), Color(0xFFDDE9F0),
+    Color(0xFFE7E0F2), Color(0xFFDDEBE1), Color(0xFFF2E5DC)
+)
+
+@Composable
 private fun tileColor(title: String): Color {
-    val idx = ((title.hashCode() % TILE_COLORS.size) + TILE_COLORS.size) % TILE_COLORS.size
-    return TILE_COLORS[idx]
+    val palette = if (AnonTheme.colors.isDark) TILE_COLORS_DARK else TILE_COLORS_LIGHT
+    val idx = ((title.hashCode() % palette.size) + palette.size) % palette.size
+    return palette[idx]
 }
 
 private fun specLine(show: ShowCard): String {
