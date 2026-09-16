@@ -46,7 +46,10 @@ import com.anonrode.downloader.data.models.ShowCard
 import com.anonrode.downloader.pipeline.VerdictPolicy
 import com.anonrode.downloader.providers.CategoryFeed
 import com.anonrode.downloader.ui.components.SearchListSkeleton
+import com.anonrode.downloader.ui.components.SkeletonBox
 import com.anonrode.downloader.ui.components.TrendingRowSkeleton
+import com.anonrode.downloader.ui.components.rememberReduceMotion
+import com.anonrode.downloader.ui.components.rememberShimmerX
 import com.anonrode.downloader.ui.theme.*
 import com.anonrode.downloader.util.UrlExtractor
 import com.anonrode.downloader.viewmodel.MainViewModel
@@ -512,7 +515,8 @@ fun HomeScreen(
                         tiles = uiState.genreTiles,
                         showPosters = viewModel.engine.showPostersInResults,
                         onOpen = { category -> viewModel.openCategory(category) },
-                        onMore = { viewModel.openCatalog() }
+                        onMore = { viewModel.openCatalog() },
+                        isLoading = uiState.isTrendingLoading
                     )
                 }
             } else {
@@ -815,7 +819,8 @@ private fun CategoryTilesGrid(
     tiles: List<CategoryFeed.GenreTile>,
     showPosters: Boolean,
     onOpen: (CategoryFeed.Category) -> Unit,
-    onMore: () -> Unit
+    onMore: () -> Unit,
+    isLoading: Boolean = false
 ) {
     val posters = tiles.associate { it.category.label to it.posterUrl }
     // No horizontal padding here: the landing Column already owns the gutter
@@ -841,7 +846,8 @@ private fun CategoryTilesGrid(
                             label = category.label,
                             posterUrl = posters[category.label] ?: "",
                             showPosters = showPosters,
-                            onClick = { onOpen(category) }
+                            onClick = { onOpen(category) },
+                            isLoading = isLoading
                         )
                     }
                 }
@@ -903,8 +909,15 @@ private fun GenreTileCard(
     label: String,
     posterUrl: String,
     showPosters: Boolean,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    isLoading: Boolean = false
 ) {
+    // Shimmer only while the artwork is actually on its way. A transition per
+    // tile that lived forever would keep the frame clock busy on a screen the
+    // user is just reading — the research's "one transition per surface" rule.
+    val shimmerX = if (showPosters && isLoading && posterUrl.isBlank()) {
+        rememberShimmerX(rememberReduceMotion())
+    } else 0f
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -927,6 +940,14 @@ private fun GenreTileCard(
                     modifier = Modifier.fillMaxSize(),
                     loading = { InitialGlyph(label) },
                     error = { InitialGlyph(label) }
+                )
+            } else if (showPosters && isLoading) {
+                // Poster URL has not arrived yet: shimmer the box instead of
+                // showing a letter that is about to be covered.
+                SkeletonBox(
+                    modifier = Modifier.fillMaxSize(),
+                    shape = RoundedCornerShape(Radius.md),
+                    x = shimmerX
                 )
             } else {
                 InitialGlyph(label)
