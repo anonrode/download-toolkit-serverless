@@ -3,6 +3,9 @@
 package com.anonrode.downloader.ui.screens
 
 import android.widget.Toast
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -20,9 +23,11 @@ import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.rounded.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
@@ -223,6 +228,13 @@ fun SettingsScreen(
     // Auto night flip), not just the chips in this screen.
     LaunchedEffect(themeMode) { state.themeMode = themeMode }
 
+    // Advanced starts collapsed (UI research round): retry counts, log
+    // retention and the OTA/diagnostic tools are the controls almost nobody
+    // opens weekly, and folding them away removes roughly 40% of the scroll
+    // length. rememberSaveable so a rotation or a tab switch doesn't re-hide
+    // a section the user just opened.
+    var advancedExpanded by rememberSaveable { mutableStateOf(false) }
+
     val lifecycleOwner = LocalLifecycleOwner.current
     // Two jobs on one observer:
     //  - flush the debounced settings write when the app backgrounds / the
@@ -297,12 +309,13 @@ fun SettingsScreen(
                     .padding(horizontal = Spacing.lg),
                 contentPadding = PaddingValues(bottom = Spacing.xxl)
             ) {
+                // Order is frequency of use, not developer concern (UI research
+                // round): the behaviour settings people touch weekly come
+                // first, the once-a-year OTA/diagnostic tools fold into
+                // Advanced, and About goes last — it used to sit between Media
+                // and Network, which made the page read as unordered.
                 item {
-                    SettingsSelfHealingSection(
-                        state = state,
-                        rulesVersion = rulesVersion,
-                        scope = scope
-                    )
+                    SettingsGeneralSection(state = state)
                     Spacer(modifier = Modifier.height(Spacing.lg))
                 }
                 item {
@@ -310,10 +323,6 @@ fun SettingsScreen(
                         state = state,
                         onThemeChanged = onThemeChanged
                     )
-                    Spacer(modifier = Modifier.height(Spacing.lg))
-                }
-                item {
-                    SettingsGeneralSection(state = state)
                     Spacer(modifier = Modifier.height(Spacing.lg))
                 }
                 item {
@@ -325,6 +334,24 @@ fun SettingsScreen(
                     Spacer(modifier = Modifier.height(Spacing.lg))
                 }
                 item {
+                    SettingsTorrentsSection(state = state)
+                    Spacer(modifier = Modifier.height(Spacing.lg))
+                }
+                item {
+                    SettingsNetworkSection(state = state)
+                    Spacer(modifier = Modifier.height(Spacing.lg))
+                }
+                item {
+                    SettingsAdvancedSection(
+                        expanded = advancedExpanded,
+                        onToggle = { advancedExpanded = !advancedExpanded },
+                        state = state,
+                        rulesVersion = rulesVersion,
+                        scope = scope
+                    )
+                    Spacer(modifier = Modifier.height(Spacing.lg))
+                }
+                item {
                     SettingsAboutSection(
                         state = state,
                         uiState = uiState,
@@ -332,18 +359,6 @@ fun SettingsScreen(
                         scope = scope,
                         onDismiss = onBack
                     )
-                    Spacer(modifier = Modifier.height(Spacing.xl))
-                }
-                item {
-                    SettingsNetworkSection(state = state)
-                    Spacer(modifier = Modifier.height(Spacing.lg))
-                }
-                item {
-                    SettingsTorrentsSection(state = state)
-                    Spacer(modifier = Modifier.height(Spacing.lg))
-                }
-                item {
-                    SettingsDiagnosticsSection(state = state)
                     Spacer(modifier = Modifier.height(Spacing.xl))
                     // No Save button: every control instant-persists via
                     // SettingsState.persist (see the sheet host above).
@@ -356,6 +371,69 @@ fun SettingsScreen(
 // ============================================================
 //                     SECTION COMPOSABLES
 // ============================================================
+
+@Composable
+internal fun SettingsAdvancedSection(
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    state: SettingsState,
+    rulesVersion: String,
+    scope: kotlinx.coroutines.CoroutineScope
+) {
+    val chevronRotation by animateFloatAsState(
+        targetValue = if (expanded) 180f else 0f,
+        animationSpec = tween(Motion.DurationFast),
+        label = "advancedChevron"
+    )
+    // Same visual language as SettingsCategoryHeader (uppercase caption,
+    // muted, tracked) plus a chevron — this row IS the disclosure control, so
+    // it is one ≥48dp tap target rather than a label with a small icon.
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(Radius.sm))
+            .clickable(role = Role.Button, onClick = onToggle)
+            .padding(vertical = Spacing.xs),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = "ADVANCED",
+            fontSize = Type.caption.fontSize,
+            fontWeight = FontWeight.Bold,
+            color = TextMuted,
+            letterSpacing = 0.8.sp,
+            modifier = Modifier
+                .weight(1f)
+                .semantics { heading() }
+                .padding(start = Spacing.xs)
+        )
+        Text(
+            text = if (expanded) "HIDE" else "SYNC · LOGS · DIAGNOSTICS",
+            fontSize = Type.micro.fontSize,
+            fontWeight = FontWeight.Bold,
+            color = TextMuted,
+            letterSpacing = 0.8.sp
+        )
+        Icon(
+            imageVector = Icons.Rounded.ArrowDropDown,
+            contentDescription = null,
+            tint = TextMuted,
+            modifier = Modifier.size(20.dp).rotate(chevronRotation)
+        )
+    }
+    AnimatedVisibility(visible = expanded) {
+        Column {
+            Spacer(modifier = Modifier.height(Spacing.sm))
+            SettingsSelfHealingSection(
+                state = state,
+                rulesVersion = rulesVersion,
+                scope = scope
+            )
+            Spacer(modifier = Modifier.height(Spacing.lg))
+            SettingsDiagnosticsSection(state = state)
+        }
+    }
+}
 
 @Composable
 internal fun SettingsSelfHealingSection(
@@ -546,7 +624,7 @@ internal fun SettingsAppearanceSection(
 internal fun SettingsGeneralSection(
     state: SettingsState
 ) {
-    SettingsCategoryHeader(title = "General & Automation")
+    SettingsCategoryHeader(title = "Downloads & Automation")
     SettingsCard {
         SettingsSwitchRow(
             icon = Icons.Rounded.FolderOpen,
