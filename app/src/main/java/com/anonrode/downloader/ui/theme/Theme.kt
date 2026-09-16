@@ -173,7 +173,25 @@ fun AnonDownloaderTheme(
     CompositionLocalProvider(LocalAnonColors provides anonColors) {
         MaterialTheme(
             colorScheme = materialScheme,
+            typography = AnonTypography,
             content = content
         )
     }
 }
+
+/**
+ * The one M3 component default this app overrides to inherit its own scale.
+ *
+ * `headlineSmall` is what AlertDialog uses for its title (material3 1.3.0
+ * AlertDialog.kt:325 -> MaterialTheme.typography.headlineSmall), so dialog
+ * titles were rendering at 24sp — larger than the page title above them and
+ * the biggest text in a dense utility screen. `Type.itemTitle` (16/21 SemiBold)
+ * is what this scale calls a dialog title.
+ *
+ * The wider mapping the UI research proposed (bodyLarge/label* -> the scale)
+ * is deliberately NOT applied yet: it reaches every composed default and every
+ * `Text` without an explicit size (about 37 of 225 in ui/), which is a
+ * look-at-it-on-a-device change, not a mechanical one. DropdownMenuItem's
+ * internal style token also could not be verified for material3 1.3.0.
+ */
+val AnonTypography = Typography(headlineSmall = Type.itemTitle)
