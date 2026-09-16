@@ -163,8 +163,21 @@ class ProgressParserTest {
     }
 
     @Test
-    fun ytdlTemplateHlsEstimateOnly() {
-        // HLS: total is "NA" (yt-dlp doesn't know the final size until the
+    fun ytdlTemplateZeroFragmentIndexNeverDerivesInfinity() {
+        // Engine-audit P2 regression: fi == 0 divided to +Infinity, whose
+        // toLong() is Long.MAX_VALUE — the card pinned at 0% and a nonsense
+        // ETA for the rest of the job. With fi == 0 the estimate is simply
+        // skipped (totBytes stays 0/previous); nothing may become absurd.
+        val t = parseProgressTick(
+            "download:@@DLP@@ 1.0%|1.00MiB/s|00:10|0|296|1.0MiB|NA|NA",
+            0f, 0L, 0L
+        )
+        assertEquals((1.0 * 1024 * 1024).toLong(), t.downloadedBytes)
+        assertTrue("total must not be poisoned by a zero fragment index", t.totalBytes < Long.MAX_VALUE / 2)
+    }
+
+    @Test
+    fun ytdlTemplateHlsEstimateOnly() {        // HLS: total is "NA" (yt-dlp doesn't know the final size until the
         // last segment lands), total_estimate is computed from segment math.
         val t = parseProgressTick(
             "download:@@DLP@@ 15.0%|5.00MiB/s|00:30|45|296|45.5MiB|NA|298.0MiB",

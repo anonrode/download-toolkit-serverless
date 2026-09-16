@@ -167,6 +167,11 @@ class DownloadService : Service() {
         const val CHANNEL_FAIL_ID = "anon_failed_channel"
         const val ONGOING_NOTIFICATION_ID = 8801
 
+        /** Completion-notification id allocator (see notifyCompleted): a
+         *  session sequence that never touches the reserved 8801 and never
+         *  repeats an id until it wraps. */
+        private val completedIdSeq = java.util.concurrent.atomic.AtomicInteger(9000)
+
         const val ACTION_START_OR_UPDATE = "com.anonrode.downloader.START_OR_UPDATE"
         const val ACTION_STOP = "com.anonrode.downloader.STOP"
 
@@ -217,8 +222,16 @@ class DownloadService : Service() {
                     .build()
 
                 val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-                val notifId = (System.currentTimeMillis() % 100000).toInt() + 9000
-                manager.notify(notifId, notification)
+                // Session sequence in 9000..17999 (engine-audit P2): the old
+                // millis-based id collided for two completions in the same
+                // millisecond (queues drain several small files at once) or
+                // exactly 100 s apart, silently replacing one card with another.
+                var id = completedIdSeq.incrementAndGet()
+                if (id > 17999) {
+                    completedIdSeq.set(9000)
+                    id = completedIdSeq.incrementAndGet()
+                }
+                manager.notify(id, notification)
             } catch (_: Exception) {}
         }
 
@@ -261,7 +274,13 @@ class DownloadService : Service() {
                     .build()
 
                 val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-                manager.notify(9000 + (taskId.hashCode() % 9000).toInt(), notification)
+                // Stable per-task id in 18000..25999 (engine-audit P2): the old
+                // `9000 + (hashCode % 9000)` could land in 1..8999 for a
+                // negative hash — including ONGOING_NOTIFICATION_ID (8801,
+                // which it replaced) — and could collide with completion ids
+                // and other failures. A repeat failure now updates its OWN
+                // card instead of stacking or replacing someone else's.
+                manager.notify(18000 + (taskId.hashCode().toLong() and 0x7FFFFFFFL).toInt() % 8000, notification)
             } catch (_: Exception) {}
         }
 

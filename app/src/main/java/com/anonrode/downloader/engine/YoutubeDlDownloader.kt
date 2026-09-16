@@ -513,9 +513,20 @@ object YoutubeDlDownloader {
                 }
             }
             if (movedOk) produced = dest
-            else com.anonrode.downloader.util.DebugLog.backend(
-                "task=$taskId yt-dlp artifact left in workdir (move failed): ${produced.absolutePath}"
-            )
+            else {
+                // Engine-audit P2: returning the in-workdir artifact let the
+                // engine report COMPLETED for a file inside a hidden dot-dir
+                // the media scanner ignores (and a later cancel would delete
+                // the very file that was called complete). Throw instead — the
+                // engine's failure path parks tasks with banked bytes, so the
+                // finished bytes stay on disk and the retry resumes from them.
+                com.anonrode.downloader.util.DebugLog.error(
+                    "task=$taskId yt-dlp artifact left in workdir (move failed): ${produced.absolutePath}"
+                )
+                throw java.io.IOException(
+                    "Download finished, but it could not be moved into your folder (storage full or access lost). Free some space, then tap retry."
+                )
+            }
             outDir.listFiles()?.takeIf { it.isEmpty() }?.let { outDir.delete() }
         }
         return produced

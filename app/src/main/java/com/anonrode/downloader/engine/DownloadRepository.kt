@@ -41,7 +41,18 @@ class DownloadRepository {
                     .map { parkForRestore(it) }
                 }
             }
-            if (_tasks.value.isEmpty()) {
+        } catch (_: Throwable) {
+            // engine-audit P1: a corrupt or partially-flushed state file used
+            // to be DELETED right here with the list emptied — while an intact
+            // Documents mirror sat unused, and the very next persist()
+            // overwrote that mirror too, destroying the whole history for good.
+            // Set the poison file aside for diagnostics instead; the mirror
+            // branch below then recovers the tasks (persist() re-syncs the
+            // private file immediately after a successful import).
+            try { f.renameTo(File(f.parentFile, f.name + ".corrupt")) } catch (_: Throwable) {}
+        }
+        if (_tasks.value.isEmpty()) {
+            try {
                 // Fresh install (filesDir wiped, e.g. by an uninstall) but a
                 // Documents mirror exists from before: import it, and the
                 // persist() below re-syncs the private file immediately.
@@ -50,10 +61,7 @@ class DownloadRepository {
                     _tasks.value = json.decodeFromString<List<DownloadTask>>(mirrored).map { parkForRestore(it) }
                     persist()
                 }
-            }
-        } catch (_: Throwable) {
-            try { f.delete() } catch (_: Throwable) {}
-            _tasks.value = emptyList()
+            } catch (_: Throwable) {}
         }
     }
 
@@ -67,7 +75,14 @@ class DownloadRepository {
                     val encoded = json.encodeToString(_tasks.value)
                     val tmp = File(f.parentFile, "${f.name}.tmp")
                     tmp.writeText(encoded)
-                    tmp.renameTo(f)
+                    if (!tmp.renameTo(f)) {
+                        // Engine-audit: the rename result was unchecked — the
+                        // one write path with no failure handling. A direct
+                        // rewrite keeps the newest state on disk even when the
+                        // rename fails (FUSE volumes, transient EBUSY).
+                        f.writeText(encoded)
+                        tmp.delete()
+                    }
                     // Mirror only on meaningful writes (this runs on status
                     // transitions, adds, removes — not per progress tick).
                     appContext?.let { HistoryBackup.save(it, encoded) }
