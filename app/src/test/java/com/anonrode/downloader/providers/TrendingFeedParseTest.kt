@@ -132,10 +132,14 @@ class TrendingFeedParseTest {
 
     @Test
     fun `mergeRoundRobin partials are order-preserving subsets of the full merge`() {
-        val a = (1..5).map { mcard("vault", "A$it") }
-        val b = (1..5).map { mcard("nkiri", "B$it") }
-        val c = (1..5).map { mcard("prey", "C$it") }
-        val d = (1..5).map { mcard("9ja", "D$it") }
+        // Three per site, not five: four sites x five cards is 20 > ROW_LIMIT
+        // (16), so the "full" merge would be truncated and could not contain
+        // the 15-card partials at all — the subset property only means
+        // something while nothing is capped. The cap has its own test below.
+        val a = (1..3).map { mcard("vault", "A$it") }
+        val b = (1..3).map { mcard("nkiri", "B$it") }
+        val c = (1..3).map { mcard("prey", "C$it") }
+        val d = (1..3).map { mcard("9ja", "D$it") }
         val full = TrendingFeed.mergeRoundRobin(listOf(a, b, c, d)).map { it.title }
         // Every progressively-grown partial must keep the full merge's
         // relative order of its own cards (no reshuffle under the user).
