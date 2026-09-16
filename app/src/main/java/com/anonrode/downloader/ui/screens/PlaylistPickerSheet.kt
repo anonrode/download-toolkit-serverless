@@ -23,6 +23,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.SubcomposeAsyncImage
 import com.anonrode.downloader.pipeline.PlaylistPicker
+import com.anonrode.downloader.ui.components.EpisodeListSkeleton
 import com.anonrode.downloader.ui.components.QualityChipRow
 import com.anonrode.downloader.ui.theme.*
 import com.anonrode.downloader.viewmodel.MainViewModel
@@ -105,20 +106,25 @@ fun PlaylistPickerSheet(viewModel: MainViewModel, onDismiss: () -> Unit) {
         Column(modifier = Modifier.fillMaxWidth().padding(horizontal = Spacing.lg)) {
 
             if (state.loading) {
-                Column(
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 320.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center
-                ) {
-                    CircularProgressIndicator(color = AccentPrimary, modifier = Modifier.size(28.dp))
-                    Spacer(Modifier.height(Spacing.md))
-                    Text("Reading the playlist…", fontSize = Type.rowTitle.fontSize, color = TextSecondary)
+                // Copy stays (it is honest about the cost), the spinner is
+                // replaced by rows in the sheet's own rhythm so the sheet does
+                // not jump when the playlist lands (UI research round).
+                Column(modifier = Modifier.fillMaxWidth().heightIn(min = 320.dp)) {
+                    Spacer(Modifier.height(Spacing.xl))
+                    Text(
+                        "Reading the playlist…",
+                        fontSize = Type.rowTitle.fontSize,
+                        color = TextSecondary,
+                        modifier = Modifier.align(Alignment.CenterHorizontally)
+                    )
                     Text(
                         "one metadata call, no video pages",
                         fontSize = Type.caption.fontSize,
-                        color = TextMuted
+                        color = TextMuted,
+                        modifier = Modifier.align(Alignment.CenterHorizontally)
                     )
                     Spacer(Modifier.height(Spacing.lg))
+                    EpisodeListSkeleton(rows = 5)
                 }
                 return@Column
             }
