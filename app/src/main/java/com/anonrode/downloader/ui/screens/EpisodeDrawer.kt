@@ -166,6 +166,17 @@ fun EpisodeDrawer(
                 }
             }
 
+            // PL-6: the story blurb — every provider already parses it
+            // (ShowDetails.synopsis) and the UI dropped it on the floor until
+            // now, so this costs ZERO new network. It lives in the drawer
+            // header rather than a second sheet because this is exactly where
+            // the user decides what to download; collapsed to three lines so
+            // it can never push the episode list off-screen.
+            if (uiState.drawerSynopsis.isNotBlank()) {
+                Spacer(modifier = Modifier.height(Spacing.sm))
+                SynopsisBlock(uiState.drawerSynopsis)
+            }
+
             if (episodes.isNotEmpty()) {
                 // 1-Tap Batch Season Selector Chips Row — 8dp gaps (design
                 // pass: interactive chips need mis-touch breathing room).
@@ -626,9 +637,56 @@ private fun lockerPreview(url: String): Pair<String, String> {
     return host to name
 }
 
+/** PL-6 story blurb: three-line clamp with one expand toggle. The toggle
+ *  renders only for text that plausibly overflows the clamp (140 chars ≈
+ *  three 12sp/17lh lines on a 360dp phone — a cheap heuristic; a long text
+ *  may show the toggle without strictly needing it, never the reverse). The
+ *  copy rides the same card language as the rest of the drawer. */
 @Composable
-private fun PreviewChip(label: String, value: String, modifier: Modifier = Modifier) {
-    Row(
+private fun SynopsisBlock(synopsis: String) {
+    var expanded by rememberSaveable { mutableStateOf(false) }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(Radius.md))
+            .background(SurfaceCard)
+            .border(1.dp, BorderHairline, RoundedCornerShape(Radius.md))
+            .padding(Spacing.md)
+    ) {
+        Text(
+            text = "STORY",
+            color = TextMuted,
+            fontSize = 10.sp,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 1.sp
+        )
+        Spacer(modifier = Modifier.height(Spacing.xs))
+        Text(
+            text = synopsis,
+            color = TextSecondary,
+            fontSize = 12.sp,
+            lineHeight = 17.sp,
+            maxLines = if (expanded) Int.MAX_VALUE else 3,
+            overflow = TextOverflow.Ellipsis
+        )
+        if (synopsis.length > 140) {
+            Spacer(modifier = Modifier.height(Spacing.xxs))
+            Text(
+                text = if (expanded) "Show less" else "Read more",
+                color = AccentPrimary,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier
+                    .minimumInteractiveComponentSize()
+                    .clickable { expanded = !expanded }
+                    .padding(vertical = Spacing.xs)
+            )
+        }
+    }
+}
+
+@Composable
+private fun PreviewChip(label: String, value: String, modifier: Modifier = Modifier) {    Row(
         modifier = modifier
             .clip(RoundedCornerShape(Radius.sm))
             // SurfaceElevated, not a background token with alpha (design
