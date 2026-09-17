@@ -54,23 +54,29 @@ class TurboState(private val file: File) {
         return try {
             val lines = file.readLines().filter { it.isNotBlank() }
             if (lines.isEmpty()) return null
+            if (!lines.first().startsWith("total=")) return null
             val header = lines.first().removePrefix("total=").toLongOrNull() ?: return null
+            if (header <= 0) return null
             // Exact match only: a reused plan whose last piece ends at
             // headerTotal-1 leaves bytes [headerTotal, total) undownloaded,
             // and the success checks still pass — up to 1 KiB of silent
             // zero-fill at the tail of a "finished" file. A size shift means
             // the remote file changed; restart rather than corrupt.
             if (total > 0 && header != total) return null
-            val chunks = lines.drop(1).mapNotNull { line ->
+            var nextStart = 0L
+            val chunks = lines.drop(1).map { line ->
                 val p = line.split(":")
-                if (p.size != 3) return@mapNotNull null
-                val s = p[0].toLongOrNull() ?: return@mapNotNull null
-                val e = p[1].toLongOrNull() ?: return@mapNotNull null
-                val c = p[2].toLongOrNull() ?: return@mapNotNull null
-                if (c < s || c > e + 1) return@mapNotNull null
+                if (p.size != 3) return null
+                val s = p[0].toLongOrNull() ?: return null
+                val e = p[1].toLongOrNull() ?: return null
+                val c = p[2].toLongOrNull() ?: return null
+                if (s != nextStart || e < s || e >= header) return null
+                if (c < s || c > e + 1) return null
+                nextStart = e + 1
                 TurboChunk(s, e, c)
             }
-            if (chunks.isEmpty()) null else chunks
+            // Preallocation makes file length insufficient evidence for missing pieces.
+            if (chunks.isEmpty() || nextStart != header) null else chunks
         } catch (_: Exception) {
             null
         }
