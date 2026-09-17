@@ -617,6 +617,14 @@ fun EpisodeRow(
                         )
                     }
                 }
+                if (episode.sizeText.isNotBlank()) {
+                    Spacer(modifier = Modifier.height(Spacing.xs))
+                    Text(
+                        text = "Site-reported size: ${episode.sizeText}",
+                        color = TextSecondary,
+                        fontSize = Type.label.fontSize
+                    )
+                }
                 Spacer(modifier = Modifier.height(2.dp))
                 Text(
                     text = "Queue now, or check this link on a browser first.",
