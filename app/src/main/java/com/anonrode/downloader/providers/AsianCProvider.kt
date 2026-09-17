@@ -21,6 +21,10 @@ object AsianCProvider : SiteProvider {
     override val mainUrl: String get() = com.anonrode.downloader.data.rules.DynamicRulesManager.getBaseUrl(name)
 
     override suspend fun search(query: String): List<ShowCard> {
+        com.anonrode.downloader.data.rules.DynamicRulesManager.getPipeline(name)?.search?.let { pl ->
+            val results = RulesPipeline.runSearch(name, pl, query)
+            if (results.isNotEmpty()) return results
+        }
         val results = mutableListOf<ShowCard>()
         try {
             val encoded = URLEncoder.encode(query, "UTF-8")
@@ -53,6 +57,18 @@ object AsianCProvider : SiteProvider {
 
     override suspend fun loadEpisodes(showUrl: String): ShowDetails {
         val show = ShowCard(title = "Asian Drama", url = showUrl, site = name)
+        com.anonrode.downloader.data.rules.DynamicRulesManager.getPipeline(name)?.episodes?.let { pl ->
+            val res = RulesPipeline.runEpisodes(name, pl, showUrl)
+            if (res != null && res.episodes.isNotEmpty()) {
+                val card = ShowCard(
+                    title = res.title.ifBlank { show.title },
+                    url = showUrl,
+                    posterUrl = res.posterUrl.ifBlank { show.posterUrl },
+                    site = name
+                )
+                return ShowDetails(show = card, synopsis = res.synopsis, episodes = res.episodes)
+            }
+        }
         try {
             val html = HttpClient.getText(showUrl, referer = "$mainUrl/") ?: return ShowDetails(show = show)
             val doc = Jsoup.parse(html, showUrl)
@@ -123,7 +139,8 @@ object AsianCProvider : SiteProvider {
     }
 
     override suspend fun resolveEpisode(episodeUrl: String, quality: String): DownloadRecipe {
-        var direct = ResolverRegistry.resolve(episodeUrl, quality)
+        var direct = RulesPipeline.runResolveForSite(name, episodeUrl, quality)
+            ?: ResolverRegistry.resolve(episodeUrl, quality)
         if (direct.isNullOrBlank()) {
             try {
                 val html = HttpClient.getText(episodeUrl, referer = "$mainUrl/") ?: ""
@@ -139,7 +156,9 @@ object AsianCProvider : SiteProvider {
             } catch (_: Exception) {}
         }
 
-        val target = direct ?: episodeUrl
+        val target = if (!direct.isNullOrBlank()) direct else {
+            if (com.anonrode.downloader.pipeline.StrictLinkClassifier.isDirectMedia(episodeUrl)) episodeUrl else ""
+        }
         val isHls = target.contains(".m3u8") || target.contains("manifest")
         return DownloadRecipe(
             directUrl = target,

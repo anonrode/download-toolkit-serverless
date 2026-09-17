@@ -256,7 +256,9 @@ object AnitakuProvider : SiteProvider {
             } catch (_: Exception) {}
         }
 
-        val target = direct ?: episodeUrl
+        val target = if (!direct.isNullOrBlank()) direct else {
+            if (com.anonrode.downloader.pipeline.StrictLinkClassifier.isDirectMedia(episodeUrl)) episodeUrl else ""
+        }
         val isHls = target.contains(".m3u8") || target.contains("manifest")
         return DownloadRecipe(
             directUrl = target,

@@ -27,26 +27,6 @@ import org.jsoup.Jsoup
  */
 object LockerRegistry {
 
-    private val DEFAULT_LOCKER_HOSTS = listOf(
-        "streamsss.net", "streamwish.com", "streamtape.com", "doodstream.com",
-        "dood.", "vidhide.com", "mixdrop.co", "mp4upload.com", "hglink.tv",
-        "loadedfiles.net", "downloadwella.com", "wetafiles.com",
-        "vikingfile.com", "lulacloud.com", "waffi", "pixeldrain.com",
-        "filevault", "kissorgrab.com", "wildshare", "gtoddl", "wapkizfile",
-        "fastupload.io", "gofile.io", "krakenfiles.com", "swish"
-    )
-
-    /** Path segments that mark a page as navigation, never media. Applied to
-     *  UNKNOWN hosts only — known lockers and proven hosts already returned. */
-    private val NAV_SEGMENTS = setOf(
-        "tag", "category", "categories", "dmca", "menu", "page", "pages",
-        "author", "about", "contact", "privacy", "policy", "terms", "sitemap",
-        "feed", "login", "register", "signin", "signup", "account", "cart",
-        "checkout", "search", "faq", "help", "request", "submit", "advertise",
-        "wp-content", "wp-json", "wp-admin", "cdn-cgi", "email-protection",
-        "series-download", "movie-download", "download-movies", "download-series",
-        "cant-download", "downloader", "date", "archive"
-    )
 
     sealed class MediaKind {
         /** Direct media file or known stream URL (unchanged since extraction). */
@@ -59,60 +39,18 @@ object LockerRegistry {
         object None : MediaKind()
     }
 
-    /** Single-pass classification: hostname-boundary match, no substring false positives. */
+    /** Single-pass classification: delegates to centralized StrictLinkClassifier shield. */
     fun classify(url: String): MediaKind {
-        if (url.isBlank()) return MediaKind.None
-        val clean = url.trim().substringBefore('?').substringBefore('#')
-        val host = try { java.net.URI(clean).host?.lowercase() ?: "" } catch (_: Exception) { "" }
-        if (host.isBlank()) return MediaKind.None
-
-        // Direct media extensions
-        val ext = clean.substringAfterLast('.').lowercase()
-        if (ext in setOf("mp4", "mkv", "webm", "avi", "m3u8", "m4v", "ts", "mp3")) return MediaKind.Direct
-
-        // Known locker hosts (OTA data + built-in defaults + learned from HostHealth)
-        val knownHosts = (DynamicRulesManager.getLockerHosts() + DEFAULT_LOCKER_HOSTS).distinct()
-        for (kh in knownHosts) {
-            if (host == kh || host.endsWith(".$kh")) return MediaKind.Locker(kh)
+        return when (val sc = com.anonrode.downloader.pipeline.StrictLinkClassifier.classify(url)) {
+            is com.anonrode.downloader.pipeline.StrictLinkClassifier.LinkClass.DirectMedia -> MediaKind.Direct
+            is com.anonrode.downloader.pipeline.StrictLinkClassifier.LinkClass.KnownLocker -> MediaKind.Locker(sc.host)
+            is com.anonrode.downloader.pipeline.StrictLinkClassifier.LinkClass.IntermediateGateway -> {
+                val h = try { java.net.URI(url).host?.lowercase() ?: "" } catch (_: Exception) { "" }
+                MediaKind.Unknown(h)
+            }
+            is com.anonrode.downloader.pipeline.StrictLinkClassifier.LinkClass.Unknown -> MediaKind.Unknown(sc.host)
+            is com.anonrode.downloader.pipeline.StrictLinkClassifier.LinkClass.NavigationJunk -> MediaKind.None
         }
-        // Move 2 (learning): a host that has PROVEN itself (>=1 successful
-        // crack recorded in HostHealth) is treated as known even if the
-        // playbook never listed it — streamsss.net works once, and every
-        // episode after that is a known locker, no OTA needed.
-        if (HostHealth.hasProvenLocker(host)) {
-            return MediaKind.Locker(host)
-        }
-
-        // Path-based heuristics for unknown hosts (known lockers and proven
-        // hosts already returned above).
-        val path = try { java.net.URI(clean).path ?: "" } catch (_: Exception) { "" }
-        val segments = path.split('/').filter { it.isNotBlank() }
-
-        // Strong media signals: /dl-xxx or deep /download/ paths.
-        if (path.contains("/dl-") || (path.contains("/download/") && segments.size >= 3)) return MediaKind.Unknown(host)
-
-        // Nav-junk: known nav words anywhere in the path (tag/category/dmca/
-        // menus/policy pages), or shallow generic paths — the dramarain ?s=
-        // lesson: a dead search endpoint returns single-segment category
-        // cards. Media markers (-episode-, season, -drama, -movie-) keep
-        // shallow paths alive (nkiri same-site episode links).
-        val navWord = segments.any { s ->
-            s in NAV_SEGMENTS || s.startsWith("how-to") || s.endsWith("-menu") || s.contains("movies")
-        }
-        if (navWord) return MediaKind.None
-        if (segments.isEmpty()) return MediaKind.None
-        // Shallow single-segment paths are nav unless they carry media
-        // markers: -episode-, season, -movie-, or a show-style slug ending
-        // in -drama with >= 2 dashes ("vincenzo-korean-drama" is a show;
-        // "chinese-drama" is a category page).
-        if (segments.size == 1) {
-            val seg = segments.first()
-            val showLike = seg.contains("-episode-") || seg.contains("season") ||
-                seg.contains("-movie-") || (seg.endsWith("-drama") && seg.count { it == '-' } >= 2)
-            if (!showLike) return MediaKind.None
-        }
-
-        return MediaKind.Unknown(host)
     }
 
     /** True when [url] is a direct media file or a KNOWN locker (playbook-

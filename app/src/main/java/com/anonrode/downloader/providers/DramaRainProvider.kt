@@ -21,6 +21,10 @@ object DramaRainProvider : SiteProvider {
     override val mainUrl: String get() = DynamicRulesManager.getBaseUrl(name)
 
     override suspend fun search(query: String): List<ShowCard> {
+        DynamicRulesManager.getPipeline(name)?.search?.let { pl ->
+            val results = RulesPipeline.runSearch(name, pl, query)
+            if (results.isNotEmpty()) return results
+        }
         // OTA search-strategy chain runs first when the playbook declares
         // one (dramarain's ?s= endpoint broke server-side; fallbacks are now
         // OTA data, not code). Legacy path below stays as final fallback.
@@ -117,6 +121,18 @@ object DramaRainProvider : SiteProvider {
 
     override suspend fun loadEpisodes(showUrl: String): ShowDetails {
         val show = ShowCard(title = "Drama", url = showUrl, site = name)
+        DynamicRulesManager.getPipeline(name)?.episodes?.let { pl ->
+            val res = RulesPipeline.runEpisodes(name, pl, showUrl)
+            if (res != null && res.episodes.isNotEmpty()) {
+                val card = ShowCard(
+                    title = res.title.ifBlank { show.title },
+                    url = showUrl,
+                    posterUrl = res.posterUrl.ifBlank { show.posterUrl },
+                    site = name
+                )
+                return ShowDetails(show = card, synopsis = res.synopsis, episodes = res.episodes)
+            }
+        }
         try {
             val html = HttpClient.getText(showUrl) ?: return ShowDetails(show = show)
             val doc = Jsoup.parse(html, showUrl)
@@ -146,7 +162,7 @@ object DramaRainProvider : SiteProvider {
                     HttpClient.safeResolveUri(showUrl, rawHref)
                 }
                 val text = a.text().trim()
-                if (href.isNotBlank() && href !in seen && !href.contains("/category/") && !href.contains("/tag/")) {
+                if (href.isNotBlank() && href !in seen && !com.anonrode.downloader.pipeline.StrictLinkClassifier.isNavigationJunk(href)) {
                     seen.add(href)
                     episodes.add(
                         EpisodeItem(
@@ -168,11 +184,15 @@ object DramaRainProvider : SiteProvider {
     }
 
     override suspend fun resolveEpisode(episodeUrl: String, quality: String): DownloadRecipe {
-        val direct = ResolverRegistry.resolve(episodeUrl, quality) ?: episodeUrl
-        val isHls = direct.contains(".m3u8") || direct.contains("manifest")
+        val direct = RulesPipeline.runResolveForSite(name, episodeUrl, quality)
+            ?: ResolverRegistry.resolve(episodeUrl, quality)
+        val target = if (!direct.isNullOrBlank()) direct else {
+            if (com.anonrode.downloader.pipeline.StrictLinkClassifier.isDirectMedia(episodeUrl)) episodeUrl else ""
+        }
+        val isHls = target.contains(".m3u8") || target.contains("manifest")
         return DownloadRecipe(
-            directUrl = direct,
-            filename = direct.substringAfterLast('/').substringBefore('?').ifEmpty { "episode.mp4" },
+            directUrl = target,
+            filename = target.substringAfterLast('/').substringBefore('?').ifEmpty { "episode.mp4" },
             backend = if (isHls) "ytdlp" else "aria2c",
             parallelSockets = 16
         )
