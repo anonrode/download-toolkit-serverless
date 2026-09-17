@@ -415,7 +415,8 @@ class DownloadEngine(
          *  stays the episode page, so the 401/403/404/HTML self-heal
          *  re-resolves from scratch if this token aged out between proof and
          *  tap. Null = the normal path, unchanged. */
-        verifiedDirectUrl: String? = null
+        verifiedDirectUrl: String? = null,
+        mirrorUrls: List<String> = emptyList()
     ): String {
         val downloadFolder = getDownloadDirectory(showTitle, createDirs = false)
 
@@ -471,7 +472,8 @@ class DownloadEngine(
                     site = site,
                     audioOnly = audioOnly,
                     quality = quality,
-                    createdAt = System.currentTimeMillis()
+                    createdAt = System.currentTimeMillis(),
+                    mirrorUrls = MirrorPool.sources(sourceUrl, mirrorUrls).filter { it != sourceUrl }
                 )
 
                 repository.addFirst(task)
@@ -1646,7 +1648,7 @@ class DownloadEngine(
                 var streamUrl = task.directUrl
                 val isMagnet = streamUrl.startsWith("magnet:", ignoreCase = true)
                 val isSocial = task.showTitle.startsWith("Social/", ignoreCase = true) || task.backend.contains("yt-dlp")
-                val permUrl = task.sourceUrl.ifBlank { streamUrl }
+                var permUrl = task.selectedMirrorUrl.ifBlank { task.sourceUrl }.ifBlank { streamUrl }
 
                 // A manual retry tap grants ONE bypass of the HostHealth gate
                 // for this start's FIRST resolution attempt (consume-on-use;
@@ -1666,7 +1668,26 @@ class DownloadEngine(
                     // the task in RESOLVING forever (user-reported).
                     val resolved = try {
                         kotlinx.coroutines.withTimeout(RESOLVE_TIMEOUT_MS) {
-                            resolveStreamUrl(permUrl, task.site, task.quality ?: defaultQuality, bypassHealth = bypassHealth)
+                            val candidates = if (task.mirrorUrls.isEmpty()) listOf(permUrl) else
+                                MirrorPool.eligible(task.sourceUrl, task.mirrorUrls, permUrl, bytesLanded(task) > 0L)
+                            var result: String? = null
+                            for (candidate in candidates) {
+                                coroutineContext.ensureActive()
+                                val output = try {
+                                    resolveStreamUrl(candidate, task.site, task.quality ?: defaultQuality, bypassHealth = bypassHealth)
+                                } catch (e: CancellationException) {
+                                    throw e
+                                } catch (_: Exception) { null }
+                                if (!output.isNullOrBlank()) {
+                                    permUrl = candidate
+                                    if (task.mirrorUrls.isNotEmpty()) repository.update(task.id) {
+                                        it.copy(selectedMirrorUrl = candidate)
+                                    }
+                                    result = output
+                                    break
+                                }
+                            }
+                            result
                         }
                     } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
                         com.anonrode.downloader.util.DebugLog.error("task=${task.id} resolution timed out after ${RESOLVE_TIMEOUT_MS / 1000}s")

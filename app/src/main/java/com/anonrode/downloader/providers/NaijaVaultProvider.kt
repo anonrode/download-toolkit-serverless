@@ -71,6 +71,73 @@ object NaijaVaultProvider : SiteProvider {
         return if (results.isEmpty()) noLinks else results
     }
 
+    // Same-site downloads use /dl- gateways, /cdn/ paths or media filenames;
+    // sibling posts and navigation are not downloadable resources.
+    private val mediaExtRegex = Regex("\\.(mkv|mp4|webm|avi|m3u8|zip|rar)$")
+    private fun isJunkSameSite(href: String, siteHost: String?): Boolean {
+        if (siteHost == null) return false
+        val uri = try { URI(href) } catch (_: Exception) { return false }
+        val host = uri.host?.lowercase() ?: return false
+        if (host != siteHost && !host.endsWith(".$siteHost") && !siteHost.endsWith(".$host")) return false
+        val path = (uri.path ?: "").lowercase()
+        if (path.isBlank() || path == "/" || path.startsWith("/category/") ||
+            path.startsWith("/tag/") || path.startsWith("/season-list") ||
+            path.startsWith("/series-list") || path.contains("/page/")) return true
+        // Any remaining same-site path is a sibling post page
+        // (sidebar/related junk) unless it is a download gateway or
+        // a real media file.
+        return !(path.startsWith("/dl-") || path.contains("/cdn/") ||
+            mediaExtRegex.containsMatchIn(path))
+    }
+
+    // Movie mirrors retain their document order and server/part labels.
+    internal fun movieDownloadItems(doc: org.jsoup.nodes.Document, showUrl: String): List<EpisodeItem> {
+        val siteHost = try { URI(showUrl).host?.lowercase()?.removePrefix("www.") } catch (_: Exception) { null }
+        val showPath = try { URI(showUrl).path ?: "" } catch (_: Exception) { "" }
+        fun isNonDownloadTarget(href: String): Boolean {
+            val h = href.trim()
+            if (h.isBlank() || h.startsWith("#")) return true
+            val uri = try { URI(h) } catch (_: Exception) { return true }
+            val scheme = uri.scheme?.lowercase()
+            if (scheme != "http" && scheme != "https") return true
+            val host = uri.host?.lowercase() ?: return true
+            if (siteHost != null && host.removePrefix("www.") == siteHost) {
+                val path = uri.path ?: ""
+                // Bare homepage, or a self-reference back to this very page.
+                if (path.isBlank() || path == "/") return true
+                if (showPath.isNotBlank() && path.trimEnd('/') == showPath.trimEnd('/')) return true
+            }
+            return false
+        }
+
+        var count = 0
+        val items = doc.select("a#download-button").mapNotNull { b ->
+            val raw = b.attr("href").trim()
+            if (raw.isBlank() || raw.startsWith("#")) return@mapNotNull null
+            val resolved = b.attr("abs:href").ifBlank {
+                try { URI(showUrl).resolve(raw).toString() } catch (_: Exception) { "" }
+            }.trim()
+            if (isNonDownloadTarget(resolved) || isJunkSameSite(resolved, siteHost)) return@mapNotNull null
+            count++
+            val t = b.text().trim()
+            EpisodeItem(
+                title = DownloadLinkLabels.serverOrPart(t, resolved) ?: t.ifBlank { "Download $count" },
+                url = resolved,
+                episodeNum = count,
+                site = name
+            )
+        }
+        // Only explicit server labels establish interchangeable movie mirrors;
+        // PART labels may describe different pieces of the movie.
+        val mirrors = items.filter { Regex("^Server \\d+$").matches(it.title) }
+            .map { it.url }.distinct().take(8)
+        return items.map { item ->
+            if (item.url in mirrors && Regex("^Server \\d+$").matches(item.title))
+                item.copy(mirrorUrls = mirrors.filter { it != item.url })
+            else item
+        }
+    }
+
     override suspend fun loadEpisodes(showUrl: String): ShowDetails {
         val show = ShowCard(title = "NaijaVault Media", url = showUrl, site = name)
         try {
@@ -101,6 +168,10 @@ object NaijaVaultProvider : SiteProvider {
             // same-host /dl-* links — they fail both checks here and keep the
             // episode-list path below.
             val dlButtons = doc.select("a#download-button")
+            // Host of the page itself, shared by the movie fallback sweep and
+            // the episode sweep; derived from the page URL so OTA base-url
+            // swaps keep the junk guard working.
+            val siteHost = try { URI(showUrl).host?.lowercase() } catch (_: Exception) { null }
             // "EPISODE NN" buttons always mean a series (posts can carry a
             // movie category alongside Series — live: 'Hello Future Me' is
             // Nollywood + Series), so they veto the movie path entirely.
@@ -114,28 +185,20 @@ object NaijaVaultProvider : SiteProvider {
                 // THIS film — live-verified 2026-09-13 (Project Sacrifice):
                 // one button, "WATCH & DOWNLOAD MOVIE HERE". The shape this
                 // replaces (firstOrNull) silently DROPPED server 2 whenever
-                // a film was published on two mirror buttons. Labels: an
-                // explicit "SERVER n" text wins as Server N, otherwise the
-                // button text, else Download N.
-                val movieItems = dlButtons.mapIndexedNotNull { i, b ->
-                    val h = b.attr("abs:href").ifBlank {
-                        HttpClient.safeResolveUri(showUrl, b.attr("href"))
-                    }
-                    if (h.isBlank()) null else {
-                        val t = b.text().trim()
-                        EpisodeItem(
-                            title = DownloadLinkLabels.serverOrPart(t, h) ?: t.ifBlank { "Download ${i + 1}" },
-                            url = h,
-                            episodeNum = i + 1,
-                            site = name
-                        )
-                    }
-                }.ifEmpty {
+                // a film was published on two mirror buttons. Navigation
+                // buttons (bare homepage, self-page, fragments, javascript:)
+                // are filtered by the unit-tested parser below — one of those
+                // (NaijaVault homepage-as-movie, device log 2026-09-16)
+                // spawned a task that cycled resolver backoff forever.
+                val movieItems = movieDownloadItems(doc, showUrl).ifEmpty {
                     // No literal button (theme variant): any known locker
                     // link on the page is the movie's download.
+                    // isJunkSameSite() guard applied here too — without it,
+                    // a cached proven-locker host match could pick the site's
+                    // own homepage or nav link as the download target.
                     val fallback = doc.select("a[href]").firstOrNull { a ->
                         val h = a.attr("abs:href").ifBlank { a.attr("href") }
-                        com.anonrode.downloader.resolvers.LockerRegistry.isKnownMedia(h)
+                        !isJunkSameSite(h, siteHost) && com.anonrode.downloader.resolvers.LockerRegistry.isKnownMedia(h)
                     }?.attr("abs:href").orEmpty()
                     if (fallback.isBlank()) emptyList()
                     else listOf(EpisodeItem(title = "Download 1", url = fallback, episodeNum = 1, site = name))
@@ -187,28 +250,11 @@ object NaijaVaultProvider : SiteProvider {
             // bare homepage and cycled resolver backoff forever. Host is
             // derived from the page itself so OTA base-url swaps keep it
             // working; cross-host lockers are untouched.
-            val siteHost = try { URI(showUrl).host?.lowercase() } catch (_: Exception) { null }
-            val mediaExtRegex = Regex("\\.(mkv|mp4|webm|avi|m3u8|zip|rar)$")
-            fun isJunkSameSite(href: String): Boolean {
-                if (siteHost == null) return false
-                val uri = try { URI(href) } catch (_: Exception) { return false }
-                val host = uri.host?.lowercase() ?: return false
-                if (host != siteHost && !host.endsWith(".$siteHost") && !siteHost.endsWith(".$host")) return false
-                val path = (uri.path ?: "").lowercase()
-                if (path.isBlank() || path == "/" || path.startsWith("/category/") ||
-                    path.startsWith("/tag/") || path.startsWith("/season-list") ||
-                    path.startsWith("/series-list") || path.contains("/page/")) return true
-                // Any remaining same-site path is a sibling post page
-                // (sidebar/related junk) unless it is a download gateway or
-                // a real media file.
-                return !(path.startsWith("/dl-") || path.contains("/cdn/") ||
-                    mediaExtRegex.containsMatchIn(path))
-            }
             val links: List<org.jsoup.nodes.Element> = if (otaSel != null) {
                 val ota = doc.select(otaSel)
                 val knownElsewhere = doc.select("a[href]").filter { a ->
                     val h = a.attr("abs:href").ifBlank { a.attr("href") }
-                    !isJunkSameSite(h) && com.anonrode.downloader.resolvers.LockerRegistry.isKnownMedia(h)
+                    !isJunkSameSite(h, siteHost) && com.anonrode.downloader.resolvers.LockerRegistry.isKnownMedia(h)
                 }
                 (ota + knownElsewhere).distinctBy { it.attr("abs:href").ifBlank { it.attr("href") } }
             } else {
@@ -230,7 +276,7 @@ object NaijaVaultProvider : SiteProvider {
                 // as downloadable episodes (bug: a bare homepage URL spawned
                 // a download task that failed "resolver chain EMPTY" and
                 // cycled backoff forever).
-                if (isJunkSameSite(href)) continue
+                if (isJunkSameSite(href, siteHost)) continue
 
                 // Direct-media detection: the site rotates download hosts
                 // (filevault, streamsss, streamwish, downloadwella, ...).
@@ -279,7 +325,7 @@ object NaijaVaultProvider : SiteProvider {
                 while (rawHrefs.find()) {
                     val u = rawHrefs.group().replace("&amp;", "&").trimEnd('.', ',', ')', ']')
                     if (u.isBlank() || u in rawSeen || u in seen) continue
-                    if (isJunkSameSite(u)) continue
+                    if (isJunkSameSite(u, siteHost)) continue
                     rawSeen.add(u)
                     episodes.add(
                         EpisodeItem(

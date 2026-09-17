@@ -31,7 +31,8 @@ data class EpisodeItem(
     val episodeNum: Int,
     val site: String,
     val sizeText: String = "",
-    val isDownloaded: Boolean = false
+    val isDownloaded: Boolean = false,
+    val mirrorUrls: List<String> = emptyList()
 )
 
 @Serializable
@@ -92,5 +93,7 @@ data class DownloadTask(
      *  buckets with real clock ages. 0 = task persisted by an older build —
      *  the UI falls back to list-position age for those (the list is
      *  newest-first, so position still orders them correctly). */
-    val createdAt: Long = 0L
+    val createdAt: Long = 0L,
+    val mirrorUrls: List<String> = emptyList(),
+    val selectedMirrorUrl: String = ""
 )

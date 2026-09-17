@@ -3,10 +3,12 @@ package com.anonrode.downloader.resolvers
 import com.anonrode.downloader.data.net.HttpClient
 import com.anonrode.downloader.pipeline.PipelineError
 import com.anonrode.downloader.pipeline.PipelineJournal
-import kotlinx.coroutines.async
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.supervisorScope
-import kotlinx.coroutines.selects.select
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withContext
 import okhttp3.FormBody
 import okhttp3.Request
 import org.json.JSONArray
@@ -25,14 +27,7 @@ interface BaseResolver {
     fun canResolve(url: String): Boolean
     suspend fun resolve(url: String, quality: String = "720p", depth: Int = 0): String?
 
-    /**
-     * Why the LAST resolve() attempt failed, or null when nothing is known.
-     * The registry logs this per-attempt reason (hop journal, retry decision,
-     * HostHealth.recordFail) instead of the GLOBAL HttpClient.lastFailure,
-     * which is stale for resolvers running their own OkHttp clients (the
-     * loadedfiles case: its private client swallows the real exception, so
-     * the global showed an unrelated canceled search from 60s earlier).
-     */
+    /** Legacy diagnostic only; concurrent registry attempts never infer outcomes from it. */
     fun lastResolveFailure(): String? = null
 }
 
@@ -91,13 +86,6 @@ object ResolverRegistry {
     const val RESOLVE_DEPTH_LIMIT = 6
     private const val NETWORK_RETRY_DELAY_MS = 1500L
 
-    // The last resolver's per-attempt failure reason (null when the last
-    // attempt succeeded or reported nothing). Filled by resolveInternal so the
-    // depth-0 recordFail in resolve() sees the REAL cause, not the global
-    // HttpClient.lastFailure (which LoadedfilesResolver's private OkHttp
-    // client never updates).
-    private var lastAttemptFailure: String? = null
-
     val RESOLVERS: List<BaseResolver> = listOf(
         VidbasicResolver,
         KissasianResolver,
@@ -126,7 +114,8 @@ object ResolverRegistry {
         GenericLockerResolver
     )
 
-    suspend fun resolve(url: String, quality: String = "720p", depth: Int = 0, bypassHealth: Boolean = false): String? {
+    suspend fun resolve(url: String, quality: String = "720p", depth: Int = 0, bypassHealth: Boolean = false): String? = withContext(Dispatchers.IO) {
+        currentCoroutineContext().ensureActive()
         // Cache + health apply ONCE per user-facing resolve (depth==0); the
         // recursive descent below stays uncached so gateway chains work.
         val cacheKey = com.anonrode.downloader.pipeline.ResolveCache.keyFor(url, quality)
@@ -135,7 +124,7 @@ object ResolverRegistry {
                 com.anonrode.downloader.pipeline.PipelineJournal.hop(
                     site = "", stage = "cache", url = url, ok = true, ms = 0
                 )
-                return cached
+                return@withContext cached
             }
             // Manual retry taps grant ONE bypass of the health gate: the user
             // explicitly asked for a fresh attempt at a cooling-down host, and
@@ -145,13 +134,12 @@ object ResolverRegistry {
                     site = "", stage = "health-gate", url = url, ok = false, ms = 0,
                     detail = "host dead or in backoff window — skipped without a request"
                 )
-                return null
+                return@withContext null
             }
         }
-        // A fresh user-facing resolve starts with no attempt history: a stale
-        // reason from an EARLIER task must never reach this call's recordFail.
-        if (depth == 0) lastAttemptFailure = null
-        val result = resolveInternal(url, quality, depth)
+        val outcome = resolveInternal(url, quality, depth)
+        currentCoroutineContext().ensureActive()
+        val result = (outcome as? ResolverOutcome.Success)?.url
         if (depth == 0) {
             // Health must be keyed on the TRUE host (same source of truth as
             // hostClaim/the terminal gate): the old string-split host recorded
@@ -163,7 +151,7 @@ object ResolverRegistry {
                 com.anonrode.downloader.pipeline.ResolveCache.put(cacheKey, result)
                 com.anonrode.downloader.pipeline.HostHealth.recordOk(host)
             } else {
-                val reason = lastAttemptFailure
+                val reason = (outcome as? ResolverOutcome.Failure)?.reason
                 com.anonrode.downloader.pipeline.HostHealth.recordFail(
                     host,
                     rateLimited = reason?.contains("429") == true,
@@ -171,66 +159,36 @@ object ResolverRegistry {
                 )
             }
         }
-        return result
+        result
     }
 
-    /**
-     * Race up to [maxConcurrency] locker candidates CONCURRENTLY and return
-     * the first success; losers are cancelled mid-flight. Health-dead hosts
-     * are filtered before launch. This is where the app beats the monolith:
-     * a page embedding three lockers with two dead costs seconds, not the
-     * full sequential walk.
-     */
+    /** Try all usable candidates in a bounded window; first success cancels losers. */
     suspend fun resolveAny(urls: List<String>, quality: String = "720p", maxConcurrency: Int = 3): String? {
         val candidates = urls.asSequence()
             .filter { it.isNotBlank() }
             .distinct()
             .filter { com.anonrode.downloader.pipeline.HostHealth.isUsable(it) }
-            .take(maxConcurrency.coerceIn(1, 6))
             .toList()
-        if (candidates.isEmpty()) return null
-        if (candidates.size == 1) return resolve(candidates.first(), quality)
-
-        return kotlinx.coroutines.supervisorScope {
-            val deferreds = candidates.map { u ->
-                async {
-                    try { resolve(u, quality) }
-                    catch (ce: kotlinx.coroutines.CancellationException) { throw ce }
-                    catch (_: Exception) { null }
-                }
-            }
-            // select must wait for the first SUCCESS, not the first COMPLETION:
-            // a candidate failing fast (dead locker answering null in ~200ms)
-            // used to win the race and have the still-working racers cancelled
-            // underneath it — exactly the opposite of the method's purpose.
-            // Drain completions until one carries a URL; then cancel the rest.
-            val pending = deferreds.toMutableList()
-            var winner: String? = null
-            while (winner == null && pending.isNotEmpty()) {
-                val (done, value) = select<Pair<kotlinx.coroutines.Deferred<String?>, String?>> {
-                    pending.forEach { d -> d.onAwait { d to it } }
-                }
-                pending.remove(done)
-                winner = value
-            }
-            pending.forEach { it.cancel() }
-            winner
-        }
+        return boundedFirstSuccess(candidates, maxConcurrency) { resolve(it, quality) }
     }
 
-    private suspend fun resolveInternal(url: String, quality: String = "720p", depth: Int = 0): String? {
+    private suspend fun resolveInternal(url: String, quality: String = "720p", depth: Int = 0): ResolverOutcome {
+        currentCoroutineContext().ensureActive()
         if (depth > RESOLVE_DEPTH_LIMIT) {
             com.anonrode.downloader.pipeline.PipelineJournal.hop(
                 site = "", stage = "registry", url = url, ok = false, ms = 0,
                 detail = PipelineError.BudgetExceeded("depth", 0).message ?: "depth limit"
             )
-            return null
+            return ResolverOutcome.Failure("depth limit")
         }
         val trimmed = url.trim()
+        var failure: ResolverOutcome = ResolverOutcome.NoMatch
         for (resolver in RESOLVERS) {
+            currentCoroutineContext().ensureActive()
             if (resolver.canResolve(trimmed)) {
                 val start = System.currentTimeMillis()
-                val direct = resolveWithRetry(resolver, trimmed, quality, depth)
+                val outcome = resolveWithRetry(resolver, trimmed, quality, depth)
+                val direct = (outcome as? ResolverOutcome.Success)?.url
                 val elapsed = System.currentTimeMillis() - start
                 if (!direct.isNullOrBlank()) {
                     com.anonrode.downloader.pipeline.PipelineJournal.hop(
@@ -250,49 +208,37 @@ object ResolverRegistry {
                         val sameResolverReclaims = resolver.canResolve(direct)
                         if (!(sameResolverReclaims && mediaPath)) {
                             val deeper = resolveInternal(direct, quality, depth + 1)
-                            if (!deeper.isNullOrBlank()) return deeper
+                            if (deeper is ResolverOutcome.Success) return deeper
                         }
                     }
-                    return direct
+                    return ResolverOutcome.Success(direct)
                 }
                 com.anonrode.downloader.pipeline.PipelineJournal.hop(
                     site = "", stage = "crack:${resolver::class.simpleName}",
                     url = trimmed, ok = false, ms = elapsed,
-                    detail = resolver.lastResolveFailure()?.take(120) ?: ""
+                    detail = (outcome as? ResolverOutcome.Failure)?.reason?.take(120) ?: ""
                 )
-                if (resolver.lastResolveFailure() != null) {
-                    lastAttemptFailure = resolver.lastResolveFailure()
-                }
+                if (outcome is ResolverOutcome.Failure) failure = outcome
             }
         }
-        return null
+        return failure
     }
 
-    // A dropped connection (DNS/reset/timeout) is not proof the host is gone:
-    // retry network-class failures up to 3 times, but fail fast when the host
-    // answered (HTTP error) or the page simply held nothing (clean null) —
-    // monolith parity (resolvers.py registry retry loop). The before/after
-    // comparison uses the RESOLVER's per-attempt reason: the global
-    // HttpClient.lastFailure is stale for resolvers with their own OkHttp
-    // client (loadedfiles), which would block network-class retries forever.
-    private suspend fun resolveWithRetry(resolver: BaseResolver, url: String, quality: String, depth: Int): String? {
+    // Retry only request-local connectivity evidence, never singleton diagnostic strings.
+    private suspend fun resolveWithRetry(resolver: BaseResolver, url: String, quality: String, depth: Int): ResolverOutcome {
         var attempt = 0
         while (true) {
-            val before = resolver.lastResolveFailure()
-            val result = resolver.resolve(url, quality, depth)
-            if (!result.isNullOrBlank()) return result
-            val current = resolver.lastResolveFailure()
-            if (attempt >= 2 || !isNetworkClassFailure(current, before)) return result
+            val outcome = if (resolver === LoadedfilesResolver) {
+                LoadedfilesResolver.resolveOutcome(url, quality, depth)
+            } else {
+                captureResolverOutcome { resolver.resolve(url, quality, depth) }
+            }
+            currentCoroutineContext().ensureActive()
+            if (attempt >= 2 || outcome !is ResolverOutcome.Failure || !outcome.retryable) return outcome
             attempt++
             com.anonrode.downloader.util.DebugLog.resolve("network-class failure, retry #$attempt ${resolver::class.simpleName}")
             delay(NETWORK_RETRY_DELAY_MS)
         }
-    }
-
-    private fun isNetworkClassFailure(current: String?, before: String?): Boolean {
-        if (current == null || current == before) return false
-        if (current.startsWith("HTTP ")) return false
-        return true
     }
 }
 
@@ -1158,9 +1104,7 @@ object DownloadwellaResolver : BaseResolver {
 object LoadedfilesResolver : BaseResolver {
     private val HOST_RE = Pattern.compile("""loadedfiles\.[a-z0-9-]+""", Pattern.CASE_INSENSITIVE)
 
-    // The real exception behind the last failed resolve() (its own OkHttp
-    // client never touches the global HttpClient.lastFailure, so the registry
-    // would otherwise log a stale unrelated failure — see BaseResolver).
+    // Legacy diagnostic retained for callers; the registry uses resolveOutcome instead.
     @Volatile private var lastResolveError: String? = null
 
     override fun lastResolveFailure(): String? = lastResolveError
@@ -1191,7 +1135,18 @@ object LoadedfilesResolver : BaseResolver {
         else HOST_RE.matcher(url.lowercase()).find()
     }
 
-    override suspend fun resolve(url: String, quality: String, depth: Int): String? {
+    override suspend fun resolve(url: String, quality: String, depth: Int): String? =
+        (resolveOutcome(url, quality, depth) as? ResolverOutcome.Success)?.url
+
+    internal suspend fun resolveOutcome(url: String, quality: String, depth: Int): ResolverOutcome = withContext(Dispatchers.IO) {
+        var failure: ResolverOutcome.Failure? = null
+        val outcome = captureResolverOutcome { resolveAttempt(url) { failure = it } }
+        val result = if (outcome == ResolverOutcome.NoMatch) failure ?: outcome else outcome
+        lastResolveError = (result as? ResolverOutcome.Failure)?.reason
+        result
+    }
+
+    private suspend fun resolveAttempt(url: String, onFailure: (ResolverOutcome.Failure?) -> Unit): String? {
         try {
             // The token chain needs the shared client's longer read timeout (a
             // slow wait page must not abort the hop), but the host-candidate
@@ -1217,7 +1172,16 @@ object LoadedfilesResolver : BaseResolver {
             var currUrl: String? = null
             for (host in hosts) {
                 val candidate = HttpClient.safeUrl(rewriteHost(url, host))
-                val effective = probeEffectiveUrl(probeClient, candidate)
+                val effective = try {
+                    probeEffectiveUrl(probeClient, candidate)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (e: Exception) {
+                    currentCoroutineContext().ensureActive()
+                    onFailure(resolverFailure(e))
+                    android.util.Log.w("AnonDownload", "Loadedfiles fast-probe failed for $host: ${e.message}")
+                    null
+                }
                 if (effective != null) {
                     lastWorkingHost = effective.substringAfter("://").substringBefore('/').lowercase()
                     currUrl = effective
@@ -1231,7 +1195,16 @@ object LoadedfilesResolver : BaseResolver {
             if (currUrl == null) {
                 for (host in hosts) {
                     val candidate = HttpClient.safeUrl(rewriteHost(url, host))
-                    val effective = probeEffectiveUrl(slowProbeClient, candidate)
+                    val effective = try {
+                        probeEffectiveUrl(slowProbeClient, candidate)
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (e: Exception) {
+                        currentCoroutineContext().ensureActive()
+                        onFailure(resolverFailure(e))
+                        android.util.Log.w("AnonDownload", "Loadedfiles slow-probe failed for $host: ${e.message}")
+                        null
+                    }
                     if (effective != null) {
                         lastWorkingHost = effective.substringAfter("://").substringBefore('/').lowercase()
                         currUrl = effective
@@ -1244,8 +1217,11 @@ object LoadedfilesResolver : BaseResolver {
                 return null
             }
 
+            onFailure(null)
+            val workingHost = HttpClient.parsedHost(currUrl!!)
             var ptHops = 0
             for (step in 1..8) {
+                currentCoroutineContext().ensureActive()
                 // Wait-page chain: the second ?pt= hop only redirects to the CDN
                 // when sent WITHOUT a Referer -- any Referer makes the server
                 // rotate tokens forever (monolith parity: resolvers.py
@@ -1254,7 +1230,7 @@ object LoadedfilesResolver : BaseResolver {
                 val referer = when {
                     ptHops >= 1 && currUrl!!.contains("?pt=") -> null
                     currUrl!!.contains("?pt=") ->
-                        lastWorkingHost?.let { "https://$it/" } ?: "https://my9jarocks.bz/"
+                        workingHost?.let { "https://$it/" } ?: "https://my9jarocks.bz/"
                     step == 1 -> "https://my9jarocks.bz/"
                     else -> currUrl
                 }
@@ -1267,7 +1243,7 @@ object LoadedfilesResolver : BaseResolver {
                 noRedirectClient.newCall(req).execute().use { res ->
                     val loc = res.header("Location")
                     if (!loc.isNullOrBlank()) {
-                        val safeLoc = HttpClient.safeUrl(loc)
+                        val safeLoc = HttpClient.safeUrl(HttpClient.safeResolveUri(res.request.url.toString(), loc))
                         // Second-or-later ?pt= hop: the Location IS the answer
                         // (monolith parity, resolvers.py hop-3:
                         // `return r3.headers.get('location')`) -- no gating.
@@ -1319,12 +1295,11 @@ object LoadedfilesResolver : BaseResolver {
                     }
                 }
             }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (e: Exception) {
-            // Surface the REAL cause to the registry: this resolver runs its
-            // own OkHttp client, so the global HttpClient.lastFailure is stale
-            // (it showed an unrelated canceled search). The registry logs and
-            // retries on this per-attempt reason instead.
-            lastResolveError = "${e.javaClass.simpleName}: ${e.message}"
+            currentCoroutineContext().ensureActive()
+            onFailure(resolverFailure(e))
             android.util.Log.e("AnonDownload", "LoadedfilesResolver error: ${e.message}", e)
         }
         return null
@@ -1335,9 +1310,10 @@ object LoadedfilesResolver : BaseResolver {
      * served a page. loadedfiles.org is a 301 shell for loadedfiles.net —
      * treating the shell as the working host poisoned the whole chain.
      */
-    private fun probeEffectiveUrl(client: okhttp3.OkHttpClient, startUrl: String): String? {
+    private suspend fun probeEffectiveUrl(client: okhttp3.OkHttpClient, startUrl: String): String? {
         var url = startUrl
         repeat(3) {
+            currentCoroutineContext().ensureActive()
             val req = Request.Builder()
                 .url(HttpClient.safeUrl(url))
                 .header("User-Agent", HttpClient.DEFAULT_UA)
@@ -1346,7 +1322,7 @@ object LoadedfilesResolver : BaseResolver {
             client.newCall(req).execute().use { res ->
                 val loc = res.header("Location")
                 if (res.code in 300..399 && !loc.isNullOrBlank()) {
-                    url = HttpClient.safeUrl(loc)
+                    url = HttpClient.safeUrl(HttpClient.safeResolveUri(res.request.url.toString(), loc))
                 } else if (res.code in 200..299) {
                     return url
                 } else {

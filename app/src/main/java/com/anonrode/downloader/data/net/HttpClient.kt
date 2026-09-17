@@ -114,46 +114,86 @@ object HttpClient {
             .build()
     }
 
+    // Fixed workers + bounded queue: timed-out native lookups retain their
+    // worker until they really return, even when getaddrinfo ignores interrupts.
+    private val dnsScheduler by lazy {
+        BoundedDnsScheduler(
+            primary = { okhttp3.Dns.SYSTEM.lookup(it) },
+            fallback = { dohFallback(it) }
+        )
+    }
+
+    private val retryAfterCooldown = RetryAfterCooldown()
+
+    /** Optional coroutine admission wait; existing synchronous APIs never sleep. */
+    suspend fun awaitOriginCooldown(url: String) {
+        retryAfterCooldown.waitUntilUsable(safeUrl(url))
+    }
+
+    private fun admitRequest(url: String) {
+        val remaining = retryAfterCooldown.remainingMs(safeUrl(url))
+        if (remaining > 0) throw java.io.IOException("Origin cooling down for ${remaining}ms")
+    }
+
+    private fun recordCooldown(response: Response) {
+        // Attribute to the request that actually received the response, including
+        // redirects, not the initial URL or the global diagnostic lastFailure.
+        val code = response.code
+        if (code == 429 || code == 503) {
+            retryAfterCooldown.record(response.request.url.toString(), response.header("Retry-After"))
+        }
+    }
+
     /**
      * Hybrid Smart-DNS:
-     * 1. Primary: System DNS (Fastest 15ms latency + local ISP CDN geo-routing for max video download speeds).
-     * 2. Fallback: Google Public DNS over HTTPS (Bypasses Nigerian ISP censorship/DNS-poisoning on blocked scraper sites).
+     * 1. Primary: System DNS (fast, geo-routes CDN IPs for max video speeds).
+     *    Capped at 3 s — on some Nigerian ISPs the carrier DNS server goes
+     *    unresponsive (not NXDOMAIN, just silent), blocking getaddrinfo for up
+     *    to 75 s before timing out. Three seconds is enough for a healthy
+     *    system DNS; anything slower falls through to DoH immediately.
+     * 2. Fallback: Google Public DNS over HTTPS (bypasses ISP DNS poisoning /
+     *    censorship on blocked scraper sites).
      */
     private val hybridDns = object : okhttp3.Dns {
         override fun lookup(hostname: String): List<java.net.InetAddress> {
             dohCache[hostname]?.let { return it }
-            return try {
-                okhttp3.Dns.SYSTEM.lookup(hostname)
-            } catch (e: java.net.UnknownHostException) {
-                try {
-                    val encoded = java.net.URLEncoder.encode(hostname, "UTF-8")
-                    val dohUrl = "https://dns.google/resolve?name=$encoded&type=A"
-                    val req = Request.Builder()
-                        .url(dohUrl)
-                        .header("User-Agent", DEFAULT_UA)
-                        .build()
-                    bootstrapDohClient.newCall(req).execute().use { res ->
-                        if (!res.isSuccessful) throw e
-                        val body = res.body?.string() ?: throw e
-                        val json = org.json.JSONObject(body)
-                        val answers = json.optJSONArray("Answer") ?: throw e
-                        val addrs = mutableListOf<java.net.InetAddress>()
-                        for (i in 0 until answers.length()) {
-                            val data = answers.getJSONObject(i).optString("data")
-                            if (data.isNotBlank() && !data.contains(":")) {
-                                addrs.add(java.net.InetAddress.getByName(data))
-                            }
-                        }
-                        if (addrs.isEmpty()) throw e
-                        dohCache[hostname] = addrs
-                        addrs
-                    }
-                } catch (_: Exception) {
-                    throw e
-                }
-            }
+            // Bounded system-DNS race: fixed workers + bounded queue, DoH on
+            // timeout/saturation/interrupt (see BoundedDnsScheduler).
+            return dnsScheduler.lookup(hostname)
         }
     }
+
+    private fun dohFallback(hostname: String): List<java.net.InetAddress> {
+        return try {
+            val encoded = java.net.URLEncoder.encode(hostname, "UTF-8")
+            val dohUrl = "https://dns.google/resolve?name=$encoded&type=A"
+            val req = Request.Builder()
+                .url(dohUrl)
+                .header("User-Agent", DEFAULT_UA)
+                .build()
+            bootstrapDohClient.newCall(req).execute().use { res ->
+                if (!res.isSuccessful) throw java.net.UnknownHostException(hostname)
+                val body = res.body?.string() ?: throw java.net.UnknownHostException(hostname)
+                val json = org.json.JSONObject(body)
+                val answers = json.optJSONArray("Answer") ?: throw java.net.UnknownHostException(hostname)
+                val addrs = mutableListOf<java.net.InetAddress>()
+                for (i in 0 until answers.length()) {
+                    val data = answers.getJSONObject(i).optString("data")
+                    if (data.isNotBlank() && !data.contains(":")) {
+                        addrs.add(java.net.InetAddress.getByName(data))
+                    }
+                }
+                if (addrs.isEmpty()) throw java.net.UnknownHostException(hostname)
+                dohCache[hostname] = addrs
+                addrs
+            }
+        } catch (e: java.net.UnknownHostException) {
+            throw e
+        } catch (_: Exception) {
+            throw java.net.UnknownHostException(hostname)
+        }
+    }
+
 
     /**
      * SSRF floor for every PAGE/RESOLVER fetch: after the hybrid resolver, drop
@@ -573,7 +613,9 @@ object HttpClient {
 
     fun getText(url: String, referer: String? = null, headers: Map<String, String> = emptyMap(), acceptStatus: Set<Int> = emptySet(), tag: String? = null, permissive: Boolean = false, maxBytes: Long = MAX_TEXT_BYTES): String? {
         return try {
+            admitRequest(url)
             get(url, referer, headers, tag, permissive).use { res ->
+                recordCooldown(res)
                 if (res.isSuccessful || res.code in acceptStatus) {
                     // The host answered: clear any stale "dead" mark. The
                     // previous behavior treated a 2xx on a previously-failed
@@ -638,6 +680,7 @@ object HttpClient {
                     com.anonrode.downloader.util.DebugLog.net(
                         "POST ${safeUrl(url)} -> ${res.code} in ${System.currentTimeMillis() - started}ms"
                     )
+                    recordCooldown(res)
                     if (res.isSuccessful) {
                         cappedText(res, maxBytes)
                     } else {
