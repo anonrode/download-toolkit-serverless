@@ -259,14 +259,21 @@ object NkiriProvider : SiteProvider {
      *  → `https://downloadwella.com/...`. Returns the input unchanged when the
      *  parameter is absent or the decoded target isn't an http URL. */
     private fun unwrapDownloadManagerRedirect(url: String): String {
-        val m = Regex("""/dl/[^?]*\?.*?[?&]redirect=([^&]+)""", RegexOption.IGNORE_CASE).find(url)
-            ?: return url
-        val target = try {
-            URLDecoder.decode(m.groupValues[1], "UTF-8")
+        return try {
+            val wrapper = URI(url)
+            if (wrapper.path?.startsWith("/dl/", ignoreCase = true) != true) return url
+            val parameter = wrapper.rawQuery?.split('&')?.firstOrNull {
+                URLDecoder.decode(it.substringBefore('='), "UTF-8").equals("redirect", ignoreCase = true)
+            } ?: return url
+            val target = URLDecoder.decode(parameter.substringAfter('=', ""), "UTF-8")
+            val parsed = URI(target)
+            if ((parsed.scheme.equals("http", ignoreCase = true) ||
+                        parsed.scheme.equals("https", ignoreCase = true)) && !parsed.host.isNullOrBlank()) {
+                target
+            } else url
         } catch (_: Exception) {
-            null
+            url
         }
-        return if (!target.isNullOrBlank() && target.startsWith("http", ignoreCase = true)) target else url
     }
 
     /** S02E05 season episode numbers from locker filenames. Mirrors the number

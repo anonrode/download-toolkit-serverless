@@ -446,7 +446,12 @@ object HttpClient {
         }
     }
 
-    fun get(url: String, referer: String? = null, headers: Map<String, String> = emptyMap(), tag: String? = null, permissive: Boolean = false): Response {
+    fun get(url: String, referer: String? = null, headers: Map<String, String> = emptyMap(), tag: String? = null, permissive: Boolean = false): Response =
+        executeGet(url, referer, headers, tag, permissive) { it }
+
+    // Raw get() still transfers response ownership to its caller. getText() instead
+    // consumes inside this scope, retaining cancellation registration during reads.
+    private fun <T> executeGet(url: String, referer: String?, headers: Map<String, String>, tag: String?, permissive: Boolean, client: OkHttpClient = if (permissive) permissiveClient else shared, consume: (Response) -> T): T {
         // SSRF floor, page plane. safeDns filters DNS-resolved hosts, but OkHttp
         // SKIPS the custom Dns for IP-literal hosts (RouteSelector:
         // canParseAsIpAddress -> raw getByName; fact-checked against 4.12.0
@@ -463,7 +468,6 @@ object HttpClient {
         }
         headers.forEach { (k, v) -> reqBuilder.header(k, v) }
 
-        val client = if (permissive) permissiveClient else shared
         val call = client.newCall(reqBuilder.build())
         inFlightCalls.add(call)
         if (tag != null) {
@@ -475,7 +479,7 @@ object HttpClient {
             com.anonrode.downloader.util.DebugLog.net(
                 "GET ${safeUrl(url)} -> ${res.code} in ${System.currentTimeMillis() - started}ms"
             )
-            res
+            consume(res)
         } catch (e: Exception) {
             com.anonrode.downloader.util.DebugLog.net(
                 "GET ${safeUrl(url)} FAILED ${e.javaClass.simpleName}: ${e.message} after ${System.currentTimeMillis() - started}ms"
@@ -533,7 +537,11 @@ object HttpClient {
         taggedCalls.remove(tag)
     }
 
-    /** Registration covers headers AND body reads; the response cannot escape this scope. */
+    /**
+     * Registration covers headers AND body reads; the response cannot escape this scope.
+     * Synchronous: registry cancellation only, NOT automatically bound to a coroutine Job.
+     * Callers needing Job cancellation must supply a per-call bridge; never cancel globally.
+     */
     internal inline fun <T> executeCancellable(client: OkHttpClient, req: Request, block: (Response) -> T): T {
         val call = registerResolverCall(client, req)
         try {
@@ -592,7 +600,7 @@ object HttpClient {
     /** Overall budget for one page/blob body read. Generous for real pages
      *  (kilobytes) yet a hard wall against trickling servers. */
     const val DEFAULT_BODY_BUDGET_MS = 90_000L
-    private fun drainCapped(source: okio.BufferedSource, maxBytes: Long, budgetMs: Long): ByteArray {
+    private fun drainCapped(source: okio.BufferedSource, maxBytes: Long, budgetMs: Long, propagateFailure: Boolean = false): ByteArray {
         val want = java.lang.Long.min(maxBytes + 1, Int.MAX_VALUE.toLong())
         val deadline = System.currentTimeMillis() + budgetMs
         var have = 0L
@@ -600,7 +608,10 @@ object HttpClient {
             val target = minOf(have + DRAIN_STEP, want)
             val ok = try {
                 source.request(target)
-            } catch (_: Exception) {
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (propagateFailure) throw e
                 false
             }
             have = source.buffer.size
@@ -610,9 +621,12 @@ object HttpClient {
     }
 
     /** Read at most [maxBytes] of the response body as UTF-8 text. */
-    fun cappedText(res: Response, maxBytes: Long = MAX_TEXT_BYTES, budgetMs: Long = DEFAULT_BODY_BUDGET_MS): String? {
+    fun cappedText(res: Response, maxBytes: Long = MAX_TEXT_BYTES, budgetMs: Long = DEFAULT_BODY_BUDGET_MS): String? =
+        readCappedText(res, maxBytes, budgetMs, propagateFailure = false)
+
+    private fun readCappedText(res: Response, maxBytes: Long, budgetMs: Long = DEFAULT_BODY_BUDGET_MS, propagateFailure: Boolean): String? {
         val body = res.body ?: return null
-        val bytes = drainCapped(body.source(), maxBytes, budgetMs)
+        val bytes = drainCapped(body.source(), maxBytes, budgetMs, propagateFailure)
         val truncated = bytes.size > maxBytes
         val text = String(if (truncated) bytes.copyOf(maxBytes.toInt()) else bytes, Charsets.UTF_8)
         if (truncated) {
@@ -648,34 +662,58 @@ object HttpClient {
         return bytes
     }
 
-    fun getText(url: String, referer: String? = null, headers: Map<String, String> = emptyMap(), acceptStatus: Set<Int> = emptySet(), tag: String? = null, permissive: Boolean = false, maxBytes: Long = MAX_TEXT_BYTES): String? {
+    /** Request-local evidence; never infer resolver outcomes from [lastFailure]. */
+    fun interface FailureListener {
+        fun onFailure(url: String, error: Throwable)
+    }
+
+    /** Legacy nullable API retained; the overload adds opt-in local failure evidence. */
+    fun getText(url: String, referer: String? = null, headers: Map<String, String> = emptyMap(), acceptStatus: Set<Int> = emptySet(), tag: String? = null, permissive: Boolean = false, maxBytes: Long = MAX_TEXT_BYTES): String? =
+        getText(url, referer, headers, acceptStatus, tag, permissive, maxBytes, null)
+
+    /**
+     * Listener runs at most once on the caller's thread; listener exceptions propagate.
+     * Opting in also reports body-read failures instead of returning partial text.
+     */
+    fun getText(url: String, referer: String? = null, headers: Map<String, String> = emptyMap(), acceptStatus: Set<Int> = emptySet(), tag: String? = null, permissive: Boolean = false, maxBytes: Long = MAX_TEXT_BYTES, onFailure: FailureListener?): String? =
+        getTextWithClient(if (permissive) permissiveClient else shared, url, referer, headers, acceptStatus, tag, maxBytes, onFailure)
+
+    // Injected client keeps regression tests socket-free without mutating shared state.
+    internal fun getTextWithClient(client: OkHttpClient, url: String, referer: String? = null, headers: Map<String, String> = emptyMap(), acceptStatus: Set<Int> = emptySet(), tag: String? = null, maxBytes: Long = MAX_TEXT_BYTES, onFailure: FailureListener? = null): String? {
         return try {
             admitRequest(url)
-            get(url, referer, headers, tag, permissive).use { res ->
-                recordCooldown(res)
-                if (res.isSuccessful || res.code in acceptStatus) {
-                    // The host answered: clear any stale "dead" mark. The
-                    // previous behavior treated a 2xx on a previously-failed
-                    // host as a normal success (recorded via recordOk
-                    // elsewhere) but DID NOT short-circuit the 60s backoff
-                    // — so vdl.np-downloader.com, which the engine had
-                    // tagged dead for 60s after a single DNS hiccup, kept
-                    // getting skipped even after the very next GET to it
-                    // returned 200 OK (live-verified: 50+ health-gate ERR
-                    // events in app-2026-08-29 / 09-01, each followed by
-                    // a 200 response on the immediate next request). This
-                    // clearIfAlive call is the single line that fixes it.
-                    com.anonrode.downloader.pipeline.HostHealth.clearIfAlive(url)
-                    cappedText(res, maxBytes)
-                } else {
-                    lastFailure = "HTTP ${res.code} for ${url.take(120)}"
-                    Log.w("HttpClient", lastFailure!!)
-                    null
+            executeGet(url, referer, headers, tag, false, client) { res ->
+                res.use { r ->
+                    recordCooldown(r)
+                    if (r.isSuccessful || r.code in acceptStatus) {
+                        // The host answered: clear any stale "dead" mark. The
+                        // previous behavior treated a 2xx on a previously-failed
+                        // host as a normal success (recorded via recordOk
+                        // elsewhere) but DID NOT short-circuit the 60s backoff
+                        // — so vdl.np-downloader.com, which the engine had
+                        // tagged dead for 60s after a single DNS hiccup, kept
+                        // getting skipped even after the very next GET to it
+                        // returned 200 OK (live-verified: 50+ health-gate ERR
+                        // events in app-2026-08-29 / 09-01, each followed by
+                        // a 200 response on the immediate next request). This
+                        // clearIfAlive call is the single line that fixes it.
+                        com.anonrode.downloader.pipeline.HostHealth.clearIfAlive(url)
+                        readCappedText(r, maxBytes, propagateFailure = onFailure != null)
+                    } else {
+                        if (r.code == 429 || r.code == 503) {
+                            throw OriginCooldownException(r.request.url.toString())
+                        }
+                        throw java.io.IOException("HTTP ${r.code} for ${r.request.url.toString().take(120)}")
+                    }
                 }
             }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (e: Exception) {
-            lastFailure = "${e.javaClass.simpleName}: ${e.message} for ${url.take(120)}"
-            Log.w("HttpClient", lastFailure!!)
+            val message = "${e.javaClass.simpleName}: ${e.message} for ${url.take(120)}"
+            lastFailure = message
+            Log.w("HttpClient", message)
+            onFailure?.onFailure(url, e)
             null
         }
     }
@@ -686,8 +724,15 @@ object HttpClient {
      * calls stay cancellable as a group). Used by the rules pipeline for
      * sites whose search is an admin-ajax style POST.
      */
-    fun postForm(url: String, form: Map<String, String>, referer: String? = null, headers: Map<String, String> = emptyMap(), tag: String? = null, maxBytes: Long = MAX_TEXT_BYTES): String? {
+    fun postForm(url: String, form: Map<String, String>, referer: String? = null, headers: Map<String, String> = emptyMap(), tag: String? = null, maxBytes: Long = MAX_TEXT_BYTES): String? =
+        postFormWithClient(shared, url, form, referer, headers, tag, maxBytes)
+
+    fun postForm(url: String, form: Map<String, String>, referer: String? = null, headers: Map<String, String> = emptyMap(), tag: String? = null, maxBytes: Long = MAX_TEXT_BYTES, onFailure: FailureListener?): String? =
+        postFormWithClient(shared, url, form, referer, headers, tag, maxBytes, onFailure)
+
+    internal fun postFormWithClient(client: OkHttpClient, url: String, form: Map<String, String>, referer: String? = null, headers: Map<String, String> = emptyMap(), tag: String? = null, maxBytes: Long = MAX_TEXT_BYTES, onFailure: FailureListener? = null): String? {
         return try {
+            admitRequest(url)
             refuseUnsafeTarget(url) // same floor as get() — INSIDE the try so an
             // unsafe target journal+returns null exactly like getText does; one
             // guard throwing for one verb and returning null for the other is
@@ -706,7 +751,7 @@ object HttpClient {
             }
             headers.forEach { (k, v) -> reqBuilder.header(k, v) }
 
-            val call = shared.newCall(reqBuilder.build())
+            val call = client.newCall(reqBuilder.build())
             inFlightCalls.add(call)
             if (tag != null) {
                 taggedCalls.computeIfAbsent(tag) { java.util.concurrent.CopyOnWriteArrayList() }.add(call)
@@ -719,11 +764,12 @@ object HttpClient {
                     )
                     recordCooldown(res)
                     if (res.isSuccessful) {
-                        cappedText(res, maxBytes)
+                        readCappedText(res, maxBytes, propagateFailure = onFailure != null)
                     } else {
-                        lastFailure = "HTTP ${res.code} for ${url.take(120)}"
-                        Log.w("HttpClient", lastFailure!!)
-                        null
+                        if (res.code == 429 || res.code == 503) {
+                            throw OriginCooldownException(res.request.url.toString())
+                        }
+                        throw java.io.IOException("HTTP ${res.code} for ${res.request.url.toString().take(120)}")
                     }
                 }
             } finally {
@@ -732,9 +778,13 @@ object HttpClient {
                     taggedCalls[tag]?.remove(call)
                 }
             }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (e: Exception) {
-            lastFailure = "${e.javaClass.simpleName}: ${e.message} for ${url.take(120)}"
-            Log.w("HttpClient", lastFailure!!)
+            val message = "${e.javaClass.simpleName}: ${e.message} for ${url.take(120)}"
+            lastFailure = message
+            Log.w("HttpClient", message)
+            onFailure?.onFailure(url, e)
             null
         }
     }

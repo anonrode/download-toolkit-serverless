@@ -209,6 +209,15 @@ object ResolverRegistry {
                         if (!(sameResolverReclaims && mediaPath)) {
                             val deeper = resolveInternal(direct, quality, depth + 1)
                             if (deeper is ResolverOutcome.Success) return deeper
+                            // Reference parity (resolvers.py:2473-2475): a failed
+                            // deeper pass must NOT fall back to returning the
+                            // uncracked intermediary as Success -- the old code
+                            // did, handing web locker pages to aria2c as if they
+                            // were media (ghost-file class). Terminal CDNs are
+                            // exempted above: a media-path result the SAME
+                            // resolver re-claims is its final answer, kept even
+                            // when a hypothetical deeper pass would fail.
+                            if (deeper is ResolverOutcome.Failure) return deeper
                         }
                     }
                     return ResolverOutcome.Success(direct)
@@ -1228,6 +1237,12 @@ object LoadedfilesResolver : BaseResolver {
             var ptHops = 0
             for (step in 1..8) {
                 currentCoroutineContext().ensureActive()
+                // No-progress guard: a step that ends on the SAME url (200 body
+                // with no downloadUrl and no media) would otherwise be re-fetched
+                // up to 8 times -- the server is rotating tokens in the page, so
+                // re-reading the identical URL cannot advance the chain. End the
+                // walk the first time nothing moved.
+                val pageBeforeStep = currUrl
                 // Wait-page chain: the second ?pt= hop only redirects to the CDN
                 // when sent WITHOUT a Referer -- any Referer makes the server
                 // rotate tokens forever (monolith parity: resolvers.py
@@ -1300,7 +1315,20 @@ object LoadedfilesResolver : BaseResolver {
                         }
                     }
                 }
+                if (currUrl == pageBeforeStep) {
+                    // Same page came back with nothing actionable: further steps
+                    // would repeat it verbatim. Give up on this host here; the
+                    // mirror-fallthrough below lets the next candidate try.
+                    android.util.Log.w("AnonDownload", "Loadedfiles token chain stalled (no progress) on $currUrl")
+                    break
+                }
             }
+            // The token chain failed on the reachable-first host (it answered
+            // the probe but the chain dead-ended). reachable-first would pin
+            // THIS host for every later call, so the other mirror TLDs would
+            // never run their own chain. Release the pin: the next resolve
+            // (retry, next episode) starts from the link's own TLD again.
+            lastWorkingHost = null
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (e: Exception) {

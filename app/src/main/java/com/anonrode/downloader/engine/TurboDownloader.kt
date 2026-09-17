@@ -256,10 +256,14 @@ object TurboDownloader {
             // case the old behavior was built for.
             if (partFile.exists() && partFile.length() > 0L) {
                 val prefix = state.contiguousPrefixBytes()
+                    ?: if (File(dest.absolutePath + ".turbo").exists()) 0L else null
                 if (prefix != null && prefix < partFile.length()) {
                     try {
                         RandomAccessFile(partFile, "rw").use { it.setLength(prefix) }
-                    } catch (_: Throwable) {}
+                    } catch (e: Exception) {
+                        failureMessage.set("Could not prepare partial file: ${e.message}")
+                        return@withContext failure(failureStatus, failureMessage)
+                    }
                 }
             }
             state.delete()
@@ -647,7 +651,7 @@ object TurboDownloader {
                             }
                             val startAt = if (resuming) resumeAt else 0L
                             RandomAccessFile(dest, "rw").use { raf ->
-                                if (raf.length() < startAt) raf.setLength(startAt)
+                                if (!resuming || raf.length() < startAt) raf.setLength(startAt)
                                 raf.seek(startAt)
                                 val buf = ByteArray(BUFFER)
                                 var written = startAt

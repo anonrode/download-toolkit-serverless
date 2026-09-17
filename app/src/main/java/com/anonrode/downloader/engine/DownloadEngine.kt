@@ -758,7 +758,9 @@ class DownloadEngine(
         val candidates = kotlinx.coroutines.withTimeoutOrNull(25_000L) {
             coroutineScope {
                 ProviderRegistry.allProviders
-                    .filter { !it.name.equals(task.site, ignoreCase = true) && it.searchEnabled }
+                    .filter { provider ->
+                        provider.searchEnabled && tried.none { it.equals(provider.name, ignoreCase = true) }
+                    }
                     .map { provider ->
                         async(Dispatchers.IO) {
                             try {
@@ -784,7 +786,7 @@ class DownloadEngine(
             .asSequence()
             .filter { card ->
                 card.url.isNotBlank() &&
-                    !card.site.equals(task.site, ignoreCase = true) &&
+                    tried.none { it.equals(card.site, ignoreCase = true) } &&
                     com.anonrode.downloader.pipeline.HostHealth.isUsable(card.url) &&
                     titleMatches(query, card.title) &&
                     seasonConsistent(query, card.title, seasonNum)
@@ -801,6 +803,7 @@ class DownloadEngine(
         val failoverDeadline = System.currentTimeMillis() + 60_000L
         for (card in ranked) {
             if (System.currentTimeMillis() > failoverDeadline) break
+            var newMirrors = emptyList<String>()
             val newUrl: String? = if (task.episodeNum > 0) {
                 // Series: match the exact episode on the candidate show page.
                 // A candidate with no matching episode number is SKIPPED, not
@@ -812,6 +815,7 @@ class DownloadEngine(
                     } ?: continue
                     val episode = details.episodes.firstOrNull { it.episodeNum == task.episodeNum } ?: continue
                     if (!com.anonrode.downloader.pipeline.HostHealth.isUsable(episode.url)) continue
+                    newMirrors = episode.mirrorUrls
                     episode.url
                 } catch (_: Exception) {
                     continue
@@ -845,6 +849,8 @@ class DownloadEngine(
                 else it.copy(
                     sourceUrl = newUrl,
                     directUrl = newUrl,
+                    mirrorUrls = newMirrors,
+                    selectedMirrorUrl = "",
                     site = card.site,
                     quality = null,
                     status = TaskStatus.QUEUED,
@@ -2191,10 +2197,25 @@ class DownloadEngine(
                     // the REAL download headers rejects HTML-decoy/archive URLs
                     // before any byte is persisted (the corrupted-"mp4" bug class).
                     // Failure fails the task loudly instead of queueing garbage.
+                    var directRefreshAttempted = false
                     if (!isSocial) {
-                        StreamValidator.validate(streamUrl, hdrs)?.let { reason ->
-                            throw PipelineError.ValidationFailed(reason)
+                        var rejection = StreamValidator.validateResult(streamUrl, hdrs)
+                        if (rejection?.refreshable == true) {
+                            directRefreshAttempted = true
+                            coroutineContext.ensureActive()
+                            val fresh = resolveStreamUrl(permUrl, task.site, task.quality ?: defaultQuality)
+                            if (!fresh.isNullOrBlank() && fresh != streamUrl &&
+                                (isDirectMediaUrl(fresh) || isProvablyDirectFile(fresh))) {
+                                streamUrl = fresh
+                                refererToPass = getRefererForUrl(fresh)
+                                hdrs.remove("Referer")
+                                if (refererToPass.isNotBlank()) hdrs["Referer"] = refererToPass
+                                rejection = StreamValidator.validateResult(streamUrl, hdrs)
+                                coroutineContext.ensureActive()
+                                repository.update(task.id) { it.copy(directUrl = streamUrl) }
+                            }
                         }
+                        rejection?.let { throw PipelineError.ValidationFailed(it.reason) }
                     }
 
                     val progressCb: (Long, Long, Long) -> Unit = { got, tot, bps ->
@@ -2234,7 +2255,8 @@ class DownloadEngine(
                         // 5-15s resolver chain and fall straight to aria2c.
                         val tokenExpired = failure.httpStatus == 401 || failure.httpStatus == 403 ||
                             failure.httpStatus == 404 || failure.httpStatus == 410 || failure.htmlPage
-                        if (tokenExpired && coroutineContext.isActive && !isSocial) {
+                        if (tokenExpired && !directRefreshAttempted && coroutineContext.isActive && !isSocial) {
+                            directRefreshAttempted = true
                             android.util.Log.w("AnonDownload", "Direct link rejected (HTTP ${failure.httpStatus}), refreshing stream token...")
                             repository.update(task.id) { it.copy(status = TaskStatus.RESOLVING) }
                             updateServiceState(force = true)
@@ -2249,6 +2271,9 @@ class DownloadEngine(
                                 refererToPass = freshReferer
                                 val freshHdrs = mutableMapOf("User-Agent" to HttpClient.DEFAULT_UA)
                                 if (freshReferer.isNotBlank()) freshHdrs["Referer"] = freshReferer
+                                StreamValidator.validateResult(streamUrl, freshHdrs)?.let {
+                                    throw PipelineError.ValidationFailed(it.reason)
+                                }
 
                                 turboResult = TurboDownloader.download(
                                     url = streamUrl,

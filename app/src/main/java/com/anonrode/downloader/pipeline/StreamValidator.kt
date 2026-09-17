@@ -29,7 +29,12 @@ object StreamValidator {
      * @return null when the URL looks downloadable, else a human-readable
      *   rejection reason.
      */
-    fun validate(url: String, headers: Map<String, String>): String? {
+    data class Rejection(val reason: String, val refreshable: Boolean = false)
+
+    fun validate(url: String, headers: Map<String, String>): String? =
+        validateResult(url, headers)?.reason
+
+    fun validateResult(url: String, headers: Map<String, String>): Rejection? {
         val start = System.currentTimeMillis()
         var status: Int = -1
         var head = ByteArray(0)
@@ -113,7 +118,7 @@ object StreamValidator {
             PipelineJournal.hop("", "validate", url, ok = false,
                 ms = System.currentTimeMillis() - start,
                 detail = "HTTP $status")
-            return reason
+            return Rejection(reason, status in setOf(401, 403, 404, 410))
         }
 
         if (status == 416 || head.isEmpty()) {
@@ -125,7 +130,7 @@ object StreamValidator {
         PipelineJournal.hop("", "validate", url, ok = reason == null,
             ms = System.currentTimeMillis() - start,
             detail = reason ?: "HTTP $status, ${head.size}B probed")
-        return reason
+        return reason?.let { Rejection(it, it == "URL serves an HTML/error page, not media") }
     }
 
     /** Rejection reason for a file head, or null when plausibly media. */
