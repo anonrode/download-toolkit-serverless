@@ -57,13 +57,15 @@ internal suspend fun <T, R : Any> boundedFirstSuccess(
 internal sealed interface ResolverOutcome {
     data class Success(val url: String) : ResolverOutcome
     data object NoMatch : ResolverOutcome
-    data class Failure(val reason: String, val retryable: Boolean = false) : ResolverOutcome
+    data class Failure(val reason: String, val retryable: Boolean = false, val cooldownUrl: String? = null) : ResolverOutcome
 }
 
 internal fun resolverFailure(error: Exception): ResolverOutcome.Failure = ResolverOutcome.Failure(
     reason = "${error.javaClass.simpleName}: ${error.message}",
     retryable = error is UnknownHostException || error is ConnectException ||
-        error is SocketTimeoutException || error is SocketException
+        error is SocketTimeoutException || error is SocketException ||
+        error is com.anonrode.downloader.data.net.OriginCooldownException,
+    cooldownUrl = (error as? com.anonrode.downloader.data.net.OriginCooldownException)?.originUrl
 )
 
 internal suspend fun captureResolverOutcome(attempt: suspend () -> String?): ResolverOutcome {

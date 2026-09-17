@@ -132,7 +132,7 @@ object HttpClient {
 
     private fun admitRequest(url: String) {
         val remaining = retryAfterCooldown.remainingMs(safeUrl(url))
-        if (remaining > 0) throw java.io.IOException("Origin cooling down for ${remaining}ms")
+        if (remaining > 0) throw OriginCooldownException(safeUrl(url))
     }
 
     private fun recordCooldown(response: Response) {
@@ -532,6 +532,43 @@ object HttpClient {
         }
         taggedCalls.remove(tag)
     }
+
+    /** Registration covers headers AND body reads; the response cannot escape this scope. */
+    internal inline fun <T> executeCancellable(client: OkHttpClient, req: Request, block: (Response) -> T): T {
+        val call = registerResolverCall(client, req)
+        try {
+            return executeResolverCall(call).use(block)
+        } finally {
+            unregisterResolverCall(call)
+        }
+    }
+
+    @PublishedApi
+    internal fun registerResolverCall(client: OkHttpClient, req: Request): okhttp3.Call {
+        refuseUnsafeTarget(req.url.toString())
+        admitRequest(req.url.toString())
+        return client.newCall(req).also { inFlightCalls.add(it) }
+    }
+
+    @PublishedApi
+    internal fun executeResolverCall(call: okhttp3.Call): Response {
+        val response = call.execute()
+        recordCooldown(response)
+        if (response.code == 429 || response.code == 503) {
+            val url = response.request.url.toString()
+            response.close()
+            throw OriginCooldownException(url)
+        }
+        return response
+    }
+
+    @PublishedApi
+    internal fun unregisterResolverCall(call: okhttp3.Call) {
+        inFlightCalls.remove(call)
+    }
+
+    /** Remaining per-origin cooldown ms (0 = usable). */
+    fun remainingCooldownMs(url: String): Long = retryAfterCooldown.remainingMs(safeUrl(url))
 
     /**
      * Hard cap on any body read through [cappedText]/[cappedBytes]. Resolver

@@ -66,8 +66,8 @@ internal class RetryAfterCooldown(
      * [retryAfterHeader] is the raw `Retry-After` value (seconds form or
      * HTTP-date form). Unparseable header -> [defaultCooldownMs]; value/clip
      * above [maxCooldownMs] -> clamped; absent -> [defaultCooldownMs].
-     * Never extends a later expiry already recorded for the origin (keeps
-     * repeated fast 429s from ratcheting the window forward forever).
+     * Keeps the later expiry when concurrent responses disagree. Waiters
+     * have their own total time budget even if fresh responses extend it.
      */
     fun record(url: String, retryAfterHeader: String? = null, nowMs: Long = clock()) {
         val origin = originOf(url) ?: return
@@ -89,10 +89,12 @@ internal class RetryAfterCooldown(
      * propagates through [kotlinx.coroutines.delay] immediately.
      */
     suspend fun waitUntilUsable(url: String) {
-        while (true) {
-            val ms = remainingMs(url)
-            if (ms <= 0L) return
-            kotlinx.coroutines.delay(ms.coerceAtMost(MAX_COOLDOWN_MS))
+        kotlinx.coroutines.withTimeoutOrNull(maxCooldownMs) {
+            while (true) {
+                val ms = remainingMs(url)
+                if (ms <= 0L) return@withTimeoutOrNull
+                kotlinx.coroutines.delay(ms.coerceAtMost(maxCooldownMs))
+            }
         }
     }
 
@@ -112,9 +114,13 @@ internal class RetryAfterCooldown(
      */
     internal fun parseRetryAfterMs(raw: String?, nowMs: Long): Long? {
         val v = raw?.trim().takeUnless { it.isNullOrEmpty() } ?: return null
-        v.toLongOrNull()?.let { return if (it < 0) null else it * 1000L }
+        if (v.all { it in '0'..'9' }) {
+            val seconds = v.toLongOrNull() ?: return Long.MAX_VALUE
+            return if (seconds > Long.MAX_VALUE / 1000L) Long.MAX_VALUE else seconds * 1000L
+        }
         val at = tryParseHttpDate(v) ?: return null
-        return at - nowMs
+        if (at <= nowMs) return 0L
+        return if (nowMs < 0L && at > Long.MAX_VALUE + nowMs) Long.MAX_VALUE else at - nowMs
     }
 
     private fun tryParseHttpDate(value: String): Long? = try {

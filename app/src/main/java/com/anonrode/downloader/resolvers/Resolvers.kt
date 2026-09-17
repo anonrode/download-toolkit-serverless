@@ -228,16 +228,22 @@ object ResolverRegistry {
     private suspend fun resolveWithRetry(resolver: BaseResolver, url: String, quality: String, depth: Int): ResolverOutcome {
         var attempt = 0
         while (true) {
+            currentCoroutineContext().ensureActive()
+            HttpClient.awaitOriginCooldown(url)
             val outcome = if (resolver === LoadedfilesResolver) {
                 LoadedfilesResolver.resolveOutcome(url, quality, depth)
             } else {
                 captureResolverOutcome { resolver.resolve(url, quality, depth) }
             }
             currentCoroutineContext().ensureActive()
-            if (attempt >= 2 || outcome !is ResolverOutcome.Failure || !outcome.retryable) return outcome
+            val cooldownUrl = (outcome as? ResolverOutcome.Failure)?.cooldownUrl
+                ?: url.takeIf { HttpClient.remainingCooldownMs(it) > 0L }
+            val retryable = (outcome as? ResolverOutcome.Failure)?.retryable == true || cooldownUrl != null
+            if (attempt >= 2 || outcome is ResolverOutcome.Success || !retryable) return outcome
             attempt++
-            com.anonrode.downloader.util.DebugLog.resolve("network-class failure, retry #$attempt ${resolver::class.simpleName}")
+            com.anonrode.downloader.util.DebugLog.resolve("transient failure, retry #$attempt ${resolver::class.simpleName}")
             delay(NETWORK_RETRY_DELAY_MS)
+            if (cooldownUrl != null && cooldownUrl != url) HttpClient.awaitOriginCooldown(cooldownUrl)
         }
     }
 }
@@ -530,7 +536,7 @@ object BloggerResolver : BaseResolver {
                 .post(form)
                 .build()
 
-            HttpClient.shared.newCall(req).execute().use { res ->
+            HttpClient.executeCancellable(HttpClient.shared, req) use@{ res ->
                 if (!res.isSuccessful) return null
                 val body = HttpClient.cappedText(res) ?: return null
 
@@ -664,7 +670,7 @@ object LightDLResolver : BaseResolver {
                 .post(FormBody.Builder().build())
                 .build()
 
-            HttpClient.shared.newCall(req).execute().use { res ->
+            HttpClient.executeCancellable(HttpClient.shared, req) use@{ res ->
                 if (!res.isSuccessful) return null
                 val body = HttpClient.cappedText(res) ?: return null
                 val obj = JSONObject(body)
@@ -1054,7 +1060,7 @@ object DownloadwellaResolver : BaseResolver {
                 .post(form)
                 .build()
 
-            HttpClient.permissiveClient.newCall(req).execute().use { res ->
+            HttpClient.executeCancellable(HttpClient.permissiveClient, req) use@{ res ->
                 if (!res.isSuccessful) return null
                 val body = HttpClient.cappedText(res) ?: return null
 
@@ -1084,7 +1090,7 @@ object DownloadwellaResolver : BaseResolver {
                         .header("Referer", url)
                         .post(step2Builder.build())
                         .build()
-                    HttpClient.permissiveClient.newCall(step2Req).execute().use { res2 ->
+                    HttpClient.executeCancellable(HttpClient.permissiveClient, step2Req) use@{ res2 ->
                         if (res2.isSuccessful) {
                             val body2 = HttpClient.cappedText(res2) ?: ""
                             val direct2 = findDirectMediaUrl(body2)
@@ -1240,7 +1246,7 @@ object LoadedfilesResolver : BaseResolver {
                     .apply { referer?.let { header("Referer", it) } }
                     .build()
 
-                noRedirectClient.newCall(req).execute().use { res ->
+                HttpClient.executeCancellable(noRedirectClient, req) use@{ res ->
                     val loc = res.header("Location")
                     if (!loc.isNullOrBlank()) {
                         val safeLoc = HttpClient.safeUrl(HttpClient.safeResolveUri(res.request.url.toString(), loc))
@@ -1319,7 +1325,7 @@ object LoadedfilesResolver : BaseResolver {
                 .header("User-Agent", HttpClient.DEFAULT_UA)
                 .header("Referer", "https://my9jarocks.bz/")
                 .build()
-            client.newCall(req).execute().use { res ->
+            HttpClient.executeCancellable(client, req) use@{ res ->
                 val loc = res.header("Location")
                 if (res.code in 300..399 && !loc.isNullOrBlank()) {
                     url = HttpClient.safeUrl(HttpClient.safeResolveUri(res.request.url.toString(), loc))
@@ -1391,7 +1397,7 @@ object WildshareResolver : BaseResolver {
                     // missing. Set it to the original page URL.
                     .header("Referer", url)
                     .build()
-                noRedirectClient.newCall(req).execute().use { res ->
+                HttpClient.executeCancellable(noRedirectClient, req) use@{ res ->
                     if (res.code !in 200..399) {
                         com.anonrode.downloader.util.DebugLog.resolve(
                             "WildshareResolver: ?pt= returned HTTP ${res.code} for $fileId"

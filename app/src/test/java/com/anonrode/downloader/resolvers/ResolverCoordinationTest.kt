@@ -153,6 +153,18 @@ class ResolverCoordinationTest {
     }
 
     @Test(timeout = 5000)
+    fun cooldownFailureRetainsTheOriginOfTheActualHop() = runBlocking {
+        val hop = "https://mirror.example/token"
+        val outcome = captureResolverOutcome {
+            throw com.anonrode.downloader.data.net.OriginCooldownException(hop)
+        } as ResolverOutcome.Failure
+        assertTrue(outcome.retryable)
+        assertEquals(hop, outcome.cooldownUrl)
+        val other = resolverFailure(SocketTimeoutException("other request"))
+        assertNull(other.cooldownUrl)
+    }
+
+    @Test(timeout = 5000)
     fun outcomeAdapterDoesNotSwallowCancellation() = runBlocking {
         try {
             captureResolverOutcome { throw CancellationException("parent") }
