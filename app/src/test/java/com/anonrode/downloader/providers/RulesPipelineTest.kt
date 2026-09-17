@@ -212,6 +212,46 @@ class RulesPipelineTest {
     // ----------------------------------------------------------- episodes/html
 
     @Test
+    fun episodesHtml_synopsisFallbackWhenPlaybookMetaIsEmpty() {
+        // Shipped playbooks carry empty meta blocks, so pipeline-driven
+        // providers returned a blank synopsis even though the same document
+        // holds the blurb. The fallback must find it without extra network.
+        val html = """
+            <html><body>
+              <div class="entry-content"><p>A legendary vigilante must balance her job with her role as a mother.</p></div>
+              <a href="https://downloadwella.com/f/1">Episode 1 File</a>
+            </body></html>
+        """.trimIndent()
+        val items = """
+            {"anchorSelector": "a[href]", "urlAllowlist": ["downloadwella.com"]}
+        """.trimIndent()
+        val result = RulesPipeline.extractEpisodes(
+            "nkiri", step(items), htmlOutcome(html), baseVars, "https://nkiri.test/show/1"
+        )
+        assertEquals(
+            "A legendary vigilante must balance her job with her role as a mother.",
+            result.metaSynopsis
+        )
+
+        // Instructional paragraphs never become the story; the meta
+        // description is the next candidate.
+        val junkHtml = """
+            <html><body>
+              <div class="entry-content"><p>How to download: click the link below and wait for it.</p></div>
+              <meta name="description" content="A real blurb about the show that is long enough to pass the length floor.">
+              <a href="https://downloadwella.com/f/1">Episode 1 File</a>
+            </body></html>
+        """.trimIndent()
+        val junkResult = RulesPipeline.extractEpisodes(
+            "nkiri", step(items), htmlOutcome(junkHtml), baseVars, "https://nkiri.test/show/2"
+        )
+        assertEquals(
+            "A real blurb about the show that is long enough to pass the length floor.",
+            junkResult.metaSynopsis
+        )
+    }
+
+    @Test
     fun episodesHtml_allowlistBlacklistSiblingLabelsAndDedupe() {
         // nkiri shape: heading above a wrapped locker link, noise links around
         val html = """

@@ -942,9 +942,39 @@ object RulesPipeline {
             metaPoster = docField(meta.opt("poster"), doc, vars)?.trim()
             metaSynopsis = docField(meta.opt("synopsis"), doc, vars)?.trim()
         }
+        // The shipped playbooks carry EMPTY meta blocks (nkiri/anitaku/dramakey/
+        // nepu), so providers that trust the pipeline short-circuit with a blank
+        // synopsis even though this same document holds the blurb the compiled
+        // selector finds. Same-document fallback: zero extra network.
+        if (metaSynopsis.isNullOrBlank()) metaSynopsis = fallbackSynopsis(doc)
 
         return PipelineEpisodes(metaTitle, metaPoster, metaSynopsis, episodes)
     }
+
+    /**
+     * Synopsis from the document the pipeline already fetched. Selector order
+     * mirrors the compiled providers (nkiri live-verified: the first
+     * `.entry-content p` IS the blurb); meta descriptions rank last because WP
+     * SEO plugins sometimes prepend site branding. Instructional paragraphs
+     * ("How to download…") are skipped, and the text is capped so a comment
+     * dump can never ride in as the story.
+     */
+    private fun fallbackSynopsis(doc: Document): String? {
+        for (css in listOf(
+            ".entry-content p", ".post-content p", ".description",
+            ".info p", ".details p", ".synopsis",
+            "meta[property=og:description]", "meta[name=description]"
+        )) {
+            val el = doc.selectFirst(css) ?: continue
+            val text = (if (el.tagName() == "meta") el.attr("content") else el.text()).trim()
+            if (text.length < 24) continue
+            if (SYNOPSIS_JUNK.containsMatchIn(text.lowercase())) continue
+            return text.take(2000)
+        }
+        return null
+    }
+
+    private val SYNOPSIS_JUNK = Regex("^(how to|download|click here|comment|copyright|tags?|added)\\b")
 
     private fun numericCapture(captures: List<String>, idx: Int): Int =
         captures.getOrNull(idx)?.toIntOrNull() ?: Int.MAX_VALUE
