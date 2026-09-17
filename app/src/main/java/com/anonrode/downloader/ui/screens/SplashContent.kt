@@ -120,7 +120,7 @@ fun SplashContent(cutMs: Float = SplashMotion.FULL_MS) {
         ) {
             Canvas(modifier = Modifier.size(markSize)) {
                 val s = size.minDimension / 120f
-                withTransform({ scale(s, s) }) {
+                withTransform({ scale(s, s, pivot = Offset.Zero) }) {
                     // one cyan breath behind the tile (the punch glow)
                     if (pose.glow > 0.001f) {
                         drawRoundRect(
@@ -135,7 +135,7 @@ fun SplashContent(cutMs: Float = SplashMotion.FULL_MS) {
                     if (pose.tileAlpha > 0.001f) {
                         withTransform({
                             translate(60f, 60f)
-                            scale(pose.tileScale, pose.tileScale)
+                            scale(pose.tileScale, pose.tileScale, pivot = Offset.Zero)
                             translate(-60f, -60f)
                         }) {
                             drawRoundRect(
@@ -157,7 +157,7 @@ fun SplashContent(cutMs: Float = SplashMotion.FULL_MS) {
                         withTransform({
                             translate(0f, pose.chevATy)
                             translate(60f, 44f)
-                            scale(pose.chevASx, pose.chevASy)
+                            scale(pose.chevASx, pose.chevASy, pivot = Offset.Zero)
                             translate(-60f, -44f)
                         }) {
                             drawPath(
@@ -193,7 +193,7 @@ fun SplashContent(cutMs: Float = SplashMotion.FULL_MS) {
                     if (pose.bodyAlpha > 0.001f) {
                         withTransform({
                             translate(60f, 52f)
-                            scale(pose.bodyScale, pose.bodyScale)
+                            scale(pose.bodyScale, pose.bodyScale, pivot = Offset.Zero)
                             translate(-60f, -52f)
                         }) {
                             drawPath(
@@ -211,7 +211,7 @@ fun SplashContent(cutMs: Float = SplashMotion.FULL_MS) {
                         withTransform({
                             translate(0f, pose.chevLTy)
                             translate(60f, 86f)
-                            scale(pose.chevLSx, pose.chevLSy)
+                            scale(pose.chevLSx, pose.chevLSy, pivot = Offset.Zero)
                             translate(-60f, -86f)
                         }) {
                             drawPath(
@@ -230,7 +230,7 @@ fun SplashContent(cutMs: Float = SplashMotion.FULL_MS) {
                     if (pose.rippleAlpha > 0.001f) {
                         withTransform({
                             translate(60f, 86f)
-                            scale(pose.rippleScale, pose.rippleScale)
+                            scale(pose.rippleScale, pose.rippleScale, pivot = Offset.Zero)
                             translate(-60f, -86f)
                         }) {
                             drawOval(
@@ -259,7 +259,7 @@ fun SplashContent(cutMs: Float = SplashMotion.FULL_MS) {
                     if (pose.headAlpha > 0.001f) {
                         withTransform({
                             translate(60f, 92f)
-                            scale(pose.headScale, pose.headScale)
+                            scale(pose.headScale, pose.headScale, pivot = Offset.Zero)
                             translate(-60f, -92f)
                         }) {
                             drawPath(

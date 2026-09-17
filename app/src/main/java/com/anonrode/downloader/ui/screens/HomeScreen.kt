@@ -9,6 +9,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -500,7 +501,9 @@ fun HomeScreen(
                 // should drop down… 3 per row"), ending with the View More
                 // tile that opens the catalog. Landing state only, never
                 // over results.
-                Column(modifier = Modifier.weight(1f)) {
+                Column(
+                    modifier = Modifier.weight(1f).verticalScroll(rememberScrollState())
+                ) {
                     TrendingSection(
                         items = uiState.trending,
                         isLoading = uiState.isTrendingLoading,
@@ -758,7 +761,6 @@ private fun TrendingCard(
     Column(
         modifier = modifier
             .width(124.dp)
-            .clip(RoundedCornerShape(Radius.md))
             .clickable { onClick() }
     ) {
         Box(
@@ -835,13 +837,12 @@ private fun CategoryTilesGrid(
         )
         Spacer(modifier = Modifier.height(Spacing.md))
         CategoryFeed.CATEGORIES.chunked(3).forEach { rowCats ->
-            Row(modifier = Modifier.fillMaxWidth()) {
-                rowCats.forEachIndexed { i, category ->
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .padding(start = if (i == 0) 0.dp else Spacing.sm)
-                    ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(Spacing.sm)
+            ) {
+                rowCats.forEach { category ->
+                    Box(modifier = Modifier.weight(1f)) {
                         GenreTileCard(
                             label = category.label,
                             posterUrl = posters[category.label] ?: "",
@@ -856,11 +857,14 @@ private fun CategoryTilesGrid(
             }
             Spacer(modifier = Modifier.height(Spacing.md))
         }
-        Row(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(Spacing.sm)
+        ) {
             Box(modifier = Modifier.weight(1f)) {
                 ViewMoreTileCard(onClick = onMore)
             }
-            Spacer(modifier = Modifier.weight(2f))
+            repeat(2) { Spacer(modifier = Modifier.weight(1f)) }
         }
     }
 }
@@ -921,7 +925,6 @@ private fun GenreTileCard(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(Radius.md))
             .clickable { onClick() }
     ) {
         Box(
@@ -1121,7 +1124,6 @@ private fun GridPosterCard(
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(Radius.md))
             .clickable { onClick() }
     ) {
         Box(
