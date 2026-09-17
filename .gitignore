@@ -32,3 +32,10 @@ scraper_rules.json
 # plain-text playbook probe dumps (same sensitivity as scraper_rules.json)
 ota_plain_probe.json
 probe/results-nightly/
+
+# Local investigation artifacts (never publish)
+.agents/
+scratch/
+ORIGINAL_REQUEST.md
+probe/*_audit_results.json
+probe/*_audit.py
