@@ -17,6 +17,10 @@ object PlutoProvider : SiteProvider {
     override val mainUrl: String get() = DynamicRulesManager.getBaseUrl(name)
 
     override suspend fun search(query: String): List<ShowCard> {
+        DynamicRulesManager.getPipeline(name)?.search?.let { pl ->
+            val results = RulesPipeline.runSearch(name, pl, query)
+            if (results.isNotEmpty()) return results
+        }
         val results = mutableListOf<ShowCard>()
         try {
             val clean = query.replace("'", "").replace("’", "").trim()
@@ -59,6 +63,18 @@ object PlutoProvider : SiteProvider {
 
     override suspend fun loadEpisodes(showUrl: String): ShowDetails {
         val show = ShowCard(title = "Pluto Title", url = showUrl, site = name)
+        DynamicRulesManager.getPipeline(name)?.episodes?.let { pl ->
+            val res = RulesPipeline.runEpisodes(name, pl, showUrl)
+            if (res != null && res.episodes.isNotEmpty()) {
+                val card = ShowCard(
+                    title = res.title.ifBlank { show.title },
+                    url = showUrl,
+                    posterUrl = res.posterUrl.ifBlank { show.posterUrl },
+                    site = name
+                )
+                return ShowDetails(show = card, synopsis = res.synopsis, episodes = res.episodes)
+            }
+        }
         try {
             val html = HttpClient.getText(showUrl, referer = "$mainUrl/")
             if (html.isNullOrBlank()) {
@@ -275,10 +291,14 @@ object PlutoProvider : SiteProvider {
         com.anonrode.downloader.pipeline.LinkResolver.isSecurityChallenge(html)
 
     override suspend fun resolveEpisode(episodeUrl: String, quality: String): DownloadRecipe {
-        val direct = ResolverRegistry.resolve(episodeUrl, quality) ?: episodeUrl
+        val direct = RulesPipeline.runResolveForSite(name, episodeUrl, quality)
+            ?: ResolverRegistry.resolve(episodeUrl, quality)
+        val target = if (!direct.isNullOrBlank()) direct else {
+            if (com.anonrode.downloader.pipeline.StrictLinkClassifier.isDirectMedia(episodeUrl)) episodeUrl else ""
+        }
         return DownloadRecipe(
-            directUrl = direct,
-            filename = direct.substringAfterLast('/').substringBefore('?').ifEmpty { "video.mp4" },
+            directUrl = target,
+            filename = target.substringAfterLast('/').substringBefore('?').ifEmpty { "video.mp4" },
             headers = mapOf("Referer" to "$mainUrl/"),
             backend = "aria2c",
             parallelSockets = 16

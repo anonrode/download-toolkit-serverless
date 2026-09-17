@@ -87,6 +87,7 @@ object ResolverRegistry {
     private const val NETWORK_RETRY_DELAY_MS = 1500L
 
     val RESOLVERS: List<BaseResolver> = listOf(
+        DynamicLockerResolver,
         VidbasicResolver,
         KissasianResolver,
         KisskhMegaplayResolver,
@@ -1764,6 +1765,12 @@ fun isDirectMediaUrl(url: String): Boolean {
     val clean = url.substringBefore('?').substringBefore('#').lowercase()
     val exts = com.anonrode.downloader.data.rules.DynamicRulesManager.getDirectMediaExtensions()
     return exts.any { clean.endsWith(it) }
+}
+
+object DynamicLockerResolver : BaseResolver {
+    override fun canResolve(url: String): Boolean = DynamicLockerEngine.canResolve(url)
+    override suspend fun resolve(url: String, quality: String, depth: Int): String? =
+        DynamicLockerEngine.resolve(url, quality)
 }
 
 fun isRootLockerDomain(url: String): Boolean {

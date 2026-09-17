@@ -19,6 +19,10 @@ object NaijaVaultProvider : SiteProvider {
     override val mainUrl: String get() = DynamicRulesManager.getBaseUrl(name)
 
     override suspend fun search(query: String): List<ShowCard> {
+        DynamicRulesManager.getPipeline(name)?.search?.let { pl ->
+            val results = RulesPipeline.runSearch(name, pl, query)
+            if (results.isNotEmpty()) return results
+        }
         val results = mutableListOf<ShowCard>()
         val noLinks = mutableListOf<ShowCard>()
         try {
@@ -71,44 +75,15 @@ object NaijaVaultProvider : SiteProvider {
         return if (results.isEmpty()) noLinks else results
     }
 
-    // Same-site downloads use /dl- gateways, /cdn/ paths or media filenames;
-    // sibling posts and navigation are not downloadable resources.
-    private val mediaExtRegex = Regex("\\.(mkv|mp4|webm|avi|m3u8|zip|rar)$")
-    private fun isJunkSameSite(href: String, siteHost: String?): Boolean {
-        if (siteHost == null) return false
-        val uri = try { URI(href) } catch (_: Exception) { return false }
-        val host = uri.host?.lowercase() ?: return false
-        if (host != siteHost && !host.endsWith(".$siteHost") && !siteHost.endsWith(".$host")) return false
-        val path = (uri.path ?: "").lowercase()
-        if (path.isBlank() || path == "/" || path.startsWith("/category/") ||
-            path.startsWith("/tag/") || path.startsWith("/season-list") ||
-            path.startsWith("/series-list") || path.contains("/page/")) return true
-        // Any remaining same-site path is a sibling post page
-        // (sidebar/related junk) unless it is a download gateway or
-        // a real media file.
-        return !(path.startsWith("/dl-") || path.contains("/cdn/") ||
-            mediaExtRegex.containsMatchIn(path))
-    }
+    private fun isJunkSameSite(href: String, siteHost: String?): Boolean =
+        com.anonrode.downloader.pipeline.StrictLinkClassifier.isNavigationJunk(href, siteHost)
 
     // Movie mirrors retain their document order and server/part labels.
     internal fun movieDownloadItems(doc: org.jsoup.nodes.Document, showUrl: String): List<EpisodeItem> {
         val siteHost = try { URI(showUrl).host?.lowercase()?.removePrefix("www.") } catch (_: Exception) { null }
         val showPath = try { URI(showUrl).path ?: "" } catch (_: Exception) { "" }
-        fun isNonDownloadTarget(href: String): Boolean {
-            val h = href.trim()
-            if (h.isBlank() || h.startsWith("#")) return true
-            val uri = try { URI(h) } catch (_: Exception) { return true }
-            val scheme = uri.scheme?.lowercase()
-            if (scheme != "http" && scheme != "https") return true
-            val host = uri.host?.lowercase() ?: return true
-            if (siteHost != null && host.removePrefix("www.") == siteHost) {
-                val path = uri.path ?: ""
-                // Bare homepage, or a self-reference back to this very page.
-                if (path.isBlank() || path == "/") return true
-                if (showPath.isNotBlank() && path.trimEnd('/') == showPath.trimEnd('/')) return true
-            }
-            return false
-        }
+        fun isNonDownloadTarget(href: String): Boolean =
+            com.anonrode.downloader.pipeline.StrictLinkClassifier.isNavigationJunk(href, siteHost, showPath)
 
         var count = 0
         val items = doc.select("a#download-button").mapNotNull { b ->
@@ -140,6 +115,18 @@ object NaijaVaultProvider : SiteProvider {
 
     override suspend fun loadEpisodes(showUrl: String): ShowDetails {
         val show = ShowCard(title = "NaijaVault Media", url = showUrl, site = name)
+        DynamicRulesManager.getPipeline(name)?.episodes?.let { pl ->
+            val res = RulesPipeline.runEpisodes(name, pl, showUrl)
+            if (res != null && res.episodes.isNotEmpty()) {
+                val card = ShowCard(
+                    title = res.title.ifBlank { show.title },
+                    url = showUrl,
+                    posterUrl = res.posterUrl.ifBlank { show.posterUrl },
+                    site = name
+                )
+                return ShowDetails(show = card, synopsis = res.synopsis, episodes = res.episodes)
+            }
+        }
         try {
             val html = HttpClient.getText(showUrl)
             if (html.isNullOrBlank()) {
