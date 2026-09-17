@@ -210,7 +210,7 @@ object NaijaVaultProvider : SiteProvider {
                     return ShowDetails(
                         show = ShowCard(title = title, url = showUrl, posterUrl = poster, site = name),
                         synopsis = synopsis,
-                        episodes = movieItems
+                        episodes = MovieSizeMetadata.enrich(movieItems, showUrl)
                     )
                 }
                 // Movie page with no usable link: fall through to the sweep
