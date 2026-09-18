@@ -1,6 +1,7 @@
 package com.anonrode.downloader.resolvers
 
 import com.anonrode.downloader.data.net.HttpClient
+import com.anonrode.downloader.pipeline.LinkResolver
 import com.anonrode.downloader.pipeline.PipelineError
 import com.anonrode.downloader.pipeline.PipelineJournal
 import kotlinx.coroutines.CancellationException
