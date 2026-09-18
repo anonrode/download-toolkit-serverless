@@ -12,7 +12,7 @@ import java.util.Locale
 import java.util.concurrent.TimeUnit
 
 internal object MovieSizeMetadata {
-    private val sizePattern = Regex("""(?<![\w.,-])(\d{1,6}(?:\.\d{1,3})?)\s*(MiB|GiB|MB|GB)\b""", RegexOption.IGNORE_CASE)
+    private val sizePattern = Regex("""(?:^|[^\w.,-])(\d{1,6}(?:\.\d{1,3})?)\s*(MiB|GiB|MB|GB)\b""", RegexOption.IGNORE_CASE)
 
     fun parse(html: String): String {
         val doc = Jsoup.parse(html)
