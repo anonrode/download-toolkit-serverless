@@ -50,8 +50,20 @@ SERVERLESS = REPO_ROOT
 # Local dev: the keypair lives in ~/anon-serverless-app-maintenance-build/
 # (outside both repos, gitignored by not being IN any repo).
 # CI: signing uses $OTA_SIGNING_PRIVATE_KEY, never a file.
-KEY_PATH = os.environ.get("OTA_SIGNING_KEY_FILE") or os.path.join(
-    os.path.expanduser("~"), "anon-serverless-app-maintenance-build", "ota_signing_private_key.pem")
+def _resolve_default_key_path():
+    env_path = os.environ.get("OTA_SIGNING_KEY_FILE")
+    if env_path and os.path.exists(env_path):
+        return env_path
+    candidates = [
+        os.path.join(os.path.expanduser("~"), "anon-serverless-app-maintenance-build", "ota_signing_private_key.pem"),
+        os.path.join(os.path.dirname(REPO_ROOT), "anon-serverless-app-maintenance-build", "ota_signing_private_key.pem"),
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    return candidates[0]
+
+KEY_PATH = _resolve_default_key_path()
 
 # PUBLIC half of the OTA signing keypair (safe to commit — it can only
 # VERIFY, never sign). Matches the constant embedded in the app's

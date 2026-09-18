@@ -1171,10 +1171,12 @@ object LoadedfilesResolver : BaseResolver {
             val noRedirectClient = HttpClient.shared.newBuilder().followRedirects(false).build()
             val probeClient = HttpClient.shared.newBuilder()
                 .followRedirects(false)
+                .connectTimeout(4, TimeUnit.SECONDS)
                 .readTimeout(5, TimeUnit.SECONDS)
                 .build()
             val slowProbeClient = HttpClient.shared.newBuilder()
                 .followRedirects(false)
+                .connectTimeout(6, TimeUnit.SECONDS)
                 .readTimeout(10, TimeUnit.SECONDS)
                 .build()
 
