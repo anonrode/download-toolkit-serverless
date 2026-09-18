@@ -39,7 +39,10 @@ object TrendingFeed {
         RegexOption.IGNORE_CASE
     )
 
-    suspend fun fetch(onPartial: (List<ShowCard>) -> Unit = {}): List<ShowCard> = coroutineScope {
+    suspend fun fetch(
+        filterExplicit: Boolean = true,
+        onPartial: (List<ShowCard>) -> Unit = {}
+    ): List<ShowCard> = coroutineScope {
         // Per-site result slots in the CANONICAL order (naijavault, nkiri,
         // naijaprey, 9jarocks). Each site publishes a re-merge the moment it
         // lands — v3.1.5 awaited ALL sites before showing anything, so one
@@ -55,20 +58,20 @@ object TrendingFeed {
             val cards = withTimeoutOrNull(TIMEOUT_MS) { block() } ?: emptyList()
             synchronized(lock) {
                 slots[i] = cards
-                if (cards.isNotEmpty()) onPartial(mergeRoundRobin(slots.map { it ?: emptyList() }))
+                if (cards.isNotEmpty()) onPartial(mergeRoundRobin(slots.map { it ?: emptyList() }, filterExplicit))
             }
         }
         listOf(
-            async { fetchSlot(0) { fetchWpRest("naijavault") } },
-            async { fetchSlot(1) { fetchWpRest("nkiri") } },
-            async { fetchSlot(2) { fetchRss("naijaprey", "/feed/") } },
-            async { fetchSlot(3) { fetchRss("9jarocks", "/feed/") } }
+            async { fetchSlot(0) { fetchWpRest("naijavault", filterExplicit = filterExplicit) } },
+            async { fetchSlot(1) { fetchWpRest("nkiri", filterExplicit = filterExplicit) } },
+            async { fetchSlot(2) { fetchRss("naijaprey", "/feed/", filterExplicit = filterExplicit) } },
+            async { fetchSlot(3) { fetchRss("9jarocks", "/feed/", filterExplicit = filterExplicit) } }
         ).awaitAll()
         val perSite = slots.map { it ?: emptyList() }
 
         // Final merge == the same pure function, so the last publish and the
         // return value are consistent by construction.
-        val out = mergeRoundRobin(perSite)
+        val out = mergeRoundRobin(perSite, filterExplicit)
         com.anonrode.downloader.util.DebugLog.resolve(
             "trending feed: ${out.size} cards (per-site ${perSite.map { it.size }})"
         )
@@ -82,7 +85,10 @@ object TrendingFeed {
      * simply empty lists, so a two-site merge is a prefix-consistent preview
      * of the four-site merge.
      */
-    internal fun mergeRoundRobin(perSite: List<List<ShowCard>>): List<ShowCard> {
+    internal fun mergeRoundRobin(
+        perSite: List<List<ShowCard>>,
+        filterExplicit: Boolean = true
+    ): List<ShowCard> {
         val out = mutableListOf<ShowCard>()
         val seenTitles = mutableSetOf<String>()
         var idx = 0
@@ -92,7 +98,8 @@ object TrendingFeed {
                 if (idx < site.size) {
                     val card = site[idx]
                     val key = card.title.lowercase().replace(Regex("[^a-z0-9]"), "")
-                    if (out.size < ROW_LIMIT && key.isNotBlank() && seenTitles.add(key)) {
+                    val isSafe = !filterExplicit || !com.anonrode.downloader.util.ExplicitContentFilter.isExplicit(card)
+                    if (out.size < ROW_LIMIT && key.isNotBlank() && isSafe && seenTitles.add(key)) {
                         out.add(card)
                     }
                     advanced = true
@@ -117,11 +124,13 @@ object TrendingFeed {
         query: String? = null,
         limit: Int = PER_SITE_LIMIT,
         extraParams: String = "",
-        confirmTerms: Set<String>? = null
+        confirmTerms: Set<String>? = null,
+        filterExplicit: Boolean = true
     ): List<ShowCard> =
         fetchWpRestFrom(
             DynamicRulesManager.getBaseUrl(site), site, query, limit,
-            extraParams = extraParams, confirmTerms = confirmTerms
+            extraParams = extraParams, confirmTerms = confirmTerms,
+            filterExplicit = filterExplicit
         )
 
     /** Same fetch against an explicit base host — NkiriProvider.search uses
@@ -140,11 +149,12 @@ object TrendingFeed {
         limit: Int,
         extraParams: String = "",
         tag: String = "trending",
-        confirmTerms: Set<String>? = null
+        confirmTerms: Set<String>? = null,
+        filterExplicit: Boolean = true
     ): List<ShowCard> {
         val url = wpRestUrl(base, query, limit, extraParams) ?: return emptyList()
         val json = HttpClient.getText(url, referer = "${base.trimEnd('/')}/", tag = tag) ?: return emptyList()
-        return gateWpRest(parseWpRestPosts(json, site), confirmTerms)
+        return gateWpRest(parseWpRestPosts(json, site), confirmTerms, filterExplicit = filterExplicit)
     }
 
     /** Pure endpoint assembly — shape live-verified 2026-09-14 on nkiri.top
@@ -213,9 +223,18 @@ object TrendingFeed {
      *  [fetchRss]: all-miss (unknown locker family) keeps the ungated batch —
      *  BUT only when no [confirmTerms] is set. A genre row would rather show
      *  nothing than show noise: accuracy over fullness, the next site fills. */
-    internal fun gateWpRest(posts: List<RestPost>, confirmTerms: Set<String>? = null): List<ShowCard> {
-        val gated = posts.filter { DownloadLinkGate.hasDownloadLink(it.body) }
-        val pool = if (gated.isNotEmpty()) gated else if (confirmTerms == null) posts else emptyList()
+    internal fun gateWpRest(
+        posts: List<RestPost>,
+        confirmTerms: Set<String>? = null,
+        filterExplicit: Boolean = true
+    ): List<ShowCard> {
+        val safePosts = if (filterExplicit) {
+            posts.filterNot { com.anonrode.downloader.util.ExplicitContentFilter.isExplicit(it.card.title, it.terms) }
+        } else {
+            posts
+        }
+        val gated = safePosts.filter { DownloadLinkGate.hasDownloadLink(it.body) }
+        val pool = if (gated.isNotEmpty()) gated else if (confirmTerms == null) safePosts else emptyList()
         return if (confirmTerms == null) {
             pool.map { it.card }
         } else {
@@ -234,19 +253,26 @@ object TrendingFeed {
     internal suspend fun fetchRss(
         site: String,
         path: String,
-        confirmTerms: Set<String>? = null
+        confirmTerms: Set<String>? = null,
+        filterExplicit: Boolean = true
     ): List<ShowCard> {
         val base = DynamicRulesManager.getBaseUrl(site).trimEnd('/')
         if (base.isBlank()) return emptyList()
         val xml = HttpClient.getText("$base$path", referer = "$base/", tag = "trending") ?: return emptyList()
-        return parseRssItems(xml, site, base, confirmTerms)
+        return parseRssItems(xml, site, base, confirmTerms, filterExplicit = filterExplicit)
     }
 
     /** Pure RSS parse (JVM-testable): items → cards, poster = first <img> in
      *  the description, WP `<category>` names harvested for genre
      *  confirmation, NAV_GARBAGE + DownloadLinkGate policies shared with the
      *  REST path (all-miss keeps the ungated batch only when unconfirmed). */
-    internal fun parseRssItems(xml: String, site: String, base: String, confirmTerms: Set<String>? = null): List<ShowCard> {
+    internal fun parseRssItems(
+        xml: String,
+        site: String,
+        base: String,
+        confirmTerms: Set<String>? = null,
+        filterExplicit: Boolean = true
+    ): List<ShowCard> {
         val out = mutableListOf<Pair<ShowCard, List<String>>>()
         val noLinks = mutableListOf<Pair<ShowCard, List<String>>>()
         try {
@@ -258,6 +284,9 @@ object TrendingFeed {
                 val desc = item.selectFirst("content|encoded")?.text()
                     ?: item.selectFirst("description")?.text() ?: ""
                 val cats = item.select("category").map { it.text().trim() }.filter { it.isNotBlank() }
+                if (filterExplicit && com.anonrode.downloader.util.ExplicitContentFilter.isExplicit(title, cats)) {
+                    continue
+                }
                 // First <img> = the _Poster.jpg, and it STAYS that way on
                 // purpose: live-measured 2026-09-15 on 9jarocks, the later
                 // "_thumb.jpg" variant is BIGGER than the poster (372 KB vs
@@ -386,13 +415,27 @@ object TrendingFeed {
 
     /** Tiles are artwork-only (tapping opens the real gated page), so no
      *  DownloadLinkGate and no _embed here — by design, on a ~2KB budget. */
-    internal suspend fun fetchWpRestLitePoster(site: String, query: String): String {
+    internal suspend fun fetchWpRestLitePoster(
+        site: String,
+        query: String,
+        filterExplicit: Boolean = true
+    ): String {
         val base = DynamicRulesManager.getBaseUrl(site)
-        val url = wpRestLiteUrl(base, query, 1) ?: return ""
+        val limit = if (filterExplicit) 3 else 1
+        val url = wpRestLiteUrl(base, query, limit) ?: return ""
         val json = HttpClient.getText(url, referer = "${base.trimEnd('/')}/", tag = "trending") ?: return ""
         return try {
             val arr = org.json.JSONArray(json)
-            arr.optJSONObject(0)?.optString("jetpack_featured_media_url").orEmpty()
+            for (i in 0 until arr.length()) {
+                val obj = arr.optJSONObject(i) ?: continue
+                val title = obj.optJSONObject("title")?.optString("rendered").orEmpty()
+                if (filterExplicit && com.anonrode.downloader.util.ExplicitContentFilter.isExplicit(title)) {
+                    continue
+                }
+                val poster = obj.optString("jetpack_featured_media_url").orEmpty()
+                if (poster.isNotBlank()) return poster
+            }
+            ""
         } catch (_: Exception) { "" }
     }
 }

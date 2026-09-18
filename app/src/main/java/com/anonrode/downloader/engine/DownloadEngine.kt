@@ -112,6 +112,7 @@ class DownloadEngine(
     // the merged file. Both live in downloader_settings like the rest.
     var downloadSubtitles: Boolean = true
     var subtitleLanguage: String = "en"
+    var filterExplicitContent: Boolean = true
 
     // No byte movement (parsed progress or filesystem bytes) for this long while
     // DOWNLOADING means the backend is hung; the watchdog kills it so the retry
@@ -306,6 +307,7 @@ class DownloadEngine(
         logRetentionDays = prefs.getInt("pref_log_retention_days", 7)
         downloadSubtitles = prefs.getBoolean("pref_download_subtitles", true)
         subtitleLanguage = prefs.getString("pref_subtitle_lang", "en") ?: "en"
+        filterExplicitContent = prefs.getBoolean("pref_filter_explicit_content", true)
         // Retention applies at startup, not just when the setting changes.
         com.anonrode.downloader.util.DebugLog.configureRetention(logRetentionDays)
     }
@@ -348,7 +350,8 @@ class DownloadEngine(
         debugLog: Boolean = false,
         logRetention: Int = 7,
         downloadSubs: Boolean = true,
-        subLang: String = "en"
+        subLang: String = "en",
+        filterExplicit: Boolean = true
     ) {
         this.maxConcurrentDownloads = maxConcurrent
         this.parallelSocketsPerFile = parallelSockets
@@ -372,6 +375,7 @@ class DownloadEngine(
         this.logRetentionDays = logRetention.coerceIn(1, 90)
         this.downloadSubtitles = downloadSubs
         this.subtitleLanguage = subLang.trim().ifBlank { "en" }
+        this.filterExplicitContent = filterExplicit
         com.anonrode.downloader.util.DebugLog.configureRetention(this.logRetentionDays)
 
         // A lower limit preempts running tasks NOW (demote back to queue);
@@ -402,6 +406,7 @@ class DownloadEngine(
             .putInt("pref_log_retention_days", this.logRetentionDays)
             .putBoolean("pref_download_subtitles", this.downloadSubtitles)
             .putString("pref_subtitle_lang", this.subtitleLanguage)
+            .putBoolean("pref_filter_explicit_content", this.filterExplicitContent)
             .apply()
     }
 

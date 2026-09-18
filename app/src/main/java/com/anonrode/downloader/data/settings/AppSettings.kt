@@ -36,7 +36,10 @@ data class AppSettings(
     // Seal-parity subtitles (2026-09-14): yt-dlp caption language + the
     // player's auto-selected embedded track. Default English.
     val downloadSubtitles: Boolean = true,
-    val subtitleLanguage: String = "en"
+    val subtitleLanguage: String = "en",
+    // Adult & explicit content filtering for Trending & Genre browse feeds.
+    // Defaults to true (safe by default). Direct search is never filtered.
+    val filterExplicitContent: Boolean = true
 ) {
     companion object {
         const val PREFS_NAME = "downloader_settings"
@@ -66,7 +69,8 @@ data class AppSettings(
                 debugLogging = prefs.getBoolean("pref_debug_logging", false),
                 logRetentionDays = prefs.getInt("pref_log_retention_days", 7),
                 downloadSubtitles = prefs.getBoolean("pref_download_subtitles", true),
-                subtitleLanguage = prefs.getString("pref_subtitle_lang", "en") ?: "en"
+                subtitleLanguage = prefs.getString("pref_subtitle_lang", "en") ?: "en",
+                filterExplicitContent = prefs.getBoolean("pref_filter_explicit_content", true)
             )
         }
 
@@ -94,6 +98,7 @@ data class AppSettings(
                 .putInt("pref_log_retention_days", s.logRetentionDays)
                 .putBoolean("pref_download_subtitles", s.downloadSubtitles)
                 .putString("pref_subtitle_lang", s.subtitleLanguage)
+                .putBoolean("pref_filter_explicit_content", s.filterExplicitContent)
                 .apply()
         }
 
