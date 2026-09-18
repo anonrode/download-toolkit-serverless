@@ -8,6 +8,9 @@ import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.ActivityInfo
 import android.net.Uri
+import android.graphics.Typeface
+import android.view.ViewGroup
+import android.widget.FrameLayout
 import androidx.activity.compose.BackHandler
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
@@ -103,6 +106,7 @@ import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.Tracks
+import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.exoplayer.ExoPlayer
@@ -110,7 +114,9 @@ import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
 import androidx.media3.session.MediaSession
 import androidx.media3.ui.AspectRatioFrameLayout
+import androidx.media3.ui.CaptionStyleCompat
 import androidx.media3.ui.PlayerView
+import androidx.media3.ui.SubtitleView
 import com.anonrode.downloader.R
 import com.anonrode.downloader.ui.theme.Spacing
 import kotlinx.coroutines.delay
@@ -415,6 +421,7 @@ private fun MediaPlayerModalImpl(
     // every layout pass, so rotation reframes automatically — no cached
     // dimensions on this side.
     var resizeMode by remember { mutableStateOf(AspectRatioFrameLayout.RESIZE_MODE_FIT) }
+    var isVerticalVideo by remember { mutableStateOf(false) }
 
     // ---- Player + session: ONE instance for the modal's whole lifetime ----
     val exoPlayer = remember {
@@ -547,6 +554,10 @@ private fun MediaPlayerModalImpl(
                         if (next != null) c.onPlayFile(next)
                     }
                 }
+            }
+
+            override fun onVideoSizeChanged(videoSize: VideoSize) {
+                isVerticalVideo = videoSize.height > videoSize.width
             }
 
             override fun onPlayerError(error: PlaybackException) {
@@ -819,12 +830,14 @@ private fun MediaPlayerModalImpl(
                         useController = false
                         player = exoPlayer
                         setBackgroundColor(android.graphics.Color.BLACK)
+                        configureSubtitles(this, isLandscape, showControls, resizeMode, isVerticalVideo)
                     }
                 },
                 update = { view ->
                     // Live-apply the Fit/Crop cycle; also re-asserted after
                     // any recomposition so the mode never drifts.
                     view.resizeMode = resizeMode
+                    configureSubtitles(view, isLandscape, showControls, resizeMode, isVerticalVideo)
                 },
                 modifier = if (isAudio) Modifier.size(1.dp) else Modifier.fillMaxSize()
             )
@@ -1226,6 +1239,69 @@ private fun applySubtitleByLabel(
     }
     player.trackSelectionParameters = builder.build()
     return true
+}
+
+/**
+ * Overhauls subtitle typography, styling, and aspect-ratio dynamic positioning.
+ *
+ * 1. Re-parents [SubtitleView] into [AspectRatioFrameLayout] (`exo_content_frame`) so its
+ *    coordinate space matches the active video frame across all resize modes (FIT, ZOOM, FILL)
+ *    and video aspect ratios (16:9, 21:9, 4:3, vertical). In letterboxed FIT mode, this prevents
+ *    subtitles from falling into the black bottom void of the phone screen.
+ * 2. Modern intentional typography (Netflix / Apple TV aesthetic):
+ *    - Crisp Roboto Medium / sans-serif-medium bold typeface
+ *    - High-contrast black outline (EDGE_TYPE_OUTLINE) so text remains readable against any video frame
+ *    - Completely transparent background (no boxy clunky artifacts)
+ *    - Strips distorted embedded styling and font sizes
+ * 3. Dynamic responsive text sizing:
+ *    - Portrait: 0.068f of video frame height (clear and comfortable at arm's length)
+ *    - Landscape: 0.054f of video frame height (cinematic streaming standard)
+ * 4. Collision-aware dynamic bottom clearance:
+ *    - When playback controls are visible AND the video touches the bottom of the screen
+ *      (landscape, cropped/filled zoom, or portrait vertical video), lift the subtitle above
+ *      the seekbar and control chips (0.22f). When controls auto-hide or in portrait FIT mode
+ *      (where the horizontal video sits comfortably in the upper/center screen), settle at cinema baseline (0.065f).
+ */
+@OptIn(UnstableApi::class)
+private fun configureSubtitles(
+    playerView: PlayerView,
+    isLandscape: Boolean,
+    showControls: Boolean,
+    resizeMode: Int,
+    isVerticalVideo: Boolean
+) {
+    val subView = playerView.subtitleView ?: return
+    val contentFrame = playerView.findViewById<AspectRatioFrameLayout>(androidx.media3.ui.R.id.exo_content_frame)
+
+    if (contentFrame != null && subView.parent != contentFrame) {
+        (subView.parent as? ViewGroup)?.removeView(subView)
+        contentFrame.addView(
+            subView,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
+    }
+
+    val customStyle = CaptionStyleCompat(
+        android.graphics.Color.WHITE,
+        android.graphics.Color.TRANSPARENT,
+        android.graphics.Color.TRANSPARENT,
+        CaptionStyleCompat.EDGE_TYPE_OUTLINE,
+        android.graphics.Color.argb(220, 0, 0, 0),
+        Typeface.create("sans-serif-medium", Typeface.BOLD)
+    )
+    subView.setStyle(customStyle)
+    subView.setApplyEmbeddedStyles(false)
+    subView.setApplyEmbeddedFontSizes(false)
+
+    val textFraction = if (isLandscape) 0.054f else 0.068f
+    subView.setFractionalTextSize(textFraction)
+
+    val controlsOverlapVideo = showControls && (isLandscape || resizeMode != AspectRatioFrameLayout.RESIZE_MODE_FIT || isVerticalVideo)
+    val bottomPadding = if (controlsOverlapVideo) 0.22f else 0.065f
+    subView.setBottomPaddingFraction(bottomPadding)
 }
 
 /** One circle-button style for the whole player. The OUTER box owns the hit
