@@ -2759,9 +2759,11 @@ class DownloadEngine(
                 coroutineContext.ensureActive()
 
                 if (producedFile != null && producedFile.exists()) {
-                    // Normalize .unknown_video extension if present
-                    if (producedFile.extension.equals("unknown_video", ignoreCase = true) || producedFile.extension.isBlank()) {
-                        val properExt = if (task.filePath.lowercase().endsWith(".mkv")) "mkv" else "mp4"
+                    // Normalize .unknown_video or .matroska extension if present
+                    if (producedFile.extension.equals("unknown_video", ignoreCase = true) ||
+                        producedFile.extension.equals("matroska", ignoreCase = true) ||
+                        producedFile.extension.isBlank()) {
+                        val properExt = if (task.filePath.lowercase().endsWith(".mkv") || producedFile.extension.equals("matroska", ignoreCase = true)) "mkv" else "mp4"
                         val corrected = File(producedFile.parentFile, "${producedFile.nameWithoutExtension}.$properExt")
                         if (!corrected.exists() && producedFile.renameTo(corrected)) {
                             producedFile = corrected

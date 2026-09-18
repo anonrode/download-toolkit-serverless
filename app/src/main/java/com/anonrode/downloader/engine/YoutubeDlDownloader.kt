@@ -215,7 +215,9 @@ object YoutubeDlDownloader {
                     preferredFilename.startsWith("Social_", ignoreCase = true)
                 val outTemplate = if (!isGenericName) {
                     val stem = File(outDir, preferredFilename.substringBeforeLast('.')).absolutePath
-                    "$stem.%(ext)s"
+                    val ext = File(preferredFilename).extension.ifBlank { "mp4" }
+                    val safeExt = if (audioOnly) "mp3" else if (ext.equals("matroska", ignoreCase = true)) "mkv" else ext
+                    "$stem.$safeExt"
                 } else {
                     File(outDir, "%(title).100s [%(id)s].%(ext)s").absolutePath
                 }
@@ -267,7 +269,9 @@ object YoutubeDlDownloader {
             } else if (isM3u8) {
                 // HLS m3u8 stream variant selection with multi-fragment parallel downloading
                 val stem = File(outDir, preferredFilename.substringBeforeLast('.')).absolutePath
-                addOption("-o", "$stem.%(ext)s")
+                val ext = File(preferredFilename).extension.ifBlank { "mp4" }
+                val safeExt = if (ext.equals("matroska", ignoreCase = true)) "mkv" else ext
+                addOption("-o", "$stem.$safeExt")
                 addOption("-f", "bestvideo[height<=$height]+bestaudio/best[height<=$height]/best")
                 addOption("-S", "height~$height,+size,+br")
                 addOption("--merge-output-format", "mp4")
@@ -287,7 +291,9 @@ object YoutubeDlDownloader {
             } else {
                 // Direct CDN HTTP multi-socket via aria2c
                 val stem = File(outDir, preferredFilename.substringBeforeLast('.')).absolutePath
-                addOption("-o", "$stem.%(ext)s")
+                val ext = File(preferredFilename).extension.ifBlank { "mp4" }
+                val safeExt = if (ext.equals("matroska", ignoreCase = true)) "mkv" else ext
+                addOption("-o", "$stem.$safeExt")
                 addOption("--downloader", "libaria2c.so")
                 val conns = parallelSockets.coerceIn(1, 16)
                 val aria2Args = buildString {
@@ -316,6 +322,11 @@ object YoutubeDlDownloader {
             // our own sanitized path, never to a location derived from the
             // remote filename.
             addOption("--no-restrict-filenames")
+            // Remap unsafe/unusual extensions extracted from remote headers (e.g. Content-Type: video/matroska
+            // -> ext='matroska', or Content-Type: application/octet-stream -> ext='unknown_video') before
+            // yt-dlp's _catch_unsafe_extension_error skips the download.
+            addCommands(listOf("--replace-in-metadata", "ext", "(?i)matroska", "mkv"))
+            addCommands(listOf("--replace-in-metadata", "ext", "(?i)unknown_video", "mp4"))
             addOption("--newline")
             addOption("--progress")
             // Refuse outside config files: a stray yt-dlp.conf could override
@@ -516,7 +527,9 @@ object YoutubeDlDownloader {
             }
 
             var finalExt = produced.extension
-            if (finalExt.equals("unknown_video", ignoreCase = true) || finalExt.isBlank()) {
+            if (finalExt.equals("matroska", ignoreCase = true)) {
+                finalExt = "mkv"
+            } else if (finalExt.equals("unknown_video", ignoreCase = true) || finalExt.isBlank()) {
                 val sniffed = try {
                     java.io.RandomAccessFile(produced, "r").use { raf ->
                         val head = ByteArray(16)
