@@ -33,6 +33,13 @@ class StrictLinkClassifierTest {
 
         val loaded = StrictLinkClassifier.classify("https://loadedfiles.net/embed/test")
         assertTrue(loaded is StrictLinkClassifier.LinkClass.KnownLocker)
+
+        // Lockers carrying media names in path must be KnownLocker, not DirectMedia
+        val loadedMkv = StrictLinkClassifier.classify("https://loadedfiles.net/37b756a81351c952/John.Candy.I.Like.Me.mkv")
+        assertTrue(loadedMkv is StrictLinkClassifier.LinkClass.KnownLocker)
+
+        val vikingMkv = StrictLinkClassifier.classify("https://vikingfile.com/d/wtKpY7FHW2/Lanterns.S01E01.mkv")
+        assertTrue(vikingMkv is StrictLinkClassifier.LinkClass.KnownLocker)
     }
 
     @Test

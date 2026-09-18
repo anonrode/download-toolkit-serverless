@@ -111,14 +111,10 @@ object StrictLinkClassifier {
             return LinkClass.IntermediateGateway("download_gateway", null)
         }
 
-        // 4. Direct media extension check
-        val ext = clean.substringBefore('?').substringAfterLast('.', "").lowercase()
-        if (ext in DIRECT_EXTENSIONS) {
-            val isHls = ext == "m3u8"
-            return LinkClass.DirectMedia(ext, isHls)
-        }
-
-        // 5. Known locker hosts (dynamic OTA + defaults + HostHealth learned)
+        // 4. Known locker hosts (dynamic OTA + defaults + HostHealth learned)
+        // Checked BEFORE direct media extension: lockers like loadedfiles.net/.../ep.mkv
+        // and vikingfile.com/d/.../ep.mkv embed media names in URL paths, but are HTML pages
+        // or redirectors requiring cracking, not direct media files.
         val allLockers = (DynamicRulesManager.getLockerHosts() + DEFAULT_LOCKER_HOSTS).distinct()
         for (locker in allLockers) {
             if (cleanHost == locker || cleanHost.endsWith(".$locker")) {
@@ -127,6 +123,13 @@ object StrictLinkClassifier {
         }
         if (HostHealth.hasProvenLocker(cleanHost)) {
             return LinkClass.KnownLocker(cleanHost)
+        }
+
+        // 5. Direct media extension check
+        val ext = clean.substringBefore('?').substringAfterLast('.', "").lowercase()
+        if (ext in DIRECT_EXTENSIONS) {
+            val isHls = ext == "m3u8"
+            return LinkClass.DirectMedia(ext, isHls)
         }
 
         // 6. Navigation junk filtering

@@ -106,5 +106,6 @@ class ResolverHostClaimTest {
         assertFalse(LightDLResolver.canResolve("https://lightdl.cc/api/download/x"))
         assertTrue(VikingFileResolver.canResolve("https://vikingfile.com/f/x"))
         assertFalse(VikingFileResolver.canResolve("https://vikingfile.com/f/x.mp4")) // ext guard intact
+        assertTrue(VikingFileResolver.canResolve("https://vikingfile.com/d/wtKpY7FHW2/Lanterns.S01E01.mkv")) // /d/ token path accepted
     }
 }
