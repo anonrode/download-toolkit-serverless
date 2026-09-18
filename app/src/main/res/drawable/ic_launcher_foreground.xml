@@ -1,9 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Adaptive launcher foreground: the ink monogram glyph (no tile — the
-     background layer carries the gradient), scaled 0.85 about the mark's
-     centre so it sits inside the 66dp adaptive safe zone (21..87 of 108).
-     Contrast lives inside the icon: dark ink on cyan/teal survives every
-     wallpaper, light or dark. -->
+<!-- Adaptive launcher foreground: Crisp White (#FFFFFF) A monogram glyph
+     on Bare Dark background (#000000), scaled to fit safely within the 66dp safe zone. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
@@ -15,20 +12,20 @@
         android:translateX="3"
         android:translateY="2.15">
         <path
-            android:fillColor="#FF04121A"
+            android:fillColor="#FFFFFFFF"
             android:pathData="M60,26 L84,78 L72,78 L60,48 L48,78 L36,78 Z" />
         <path
-            android:strokeColor="#FF04121A"
+            android:strokeColor="#FFFFFFFF"
             android:strokeWidth="9"
             android:strokeLineCap="round"
             android:pathData="M42,86 L78,86" />
         <path
-            android:strokeColor="#FF04121A"
+            android:strokeColor="#FFFFFFFF"
             android:strokeWidth="7"
             android:strokeLineCap="round"
             android:pathData="M60,82 L60,94" />
         <path
-            android:strokeColor="#FF04121A"
+            android:strokeColor="#FFFFFFFF"
             android:strokeWidth="7"
             android:strokeLineCap="round"
             android:strokeLineJoin="round"

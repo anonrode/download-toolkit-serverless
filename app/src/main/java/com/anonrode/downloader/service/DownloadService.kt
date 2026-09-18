@@ -14,6 +14,7 @@ import android.content.pm.ServiceInfo
 import androidx.core.app.ServiceCompat
 import androidx.core.app.NotificationCompat
 import com.anonrode.downloader.MainActivity
+import com.anonrode.downloader.R
 
 class DownloadService : Service() {
 
@@ -151,7 +152,8 @@ class DownloadService : Service() {
         return NotificationCompat.Builder(this, CHANNEL_ONGOING_ID)
             .setContentTitle("Anonrode$countText")
             .setContentText(title)
-            .setSmallIcon(android.R.drawable.stat_sys_download)
+            .setSmallIcon(R.drawable.ic_notification)
+            .setColor(0xFF22D3EE.toInt())
             .setProgress(100, progress, progress == 0)
             .setContentIntent(pendingIntent)
             .setOngoing(true)
@@ -216,7 +218,8 @@ class DownloadService : Service() {
                 val notification = NotificationCompat.Builder(context, CHANNEL_COMPLETE_ID)
                     .setContentTitle("Download Complete")
                     .setContentText(filename)
-                    .setSmallIcon(android.R.drawable.stat_sys_download_done)
+                    .setSmallIcon(R.drawable.ic_notification)
+                    .setColor(0xFF22D3EE.toInt())
                     .setContentIntent(pendingIntent)
                     .setAutoCancel(true)
                     .build()
@@ -261,12 +264,13 @@ class DownloadService : Service() {
                     .setContentTitle("Download failed — $title")
                     .setContentText(error.take(140))
                     .setStyle(NotificationCompat.BigTextStyle().bigText(error.take(300)))
-                    .setSmallIcon(android.R.drawable.stat_notify_error)
+                    .setSmallIcon(R.drawable.ic_notification)
+                    .setColor(0xFFEF4444.toInt())
                     .setContentIntent(contentIntent)
                     .setAutoCancel(true)
                     .addAction(
                         NotificationCompat.Action.Builder(
-                            android.R.drawable.stat_sys_download_done,
+                            R.drawable.ic_notification,
                             "Retry",
                             retryPending
                         ).build()
