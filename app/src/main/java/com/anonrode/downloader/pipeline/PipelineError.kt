@@ -87,7 +87,8 @@ object PipelineJournal {
             append(" result=").append(if (ok) "OK" else "ERR")
             append(" ms=").append(ms)
             if (hash.isNotBlank()) append(" hash=").append(hash)
-            if (detail.isNotBlank()) append(" ").append(detail.take(160))
+            val d = if (!ok && detail.isBlank()) "unspecified error / no stream extracted" else detail
+            if (d.isNotBlank()) append(" ").append(d.take(160))
         }
         if (ok) DebugLog.resolve(line) else DebugLog.error(line)
     }
@@ -95,10 +96,11 @@ object PipelineJournal {
     inline fun <T> timed(site: String, stage: String, url: String, block: () -> T?): T? {
         val start = System.currentTimeMillis()
         val result = try { block() } catch (e: Exception) {
-            hop(site, stage, url, ok = false, ms = System.currentTimeMillis() - start, detail = e.message ?: "")
+            hop(site, stage, url, ok = false, ms = System.currentTimeMillis() - start, detail = "${e.javaClass.simpleName}: ${e.message ?: "no message"}")
             throw e
         }
-        hop(site, stage, url, ok = result != null, ms = System.currentTimeMillis() - start)
+        val ok = result != null
+        hop(site, stage, url, ok = ok, ms = System.currentTimeMillis() - start, detail = if (!ok) "null result (no match)" else "")
         return result
     }
 }

@@ -33,6 +33,7 @@ object SearchStrategyRunner {
             if (!com.anonrode.downloader.pipeline.HostHealth.isUsable(mainUrl)) break
             val type = st.optString("type")
             val start = System.currentTimeMillis()
+            var errDetail = ""
             val results = try {
                 when (type) {
                     "urlTemplate" -> runUrlTemplate(st, query, mainUrl, siteName)
@@ -40,12 +41,17 @@ object SearchStrategyRunner {
                     "slugGuess" -> runSlugGuess(st, query, mainUrl, siteName)
                     else -> null
                 }
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                errDetail = "${e.javaClass.simpleName}: ${e.message ?: "unknown"}"
                 null
             }
+            val ok = !results.isNullOrEmpty()
+            val hopDetail = if (ok) "${results?.size} match(es)"
+                else if (errDetail.isNotBlank()) errDetail
+                else "0 results returned (lastFailure=${HttpClient.lastFailure ?: "none"})"
             PipelineJournal.hop(
                 site = siteName, stage = "search:$type", url = mainUrl + " q=" + query.take(40),
-                ok = !results.isNullOrEmpty(), ms = System.currentTimeMillis() - start
+                ok = ok, ms = System.currentTimeMillis() - start, detail = hopDetail
             )
             if (!results.isNullOrEmpty()) return results
         }

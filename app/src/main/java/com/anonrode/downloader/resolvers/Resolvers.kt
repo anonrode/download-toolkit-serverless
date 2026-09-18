@@ -225,12 +225,16 @@ object ResolverRegistry {
                     }
                     return ResolverOutcome.Success(direct)
                 }
+                val failureDetail = (outcome as? ResolverOutcome.Failure)?.reason
+                    ?: resolver.lastResolveFailure()
+                    ?: com.anonrode.downloader.data.net.HttpClient.lastFailure
+                    ?: "no playable stream or token extracted"
                 com.anonrode.downloader.pipeline.PipelineJournal.hop(
                     site = "", stage = "crack:${resolver::class.simpleName}",
                     url = trimmed, ok = false, ms = elapsed,
-                    detail = (outcome as? ResolverOutcome.Failure)?.reason?.take(120) ?: ""
+                    detail = failureDetail.take(160)
                 )
-                if (outcome is ResolverOutcome.Failure) failure = outcome
+                failure = if (outcome is ResolverOutcome.Failure) outcome else ResolverOutcome.Failure(failureDetail)
             }
         }
         return failure
@@ -267,6 +271,9 @@ object VidbasicResolver : BaseResolver {
     private val KEY = "94588293375053432799222445521289".toByteArray(Charsets.UTF_8)
     private val IV = "5259228356829423".toByteArray(Charsets.UTF_8)
     private val HOSTS = listOf("vidbasic.", "vidb.top", "embedload.cfd")
+    @Volatile private var lastFailure: String? = null
+
+    override fun lastResolveFailure(): String? = lastFailure
 
     override fun canResolve(url: String): Boolean {
         val low = url.lowercase()
@@ -274,10 +281,14 @@ object VidbasicResolver : BaseResolver {
     }
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
+        lastFailure = null
         try {
             // Reference parity (resolvers.py:557): the page is fetched WITHOUT a
             // Referer header.
-            val html = HttpClient.getText(url) ?: return null
+            val html = HttpClient.getText(url) ?: run {
+                lastFailure = "Vidbasic: empty HTTP response for $url"
+                return null
+            }
 
             // 1) this page already carries the encrypted payload (3rdplayer.html)
             val direct = decryptPayload(html)
@@ -337,7 +348,12 @@ object VidbasicResolver : BaseResolver {
                     if (!innerDirect.isNullOrBlank()) return innerDirect
                 }
             }
-        } catch (_: Exception) {}
+            lastFailure = "Vidbasic: no crypto payload, mirror candidates, or 3rdplayer found in HTML (len=${html.length})"
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (e: Exception) {
+            lastFailure = "Vidbasic: ${e.javaClass.simpleName}: ${e.message}"
+        }
         return null
     }
 
@@ -357,9 +373,7 @@ object VidbasicResolver : BaseResolver {
             val ivSpec = IvParameterSpec(IV)
             cipher.init(Cipher.DECRYPT_MODE, keySpec, ivSpec)
             val decrypted = String(cipher.doFinal(cipherBytes), Charsets.UTF_8).trim()
-            if (decrypted.startsWith("http") &&
-                (decrypted.contains(".m3u8") || decrypted.contains(".mp4") || decrypted.contains(".mkv"))
-            ) {
+            if (decrypted.startsWith("http") && !decrypted.contains(" ")) {
                 return decrypted
             }
         } catch (_: Exception) {}
@@ -371,26 +385,42 @@ object VidbasicResolver : BaseResolver {
 // 2. KissasianResolver
 // -------------------------------------------------------------
 object KissasianResolver : BaseResolver {
+    @Volatile private var lastFailure: String? = null
+
+    override fun lastResolveFailure(): String? = lastFailure
+
     override fun canResolve(url: String): Boolean {
         val lower = url.lowercase()
         return hostClaim(url, listOf("kissasian9.ro")) && lower.contains("/kisskh/") && !lower.endsWith(".m3u8")
     }
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
+        lastFailure = null
         try {
-            val html = HttpClient.getText(url, referer = url) ?: return null
+            val html = HttpClient.getText(url, referer = url) ?: run {
+                lastFailure = "Kissasian: empty HTTP response for $url"
+                return null
+            }
             val m = Pattern.compile("""sourceUrl"\s*:\s*"([^"]+)""").matcher(html)
             if (m.find()) {
                 val apiPath = m.group(1) ?: return null
                 val apiUrl = HttpClient.safeResolveUri(url, apiPath)
-                val apiJson = HttpClient.getText(apiUrl, referer = url) ?: return null
+                val apiJson = HttpClient.getText(apiUrl, referer = url) ?: run {
+                    lastFailure = "Kissasian: API fetch failed for $apiUrl"
+                    return null
+                }
                 val obj = JSONObject(apiJson)
                 val src = obj.optString("source")
-                if (src.startsWith("http") && src.contains(".m3u8")) {
+                if (src.startsWith("http") && !src.contains(" ")) {
                     return src
                 }
             }
-        } catch (_: Exception) {}
+            lastFailure = "Kissasian: sourceUrl not found in HTML (len=${html.length})"
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (e: Exception) {
+            lastFailure = "Kissasian: ${e.javaClass.simpleName}: ${e.message}"
+        }
         return null
     }
 }
@@ -404,6 +434,9 @@ object KisskhMegaplayResolver : BaseResolver {
         "anihdplay.", "gogohd.", "megaplay.", "animesama.", "tamilembed.",
         "gogoanime.me.uk", "vkspeed.com", "ansembed.net", "sibnet.ru"
     )
+    @Volatile private var lastFailure: String? = null
+
+    override fun lastResolveFailure(): String? = lastFailure
 
     override fun canResolve(url: String): Boolean {
         if (url.contains("/playlist.php") || url.contains("/api/")) return false
@@ -418,6 +451,7 @@ object KisskhMegaplayResolver : BaseResolver {
     }
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
+        lastFailure = null
         try {
             // tamilembed serves the real player under HTTP 404 — accept the body
             // (monolith parity, resolvers.py:693-698). LIVE (2026-08): tamilembed
@@ -426,7 +460,10 @@ object KisskhMegaplayResolver : BaseResolver {
                 url,
                 referer = if (url.contains("tamilembed")) null else url,
                 acceptStatus = if (url.contains("tamilembed")) setOf(404) else emptySet()
-            ) ?: return null
+            ) ?: run {
+                lastFailure = "KisskhMegaplay: empty HTTP response for $url"
+                return null
+            }
 
             // Inner iframe (tamilembed / blogger)
             val doc = Jsoup.parse(html, url)
@@ -494,15 +531,20 @@ object KisskhMegaplayResolver : BaseResolver {
                 return "https://video.sibnet.ru" + sibMatcher.group(1)
             }
 
-            val direct = extractM3u8FromHtml(html)
+            val direct = extractM3u8FromHtml(html) ?: extractMp4FromHtml(html)
             if (!direct.isNullOrBlank()) return direct
 
             val unpacked = JsUnpacker.unpack(html)
             if (!unpacked.isNullOrBlank()) {
-                val unpDirect = extractM3u8FromHtml(unpacked)
+                val unpDirect = extractM3u8FromHtml(unpacked) ?: extractMp4FromHtml(unpacked)
                 if (!unpDirect.isNullOrBlank()) return unpDirect
             }
-        } catch (_: Exception) {}
+            lastFailure = "KisskhMegaplay: no stream extracted from HTML (len=${html.length})"
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (e: Exception) {
+            lastFailure = "KisskhMegaplay: ${e.javaClass.simpleName}: ${e.message}"
+        }
         return null
     }
 }
@@ -511,25 +553,42 @@ object KisskhMegaplayResolver : BaseResolver {
 // 4. BloggerResolver (batchexecute RPC -> direct googlevideo MP4)
 // -------------------------------------------------------------
 object BloggerResolver : BaseResolver {
+    @Volatile private var lastFailure: String? = null
+
+    override fun lastResolveFailure(): String? = lastFailure
+
     override fun canResolve(url: String): Boolean {
         val low = url.lowercase()
         return hostClaim(url, listOf("blogger.com")) && (low.contains("video.g") || low.contains("token="))
     }
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
+        lastFailure = null
         try {
-            val html = HttpClient.getText(url) ?: return null
+            val html = HttpClient.getText(url) ?: run {
+                lastFailure = "Blogger: empty HTTP response for $url"
+                return null
+            }
 
             val fsidMatcher = Pattern.compile("""FdrFJe":"([^"]+)""").matcher(html)
-            if (!fsidMatcher.find()) return null
+            if (!fsidMatcher.find()) {
+                lastFailure = "Blogger: FdrFJe sid token not found in HTML"
+                return null
+            }
             val fSid = fsidMatcher.group(1) ?: return null
 
             val blMatcher = Pattern.compile("""boq_bloggeruiserver_[^'", ]+""").matcher(html)
-            if (!blMatcher.find()) return null
+            if (!blMatcher.find()) {
+                lastFailure = "Blogger: boq_bloggeruiserver bl token not found in HTML"
+                return null
+            }
             val bl = blMatcher.group(0)
 
             val tokenMatcher = Pattern.compile("""[?&]token=([^&]+)""").matcher(url)
-            if (!tokenMatcher.find()) return null
+            if (!tokenMatcher.find()) {
+                lastFailure = "Blogger: token param not found in URL"
+                return null
+            }
             val token = tokenMatcher.group(1) ?: return null
 
             val rpcUrl = "https://www.blogger.com/_/BloggerVideoPlayerUi/data/batchexecute?rpcids=WcwnYd&source-path=%2Fvideo.g&f.sid=${URLEncoder.encode(fSid, "UTF-8")}&bl=${URLEncoder.encode(bl, "UTF-8")}&hl=en-US&rt=c"
@@ -549,8 +608,14 @@ object BloggerResolver : BaseResolver {
                 .build()
 
             HttpClient.executeCancellable(HttpClient.shared, req) use@{ res ->
-                if (!res.isSuccessful) return null
-                val body = HttpClient.cappedText(res) ?: return null
+                if (!res.isSuccessful) {
+                    lastFailure = "Blogger: RPC returned HTTP ${res.code}"
+                    return null
+                }
+                val body = HttpClient.cappedText(res) ?: run {
+                    lastFailure = "Blogger: empty RPC body"
+                    return null
+                }
 
                 val urlMatches = Pattern.compile("""(https://[^"]+googlevideo\.com[^"]+)""").matcher(body)
                 val urls = mutableListOf<String>()
@@ -566,8 +631,13 @@ object BloggerResolver : BaseResolver {
                 val itag18 = urls.find { it.contains("itag=18") }
                 if (itag18 != null) return itag18
                 if (urls.isNotEmpty()) return urls.first()
+                lastFailure = "Blogger: no googlevideo stream URL in RPC response"
             }
-        } catch (_: Exception) {}
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (e: Exception) {
+            lastFailure = "Blogger: ${e.javaClass.simpleName}: ${e.message}"
+        }
         return null
     }
 }
@@ -582,25 +652,35 @@ object VidsrcResolver : BaseResolver {
         "cloudorchestranova.com", "data.vidsrcme.ru",
         "nepu.gd/watch", "nepu.to/watch"
     )
-    private val TMDB_PATTERN = Pattern.compile("""/(?:movie|tv)/(\d+)(?:/(\d+)/(\d+))?""")
+    private val TMDB_PATTERN = Pattern.compile("""/(?:movie|tv)/(\d+)(?:[/_-](\d+)[/_-](\d+))?""")
     private val ORIGIN_PATTERN = Pattern.compile("""https?://[^/]+""")
+    @Volatile private var lastFailure: String? = null
+
+    override fun lastResolveFailure(): String? = lastFailure
 
     override fun canResolve(url: String): Boolean {
         return hostClaim(url, HOSTS)
     }
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
+        lastFailure = null
         try {
             var embedUrl = url.replace("nepu.to/", "nepu.gd/")
             if (embedUrl.contains("nepu.gd/watch")) {
-                // Watch pages hide the player in iframe#playerFrame (or a
-                // vidsrc-src iframe) — hop through it to the embed URL if present.
+                // Watch pages require Cookie: hv=1 to bypass JS gate and hide
+                // the player in iframe#playerFrame (or vidsrc/vsembed iframe).
                 try {
-                    val html = HttpClient.getText(embedUrl, referer = "https://nepu.gd/")
+                    val html = HttpClient.getText(
+                        embedUrl,
+                        referer = "https://nepu.gd/",
+                        headers = mapOf("Cookie" to "hv=1")
+                    )
                     if (!html.isNullOrBlank()) {
                         val doc = Jsoup.parse(html, embedUrl)
                         val iframe = doc.selectFirst("iframe#playerFrame")
                             ?: doc.selectFirst("iframe[src*=vidsrc]")
+                            ?: doc.selectFirst("iframe[src*=vsembed]")
+                            ?: doc.selectFirst("iframe[src]")
                         if (iframe != null && iframe.attr("src").isNotBlank()) {
                             embedUrl = HttpClient.safeResolveUri(embedUrl, iframe.attr("src"))
                         }
@@ -608,9 +688,32 @@ object VidsrcResolver : BaseResolver {
                 } catch (_: Exception) {}
             }
 
+            // vsembed.ru embeds relay through an internal data-api (vs_src.php)
+            // which mints the signed cloudorchestranova player URL.
+            if (embedUrl.contains("vsembed.ru")) {
+                try {
+                    val vHtml = HttpClient.getText(embedUrl, referer = "https://vidsrc.mov/")
+                    if (!vHtml.isNullOrBlank()) {
+                        val apiMatcher = Pattern.compile("""data-api=["']([^"']+)["']""").matcher(vHtml)
+                        val apiPath = if (apiMatcher.find()) apiMatcher.group(1) else null
+                        if (!apiPath.isNullOrBlank()) {
+                            val fullApi = HttpClient.safeResolveUri(embedUrl, apiPath.replace("&amp;", "&"))
+                            val apiJson = HttpClient.getText(fullApi, referer = embedUrl)
+                            if (!apiJson.isNullOrBlank()) {
+                                val src = JSONObject(apiJson).optString("src")
+                                if (src.startsWith("http")) embedUrl = src
+                            }
+                        }
+                    }
+                } catch (_: Exception) {}
+            }
+
             // The embed URL carries the TMDB id (and season/episode for TV).
             val m = TMDB_PATTERN.matcher(embedUrl)
-            if (!m.find()) return null
+            if (!m.find()) {
+                lastFailure = "Vidsrc: no TMDB id pattern matched in $embedUrl"
+                return null
+            }
             val tmdb = m.group(1) ?: return null
             val apiUrl = if (embedUrl.contains("/tv/")) {
                 val season = m.group(2) ?: return null
@@ -620,9 +723,16 @@ object VidsrcResolver : BaseResolver {
                 "https://data.vidsrcme.ru/api.php?type=movie&tmdb=$tmdb&stream_urls"
             }
 
-            val json = HttpClient.getText(apiUrl, referer = "https://cloudorchestranova.com/") ?: return null
+            val json = HttpClient.getText(apiUrl, referer = "https://cloudorchestranova.com/") ?: run {
+                lastFailure = "Vidsrc: API request failed for $apiUrl"
+                return null
+            }
             val root = JSONObject(json)
-            val data = root.optJSONObject("data") ?: return null
+            val data = root.optJSONObject("data") ?: run {
+                val sc = root.optInt("status_code", 404)
+                lastFailure = "Vidsrc: API returned status $sc for tmdb=$tmdb"
+                return null
+            }
             val streamUrl: String = when (val su = data.opt("stream_urls")) {
                 is JSONArray -> if (su.length() > 0) su.getString(0) else null
                 is String -> {
@@ -637,7 +747,10 @@ object VidsrcResolver : BaseResolver {
                     VidsrcWasmCrypto.decrypt(su, key).firstOrNull()
                 }
                 else -> null
-            } ?: return null
+            } ?: run {
+                lastFailure = "Vidsrc: no valid stream_urls extracted from data"
+                return null
+            }
 
             // Playlist URLs are CDN-gated by an IP-bound JWT issued by the
             // origin's generate.php; without it the CDN answers 401. A URL that
@@ -651,10 +764,17 @@ object VidsrcResolver : BaseResolver {
             // tokenless master is a guaranteed CDN 401, so fail this candidate
             // outright and let another mirror win instead of handing the player
             // a URL it cannot open.
-            if (token.isEmpty()) return null
+            if (token.isEmpty()) {
+                lastFailure = "Vidsrc: generate.php returned empty token for $origin"
+                return null
+            }
             return if (streamUrl.contains("__TOKEN__")) streamUrl.replace("__TOKEN__", token)
             else streamUrl + (if (streamUrl.contains("?")) "&" else "?") + "token=$token"
-        } catch (_: Exception) {}
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (e: Exception) {
+            lastFailure = "Vidsrc: ${e.javaClass.simpleName}: ${e.message}"
+        }
         return null
     }
 }
@@ -663,17 +783,31 @@ object VidsrcResolver : BaseResolver {
 // 6. LightDLResolver
 // -------------------------------------------------------------
 object LightDLResolver : BaseResolver {
+    @Volatile private var lastFailure: String? = null
+
+    override fun lastResolveFailure(): String? = lastFailure
+
     override fun canResolve(url: String): Boolean {
         if (url.contains("/api/download/")) return false
         return hostClaim(url, listOf("lightdl.cc"))
     }
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
+        lastFailure = null
         try {
             val code = url.trimEnd('/').substringAfterLast('/')
-            if (code.isBlank()) return null
-            val fileJson = HttpClient.getText("https://lightdl.cc/api/files/code/$code", referer = url) ?: return null
-            val fileId = JSONObject(fileJson).optJSONObject("file")?.optString("id") ?: return null
+            if (code.isBlank()) {
+                lastFailure = "LightDL: code blank in $url"
+                return null
+            }
+            val fileJson = HttpClient.getText("https://lightdl.cc/api/files/code/$code", referer = url) ?: run {
+                lastFailure = "LightDL: file query failed for code $code"
+                return null
+            }
+            val fileId = JSONObject(fileJson).optJSONObject("file")?.optString("id") ?: run {
+                lastFailure = "LightDL: file id not found in response"
+                return null
+            }
 
             val req = Request.Builder()
                 .url("https://lightdl.cc/api/files/$fileId/download-token")
@@ -683,12 +817,24 @@ object LightDLResolver : BaseResolver {
                 .build()
 
             HttpClient.executeCancellable(HttpClient.shared, req) use@{ res ->
-                if (!res.isSuccessful) return null
-                val body = HttpClient.cappedText(res) ?: return null
+                if (!res.isSuccessful) {
+                    lastFailure = "LightDL: download-token HTTP ${res.code}"
+                    return null
+                }
+                val body = HttpClient.cappedText(res) ?: run {
+                    lastFailure = "LightDL: empty download-token body"
+                    return null
+                }
                 val obj = JSONObject(body)
-                return obj.optString("downloadUrl")
+                val dlUrl = obj.optString("downloadUrl")
+                if (dlUrl.isNotBlank()) return dlUrl
+                lastFailure = "LightDL: no downloadUrl in token response"
             }
-        } catch (_: Exception) {}
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (e: Exception) {
+            lastFailure = "LightDL: ${e.javaClass.simpleName}: ${e.message}"
+        }
         return null
     }
 }
@@ -697,15 +843,35 @@ object LightDLResolver : BaseResolver {
 // 7. FivePlayResolver
 // -------------------------------------------------------------
 object FivePlayResolver : BaseResolver {
+    @Volatile private var lastFailure: String? = null
+
+    override fun lastResolveFailure(): String? = lastFailure
+
     override fun canResolve(url: String): Boolean {
         return hostClaim(url, listOf("5play.cc"))
     }
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
+        lastFailure = null
         try {
-            val html = HttpClient.getText(url, referer = "https://dramakey.cc/") ?: return null
-            return extractM3u8FromHtml(html) ?: extractMp4FromHtml(html)
-        } catch (_: Exception) {}
+            val html = HttpClient.getText(url, referer = "https://dramakey.cc/") ?: run {
+                lastFailure = "FivePlay: empty HTTP response for $url"
+                return null
+            }
+            val direct = extractM3u8FromHtml(html) ?: extractMp4FromHtml(html)
+            if (!direct.isNullOrBlank()) return direct
+
+            val unpacked = JsUnpacker.unpack(html)
+            if (!unpacked.isNullOrBlank()) {
+                val unpDirect = extractM3u8FromHtml(unpacked) ?: extractMp4FromHtml(unpacked)
+                if (!unpDirect.isNullOrBlank()) return unpDirect
+            }
+            lastFailure = "FivePlay: no stream extracted from HTML (len=${html.length})"
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (e: Exception) {
+            lastFailure = "FivePlay: ${e.javaClass.simpleName}: ${e.message}"
+        }
         return null
     }
 }
@@ -714,6 +880,10 @@ object FivePlayResolver : BaseResolver {
 // 8. VikingFileResolver
 // -------------------------------------------------------------
 object VikingFileResolver : BaseResolver {
+    @Volatile private var lastFailure: String? = null
+
+    override fun lastResolveFailure(): String? = lastFailure
+
     override fun canResolve(url: String): Boolean {
         val low = url.lowercase()
         return hostClaim(url, listOf("vikingfile.com")) && (low.contains("/d/") || (!low.endsWith(".mp4") && !low.endsWith(".mkv") && !low.endsWith(".m3u8")))
@@ -748,6 +918,7 @@ object VikingFileResolver : BaseResolver {
     }
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
+        lastFailure = null
         try {
             // vikingfile.com has TWO URL shapes:
             //
@@ -764,7 +935,10 @@ object VikingFileResolver : BaseResolver {
             var curr = url
             for (hop in 1..5) {
                 val tp = HttpClient.probeTerminal(curr, referer = "https://www.naijavault.com/")
-                    ?: return null
+                if (tp == null) {
+                    lastFailure = "VikingFile: probeTerminal failed for $curr"
+                    return null
+                }
                 // Case (a): curr is already the direct storage/media URL (e.g. Cloudflare R2)
                 if (tp.totalBytes != null) {
                     val lowCurr = curr.lowercase()
@@ -774,11 +948,17 @@ object VikingFileResolver : BaseResolver {
                         val verified = probeStorageLocation(curr)
                         if (verified != null) return verified
                     }
-                    if (tp.code in 200..206 && !hostClaim(curr, listOf("vikingfile.com"))) {
-                        com.anonrode.downloader.util.DebugLog.resolve(
-                            "VikingFileResolver: $curr is the direct file (Range probe ${tp.code}, size=${tp.totalBytes}) — returning as-is"
-                        )
-                        return curr
+                    if (tp.code in 200..206) {
+                        val isMediaContent = tp.contentType?.contains("video") == true ||
+                            tp.contentType?.contains("octet-stream") == true ||
+                            tp.contentType?.contains("matroska") == true ||
+                            isDirectMediaUrl(curr)
+                        if (!hostClaim(curr, listOf("vikingfile.com")) || isMediaContent) {
+                            com.anonrode.downloader.util.DebugLog.resolve(
+                                "VikingFileResolver: $curr is the direct file (Range probe ${tp.code}, size=${tp.totalBytes}) — returning as-is"
+                            )
+                            return curr
+                        }
                     }
                 }
                 // Case (b): 30x redirect
@@ -799,7 +979,10 @@ object VikingFileResolver : BaseResolver {
                     continue
                 }
                 // Case (c): HTML page that doesn't redirect
-                val html = HttpClient.getText(curr, referer = "https://www.naijavault.com/") ?: return null
+                val html = HttpClient.getText(curr, referer = "https://www.naijavault.com/") ?: run {
+                    lastFailure = "VikingFile: empty HTTP response at hop $hop for $curr"
+                    return null
+                }
                 val m = Pattern.compile("""(?:window\.location|location\.href)\s*=\s*["']([^"']+)["']""").matcher(html)
                 if (m.find()) {
                     val loc = m.group(1) ?: return null
@@ -813,9 +996,15 @@ object VikingFileResolver : BaseResolver {
                     curr = HttpClient.safeUrl(HttpClient.safeResolveUri(curr, loc))
                     continue
                 }
-                return extractMp4FromHtml(html) ?: extractM3u8FromHtml(html)
+                val direct = extractMp4FromHtml(html) ?: extractM3u8FromHtml(html)
+                if (!direct.isNullOrBlank()) return direct
+                lastFailure = "VikingFile: no redirect or media found at hop $hop ($curr)"
             }
-        } catch (_: Exception) {}
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (e: Exception) {
+            lastFailure = "VikingFile: ${e.javaClass.simpleName}: ${e.message}"
+        }
         return null
     }
 }
@@ -824,22 +1013,49 @@ object VikingFileResolver : BaseResolver {
 // 9. LulaCloudResolver
 // -------------------------------------------------------------
 object LulaCloudResolver : BaseResolver {
+    @Volatile private var lastFailure: String? = null
+
+    override fun lastResolveFailure(): String? = lastFailure
+
     override fun canResolve(url: String): Boolean {
         return hostClaim(url, listOf("lulacloud.com"))
     }
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
+        lastFailure = null
         try {
             // lulacloud.com serves a broken CA chain (live-verified verify
             // code 20) — permissive client, same bounded scope as the
             // downloadwella family.
-            val html = HttpClient.getText(url, referer = "https://www.naijavault.com/", permissive = true) ?: return null
-            val m = Pattern.compile("""(?:window\.location|location\.href)\s*=\s*["']([^"']+)["']""").matcher(html)
+            val html = HttpClient.getText(url, referer = "https://www.naijavault.com/", permissive = true) ?: run {
+                lastFailure = "LulaCloud: empty HTTP response for $url"
+                return null
+            }
+            val m = Pattern.compile("""(?:window\.location(?:\.href)?|location\.href)\s*=\s*["']([^"']+)["']""").matcher(html)
             if (m.find()) {
                 return m.group(1)
             }
-            return extractMp4FromHtml(html) ?: extractM3u8FromHtml(html)
-        } catch (_: Exception) {}
+            val direct = extractMp4FromHtml(html) ?: extractM3u8FromHtml(html)
+            if (!direct.isNullOrBlank()) return direct
+
+            val doc = Jsoup.parse(html, url)
+            val btn = doc.selectFirst("a.download-btn, a[href*='download'], a[href*='/d/']")
+            if (btn != null) {
+                val href = btn.attr("abs:href")
+                if (href.isNotBlank() && href != url) return href
+            }
+
+            val unpacked = JsUnpacker.unpack(html)
+            if (!unpacked.isNullOrBlank()) {
+                val unpDirect = extractMp4FromHtml(unpacked) ?: extractM3u8FromHtml(unpacked)
+                if (!unpDirect.isNullOrBlank()) return unpDirect
+            }
+            lastFailure = "LulaCloud: no media or redirect found in HTML (len=${html.length})"
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (e: Exception) {
+            lastFailure = "LulaCloud: ${e.javaClass.simpleName}: ${e.message}"
+        }
         return null
     }
 }
@@ -848,20 +1064,45 @@ object LulaCloudResolver : BaseResolver {
 // 10. DramaGatewayResolver
 // -------------------------------------------------------------
 object DramaGatewayResolver : BaseResolver {
+    @Volatile private var lastFailure: String? = null
+
+    override fun lastResolveFailure(): String? = lastFailure
+
     override fun canResolve(url: String): Boolean {
         val low = url.lowercase()
         return hostClaim(url, listOf("dramarain.com", "dramakey.cc")) && low.contains("/download")
     }
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
+        lastFailure = null
         try {
             val host = HttpClient.safeHost(url, "dramarain.com")
-            val html = HttpClient.getText(url, referer = "https://$host/") ?: return null
-            val m = Pattern.compile("""window\.location\.href\s*=\s*"([^"]+)""").matcher(html)
-            if (m.find()) {
-                return m.group(1)
+            val html = HttpClient.getText(url, referer = "https://$host/") ?: run {
+                lastFailure = "DramaGateway: empty HTTP response for $url"
+                return null
             }
-        } catch (_: Exception) {}
+            val m = Pattern.compile("""(?:window\.location(?:\.href)?|location\.href)\s*=\s*["']([^"']+)["']""").matcher(html)
+            if (m.find()) {
+                val dest = m.group(1)
+                if (!dest.isNullOrBlank()) return dest
+            }
+
+            val doc = Jsoup.parse(html, url)
+            val btn = doc.selectFirst("a.download-btn, a[href*='waffi'], a[href*='download'], a[href*='stream']")
+            if (btn != null) {
+                val href = btn.attr("abs:href")
+                if (href.isNotBlank() && href != url) return href
+            }
+            val lockerAnchor = doc.select("a[href]").map { it.attr("abs:href") }
+                .firstOrNull { LinkResolver.isKnownLockerHost(it) && it != url }
+            if (!lockerAnchor.isNullOrBlank()) return lockerAnchor
+
+            lastFailure = "DramaGateway: no window.location or download link found in HTML (len=${html.length})"
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (e: Exception) {
+            lastFailure = "DramaGateway: ${e.javaClass.simpleName}: ${e.message}"
+        }
         return null
     }
 }
@@ -870,24 +1111,43 @@ object DramaGatewayResolver : BaseResolver {
 // 11. NaijaVaultGatewayResolver
 // -------------------------------------------------------------
 object NaijaVaultGatewayResolver : BaseResolver {
+    @Volatile private var lastFailure: String? = null
+
+    override fun lastResolveFailure(): String? = lastFailure
+
     override fun canResolve(url: String): Boolean {
         val low = url.lowercase()
         return hostClaim(url, listOf("naijavault.com")) && (low.contains("/dl-") || low.contains("/temp/"))
     }
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
+        lastFailure = null
         try {
-            val html = HttpClient.getText(url, referer = "https://www.naijavault.com/") ?: return null
+            val html = HttpClient.getText(url, referer = "https://www.naijavault.com/") ?: run {
+                lastFailure = "NaijaVault: empty HTTP response for $url"
+                return null
+            }
             val soup = Jsoup.parse(html, url)
-            val btn = soup.selectFirst("a.download-btn, a[href*='vikingfile'], a[href*='lulacloud']")
+            val btn = soup.selectFirst("a.download-btn, a.btn-download, a[href*='vikingfile'], a[href*='lulacloud'], a[href*='loadedfiles'], a[href*='downloadwella'], a[href*='wetafiles'], a[href*='pixeldrain']")
             if (btn != null) {
-                return btn.attr("abs:href")
+                val href = btn.attr("abs:href")
+                if (href.isNotBlank()) return href
             }
-            val m = Pattern.compile("""var\s+downloadURL\s*=\s*"([^"]+)""").matcher(html)
+            val lockerAnchor = soup.select("a[href]").map { it.attr("abs:href") }
+                .firstOrNull { LinkResolver.isKnownLockerHost(it) && it != url }
+            if (!lockerAnchor.isNullOrBlank()) return lockerAnchor
+
+            val m = Pattern.compile("""var\s+downloadURL\s*=\s*["']([^"']+)["']""").matcher(html)
             if (m.find()) {
-                return m.group(1)
+                val u = m.group(1)
+                if (!u.isNullOrBlank()) return u
             }
-        } catch (_: Exception) {}
+            lastFailure = "NaijaVault: no download anchor or var downloadURL found in HTML (len=${html.length})"
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (e: Exception) {
+            lastFailure = "NaijaVault: ${e.javaClass.simpleName}: ${e.message}"
+        }
         return null
     }
 }
@@ -897,16 +1157,35 @@ object NaijaVaultGatewayResolver : BaseResolver {
 // -------------------------------------------------------------
 object EmbedResolver : BaseResolver {
     private val KNOWN = listOf("megaplay.buzz", "megaplay.cc", "tamilembed.lol", "embedsito.com")
+    @Volatile private var lastFailure: String? = null
+
+    override fun lastResolveFailure(): String? = lastFailure
 
     override fun canResolve(url: String): Boolean {
         return hostClaim(url, KNOWN)
     }
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
+        lastFailure = null
         try {
-            val html = HttpClient.getText(url, referer = url) ?: return null
-            return extractM3u8FromHtml(html) ?: extractMp4FromHtml(html)
-        } catch (_: Exception) {}
+            val html = HttpClient.getText(url, referer = url) ?: run {
+                lastFailure = "EmbedResolver: empty HTTP response for $url"
+                return null
+            }
+            val direct = extractM3u8FromHtml(html) ?: extractMp4FromHtml(html)
+            if (!direct.isNullOrBlank()) return direct
+
+            val unpacked = JsUnpacker.unpack(html)
+            if (!unpacked.isNullOrBlank()) {
+                val unpDirect = extractM3u8FromHtml(unpacked) ?: extractMp4FromHtml(unpacked)
+                if (!unpDirect.isNullOrBlank()) return unpDirect
+            }
+            lastFailure = "EmbedResolver: no stream extracted from HTML (len=${html.length})"
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (e: Exception) {
+            lastFailure = "EmbedResolver: ${e.javaClass.simpleName}: ${e.message}"
+        }
         return null
     }
 }
@@ -915,6 +1194,10 @@ object EmbedResolver : BaseResolver {
 // 13. PlutoMoviesResolver
 // -------------------------------------------------------------
 object PlutoMoviesResolver : BaseResolver {
+    @Volatile private var lastFailure: String? = null
+
+    override fun lastResolveFailure(): String? = lastFailure
+
     override fun canResolve(url: String): Boolean {
         // /series/ episode pages carry the same download link as movies —
         // without them the Vincenzo-style episode taps failed with
@@ -927,8 +1210,12 @@ object PlutoMoviesResolver : BaseResolver {
     }
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
+        lastFailure = null
         try {
-            val html = HttpClient.getText(url, referer = "https://plutomovies.com/") ?: return null
+            val html = HttpClient.getText(url, referer = "https://plutomovies.com/") ?: run {
+                lastFailure = "PlutoMovies: empty HTTP response for $url"
+                return null
+            }
             val m = Pattern.compile("""location\.href\s*=\s*['"](https?://[^'"]+)['"]""").matcher(html)
             if (m.find()) {
                 val dest = m.group(1) ?: ""
@@ -980,7 +1267,12 @@ object PlutoMoviesResolver : BaseResolver {
                 }
                 return episodeish ?: seasonish ?: children.first()
             }
-        } catch (_: Exception) {}
+            lastFailure = "PlutoMovies: no dl anchor or direct media found in HTML (len=${html.length})"
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (e: Exception) {
+            lastFailure = "PlutoMovies: ${e.javaClass.simpleName}: ${e.message}"
+        }
         return null
     }
 }
@@ -989,17 +1281,25 @@ object PlutoMoviesResolver : BaseResolver {
 // 14. DownloadwellaResolver
 // -------------------------------------------------------------
 object DownloadwellaResolver : BaseResolver {
+    @Volatile private var lastFailure: String? = null
+
+    override fun lastResolveFailure(): String? = lastFailure
+
     override fun canResolve(url: String): Boolean {
         return hostClaim(url, listOf("downloadwella.com", "wetafiles.com", "kissorgrab.com"))
     }
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
+        lastFailure = null
         try {
             // Permissive client: wetafiles.com omits its TLS intermediate and
             // kissorgrab.com serves an invalid cert — strict verification
             // fails every crack on those hosts (live-verified). Scoped here
             // only; the shared client stays strict for everything else.
-            val html = HttpClient.getText(url, referer = url, permissive = true) ?: return null
+            val html = HttpClient.getText(url, referer = url, permissive = true) ?: run {
+                lastFailure = "Downloadwella: empty HTTP response for $url"
+                return null
+            }
             val doc = Jsoup.parse(html, url)
             val formEl = doc.selectFirst("form")
 
@@ -1030,7 +1330,10 @@ object DownloadwellaResolver : BaseResolver {
                 } catch (_: Exception) {
                     null
                 }
-                if (fileId.isNullOrBlank()) return null
+                if (fileId.isNullOrBlank()) {
+                    lastFailure = "Downloadwella: fileId could not be extracted from path $url"
+                    return null
+                }
                 formBuilder.add("op", "download2")
                 formBuilder.add("id", fileId)
                 formBuilder.add("rand", "")
@@ -1048,8 +1351,14 @@ object DownloadwellaResolver : BaseResolver {
                 .build()
 
             HttpClient.executeCancellable(HttpClient.permissiveClient, req) use@{ res ->
-                if (!res.isSuccessful) return null
-                val body = HttpClient.cappedText(res) ?: return null
+                if (!res.isSuccessful) {
+                    lastFailure = "Downloadwella: step 1 POST HTTP ${res.code}"
+                    return null
+                }
+                val body = HttpClient.cappedText(res) ?: run {
+                    lastFailure = "Downloadwella: step 1 empty POST body"
+                    return null
+                }
 
                 val directMedia = findDirectMediaUrl(body)
                 if (!directMedia.isNullOrBlank() && !directMedia.equals(url, ignoreCase = true) && !isRootLockerDomain(directMedia)) {
@@ -1082,11 +1391,22 @@ object DownloadwellaResolver : BaseResolver {
                             val body2 = HttpClient.cappedText(res2) ?: ""
                             val direct2 = findDirectMediaUrl(body2)
                             if (!direct2.isNullOrBlank() && !isRootLockerDomain(direct2)) return direct2
+                            val postDoc2 = Jsoup.parse(body2, url)
+                            val directAnchor2 = postDoc2.select("a[href]").mapNotNull { a ->
+                                val href = a.attr("abs:href")
+                                if (isDirectMediaUrl(href) || (href.contains("/d/") && !href.endsWith(".html"))) href else null
+                            }.firstOrNull { !it.equals(url, ignoreCase = true) && !isRootLockerDomain(it) }
+                            if (!directAnchor2.isNullOrBlank()) return directAnchor2
                         }
                     }
                 }
+                lastFailure = "Downloadwella: no direct media link found after form submit (body len=${body.length})"
             }
-        } catch (_: Exception) {}
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (e: Exception) {
+            lastFailure = "Downloadwella: ${e.javaClass.simpleName}: ${e.message}"
+        }
         return null
     }
 }
@@ -1208,6 +1528,7 @@ object LoadedfilesResolver : BaseResolver {
                 }
             }
             if (currUrl == null) {
+                onFailure(ResolverOutcome.Failure("Loadedfiles: no live candidate host responded (${hosts.joinToString()})"))
                 android.util.Log.w("AnonDownload", "Loadedfiles: no live host")
                 return null
             }
@@ -1320,6 +1641,18 @@ object LoadedfilesResolver : BaseResolver {
                                 }
                             }
                         }
+                        if (next == null) {
+                            try {
+                                val doc = Jsoup.parse(body, currUrl!!)
+                                val btn = doc.selectFirst("a[href*='/d/'], a[href*='/token/download/'], a[href*='?pt='], a.download-btn, a.btn-download")
+                                if (btn != null) {
+                                    val href = btn.attr("abs:href")
+                                    if (href.isNotBlank() && href != currUrl) {
+                                        next = href
+                                    }
+                                }
+                            } catch (_: Exception) {}
+                        }
                         if (!next.isNullOrBlank()) {
                             currUrl = HttpClient.safeUrl(next)
                             ptHops++
@@ -1327,6 +1660,7 @@ object LoadedfilesResolver : BaseResolver {
                     }
                 }
                 if (currUrl == pageBeforeStep) {
+                    onFailure(ResolverOutcome.Failure("Loadedfiles token chain stalled on step $step ($currUrl) — neither dlTimer nor downloadUrl found"))
                     // Same page came back with nothing actionable: further steps
                     // would repeat it verbatim. Give up on this host here; the
                     // mirror-fallthrough below lets the next candidate try.
@@ -1405,38 +1739,19 @@ object WildshareResolver : BaseResolver {
         return hostClaim(url, listOf("wildshare.net"))
     }
 
+    @Volatile private var lastFailure: String? = null
+
+    override fun lastResolveFailure(): String? = lastFailure
+
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
+        lastFailure = null
         try {
-            val html = HttpClient.getText(url, referer = url) ?: return null
-            val ptMatcher = Pattern.compile("""pt=([A-Za-z0-9%+=/]+)""").matcher(html)
+            val html = HttpClient.getText(url, referer = url) ?: run {
+                lastFailure = "Wildshare: empty HTTP response for $url"
+                return null
+            }
+            val ptMatcher = Pattern.compile("""[?&'"]pt(?:=|["']\s*:\s*["'])([A-Za-z0-9%+=/]+)""").matcher(html)
             if (ptMatcher.find()) {
-                // THE BUGS (two of them, both fixed):
-                //
-                // 1. The previous code did `ptMatcher.group(0)` which returns the
-                //    WHOLE MATCH (e.g. "pt=ZG1DYldW..."). Then it built the URL as
-                //    `https://wildshare.net/$fileId?$pt` which produced "?pt=pt=ZG1D..."
-                //    — a double-pt query. wildshare's edge returned an HTML
-                //    interstitial for the malformed URL (it never matched a real
-                //    download token), and the engine then tried to download that
-                //    HTML as a .mkv, hit the "URL serves an HTML/error page, not
-                //    media" check, and gave up. Live-verified: the 11-episode Pitt
-                //    S02 wildshare cascade in app-2026-09-01 had every episode
-                //    returning a `?pt=...` token in the page, but the engine
-                //    couldn't follow it because the URL it constructed was
-                //    garbage. `group(1)` extracts just the token value, so the
-                //    final URL is `?pt=ZG1D...` — the form wildshare expects.
-                //
-                // 2. The previous code used a brand-new OkHttpClient with no
-                //    cookieJar. wildshare's edge server sets a `filehosting`
-                //    cookie on the first page visit (response headers confirmed),
-                //    and the `?pt=...` 302 only fires when that cookie is
-                //    present in the next request. Without the cookie the server
-                //    returns 200 OK with HTML, not 302 — the resolver then
-                //    silently failed. Reusing [HttpClient.shared] (which carries
-                //    the sessionCookieJar populated by the page fetch above)
-                //    preserves the cookie, and the 302 follows. Live-verified
-                //    end-to-end: page → cookie set → follow ?pt= with cookie
-                //    → 302 → real .mkv URL.
                 val pt = ptMatcher.group(1) ?: return null
                 if (pt.isBlank()) return null
                 val parts = url.trimEnd('/').split('/')
@@ -1449,24 +1764,32 @@ object WildshareResolver : BaseResolver {
                 val req = Request.Builder()
                     .url(HttpClient.safeUrl("https://wildshare.net/$fileId?pt=$pt"))
                     .header("User-Agent", HttpClient.DEFAULT_UA)
-                    // The previous version did not set Referer on the follow;
-                    // wildshare's edge 302s to an HTML page when Referer is
-                    // missing. Set it to the original page URL.
                     .header("Referer", url)
                     .build()
                 HttpClient.executeCancellable(noRedirectClient, req) use@{ res ->
                     if (res.code !in 200..399) {
+                        lastFailure = "Wildshare: ?pt= returned HTTP ${res.code} for $fileId"
                         com.anonrode.downloader.util.DebugLog.resolve(
                             "WildshareResolver: ?pt= returned HTTP ${res.code} for $fileId"
                         )
                         return null
                     }
-                    val loc = res.header("Location") ?: return null
-                    if (loc.isBlank()) return null
-                    return HttpClient.safeUrl(loc)
+                    val loc = res.header("Location")
+                    if (!loc.isNullOrBlank()) {
+                        return HttpClient.safeUrl(loc)
+                    }
+                    lastFailure = "Wildshare: no Location header returned on HTTP ${res.code}"
+                    return null
                 }
             }
-        } catch (_: Exception) {}
+            findDirectMediaUrl(html)?.let { return it }
+            extractMp4FromHtml(html)?.let { return it }
+            lastFailure = "Wildshare: no pt token or direct media found in HTML (len=${html.length})"
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (e: Exception) {
+            lastFailure = "Wildshare: ${e.javaClass.simpleName}: ${e.message}"
+        }
         return null
     }
 }
@@ -1491,18 +1814,46 @@ object WaffiCloudResolver : BaseResolver {
 // 18. VidmolyResolver
 // -------------------------------------------------------------
 object VidmolyResolver : BaseResolver {
+    @Volatile private var lastFailure: String? = null
+
+    override fun lastResolveFailure(): String? = lastFailure
+
     override fun canResolve(url: String): Boolean {
         return hostClaim(url, listOf("vidmoly."))
     }
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
+        lastFailure = null
         try {
-            val html = HttpClient.getText(url, referer = url) ?: return null
-            val m = Pattern.compile("""file\s*:\s*["'](https?://[^"']+\.m3u8[^"']*)["']""").matcher(html)
-            if (m.find()) {
-                return m.group(1)
+            val html = HttpClient.getText(url, referer = url) ?: run {
+                lastFailure = "Vidmoly: empty HTTP response for $url"
+                return null
             }
-        } catch (_: Exception) {}
+            val m = Pattern.compile("""(?:file|source|src)\s*:\s*["'](https?://[^"']+\.(?:m3u8|mp4)[^"']*)["']""").matcher(html)
+            if (m.find()) {
+                val stream = m.group(1)
+                if (!stream.isNullOrBlank()) return stream
+            }
+
+            val direct = extractM3u8FromHtml(html) ?: extractMp4FromHtml(html)
+            if (!direct.isNullOrBlank()) return direct
+
+            val unpacked = JsUnpacker.unpack(html)
+            if (!unpacked.isNullOrBlank()) {
+                val um = Pattern.compile("""(?:file|source|src)\s*:\s*["'](https?://[^"']+\.(?:m3u8|mp4)[^"']*)["']""").matcher(unpacked)
+                if (um.find()) {
+                    val stream = um.group(1)
+                    if (!stream.isNullOrBlank()) return stream
+                }
+                val unpDirect = extractM3u8FromHtml(unpacked) ?: extractMp4FromHtml(unpacked)
+                if (!unpDirect.isNullOrBlank()) return unpDirect
+            }
+            lastFailure = "Vidmoly: no m3u8/mp4 stream found in HTML or unpacked JS (len=${html.length})"
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (e: Exception) {
+            lastFailure = "Vidmoly: ${e.javaClass.simpleName}: ${e.message}"
+        }
         return null
     }
 }
@@ -1516,12 +1867,16 @@ object StreamwishResolver : BaseResolver {
         "mwish.", "awish.", "sfastwish.", "swishsrv.", "ajmidyad", "khadhnayad",
         "obeywish.com", "jodwish.com", "streamwish.to", "embedwish.", "filelions."
     )
+    @Volatile private var lastFailure: String? = null
+
+    override fun lastResolveFailure(): String? = lastFailure
 
     override fun canResolve(url: String): Boolean {
         return hostClaim(url, HOSTS)
     }
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
+        lastFailure = null
         try {
             val vid = url.trimEnd('/').substringAfterLast('/')
             val candidates = if (vid.length >= 6) {
@@ -1537,16 +1892,21 @@ object StreamwishResolver : BaseResolver {
             for (cand in candidates) {
                 val html = HttpClient.getText(cand, referer = "https://asianc.id/") ?: continue
                 if (looksLikeDeadPage(html)) continue
-                val m3u8 = extractM3u8FromHtml(html)
+                val m3u8 = extractM3u8FromHtml(html) ?: extractMp4FromHtml(html)
                 if (!m3u8.isNullOrBlank()) return m3u8
 
                 val unpacked = JsUnpacker.unpack(html)
                 if (!unpacked.isNullOrBlank()) {
-                    val direct = extractM3u8FromHtml(unpacked)
+                    val direct = extractM3u8FromHtml(unpacked) ?: extractMp4FromHtml(unpacked)
                     if (!direct.isNullOrBlank()) return direct
                 }
             }
-        } catch (_: Exception) {}
+            lastFailure = "Streamwish: no playable stream extracted from ${candidates.size} candidate(s)"
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (e: Exception) {
+            lastFailure = "Streamwish: ${e.javaClass.simpleName}: ${e.message}"
+        }
         return null
     }
 }
@@ -1569,7 +1929,10 @@ object VidhideResolver : BaseResolver {
         "vidhidevip.com", "vidhidepro.com", "filelions.to"
     )
     @Volatile private var lastWorkingHost: String? = null
+    @Volatile private var lastFailure: String? = null
     private val HOST_PART = Pattern.compile("""(https?://)([^/:]+)""", Pattern.CASE_INSENSITIVE)
+
+    override fun lastResolveFailure(): String? = lastFailure
 
     private fun rewriteHost(url: String, host: String): String {
         val m = HOST_PART.matcher(url)
@@ -1583,6 +1946,7 @@ object VidhideResolver : BaseResolver {
     }
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
+        lastFailure = null
         try {
             val urlHost = HttpClient.safeHost(url).lowercase()
             val candidates = LinkedHashSet<String>()
@@ -1593,21 +1957,26 @@ object VidhideResolver : BaseResolver {
                 val cand = if (host == urlHost) url else rewriteHost(url, host)
                 val html = HttpClient.getText(cand, referer = cand) ?: continue
                 if (looksLikeDeadPage(html)) continue
-                val m3u8 = extractM3u8FromHtml(html)
+                val m3u8 = extractM3u8FromHtml(html) ?: extractMp4FromHtml(html)
                 if (!m3u8.isNullOrBlank()) {
                     lastWorkingHost = host
                     return m3u8
                 }
                 val unpacked = JsUnpacker.unpack(html)
                 if (!unpacked.isNullOrBlank()) {
-                    val direct = extractM3u8FromHtml(unpacked)
+                    val direct = extractM3u8FromHtml(unpacked) ?: extractMp4FromHtml(unpacked)
                     if (!direct.isNullOrBlank()) {
                         lastWorkingHost = host
                         return direct
                     }
                 }
             }
-        } catch (_: Exception) {}
+            lastFailure = "Vidhide: no stream extracted across ${candidates.size} mirror(s)"
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (e: Exception) {
+            lastFailure = "Vidhide: ${e.javaClass.simpleName}: ${e.message}"
+        }
         return null
     }
 }
@@ -1620,17 +1989,27 @@ object DoodstreamResolver : BaseResolver {
         "dood.", "doodstream.", "ds2play.com", "dooood.com", "d0000d.com",
         "d000d.com", "vidply.com", "do0od.com", "dood.re"
     )
+    @Volatile private var lastFailure: String? = null
+
+    override fun lastResolveFailure(): String? = lastFailure
 
     override fun canResolve(url: String): Boolean {
         return hostClaim(url, HOSTS)
     }
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
+        lastFailure = null
         try {
             val host = HttpClient.safeHost(url, "dood.to")
             val embedUrl = url.replace("/d/", "/e/").replace("/f/", "/e/")
-            val html = HttpClient.getText(embedUrl, referer = "https://$host/") ?: return null
-            if (looksLikeDeadPage(html)) return null
+            val html = HttpClient.getText(embedUrl, referer = "https://$host/") ?: run {
+                lastFailure = "Doodstream: empty HTTP response for $embedUrl"
+                return null
+            }
+            if (looksLikeDeadPage(html)) {
+                lastFailure = "Doodstream: page matches dead file markers"
+                return null
+            }
             val passPattern = Pattern.compile("""/pass_md5/([^"'\s]+)""")
             val matcher = passPattern.matcher(html)
             if (matcher.find()) {
@@ -1647,8 +2026,15 @@ object DoodstreamResolver : BaseResolver {
                     // not a URL and every downloader rejects it.
                     return "https://$host/e/${token.trim()}$randomStr?token=$tokenSlug&expiry=$expiry"
                 }
+                lastFailure = "Doodstream: pass_md5 token fetch returned empty from $passUrl"
+            } else {
+                lastFailure = "Doodstream: pass_md5 pattern not found in HTML (len=${html.length})"
             }
-        } catch (_: Exception) {}
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (e: Exception) {
+            lastFailure = "Doodstream: ${e.javaClass.simpleName}: ${e.message}"
+        }
         return null
     }
 }
@@ -1658,26 +2044,47 @@ object DoodstreamResolver : BaseResolver {
 // -------------------------------------------------------------
 object MixdropResolver : BaseResolver {
     private val HOSTS = listOf("mixdrop.", "mixdrp.", "mdfx9dc8n.net", "mixdroop.")
+    @Volatile private var lastFailure: String? = null
+
+    override fun lastResolveFailure(): String? = lastFailure
 
     override fun canResolve(url: String): Boolean {
         return hostClaim(url, HOSTS)
     }
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
+        lastFailure = null
         try {
             val embedUrl = url.replace("/f/", "/e/")
             val host = HttpClient.safeHost(url, "mixdrop.co")
-            val html = HttpClient.getText(embedUrl, referer = "https://$host/") ?: return null
-            if (looksLikeDeadPage(html)) return null
+            val html = HttpClient.getText(embedUrl, referer = "https://$host/") ?: run {
+                lastFailure = "Mixdrop: empty HTTP response for $embedUrl"
+                return null
+            }
+            if (looksLikeDeadPage(html)) {
+                lastFailure = "Mixdrop: page matches dead file markers"
+                return null
+            }
             val unpacked = JsUnpacker.unpack(html)
             val source = if (!unpacked.isNullOrBlank()) unpacked else html
-            val matcher = Pattern.compile("""MDCore\.wurl\s*=\s*["']([^"']+)["']""").matcher(source)
+            var matcher = Pattern.compile("""MDCore\.wurl\s*=\s*["']([^"']+)["']""").matcher(source)
             if (matcher.find()) {
-                var streamUrl = matcher.group(1)
+                var streamUrl = matcher.group(1) ?: ""
                 if (streamUrl.startsWith("//")) streamUrl = "https:$streamUrl"
                 return streamUrl
             }
-        } catch (_: Exception) {}
+            matcher = Pattern.compile("""(?:wurl|player\.src)\s*=\s*["']([^"']+)["']""").matcher(source)
+            if (matcher.find()) {
+                var streamUrl = matcher.group(1) ?: ""
+                if (streamUrl.startsWith("//")) streamUrl = "https:$streamUrl"
+                return streamUrl
+            }
+            lastFailure = "Mixdrop: MDCore.wurl pattern not found in HTML/unpacked JS"
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (e: Exception) {
+            lastFailure = "Mixdrop: ${e.javaClass.simpleName}: ${e.message}"
+        }
         return null
     }
 }
@@ -1687,24 +2094,45 @@ object MixdropResolver : BaseResolver {
 // -------------------------------------------------------------
 object StreamtapeResolver : BaseResolver {
     private val HOSTS = listOf("streamtape.", "watchadsontape.", "strtape.tech")
+    @Volatile private var lastFailure: String? = null
+
+    override fun lastResolveFailure(): String? = lastFailure
 
     override fun canResolve(url: String): Boolean {
         return hostClaim(url, HOSTS)
     }
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
+        lastFailure = null
         try {
-            val html = HttpClient.getText(url, referer = url) ?: return null
-            if (looksLikeDeadPage(html)) return null
-            val matcher = Pattern.compile("""document\.getElementById\('robotlink'\)\.innerHTML\s*=\s*'([^']+)'\s*\+\s*\('([^']+)'\)""").matcher(html)
+            val html = HttpClient.getText(url, referer = url) ?: run {
+                lastFailure = "Streamtape: empty HTTP response for $url"
+                return null
+            }
+            if (looksLikeDeadPage(html)) {
+                lastFailure = "Streamtape: page matches dead file markers"
+                return null
+            }
+            var matcher = Pattern.compile("""document\.getElementById\(["']robotlink["']\)\.innerHTML\s*=\s*["']([^"']+)["']\s*\+\s*(?:\(["']|["'])([^"'\)]+)(?:["']\)|["'])""").matcher(html)
             if (matcher.find()) {
-                val part1 = matcher.group(1)
-                val part2 = matcher.group(2)
+                val part1 = matcher.group(1) ?: ""
+                val part2 = matcher.group(2) ?: ""
                 var stream = "$part1$part2"
                 if (stream.startsWith("//")) stream = "https:$stream"
                 return stream
             }
-        } catch (_: Exception) {}
+            matcher = Pattern.compile("""["']robotlink["']\s*\)\s*\.innerHTML\s*=\s*["']([^"']+)["']""").matcher(html)
+            if (matcher.find()) {
+                var stream = matcher.group(1) ?: ""
+                if (stream.startsWith("//")) stream = "https:$stream"
+                if (stream.startsWith("http")) return stream
+            }
+            lastFailure = "Streamtape: robotlink pattern not matched in HTML (len=${html.length})"
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (e: Exception) {
+            lastFailure = "Streamtape: ${e.javaClass.simpleName}: ${e.message}"
+        }
         return null
     }
 }
@@ -1713,17 +2141,26 @@ object StreamtapeResolver : BaseResolver {
 // 24. PixelDrainResolver
 // -------------------------------------------------------------
 object PixelDrainResolver : BaseResolver {
+    @Volatile private var lastFailure: String? = null
+
+    override fun lastResolveFailure(): String? = lastFailure
+
     override fun canResolve(url: String): Boolean {
         return hostClaim(url, listOf("pixeldrain.com"))
     }
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
+        lastFailure = null
         try {
-            val fileId = url.substringAfterLast("/").substringBefore("?")
-            if (fileId.isNotBlank()) {
+            val clean = url.trimEnd('/').substringBefore('?')
+            val fileId = clean.substringAfterLast('/')
+            if (fileId.isNotBlank() && fileId != "u" && fileId != "d" && fileId != "pixeldrain.com") {
                 return "https://pixeldrain.com/api/file/$fileId?download"
             }
-        } catch (_: Exception) {}
+            lastFailure = "PixelDrain: could not extract fileId from $url"
+        } catch (e: Exception) {
+            lastFailure = "PixelDrain: ${e.javaClass.simpleName}: ${e.message}"
+        }
         return null
     }
 }
@@ -1732,17 +2169,24 @@ object PixelDrainResolver : BaseResolver {
 // 25. GenericLockerResolver
 // -------------------------------------------------------------
 object GenericLockerResolver : BaseResolver {
-    private val HOSTS = listOf("vikingfile.com", "lulacloud.com")
+    private val HOSTS = listOf("lulacloud.com")
+    @Volatile private var lastFailure: String? = null
+
+    override fun lastResolveFailure(): String? = lastFailure
 
     override fun canResolve(url: String): Boolean {
         return hostClaim(url, HOSTS)
     }
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
+        lastFailure = null
         try {
             // Covers lulacloud.com (broken CA chain) — permissive, bounded
             // to these locker page fetches only.
-            val html = HttpClient.getText(url, referer = url, permissive = true) ?: return null
+            val html = HttpClient.getText(url, referer = url, permissive = true) ?: run {
+                lastFailure = "GenericLocker: empty HTTP response for $url"
+                return null
+            }
             val m3u8 = extractM3u8FromHtml(html)
             if (!m3u8.isNullOrBlank()) return m3u8
 
@@ -1754,51 +2198,34 @@ object GenericLockerResolver : BaseResolver {
                 val direct = extractM3u8FromHtml(unpacked) ?: extractMp4FromHtml(unpacked)
                 if (!direct.isNullOrBlank()) return direct
             }
-        } catch (_: Exception) {}
+            lastFailure = "GenericLocker: no media extracted from HTML (len=${html.length})"
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (e: Exception) {
+            lastFailure = "GenericLocker: ${e.javaClass.simpleName}: ${e.message}"
+        }
         return null
     }
 }
 
-private val DEAD_FILE_MARKERS = listOf(
-    "file is no longer available", "file was deleted", "file deleted",
-    "file not found", "video not found", "this file was deleted",
-    "has been removed", "no longer exists"
-)
-
-private fun looksLikeDeadPage(html: String): Boolean {
-    val low = html.lowercase()
-    return DEAD_FILE_MARKERS.any { low.contains(it) }
-}
-
-private fun extractM3u8FromHtml(html: String): String? {
-    val matcher = Pattern.compile("""https?://[^\s"'<>]+\.m3u8[^\s"'<>]*""").matcher(html)
-    if (matcher.find()) {
-        return matcher.group(0)
-    }
-    return null
-}
-
-private fun extractMp4FromHtml(html: String): String? {
-    // (?![a-zA-Z0-9]) so "site.webmanifest" (a common WP favicon link) is not
-    // matched as ".webm"; HTML-escaped quotes are stripped off the tail.
-    val matcher = Pattern.compile("""https?://[^\s"'<>]+\.(?:mp4|mkv)(?![a-zA-Z0-9])[^\s"'<>]*""").matcher(html)
-    if (matcher.find()) {
-        return matcher.group(0)?.substringBefore("&quot;")?.substringBefore("&amp;")
-    }
-    return null
-}
-
-fun isDirectMediaUrl(url: String): Boolean {
-    if (url.isBlank()) return false
-    val clean = url.substringBefore('?').substringBefore('#').lowercase()
-    val exts = com.anonrode.downloader.data.rules.DynamicRulesManager.getDirectMediaExtensions()
-    return exts.any { clean.endsWith(it) }
-}
-
+// -------------------------------------------------------------
+// 26. DynamicLockerResolver
+// -------------------------------------------------------------
 object DynamicLockerResolver : BaseResolver {
+    @Volatile private var lastFailure: String? = null
+
+    override fun lastResolveFailure(): String? = lastFailure
+
     override fun canResolve(url: String): Boolean = DynamicLockerEngine.canResolve(url)
-    override suspend fun resolve(url: String, quality: String, depth: Int): String? =
-        DynamicLockerEngine.resolve(url, quality)
+
+    override suspend fun resolve(url: String, quality: String, depth: Int): String? {
+        lastFailure = null
+        val result = DynamicLockerEngine.resolve(url, quality)
+        if (result.isNullOrBlank()) {
+            lastFailure = "DynamicLocker: OTA pipeline yielded no stream for $url"
+        }
+        return result
+    }
 }
 
 fun isRootLockerDomain(url: String): Boolean {

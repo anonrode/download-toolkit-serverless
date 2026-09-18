@@ -114,10 +114,20 @@ object StreamValidator {
             // these responses fell through with an empty head and passed as
             // "looks downloadable", so dead/expired links spent a task slot
             // and extra probe traffic before failing in the backend.
-            val reason = "Server rejected the link (HTTP $status) — it is dead or expired"
+            val isLockerFrontend = LinkResolver.isKnownLockerHost(url)
+            val detailMsg = if (status == 429 && isLockerFrontend) {
+                "HTTP 429: hit locker frontend instead of cracked storage backend"
+            } else {
+                "HTTP $status"
+            }
+            val reason = if (status == 429 && isLockerFrontend) {
+                "Locker frontend returned HTTP 429 (unresolved locker redirector — was not cracked to storage backend)"
+            } else {
+                "Server rejected the link (HTTP $status) — it is dead or expired"
+            }
             PipelineJournal.hop("", "validate", url, ok = false,
                 ms = System.currentTimeMillis() - start,
-                detail = "HTTP $status")
+                detail = detailMsg)
             return Rejection(reason, status in setOf(401, 403, 404, 410))
         }
 
