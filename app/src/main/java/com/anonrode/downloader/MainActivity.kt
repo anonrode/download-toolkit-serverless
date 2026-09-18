@@ -532,31 +532,19 @@ private fun MainActivity.setWindowBackground(isDark: Boolean) {
     )
 }
 
-/** Polls the engine's torrent-file-selection bridge and renders the picker
+/** Observes the engine's torrent-file-selection bridge and renders the picker
  *  dialog while a request is outstanding. Completes the deferred with the
  *  user's choice (null = whole torrent, only ever from the explicit
  *  "Whole torrent" button).
- *  Moved here from HomeScreen on 2026-09-13 — a root host is composed
- *  regardless of which tab is on stage, so the engine's 60 s fallback can no
- *  longer fire simply because the user wasn't looking at Search. */
+ *  Using requestState (StateFlow) ensures the dialog survives configuration
+ *  changes (such as screen rotation) without polling or state loss. */
 @Composable
 private fun TorrentFilePickerHost() {
-    var request by remember { mutableStateOf<TorrentFilePicker.Request?>(null) }
-    LaunchedEffect(Unit) {
-        while (true) {
-            val r = TorrentFilePicker.consume()
-            if (r != null) {
-                request = r
-                runCatching { r.deferred.await() }
-                request = null
-            }
-            kotlinx.coroutines.delay(250)
-        }
-    }
+    val request by TorrentFilePicker.requestState.collectAsState()
     request?.let { req ->
         TorrentFilePickerDialog(
             request = req,
-            onDismiss = { selection -> req.deferred.complete(selection) }
+            onDismiss = { selection -> TorrentFilePicker.resolve(req, selection) }
         )
     }
 }

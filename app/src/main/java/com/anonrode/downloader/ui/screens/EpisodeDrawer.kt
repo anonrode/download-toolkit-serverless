@@ -31,6 +31,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.viewModelScope
 import com.anonrode.downloader.data.models.EpisodeItem
 import com.anonrode.downloader.data.models.ShowCard
 import com.anonrode.downloader.ui.components.EpisodeListSkeleton
@@ -38,6 +39,9 @@ import com.anonrode.downloader.ui.theme.*
 import com.anonrode.downloader.viewmodel.MainViewModel
 import com.anonrode.downloader.ui.util.confirmHaptic
 import com.anonrode.downloader.ui.util.tick
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -58,6 +62,7 @@ fun EpisodeDrawer(
     var selectedEpisodes by remember(episodes) { mutableStateOf(setOf<EpisodeItem>()) }
     var rangeText by remember { mutableStateOf("") }
     var enqueued by remember { mutableStateOf(false) }
+    var isEnqueuing by remember { mutableStateOf(false) }
 
     // Parse range string (e.g. "1-5, 8, 10-12", "all", "none")
     fun applyRange(input: String) {
@@ -295,7 +300,7 @@ fun EpisodeDrawer(
 
                     Button(
                         onClick = {
-                            if (enqueued) return@Button
+                            if (enqueued || isEnqueuing) return@Button
                             // Never silently queue the whole show: an empty
                             // selection is a tap mistake, not a request for
                             // every episode (40+ items, tens of GB on mobile).
@@ -303,26 +308,36 @@ fun EpisodeDrawer(
                                 Toast.makeText(context, "Select at least one episode first", Toast.LENGTH_SHORT).show()
                                 return@Button
                             }
+                            isEnqueuing = true
                             enqueued = true
                             // Respect the range the user typed: the field feeds
                             // selectedEpisodes, so queue exactly those.
-                            val sorted = selectedEpisodes.sortedBy { it.episodeNum }
-                            for (ep in sorted) {
-                                viewModel.engine.enqueue(
-                                    showTitle = show.title,
-                                    episodeNum = ep.episodeNum,
-                                    episodeTitle = "${show.title} - ${ep.title}",
-                                    sourceUrl = ep.url,
-                                    mirrorUrls = ep.mirrorUrls,
-                                    isDirect = false,
-                                    backend = "aria2c",
-                                    site = ep.site.ifBlank { show.site },
-                                    parallelSockets = viewModel.engine.parallelSocketsPerFile,
-                                    verifiedDirectUrl = com.anonrode.downloader.pipeline.ResultVerifier.verifiedDirect(ep.url)
-                                )
+                            val toEnqueue = selectedEpisodes.toList()
+                            viewModel.viewModelScope.launch(Dispatchers.Default) {
+                                try {
+                                    val sorted = toEnqueue.sortedBy { it.episodeNum }
+                                    for (ep in sorted) {
+                                        viewModel.engine.enqueue(
+                                            showTitle = show.title,
+                                            episodeNum = ep.episodeNum,
+                                            episodeTitle = "${show.title} - ${ep.title}",
+                                            sourceUrl = ep.url,
+                                            mirrorUrls = ep.mirrorUrls,
+                                            isDirect = false,
+                                            backend = "aria2c",
+                                            site = ep.site.ifBlank { show.site },
+                                            parallelSockets = viewModel.engine.parallelSocketsPerFile,
+                                            verifiedDirectUrl = com.anonrode.downloader.pipeline.ResultVerifier.verifiedDirect(ep.url)
+                                        )
+                                    }
+                                } finally {
+                                    withContext(Dispatchers.Main) {
+                                        onDismiss()
+                                    }
+                                }
                             }
-                            onDismiss()
                         },
+                        enabled = !isEnqueuing,
                         colors = ButtonDefaults.buttonColors(
                             containerColor = AccentPrimary,
                             contentColor = BackgroundDark
@@ -330,12 +345,15 @@ fun EpisodeDrawer(
                         shape = RoundedCornerShape(Radius.md),
                         contentPadding = PaddingValues(horizontal = Spacing.md, vertical = Spacing.sm)
                     ) {
-                        // Was "All" while nothing was selected — a label that
-                        // PROMISES a whole-show download and then refuses with
-                        // a toast. The button never enqueued "all"; the count
-                        // lives on the sticky batch bar so the two bars don't
-                        // mirror each other.
-                        Text("Download", fontSize = Type.label.fontSize, fontWeight = FontWeight.Bold)
+                        if (isEnqueuing) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(14.dp),
+                                strokeWidth = 2.dp,
+                                color = BackgroundDark
+                            )
+                        } else {
+                            Text("Download", fontSize = Type.label.fontSize, fontWeight = FontWeight.Bold)
+                        }
                     }
                 }
             }
@@ -408,20 +426,23 @@ fun EpisodeDrawer(
                                 }
                             },
                             onDownloadSingle = {
-                                hapticView.confirmHaptic()
-                                viewModel.engine.enqueue(
-                                    showTitle = show.title,
-                                    episodeNum = ep.episodeNum,
-                                    episodeTitle = "${show.title} - ${ep.title}",
-                                    sourceUrl = ep.url,
-                                    mirrorUrls = ep.mirrorUrls,
-                                    isDirect = false,
-                                    backend = "aria2c",
-                                    site = ep.site.ifBlank { show.site },
-                                    parallelSockets = viewModel.engine.parallelSocketsPerFile,
-                                    verifiedDirectUrl = com.anonrode.downloader.pipeline.ResultVerifier.verifiedDirect(ep.url)
-                                )
-                                onDismiss()
+                                if (!enqueued && !isEnqueuing) {
+                                    enqueued = true
+                                    hapticView.confirmHaptic()
+                                    viewModel.engine.enqueue(
+                                        showTitle = show.title,
+                                        episodeNum = ep.episodeNum,
+                                        episodeTitle = "${show.title} - ${ep.title}",
+                                        sourceUrl = ep.url,
+                                        mirrorUrls = ep.mirrorUrls,
+                                        isDirect = false,
+                                        backend = "aria2c",
+                                        site = ep.site.ifBlank { show.site },
+                                        parallelSockets = viewModel.engine.parallelSocketsPerFile,
+                                        verifiedDirectUrl = com.anonrode.downloader.pipeline.ResultVerifier.verifiedDirect(ep.url)
+                                    )
+                                    onDismiss()
+                                }
                             }
                         )
                     }
@@ -468,35 +489,55 @@ fun EpisodeDrawer(
                                 // Double-tap guard: the dismiss animation takes
                                 // ~300ms and a second tap would re-enqueue every
                                 // selected episode (duplicate tasks, same filePath).
-                                if (enqueued) return@Button
+                                if (enqueued || isEnqueuing) return@Button
+                                isEnqueuing = true
                                 enqueued = true
                                 hapticView.confirmHaptic()
-                                val sorted = selectedEpisodes.sortedBy { it.episodeNum }
-                                for (ep in sorted) {
-                                    viewModel.engine.enqueue(
-                                        showTitle = show.title,
-                                        episodeNum = ep.episodeNum,
-                                        episodeTitle = "${show.title} - ${ep.title}",
-                                        sourceUrl = ep.url,
-                                        mirrorUrls = ep.mirrorUrls,
-                                        isDirect = false,
-                                        backend = "aria2c",
-                                        site = ep.site.ifBlank { show.site },
-                                        parallelSockets = viewModel.engine.parallelSocketsPerFile,
-                                        verifiedDirectUrl = com.anonrode.downloader.pipeline.ResultVerifier.verifiedDirect(ep.url)
-                                    )
+                                val toEnqueue = selectedEpisodes.toList()
+                                viewModel.viewModelScope.launch(Dispatchers.Default) {
+                                    try {
+                                        val sorted = toEnqueue.sortedBy { it.episodeNum }
+                                        for (ep in sorted) {
+                                            viewModel.engine.enqueue(
+                                                showTitle = show.title,
+                                                episodeNum = ep.episodeNum,
+                                                episodeTitle = "${show.title} - ${ep.title}",
+                                                sourceUrl = ep.url,
+                                                mirrorUrls = ep.mirrorUrls,
+                                                isDirect = false,
+                                                backend = "aria2c",
+                                                site = ep.site.ifBlank { show.site },
+                                                parallelSockets = viewModel.engine.parallelSocketsPerFile,
+                                                verifiedDirectUrl = com.anonrode.downloader.pipeline.ResultVerifier.verifiedDirect(ep.url)
+                                            )
+                                        }
+                                    } finally {
+                                        withContext(Dispatchers.Main) {
+                                            onDismiss()
+                                        }
+                                    }
                                 }
-                                onDismiss()
                             },
+                            enabled = !isEnqueuing,
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = AccentPrimary,
                                 contentColor = BackgroundDark
                             ),
                             shape = RoundedCornerShape(Radius.md)
                         ) {
-                            Icon(Icons.Rounded.Download, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(Spacing.xs))
-                            Text("Download (${selectedEpisodes.size})", fontWeight = FontWeight.Bold, fontSize = Type.label.fontSize)
+                            if (isEnqueuing) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(16.dp),
+                                    strokeWidth = 2.dp,
+                                    color = BackgroundDark
+                                )
+                                Spacer(modifier = Modifier.width(Spacing.xs))
+                                Text("Queueing...", fontWeight = FontWeight.Bold, fontSize = Type.label.fontSize)
+                            } else {
+                                Icon(Icons.Rounded.Download, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(Spacing.xs))
+                                Text("Download (${selectedEpisodes.size})", fontWeight = FontWeight.Bold, fontSize = Type.label.fontSize)
+                            }
                         }
                     }
                 }

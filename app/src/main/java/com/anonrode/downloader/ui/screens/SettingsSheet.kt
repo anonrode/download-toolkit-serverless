@@ -1310,29 +1310,36 @@ internal fun SettingsDiagnosticsSection(state: SettingsState) {
                                     total -= files[from].length()
                                     from++
                                 }
-                                val combined = StringBuilder()
-                                if (from > 0) {
-                                    combined.append("(oldest ").append(from)
-                                        .append(" log files omitted to keep the share under 8 MB)\n\n")
-                                }
-                                for (f in files.subList(from, files.size)) {
-                                    combined.append("===== ").append(f.name).append(" =====\n")
-                                    combined.append(f.readText()).append('\n')
-                                }
-                                // Crash reports carry the full untruncated
-                                // "Caused by:" chain the log's CRASH line cuts.
-                                val crashTxt = com.anonrode.downloader.util.CrashHandler
-                                    .crashReportsText(context)
-                                if (crashTxt.isNotBlank()) {
-                                    combined.append("\n===== CRASH REPORTS =====\n").append(crashTxt)
-                                }
-                                val redacted = combined.toString().replace(
-                                    Regex("""[?&](token|download_token|pt|expiry|expires)=[^\s&]+""")
-                                ) { match ->
+                                val shareFile = File(context.cacheDir, "activity-log-share.txt")
+                                val tokenRegex = Regex("""[?&](token|download_token|pt|expiry|expires)=[^\s&]+""")
+                                fun redact(line: String): String = line.replace(tokenRegex) { match ->
                                     "${match.value.substringBefore('=')}=***REDACTED***"
                                 }
-                                val shareFile = File(context.cacheDir, "activity-log-share.txt")
-                                shareFile.writeText(redacted)
+
+                                shareFile.bufferedWriter(Charsets.UTF_8).use { writer ->
+                                    if (from > 0) {
+                                        writer.write("(oldest $from log files omitted to keep the share under 8 MB)\n\n")
+                                    }
+                                    for (f in files.subList(from, files.size)) {
+                                        writer.write("===== ${f.name} =====\n")
+                                        f.forEachLine(Charsets.UTF_8) { line ->
+                                            writer.write(redact(line))
+                                            writer.write("\n")
+                                        }
+                                        writer.write("\n")
+                                    }
+                                    // Crash reports carry the full untruncated
+                                    // "Caused by:" chain the log's CRASH line cuts.
+                                    val crashTxt = com.anonrode.downloader.util.CrashHandler
+                                        .crashReportsText(context)
+                                    if (crashTxt.isNotBlank()) {
+                                        writer.write("\n===== CRASH REPORTS =====\n")
+                                        crashTxt.lineSequence().forEach { line ->
+                                            writer.write(redact(line))
+                                            writer.write("\n")
+                                        }
+                                    }
+                                }
                                 androidx.core.content.FileProvider.getUriForFile(
                                     context, "${context.packageName}.fileprovider", shareFile
                                 )

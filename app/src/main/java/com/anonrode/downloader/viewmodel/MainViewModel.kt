@@ -517,7 +517,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 kotlinx.coroutines.delay(350)
                 search(q)
             }
-        } else if (q.isBlank()) {
+        } else {
             searchJob?.cancel()
             // Same rule as search(): the dead coroutine stops instantly, but
             // its blocking search HTTP keeps draining until it finishes.
