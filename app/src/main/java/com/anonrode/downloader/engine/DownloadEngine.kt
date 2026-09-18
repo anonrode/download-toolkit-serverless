@@ -2503,8 +2503,17 @@ class DownloadEngine(
                         // describes the .part file, which no longer exists once the prefix
                         // becomes the aria2c target.
                         try {
-                            val urlExt = streamUrl.substringBefore('?').substringBefore('#')
-                                .substringAfterLast('/').substringAfterLast('.', "")
+                            val urlExt = run {
+                                val fromPath = streamUrl.substringBefore('?').substringBefore('#')
+                                    .substringAfterLast('/').substringAfterLast('.', "")
+                                if (fromPath.isNotBlank() && fromPath.length <= 5 && fromPath.all { it.isLetterOrDigit() }) {
+                                    fromPath
+                                } else {
+                                    val query = streamUrl.substringAfter('?', "").lowercase()
+                                    val match = Regex("""filename[*]?=[^&;]+\.([a-z0-9]{2,5})""").find(query)
+                                    match?.groupValues?.get(1) ?: ""
+                                }
+                            }
                             if (urlExt.isNotBlank() && urlExt.length <= 5 && urlExt.all { it.isLetterOrDigit() }) {
                                 val handoffTarget = File(targetFolder, "${File(task.filePath).nameWithoutExtension}.$urlExt")
                                 // Also refuse a target another task has RESERVED: two tasks

@@ -174,6 +174,9 @@ object HostHealth {
         if (DynamicRulesManager.isKnownDead(urlOrHost)) return false
         val r = records[hostOf(urlOrHost)] ?: return true
         val sinceLastFail = System.currentTimeMillis() - r.lastFailMs
+        // If the host explicitly returned HTTP 429 (Rate Limited), honor a minimum
+        // 30s cooldown immediately so we do not hammer the server into a hard ban.
+        if (r.rate429 > 0 && sinceLastFail < 30_000L) return false
         // Backoff only after >= 3 CONSECUTIVE hard failures: a single hiccup
         // (one 404, one timeout) must not gate a host for 30s+ — search
         // cancellations and flaky single requests used to kill hosts
@@ -187,8 +190,11 @@ object HostHealth {
      *  auto-retry loop (the engine parks a task while this is > 0). */
     fun remainingBackoffMs(urlOrHost: String): Long {
         val r = records[hostOf(urlOrHost)] ?: return 0L
-        if (r.consecutiveFails < 3) return 0L
         val elapsed = System.currentTimeMillis() - r.lastFailMs
+        if (r.rate429 > 0 && elapsed < 30_000L) {
+            return maxOf(0L, 30_000L - elapsed)
+        }
+        if (r.consecutiveFails < 3) return 0L
         val window = backoffWindowMs(r.consecutiveFails)
         return maxOf(0L, window - elapsed)
     }
