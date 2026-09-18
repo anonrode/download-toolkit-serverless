@@ -204,12 +204,21 @@ object YoutubeDlDownloader {
                 addOption("--enable-file-urls")
             }
             if (isExtractorTask) {
-                // True Monolith Metadata Naming Template with user-configured quality.
-                // Title-only: the old "%(uploader)s - %(title)s" template doubled
-                // the channel name (YouTube titles already carry it) and produced
-                // "NA - …" garbage when the uploader field was missing (generic
-                // extractor on a locker URL, app-2026-09-01 Lanterns job).
-                val outTemplate = File(outDir, "%(title).100s [%(id)s].%(ext)s").absolutePath
+                // If caller provided a specific preferredFilename (movies / TV show episodes),
+                // use that clean filename stem instead of yt-dlp's generic extractor metadata
+                // which can produce garbage like "RBNNj1sIT2 [id].unknown_video".
+                // %(title)s [%(id)s] is reserved for social video downloads where the title
+                // is unknown in advance.
+                val isGenericName = preferredFilename.isBlank() ||
+                    preferredFilename.equals("video.mp4", ignoreCase = true) ||
+                    preferredFilename.equals("download.mp4", ignoreCase = true) ||
+                    preferredFilename.startsWith("Social_", ignoreCase = true)
+                val outTemplate = if (!isGenericName) {
+                    val stem = File(outDir, preferredFilename.substringBeforeLast('.')).absolutePath
+                    "$stem.%(ext)s"
+                } else {
+                    File(outDir, "%(title).100s [%(id)s].%(ext)s").absolutePath
+                }
                 addOption("-o", outTemplate)
                 if (audioOnly) {
                     addOption("-f", "bestaudio/best")
@@ -495,10 +504,39 @@ object YoutubeDlDownloader {
         // only as a cross-volume fallback. The workdir is removed when empty
         // so a folder of one-shot YouTube jobs doesn't accumulate dot-dirs.
         if (produced != null && outDir != targetDir) {
-            var dest = File(targetDir, produced.name)
+            val isGenericName = preferredFilename.isBlank() ||
+                preferredFilename.equals("video.mp4", ignoreCase = true) ||
+                preferredFilename.equals("download.mp4", ignoreCase = true) ||
+                preferredFilename.startsWith("Social_", ignoreCase = true)
+
+            val baseStem = if (!isGenericName) {
+                File(preferredFilename).nameWithoutExtension
+            } else {
+                produced.nameWithoutExtension
+            }
+
+            var finalExt = produced.extension
+            if (finalExt.equals("unknown_video", ignoreCase = true) || finalExt.isBlank()) {
+                val sniffed = try {
+                    java.io.RandomAccessFile(produced, "r").use { raf ->
+                        val head = ByteArray(16)
+                        val read = raf.read(head)
+                        if (read >= 4 && head[0] == 0x1A.toByte() && head[1] == 0x45.toByte() &&
+                            head[2] == 0xDF.toByte() && head[3] == 0xA3.toByte()) {
+                            "mkv"
+                        } else if (read >= 8 && String(head, 4, 4, Charsets.US_ASCII).lowercase() in
+                            setOf("ftyp", "moov", "mdat", "free", "wide", "skip", "moof", "styp")) {
+                            "mp4"
+                        } else null
+                    }
+                } catch (_: Exception) { null }
+                finalExt = sniffed ?: if (!isGenericName) File(preferredFilename).extension.ifBlank { "mp4" } else "mp4"
+            }
+
+            var dest = File(targetDir, "$baseStem.$finalExt")
             var n = 1
             while (dest.exists()) {
-                dest = File(targetDir, "${produced.nameWithoutExtension} ($n).${produced.extension}")
+                dest = File(targetDir, "$baseStem ($n).$finalExt")
                 n++
             }
             val movedOk = if (produced.isDirectory) produced.renameTo(dest)
