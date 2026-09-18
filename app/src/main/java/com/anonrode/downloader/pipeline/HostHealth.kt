@@ -22,20 +22,23 @@ object HostHealth {
         var consecutiveFails: Int = 0,
         var lastOkMs: Long = 0,
         var lastFailMs: Long = 0,
-        var rate429: Int = 0
+        var rate429: Int = 0,
+        var lastReason: String? = null
     ) {
         fun toJson(): JSONObject = JSONObject()
             .put("ok", ok).put("fail", fail)
             .put("consecFail", consecutiveFails)
             .put("lastOk", lastOkMs).put("lastFail", lastFailMs)
             .put("rate429", rate429)
+            .apply { if (lastReason != null) put("lastReason", lastReason) }
 
         companion object {
             fun from(o: JSONObject) = Rec(
                 ok = o.optLong("ok"), fail = o.optLong("fail"),
                 consecutiveFails = o.optInt("consecFail"),
                 lastOkMs = o.optLong("lastOk"), lastFailMs = o.optLong("lastFail"),
-                rate429 = o.optInt("rate429")
+                rate429 = o.optInt("rate429"),
+                lastReason = o.optString("lastReason").takeIf { it.isNotBlank() }
             )
         }
     }
@@ -149,6 +152,9 @@ object HostHealth {
         records.compute(h) { _, v -> (v ?: Rec()).apply {
             fail++
             if (rateLimited) rate429++
+            if (reason != null && reason.isNotBlank()) {
+                lastReason = reason
+            }
             val provenRecently = lastOkMs > 0 &&
                 System.currentTimeMillis() - lastOkMs < 10 * 60_000L
             if (!(isTimeout && provenRecently)) {
@@ -158,6 +164,9 @@ object HostHealth {
         } }
         persist()
     }
+
+    /** Last recorded failure reason for this host, if any. */
+    fun lastReason(urlOrHost: String): String? = records[hostOf(urlOrHost)]?.lastReason
 
     /** False when this URL's host is playbook-known-dead or currently inside
      *  its backoff window. Callers skip the host WITHOUT burning a request. */

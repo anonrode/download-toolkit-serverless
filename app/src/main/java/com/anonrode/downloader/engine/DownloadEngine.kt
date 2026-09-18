@@ -1730,7 +1730,10 @@ class DownloadEngine(
                             // failure is the task's terminal outcome, and the log
                             // audit showed these only as RESOLVE lines (audit
                             // finding: "silent failures, no ERROR line").
-                            com.anonrode.downloader.util.DebugLog.error("task=${task.id} could not crack stream link (host=$host) for ${streamUrl.take(120)}")
+                            val hostReason = com.anonrode.downloader.pipeline.HostHealth.lastReason(streamUrl)
+                                ?: com.anonrode.downloader.data.net.HttpClient.lastFailure
+                            val reasonSuffix = if (!hostReason.isNullOrBlank()) " ($hostReason)" else ""
+                            com.anonrode.downloader.util.DebugLog.error("task=${task.id} could not crack stream link (host=$host)$reasonSuffix for ${streamUrl.take(120)}")
                             // Cross-provider auto-failover BEFORE parking or
                             // failing: if another provider can serve this same
                             // title, switch the task to that source and requeue.
