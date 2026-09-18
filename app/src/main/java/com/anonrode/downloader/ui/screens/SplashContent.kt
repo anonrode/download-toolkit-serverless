@@ -1,6 +1,9 @@
 package com.anonrode.downloader.ui.screens
 
 import android.provider.Settings
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -9,11 +12,9 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -27,7 +28,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
@@ -35,6 +35,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.withTransform
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -42,9 +43,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.anonrode.downloader.ui.theme.SplashBackground
-import com.anonrode.downloader.ui.theme.SplashElevated
-import com.anonrode.downloader.ui.theme.SplashOnBackground
+import com.anonrode.downloader.ui.theme.DarkSplashColors
+import com.anonrode.downloader.ui.theme.LightSplashColors
+import kotlinx.coroutines.delay
 import kotlin.math.roundToInt
 
 /**
@@ -53,27 +54,31 @@ import kotlin.math.roundToInt
  * see [SplashMotion]). Every frame asks the pure engine for a pose and paints
  * it — the mockup's rAF loop ported 1:1, so the motion IS the verified one.
  *
- * cutMs: [SplashMotion.FULL_MS] on the very first install (the cinematic),
- * [SplashMotion.QUICK_MS] on warm starts (MainActivity decides). Devices with
- * the system animation scale at 0 render the final pose statically.
+ * Dual-Theme Architecture:
+ * - Bare Dark ("White No Tile A"): Pure #000000 surface, #FFFFFF monogram, #22D3EE subtitle.
+ * - Minimal Light ("Light Surface A"): Porcelain #F4F7FA surface, #07131A deep ink monogram, #0E7490 subtitle.
  *
- * Sizing is screen-relative on purpose — phone widths vary a lot. v3.1.5
- * shipped two sizing mistakes the device caught ("the logo is literally
- * going to the edge of the splash screen"): (1) a 150.dp FLOOR on the mark
- * size — 42% of width only ever SHRINKS below 150dp, and the floor then
- * INFLATES the lockup to ~47% of a small phone's width; (2) the wordmark
- * used SP, which multiplies by the user's system font-scale setting, so a
- * large-font device scaled the 30sp ANONRODE well past the mockup's design
- * while the dp-based mark stayed fixed — the lockup sprawled edge to edge.
- * Now: the mark is simply 42% of width capped at 216dp (proportional, never
- * inflated, never tiny on a big phone), and the type divides its sp by
- * fontScale so the cinematic lockup renders identically on every device
- * regardless of the reading-size preference. The "100% SERVERLESS" tagline
- * was removed by user decision.
+ * Zero-Jank Render Optimizations:
+ * 1. Zero Recomposition for Text: Wordmark translations and opacity are driven by
+ *    [graphicsLayer] on the RenderThread, avoiding continuous font layout/measurement.
+ * 2. Zero Draw Allocations: [Path] instances are pre-allocated and reused with .reset()
+ *    to eliminate Dalvik/ART GC pauses.
+ * 3. Settle Beat & Silky Exit: After the assembly completes at cutMs, the completed
+ *    mark is held for 150ms before smoothly fading out over 250ms via FastOutSlowInEasing,
+ *    unveiling the already-composed HomeScreen underneath.
+ *
+ * cutMs: [SplashMotion.FULL_MS] on the very first install (the cinematic),
+ * [SplashMotion.QUICK_MS] on warm starts (MainActivity decides).
  */
 @Composable
-fun SplashContent(cutMs: Float = SplashMotion.FULL_MS) {
+fun SplashContent(
+    cutMs: Float = SplashMotion.FULL_MS,
+    isDark: Boolean = true,
+    onSplashFinished: () -> Unit = {}
+) {
     val context = LocalContext.current
+    val colors = if (isDark) DarkSplashColors else LightSplashColors
+
     val reduced = remember {
         try {
             Settings.Global.getFloat(
@@ -82,9 +87,16 @@ fun SplashContent(cutMs: Float = SplashMotion.FULL_MS) {
         } catch (_: Throwable) { false }
     }
 
+    val exitAlpha = remember { Animatable(1f) }
     var t by remember { mutableFloatStateOf(0f) }
+
     LaunchedEffect(reduced, cutMs) {
-        if (reduced) { t = cutMs; return@LaunchedEffect }
+        if (reduced) {
+            t = cutMs
+            delay(300L)
+            onSplashFinished()
+            return@LaunchedEffect
+        }
         var last = 0L
         while (t < cutMs) {
             withFrameMillis { ms ->
@@ -93,25 +105,40 @@ fun SplashContent(cutMs: Float = SplashMotion.FULL_MS) {
             }
         }
         t = cutMs
+
+        // 150ms pristine settle beat: eye registers completed mark
+        delay(150L)
+
+        // 250ms hardware fade-out: smoothly reveals home screen
+        exitAlpha.animateTo(
+            targetValue = 0f,
+            animationSpec = tween(durationMillis = 250, easing = FastOutSlowInEasing)
+        )
+        onSplashFinished()
     }
+
     val pose = remember(t) { SplashMotion.poseAt(t, cutMs) }
 
+    // Pre-allocated reusable paths to guarantee 0 allocations per draw frame
+    val chevAPath = remember { Path() }
+    val chevRPath = remember { Path() }
+    val chevLPath = remember { Path() }
+    val bodyPath = remember { Path() }
+    val stemPath = remember { Path() }
+    val headPath = remember { Path() }
+
     // One scale factor drives mark + type together on every screen size.
-    // 42% of width, capped at the mockup's design size — NO floor: a floor
-    // can only ever inflate the logo on small screens (v3.1.5 bug).
+    // 42% of width, capped at 216dp.
     val screenWidthDp = LocalConfiguration.current.screenWidthDp.toFloat()
     val markSize = (screenWidthDp * 0.42f).coerceAtMost(216f).roundToInt().dp
     val typeFactor = markSize.value / 216f
-    // The splash lockup is brand art, not body copy: it must NOT scale with
-    // the user's accessibility font size (that's what pushed v3.1.5's wordmark
-    // edge-to-edge on large-font devices). Dividing the sp by fontScale pins
-    // the on-screen size to the design; real text elsewhere still respects it.
     val fontScale = LocalDensity.current.fontScale.takeIf { it > 0.1f } ?: 1f
 
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(SplashBackground),
+            .graphicsLayer { alpha = exitAlpha.value }
+            .background(colors.background),
         contentAlignment = Alignment.Center
     ) {
         Column(
@@ -121,39 +148,15 @@ fun SplashContent(cutMs: Float = SplashMotion.FULL_MS) {
             Canvas(modifier = Modifier.size(markSize)) {
                 val s = size.minDimension / 120f
                 withTransform({ scale(s, s, pivot = Offset.Zero) }) {
-                    // one cyan breath behind the tile (the punch glow)
-                    if (pose.glow > 0.001f) {
-                        drawRoundRect(
-                            color = Color(0xFF22D3EE),
-                            topLeft = Offset(-6f, -6f),
-                            size = Size(132f, 132f),
-                            cornerRadius = CornerRadius(30f, 30f),
-                            alpha = pose.glow * 0.30f
-                        )
-                    }
-                    // squircle tile — the approved "squircle · ink" surface
-                    if (pose.tileAlpha > 0.001f) {
-                        withTransform({
-                            translate(60f, 60f)
-                            scale(pose.tileScale, pose.tileScale, pivot = Offset.Zero)
-                            translate(-60f, -60f)
-                        }) {
-                            drawRoundRect(
-                                brush = Brush.linearGradient(
-                                    colors = listOf(Color(0xFF22D3EE), Color(0xFF0E7490)),
-                                    start = Offset(6f, 6f), end = Offset(114f, 114f)
-                                ),
-                                topLeft = Offset(6f, 6f),
-                                size = Size(108f, 108f),
-                                cornerRadius = CornerRadius(24f, 24f),
-                                alpha = pose.tileAlpha
-                            )
-                        }
-                    }
-                    val ink = Color(0xFF04121A)
+                    val glyphColor = colors.glyph
 
                     // folding chevron: lands on its vertex, arms swing up into the A
                     if (pose.chevAAlpha > 0.001f) {
+                        chevAPath.reset()
+                        chevAPath.moveTo(38f, pose.chevATipY)
+                        chevAPath.lineTo(60f, pose.chevASpineY)
+                        chevAPath.lineTo(82f, pose.chevATipY)
+
                         withTransform({
                             translate(0f, pose.chevATy)
                             translate(60f, 44f)
@@ -161,12 +164,8 @@ fun SplashContent(cutMs: Float = SplashMotion.FULL_MS) {
                             translate(-60f, -44f)
                         }) {
                             drawPath(
-                                Path().apply {
-                                    moveTo(38f, pose.chevATipY)
-                                    lineTo(60f, pose.chevASpineY)
-                                    lineTo(82f, pose.chevATipY)
-                                },
-                                color = ink,
+                                path = chevAPath,
+                                color = glyphColor,
                                 alpha = pose.chevAAlpha,
                                 style = Stroke(
                                     width = pose.chevAStroke,
@@ -176,38 +175,55 @@ fun SplashContent(cutMs: Float = SplashMotion.FULL_MS) {
                             )
                         }
                     }
+
                     // the diver: punches through the floor, rings down, hands off
                     if (pose.chevRAlpha > 0.001f) {
+                        chevRPath.reset()
+                        chevRPath.moveTo(44f, 74f)
+                        chevRPath.lineTo(60f, 86f)
+                        chevRPath.lineTo(76f, 74f)
+
                         withTransform({ translate(0f, pose.chevRTy) }) {
                             drawPath(
-                                Path().apply {
-                                    moveTo(44f, 74f); lineTo(60f, 86f); lineTo(76f, 74f)
-                                },
-                                color = ink,
+                                path = chevRPath,
+                                color = glyphColor,
                                 alpha = pose.chevRAlpha,
                                 style = Stroke(width = 8f, cap = StrokeCap.Round, join = StrokeJoin.Round)
                             )
                         }
                     }
+
                     // the A body (silhouette-matched cross-dissolve)
                     if (pose.bodyAlpha > 0.001f) {
+                        bodyPath.reset()
+                        bodyPath.moveTo(60f, 26f)
+                        bodyPath.lineTo(84f, 78f)
+                        bodyPath.lineTo(72f, 78f)
+                        bodyPath.lineTo(60f, 48f)
+                        bodyPath.lineTo(48f, 78f)
+                        bodyPath.lineTo(36f, 78f)
+                        bodyPath.close()
+
                         withTransform({
                             translate(60f, 52f)
                             scale(pose.bodyScale, pose.bodyScale, pivot = Offset.Zero)
                             translate(-60f, -52f)
                         }) {
                             drawPath(
-                                Path().apply {
-                                    moveTo(60f, 26f); lineTo(84f, 78f); lineTo(72f, 78f)
-                                    lineTo(60f, 48f); lineTo(48f, 78f); lineTo(36f, 78f); close()
-                                },
-                                color = ink,
+                                path = bodyPath,
+                                color = glyphColor,
                                 alpha = pose.bodyAlpha
                             )
                         }
                     }
+
                     // flattening chevron -> landing line
                     if (pose.chevLAlpha > 0.001f) {
+                        chevLPath.reset()
+                        chevLPath.moveTo(42f - pose.chevLWide, pose.chevLTipY)
+                        chevLPath.lineTo(60f, pose.chevLSpineY)
+                        chevLPath.lineTo(78f + pose.chevLWide, pose.chevLTipY)
+
                         withTransform({
                             translate(0f, pose.chevLTy)
                             translate(60f, 86f)
@@ -215,18 +231,15 @@ fun SplashContent(cutMs: Float = SplashMotion.FULL_MS) {
                             translate(-60f, -86f)
                         }) {
                             drawPath(
-                                Path().apply {
-                                    moveTo(42f - pose.chevLWide, pose.chevLTipY)
-                                    lineTo(60f, pose.chevLSpineY)
-                                    lineTo(78f + pose.chevLWide, pose.chevLTipY)
-                                },
-                                color = ink,
+                                path = chevLPath,
+                                color = glyphColor,
                                 alpha = pose.chevLAlpha,
                                 style = Stroke(width = 9f, cap = StrokeCap.Round, join = StrokeJoin.Round)
                             )
                         }
                     }
-                    // one white ripple off the landing line
+
+                    // dynamic ripple off the landing line
                     if (pose.rippleAlpha > 0.001f) {
                         withTransform({
                             translate(60f, 86f)
@@ -234,19 +247,24 @@ fun SplashContent(cutMs: Float = SplashMotion.FULL_MS) {
                             translate(-60f, -86f)
                         }) {
                             drawOval(
-                                color = Color.White,
+                                color = glyphColor,
                                 topLeft = Offset(44f, 81f),
                                 size = Size(32f, 10f),
-                                alpha = pose.rippleAlpha,
+                                alpha = pose.rippleAlpha * 0.7f,
                                 style = Stroke(width = 2.5f)
                             )
                         }
                     }
+
                     // stem draws in behind the arrowhead handoff
                     if (pose.stemProgress > 0.001f) {
+                        stemPath.reset()
+                        stemPath.moveTo(60f, 82f)
+                        stemPath.lineTo(60f, 94f)
+
                         drawPath(
-                            Path().apply { moveTo(60f, 82f); lineTo(60f, 94f) },
-                            color = ink,
+                            path = stemPath,
+                            color = glyphColor,
                             style = Stroke(
                                 width = 7f,
                                 cap = StrokeCap.Round,
@@ -256,15 +274,22 @@ fun SplashContent(cutMs: Float = SplashMotion.FULL_MS) {
                             )
                         )
                     }
+
+                    // arrowhead
                     if (pose.headAlpha > 0.001f) {
+                        headPath.reset()
+                        headPath.moveTo(51f, 87f)
+                        headPath.lineTo(60f, 96f)
+                        headPath.lineTo(69f, 87f)
+
                         withTransform({
                             translate(60f, 92f)
                             scale(pose.headScale, pose.headScale, pivot = Offset.Zero)
                             translate(-60f, -92f)
                         }) {
                             drawPath(
-                                Path().apply { moveTo(51f, 87f); lineTo(60f, 96f); lineTo(69f, 87f) },
-                                color = ink,
+                                path = headPath,
+                                color = glyphColor,
                                 alpha = pose.headAlpha,
                                 style = Stroke(width = 7f, cap = StrokeCap.Round, join = StrokeJoin.Round)
                             )
@@ -273,9 +298,10 @@ fun SplashContent(cutMs: Float = SplashMotion.FULL_MS) {
                 }
             }
 
+            // Wordmark with zero-recomposition graphicsLayer animations
             Text(
                 text = "ANONRODE",
-                color = SplashOnBackground.copy(alpha = pose.name1),
+                color = colors.title,
                 fontSize = (30f * typeFactor / fontScale).sp,
                 fontWeight = FontWeight.Black,
                 letterSpacing = (3f * typeFactor / fontScale).sp,
@@ -283,12 +309,15 @@ fun SplashContent(cutMs: Float = SplashMotion.FULL_MS) {
                 softWrap = false,
                 overflow = TextOverflow.Clip,
                 modifier = Modifier
-                    .offset(y = ((1f - pose.name1) * 10f * typeFactor).dp)
                     .padding(top = (14f * typeFactor).dp)
+                    .graphicsLayer {
+                        alpha = pose.name1
+                        translationY = (1f - pose.name1) * 10f * typeFactor * density
+                    }
             )
             Text(
                 text = "DOWNLOADER",
-                color = Color(0xFF22D3EE).copy(alpha = pose.name2),
+                color = colors.subtitle,
                 fontSize = (11f * typeFactor / fontScale).sp,
                 fontWeight = FontWeight.ExtraBold,
                 letterSpacing = (6f * typeFactor / fontScale).sp,
@@ -296,23 +325,43 @@ fun SplashContent(cutMs: Float = SplashMotion.FULL_MS) {
                 softWrap = false,
                 overflow = TextOverflow.Clip,
                 modifier = Modifier
-                    .offset(y = ((1f - pose.name2) * 8f * typeFactor).dp)
                     .padding(top = (7f * typeFactor).dp)
+                    .graphicsLayer {
+                        alpha = pose.name2
+                        translationY = (1f - pose.name2) * 8f * typeFactor * density
+                    }
             )
         }
 
-        LinearProgressIndicator(
-            color = SplashOnBackground,
-            trackColor = SplashElevated,
+        // Deterministic, 60fps/120fps frame-synced progress line:
+        // fills smoothly from 0% to 100% in exact lockstep with (t / cutMs),
+        // matching the hardware refresh rate of the identity physics canvas.
+        // Bounded clearance: 24dp above navigationBarsPadding() so it cleanly
+        // clears the Android gesture navigation pill on all device formats.
+        val progress = if (cutMs > 0f) (t / cutMs).coerceIn(0f, 1f) else 1f
+        Canvas(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
-                // system nav clearance — the fixed 48dp lift only
-                // *touches* a classic 3-button bar; on gesture-nav devices
-                // the pill overlapped the indicator
                 .navigationBarsPadding()
-                .padding(bottom = 48.dp)
-                .height(3.dp)
+                .padding(bottom = 24.dp)
                 .width(120.dp)
-        )
+                .height(3.dp)
+        ) {
+            val h = size.height
+            val w = size.width
+            val r = h / 2f
+            drawRoundRect(
+                color = colors.progressTrack,
+                size = size,
+                cornerRadius = CornerRadius(r, r)
+            )
+            if (progress > 0.001f) {
+                drawRoundRect(
+                    color = colors.progressFill,
+                    size = Size(w * progress, h),
+                    cornerRadius = CornerRadius(r, r)
+                )
+            }
+        }
     }
 }

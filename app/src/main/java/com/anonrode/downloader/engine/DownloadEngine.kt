@@ -773,7 +773,7 @@ class DownloadEngine(
         val origYear = extractYear(task.showTitle)
             ?: extractYear(task.episodeTitle)
             ?: extractYear(task.sourceUrl)
-        val origCountry = extractCountry("${task.showTitle} ${task.episodeTitle}", task.site)
+        val origCountry = extractCountry("${task.showTitle} ${task.episodeTitle} ${task.sourceUrl}", task.site)
         val (origSeason, origEpNum) = parseSeasonAndEpisode(task)
 
         com.anonrode.downloader.util.DebugLog.resolve(
@@ -794,7 +794,7 @@ class DownloadEngine(
                         val pName = provider.name.lowercase()
                         provider.searchEnabled &&
                             pName in allowedCluster &&
-                            (!isAsian || pName !in DEDICATED_ASIAN_SITES) &&
+                            (isAsian || pName !in DEDICATED_ASIAN_SITES) &&
                             tried.none { it.equals(provider.name, ignoreCase = true) }
                     }
                     .map { provider ->

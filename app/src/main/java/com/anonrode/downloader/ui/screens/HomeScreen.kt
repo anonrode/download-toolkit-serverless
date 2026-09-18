@@ -148,17 +148,14 @@ fun HomeScreen(
                     .padding(top = Spacing.xl, bottom = Spacing.md),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Proportionality rule: beside a text lockup the mark's side
-                // matches the full height of the two-line block (22sp title
-                // line + 2dp + 11sp subtitle ≈ 41dp), and the corner radius
-                // tracks the side at ~27% (was 9dp on 34dp) so the tile keeps
-                // the same roundness at any size.
-                Image(
-                    painter = painterResource(R.drawable.ic_anon_mark),
+                // Bare Brand Monogram (user-approved "White No Tile A" / "Light Surface A"):
+                // Floating geometric monogram without bounding squircle tile, tinted
+                // dynamically with TextPrimary (#FFFFFF in Dark Mode, #07131A in Light Mode).
+                Icon(
+                    painter = painterResource(R.drawable.ic_anon_monogram),
                     contentDescription = "AnonRode Downloader logo",
-                    modifier = Modifier
-                        .size(40.dp)
-                        .clip(RoundedCornerShape(11.dp))
+                    tint = TextPrimary,
+                    modifier = Modifier.size(36.dp)
                 )
                 Spacer(modifier = Modifier.width(Spacing.md))
                 Column(modifier = Modifier.weight(1f)) {

@@ -44,17 +44,17 @@ val DarkAnonColors = AnonColors(
 
 val LightAnonColors = AnonColors(
     isDark = false,
-    background = Color(0xFFF8FAFC),
+    background = Color(0xFFF4F7FA),
     surfaceCard = Color(0xFFFFFFFF),
-    surfaceElevated = Color(0xFFF1F5F9),
-    borderHairline = Color(0xFFE2E8F0),
-    accentPrimary = Color(0xFF0F172A),
-    textPrimary = Color(0xFF0F172A),
+    surfaceElevated = Color(0xFFE9EFF5),
+    borderHairline = Color(0xFFD8E0E8),
+    accentPrimary = Color(0xFF07131A),
+    textPrimary = Color(0xFF07131A),
     textSecondary = Color(0xFF475569),
     // #55627A (was #64748B): 64748B computed only 4.34:1 on surfaceElevated
     // (the pair ships as the QUEUED chip) — under the 4.5:1 floor for the
     // 9-11sp chip labels that use muted-on-elevated. #55627A is 5.6:1 there
-    // and visually near-identical on the #F8FAFC background.
+    // and visually near-identical on the #F4F7FA background.
     textMuted = Color(0xFF55627A),
     accentViolet = Color(0xFF7C3AED),
     accentPink = Color(0xFFDB2777),
@@ -87,13 +87,39 @@ val StatusError: Color @Composable get() = AnonTheme.colors.statusError
 val StatusWarning: Color @Composable get() = AnonTheme.colors.statusWarning
 
 /**
- * PINNED splash colors — deliberately NOT theme-aware. The system splash
- * window (styles.xml @color/splash_background) is black on every device, so
- * the Compose splash must be black too: with theme-aware colors a light-theme
- * device got black system-splash -> WHITE compose splash -> light app, a
- * visible mid-handover flash. These constants are the contract with
- * styles.xml; the only theme transition is the final one into the app.
+ * Dual-Theme Brand Tokens for the Splash Screen:
+ * - Bare Dark ("White No Tile A"): Pure #000000 surface, #FFFFFF monogram, #22D3EE subtitle.
+ * - Minimal Light ("Light Surface A"): Porcelain #F4F7FA surface, #07131A deep ink monogram, #0E7490 subtitle.
+ * Paired 1:1 with res/values/colors.xml and res/values-night/colors.xml for zero-flicker starting window handoff.
  */
+data class SplashThemeColors(
+    val background: Color,
+    val glyph: Color,
+    val title: Color,
+    val subtitle: Color,
+    val progressTrack: Color,
+    val progressFill: Color,
+)
+
+val DarkSplashColors = SplashThemeColors(
+    background = Color(0xFF000000),
+    glyph = Color(0xFFFFFFFF),
+    title = Color(0xFFFFFFFF),
+    subtitle = Color(0xFF22D3EE),
+    progressTrack = Color(0xFF181B22),
+    progressFill = Color(0xFFFFFFFF)
+)
+
+val LightSplashColors = SplashThemeColors(
+    background = Color(0xFFF4F7FA),
+    glyph = Color(0xFF07131A),
+    title = Color(0xFF0A1620),
+    subtitle = Color(0xFF0E7490),
+    progressTrack = Color(0xFFD5DEE7),
+    progressFill = Color(0xFF07131A)
+)
+
+// Backward-compatible fallback accessors
 val SplashBackground = Color(0xFF000000)
 val SplashOnBackground = Color(0xFFFFFFFF)
 val SplashMuted = Color(0xFF94A3B8)

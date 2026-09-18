@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- ANONRODE DOWNLOADER bare brand monogram (user-approved "White No Tile A" / "Light Surface A"):
+     Pure geometric monogram 'A', landing floor line, and pierced download arrow.
+     Zero bounding squircle tile or gradient background.
+     Used in OS splash window, Compose header bar, and dynamic brand placements. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="120"
+    android:viewportHeight="120">
+    <!-- A body -->
+    <path
+        android:fillColor="@color/splash_glyph_color"
+        android:pathData="M60,26 L84,78 L72,78 L60,48 L48,78 L36,78 Z" />
+    <!-- landing line -->
+    <path
+        android:strokeColor="@color/splash_glyph_color"
+        android:strokeWidth="9"
+        android:strokeLineCap="round"
+        android:pathData="M42,86 L78,86" />
+    <!-- arrow stem + head: the download that passed through the floor -->
+    <path
+        android:strokeColor="@color/splash_glyph_color"
+        android:strokeWidth="7"
+        android:strokeLineCap="round"
+        android:pathData="M60,82 L60,94" />
+    <path
+        android:strokeColor="@color/splash_glyph_color"
+        android:strokeWidth="7"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M51,87 L60,96 L69,87" />
+</vector>

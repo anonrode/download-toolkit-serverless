@@ -214,8 +214,10 @@ class MainActivity : ComponentActivity() {
                 // (savedInstanceState != null) the splash would flash over the
                 // live UI.
                 var showSplash by remember { mutableStateOf(savedInstanceState == null) }
+                // Fallback safety timeout: normal dismissal is driven smoothly by SplashContent's
+                // onSplashFinished after physics cut + settle beat + hardware exit dissolve.
                 LaunchedEffect(Unit) {
-                    kotlinx.coroutines.delay(splashCutMs.toLong())
+                    kotlinx.coroutines.delay((splashCutMs + 1200f).toLong())
                     showSplash = false
                 }
                 // v3.1.5 shipped this as `if (showSplash) { Splash(...); return }`
@@ -397,7 +399,11 @@ class MainActivity : ComponentActivity() {
                             .fillMaxSize()
                             .pointerInput(Unit) { detectTapGestures { } }
                     ) {
-                        SplashContent(cutMs = splashCutMs)
+                        SplashContent(
+                            cutMs = splashCutMs,
+                            isDark = isDark,
+                            onSplashFinished = { showSplash = false }
+                        )
                     }
                 }
             }
