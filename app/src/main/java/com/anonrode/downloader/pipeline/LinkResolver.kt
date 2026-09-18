@@ -73,7 +73,16 @@ object LinkResolver {
         val path = lower.substringAfter("://", "").substringBefore('?').substringBefore('#')
         if (path.contains("/api/file/")) return true
         val query = lower.substringAfter('?', "").substringBefore('#')
-        return query.contains("pt=") || query.contains("token=") || query.contains("download")
+        if (query.contains("pt=") || query.contains("token=") || query.contains("download")) return true
+        // R2 / S3 / Object Storage signed links: the query string contains
+        // AWS-style signing parameters and/or response-content-disposition.
+        // These are resolver outputs (the direct cracked media stream) serving
+        // the raw file object, not web pages.
+        if (query.contains("response-content-disposition=") ||
+            query.contains("x-amz-signature=") ||
+            query.contains("x-amz-credential=")) return true
+        if (lower.contains("r2.cloudflarestorage.com") || lower.contains(".r2.dev/")) return true
+        return false
     }
 
     fun isKnownLockerHost(url: String): Boolean {

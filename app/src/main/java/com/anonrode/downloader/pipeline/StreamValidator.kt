@@ -120,6 +120,9 @@ object StreamValidator {
             } else {
                 "HTTP $status"
             }
+            if (status == 429) {
+                HostHealth.recordFail(url, rateLimited = true, reason = detailMsg)
+            }
             val reason = if (status == 429 && isLockerFrontend) {
                 "Locker frontend returned HTTP 429 (unresolved locker redirector — was not cracked to storage backend)"
             } else {

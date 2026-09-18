@@ -2279,7 +2279,12 @@ fun isDirectMediaUrl(url: String): Boolean {
     if (url.isBlank()) return false
     val clean = url.substringBefore('?').substringBefore('#').lowercase()
     val exts = com.anonrode.downloader.data.rules.DynamicRulesManager.getDirectMediaExtensions()
-    return exts.any { clean.endsWith(it) }
+    if (exts.any { clean.endsWith(it) }) return true
+    val query = url.substringAfter('?', "").lowercase()
+    if (query.contains("response-content-disposition=")) {
+        return exts.any { query.contains(it) }
+    }
+    return false
 }
 
 fun isRootLockerDomain(url: String): Boolean {
