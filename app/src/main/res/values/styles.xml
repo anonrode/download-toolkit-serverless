@@ -8,7 +8,7 @@
              behind it isn't exactly #FF000000 (the light theme, cards, etc.).
              Transparent lets the app's own background run behind the pill. -->
         <item name="android:navigationBarColor">#00000000</item>
-        <item name="android:windowBackground">#FF000000</item>
+        <item name="android:windowBackground">@color/splash_background</item>
         <!-- The app draws its own background behind both bars and picks icon
              colors itself (enableEdgeToEdge / syncSystemBars); the system's
              automatic contrast scrim would otherwise lay a translucent gray
@@ -18,32 +18,18 @@
 
     <style name="Theme.AnonDownloader.Splash" parent="Theme.SplashScreen">
         <item name="windowSplashScreenBackground">@color/splash_background</item>
-        <!-- The FULL brand mark (cyan->teal squircle + ink monogram), not the
-             adaptive FOREGROUND: that layer is now transparent behind the ink
-             glyph, which would render invisible on the pinned-black splash.
-             API 31+ masks the splash icon to a circle — the squircle inside
-             the clip still reads as the badge; the Compose splash that follows
-             runs the full motion with the unclipped tile. -->
-        <item name="windowSplashScreenAnimatedIcon">@drawable/ic_anon_mark</item>
+        <!-- The bare brand monogram glyph (user-approved "Light Surface A"),
+             dynamically tinted via @color/splash_glyph_color.
+             API 31+ masks the splash icon to a circle — the bare monogram reads
+             cleanly without squircle clipping. -->
+        <item name="windowSplashScreenAnimatedIcon">@drawable/ic_anon_monogram</item>
         <item name="postSplashScreenTheme">@style/Theme.AnonDownloader</item>
-        <!-- On API 31+ the library's Theme.SplashScreen resolves to
-             DeviceDefault.DayNight carrying ONLY the windowSplashScreen*
-             attributes — no windowBackground, no bar colors, no bar
-             appearance. On a light-mode device that inherits a LIGHT window
-             background and light bar appearance, which drew a pale strip
-             under the black splash at startup: the faint horizontal line
-             around the (dark) gesture pill. Pin the splash window to
-             full-bleed black with transparent bars and light icons/pill,
-             regardless of the device's day/night mode. On API <31 the
-             compat windowBackground was already exactly this color drawable
-             (the icon comes from the library's overlay view), so this
-             override is equivalent there. -->
         <item name="android:windowBackground">@color/splash_background</item>
         <item name="android:windowDrawsSystemBarBackgrounds">true</item>
         <item name="android:statusBarColor">@android:color/transparent</item>
         <item name="android:navigationBarColor">@android:color/transparent</item>
-        <item name="android:windowLightStatusBar">false</item>
-        <item name="android:windowLightNavigationBar" tools:targetApi="o_mr1">false</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar" tools:targetApi="o_mr1">true</item>
     </style>
 
     <style name="Theme.AnonDownloader.Dialog" parent="android:Theme.Material.NoActionBar">

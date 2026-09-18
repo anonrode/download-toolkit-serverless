@@ -257,6 +257,11 @@ class FederatedFailoverTestSuite(unittest.TestCase):
         self.assertIn("quality = current.quality,", self.source)
         self.assertNotIn("quality = null,", self.source[self.source.find("attemptCrossProviderFailover"):self.source.find("attemptCrossProviderFailover") + 5000])
 
+    def test_dedicated_asian_sites_query_guard_in_engine(self):
+        """Invariant: Asian drama failover MUST allow searching dedicated Asian sites and extract country from sourceUrl."""
+        self.assertIn("(isAsian || pName !in DEDICATED_ASIAN_SITES)", self.source)
+        self.assertIn('val origCountry = extractCountry("${task.showTitle} ${task.episodeTitle} ${task.sourceUrl}", task.site)', self.source)
+
     # --------------------------------------------------------------------------
     # 2. Progress Banking Guard Behavioral Tests
     # --------------------------------------------------------------------------
