@@ -27,14 +27,6 @@ class AnonApp : Application(), ImageLoaderFactory {
         instance = this
         repository.initPersistence(filesDir, this)
         com.anonrode.downloader.util.DebugLog.init(this)
-        // Load cached scraper rules (domain fixes / dynamic providers) so a
-        // manual sync in Settings survives app restarts.
-        com.anonrode.downloader.data.rules.DynamicRulesManager.init(this)
-        // Per-host health ledger (backoff windows + playbook knownDead seeds).
-        com.anonrode.downloader.pipeline.HostHealth.init(this)
-        // Home-feed disk memory (v3.1.6): trending/genre rows + tile posters
-        // survive restarts; the VM paints from it before touching the network.
-        com.anonrode.downloader.providers.FeedCache.init(this)
         engine = DownloadEngine(this, repository, com.anonrode.downloader.util.NetworkObserver(this))
         // Torrent selective-file picker: the engine suspends on this callback
         // while the Compose dialog (HomeScreen) shows the swarm's file list.
@@ -55,6 +47,12 @@ class AnonApp : Application(), ImageLoaderFactory {
         com.anonrode.downloader.util.CrashHandler.install(this)
         appScope.launch {
             try {
+                // Non-critical startup initializations: disk I/O, AES decryption,
+                // and JSON decoding offloaded to Dispatchers.IO to prevent cold-start ANR.
+                com.anonrode.downloader.data.rules.DynamicRulesManager.init(this@AnonApp)
+                com.anonrode.downloader.pipeline.HostHealth.init(this@AnonApp)
+                com.anonrode.downloader.providers.FeedCache.init(this@AnonApp)
+
                 maybeSyncRules()
                 initMutex.withLock {
                     if (ytdlpReady) return@withLock

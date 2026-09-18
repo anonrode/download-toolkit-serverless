@@ -26,12 +26,17 @@ import androidx.compose.ui.unit.sp
 import com.anonrode.downloader.security.TorrentSecurityShield
 import com.anonrode.downloader.ui.theme.*
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
 /**
  * Bridge between the engine's suspend picker callback (running on IO) and the
  * Compose UI. The engine calls [pick] on the IO thread; the main-thread dialog
- * observes [requests] and completes the deferred with the user's choice.
+ * observes [requestState] and completes the deferred with the user's choice.
  * Null selection (dismiss) means "download the whole torrent".
+ * The active request is held in a StateFlow so configuration changes (e.g. screen
+ * rotation) do not drop the dialog.
  */
 object TorrentFilePicker {
     data class Request(
@@ -39,9 +44,11 @@ object TorrentFilePicker {
         val deferred: CompletableDeferred<List<Int>?>
     )
 
-    @Volatile
-    var requests: Request? = null
-        private set
+    private val _requestState = MutableStateFlow<Request?>(null)
+    val requestState: StateFlow<Request?> = _requestState.asStateFlow()
+
+    val requests: Request?
+        get() = _requestState.value
 
     /** How long the engine waits for the UI to show the picker before falling
      *  back to downloading the whole torrent. Guards against the dialog never
@@ -53,15 +60,15 @@ object TorrentFilePicker {
         val deferred = CompletableDeferred<List<Int>?>()
 
         // The bridge has a single slot: a second request arriving before the
-        // host consumes the first would orphan the first deferred forever.
+        // host resolves the first would orphan the first deferred forever.
         // Resolve it to "whole torrent" first so the engine never hangs.
-        val previous = requests
+        val previous = _requestState.value
         if (previous != null && !previous.deferred.isCompleted) {
             previous.deferred.complete(null)
         }
 
         val req = Request(files, deferred)
-        requests = req
+        _requestState.value = req
 
         // If no dialog appears within the timeout (host not composed, task
         // paused while the dialog is open), fall back to whole-torrent instead
@@ -70,24 +77,33 @@ object TorrentFilePicker {
             kotlinx.coroutines.withTimeoutOrNull(PICK_TIMEOUT_MS) { deferred.await() }
         } catch (e: kotlinx.coroutines.CancellationException) {
             // Caller (task job) cancelled: never leave the deferred pending —
-            // a later host consume() would show a dialog that can never resolve.
+            // a later host would show a dialog that can never resolve.
             deferred.complete(null)
             throw e
+        } finally {
+            if (!deferred.isCompleted) {
+                deferred.complete(null)
+            }
+            if (_requestState.value === req) {
+                _requestState.value = null
+            }
         }
-        if (result == null && !deferred.isCompleted) {
-            deferred.complete(null)
-        }
-        // If the host never consumed the slot, clear it so a later host
-        // instance does not surface a stale dialog for an already-timed-out
-        // decision. (consume() already nulls it in the normal path.)
-        if (requests === req) requests = null
         return result
     }
 
-    /** Non-blocking poll used by the dialog host; returns and clears the request. */
+    /** Completes the active request and clears the request state so the dialog dismisses. */
+    fun resolve(request: Request, selection: List<Int>?) {
+        request.deferred.complete(selection)
+        if (_requestState.value === request) {
+            _requestState.value = null
+        }
+    }
+
+    /** Deprecated non-blocking poll preserved for backward compatibility. */
+    @Deprecated("Observe requestState instead of polling consume()", ReplaceWith("requestState.value"))
     fun consume(): Request? {
-        val r = requests ?: return null
-        requests = null
+        val r = _requestState.value ?: return null
+        _requestState.value = null
         return r
     }
 }
