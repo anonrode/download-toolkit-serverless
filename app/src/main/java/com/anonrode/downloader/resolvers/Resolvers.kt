@@ -1925,7 +1925,7 @@ object VidhideResolver : BaseResolver {
         "techradar.ink", "ryderjet.com"
     )
     private val MIRROR_HOSTS = listOf(
-        "vidhide.com", "minochinos.com", "vidhidefast.com",
+        "vidhide.com", "ryderjet.com", "minochinos.com", "vidhidefast.com",
         "vidhidevip.com", "vidhidepro.com", "filelions.to"
     )
     @Volatile private var lastWorkingHost: String? = null
@@ -2000,22 +2000,38 @@ object DoodstreamResolver : BaseResolver {
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
         lastFailure = null
         try {
-            val host = HttpClient.safeHost(url, "dood.to")
-            val embedUrl = url.replace("/d/", "/e/").replace("/f/", "/e/")
-            val html = HttpClient.getText(embedUrl, referer = "https://$host/") ?: run {
-                lastFailure = "Doodstream: empty HTTP response for $embedUrl"
-                return null
+            val urlHost = HttpClient.safeHost(url, "dood.to")
+            val rawPath = url.replace("https://$urlHost", "").replace("http://$urlHost", "")
+            val embedPath = rawPath.replace("/d/", "/e/").replace("/f/", "/e/")
+            val candidates = LinkedHashSet<String>().apply {
+                add(urlHost)
+                add("doodstream.com")
+                add("dood.to")
+                add("d000d.com")
             }
-            if (looksLikeDeadPage(html)) {
-                lastFailure = "Doodstream: page matches dead file markers"
+            var html: String? = null
+            var activeHost = urlHost
+            var activeEmbedUrl = "https://$urlHost$embedPath"
+            for (h in candidates) {
+                val candidateUrl = "https://$h$embedPath"
+                val res = HttpClient.getText(candidateUrl, referer = "https://$h/")
+                if (!res.isNullOrBlank() && !looksLikeDeadPage(res)) {
+                    html = res
+                    activeHost = h
+                    activeEmbedUrl = candidateUrl
+                    break
+                }
+            }
+            if (html == null) {
+                lastFailure = "Doodstream: empty or blocked response across candidate mirrors (${candidates.joinToString()})"
                 return null
             }
             val passPattern = Pattern.compile("""/pass_md5/([^"'\s]+)""")
             val matcher = passPattern.matcher(html)
             if (matcher.find()) {
                 val passPath = matcher.group(1)
-                val passUrl = "https://$host/pass_md5/$passPath"
-                val token = HttpClient.getText(passUrl, referer = embedUrl)
+                val passUrl = "https://$activeHost/pass_md5/$passPath"
+                val token = HttpClient.getText(passUrl, referer = activeEmbedUrl)
                 if (!token.isNullOrBlank()) {
                     val tokenSlug = passPath.trimEnd('/').substringAfterLast('/')
                     val randomStr = (1..10).map { ('a'..'z').random() }.joinToString("")
@@ -2024,7 +2040,7 @@ object DoodstreamResolver : BaseResolver {
                     // https://<host>/e/<md5><random>?token=<md5>&expiry=<ts>.
                     // The scheme+host prefix is mandatory — a hostless string is
                     // not a URL and every downloader rejects it.
-                    return "https://$host/e/${token.trim()}$randomStr?token=$tokenSlug&expiry=$expiry"
+                    return "https://$activeHost/e/${token.trim()}$randomStr?token=$tokenSlug&expiry=$expiry"
                 }
                 lastFailure = "Doodstream: pass_md5 token fetch returned empty from $passUrl"
             } else {
@@ -2057,7 +2073,8 @@ object MixdropResolver : BaseResolver {
         try {
             val embedUrl = url.replace("/f/", "/e/")
             val host = HttpClient.safeHost(url, "mixdrop.co")
-            val html = HttpClient.getText(embedUrl, referer = "https://$host/") ?: run {
+            // Permissive SSL client: mixdrop.co frequently serves mismatched or broken CA chains
+            val html = HttpClient.getText(embedUrl, referer = "https://$host/", permissive = true) ?: run {
                 lastFailure = "Mixdrop: empty HTTP response for $embedUrl"
                 return null
             }
