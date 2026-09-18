@@ -50,7 +50,11 @@ object RulesPipeline {
         val metaPoster: String? = null,
         val metaSynopsis: String? = null,
         val episodes: List<EpisodeItem> = emptyList()
-    )
+    ) {
+        val title: String get() = metaTitle.orEmpty()
+        val posterUrl: String get() = metaPoster.orEmpty()
+        val synopsis: String get() = metaSynopsis.orEmpty()
+    }
 
     // ---------------------------------------------------------------- search
 
