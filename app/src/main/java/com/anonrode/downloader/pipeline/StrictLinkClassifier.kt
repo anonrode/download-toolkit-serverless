@@ -90,11 +90,13 @@ object StrictLinkClassifier {
         val cleanSiteHost = siteHost?.lowercase()?.removePrefix("www.")
         val path = uri.path?.lowercase().orEmpty()
 
-        // 1. Same-site self-reference / homepage check
+        // 1. Homepage / root path check (empty or "/" path is always nav junk)
+        if (path.isBlank() || path == "/") {
+            return LinkClass.NavigationJunk("homepage")
+        }
+
+        // Same-site self-reference check
         if (cleanSiteHost != null && (cleanHost == cleanSiteHost || cleanHost.endsWith(".$cleanSiteHost"))) {
-            if (path.isBlank() || path == "/") {
-                return LinkClass.NavigationJunk("homepage")
-            }
             if (currentPath != null && path.trimEnd('/') == currentPath.trimEnd('/')) {
                 return LinkClass.NavigationJunk("self_reference")
             }
