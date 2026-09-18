@@ -2245,6 +2245,42 @@ object DynamicLockerResolver : BaseResolver {
     }
 }
 
+private val DEAD_FILE_MARKERS = listOf(
+    "file is no longer available", "file was deleted", "file deleted",
+    "file not found", "video not found", "this file was deleted",
+    "has been removed", "no longer exists"
+)
+
+private fun looksLikeDeadPage(html: String): Boolean {
+    val low = html.lowercase()
+    return DEAD_FILE_MARKERS.any { low.contains(it) }
+}
+
+private fun extractM3u8FromHtml(html: String): String? {
+    val matcher = Pattern.compile("""https?://[^\s"'<>]+\.m3u8[^\s"'<>]*""").matcher(html)
+    if (matcher.find()) {
+        return matcher.group(0)
+    }
+    return null
+}
+
+private fun extractMp4FromHtml(html: String): String? {
+    // (?![a-zA-Z0-9]) so "site.webmanifest" (a common WP favicon link) is not
+    // matched as ".webm"; HTML-escaped quotes are stripped off the tail.
+    val matcher = Pattern.compile("""https?://[^\s"'<>]+\.(?:mp4|mkv)(?![a-zA-Z0-9])[^\s"'<>]*""").matcher(html)
+    if (matcher.find()) {
+        return matcher.group(0)?.substringBefore("&quot;")?.substringBefore("&amp;")
+    }
+    return null
+}
+
+fun isDirectMediaUrl(url: String): Boolean {
+    if (url.isBlank()) return false
+    val clean = url.substringBefore('?').substringBefore('#').lowercase()
+    val exts = com.anonrode.downloader.data.rules.DynamicRulesManager.getDirectMediaExtensions()
+    return exts.any { clean.endsWith(it) }
+}
+
 fun isRootLockerDomain(url: String): Boolean {
     val clean = url.trimEnd('/')
     return listOf(
