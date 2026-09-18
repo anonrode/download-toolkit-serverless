@@ -17,7 +17,9 @@ import org.jsoup.Jsoup
 import java.net.URI
 import java.net.URLDecoder
 import java.net.URLEncoder
+import com.anonrode.downloader.data.rules.DynamicRulesManager
 import java.util.concurrent.TimeUnit
+import java.util.regex.Matcher
 import java.util.regex.Pattern
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
@@ -714,7 +716,7 @@ object FivePlayResolver : BaseResolver {
 object VikingFileResolver : BaseResolver {
     override fun canResolve(url: String): Boolean {
         val low = url.lowercase()
-        return hostClaim(url, listOf("vikingfile.com")) && !low.endsWith(".mp4") && !low.endsWith(".mkv") && !low.endsWith(".m3u8")
+        return hostClaim(url, listOf("vikingfile.com")) && (low.contains("/d/") || (!low.endsWith(".mp4") && !low.endsWith(".mkv") && !low.endsWith(".m3u8")))
     }
 
     // The Sep-2 hardening blanket-rejected every redirect whose Location sat
@@ -753,91 +755,66 @@ object VikingFileResolver : BaseResolver {
             //    The /f/<id> page itself is just a token-mint; the actual
             //    file is at the /d/<token>/<file> URL. Live-verified: the
             //    page returns 302 with Location: /d/ZlVDRbze6i/...mkv
-            //    (HTML body has a 0-second meta-refresh too).
             //
-            // 2. /d/<token>/<file>  → 206 Partial Content on a Range probe
-            //    (this IS the direct file URL — engine should go to aria2c).
-            //
-            // The OLD code did the wrong thing on both:
-            //   - On /f/<id>, it tried to parse the body for window.location
-            //     (but the body is HTML, the redirect is in the HTTP header
-            //     AND a meta refresh — neither was the old regex's pattern).
-            //     Then cappedText hit 3MB, saw HTML, called it "not a page",
-            //     and 26 times on naijavault.com/dl-b8902199 returned
-            //     "body from uz.vikingfile.com truncated at 3145728 bytes
-            //     (not a page — likely a misdirected file fetch)".
-            //   - On /d/<token>/<file>, it should have been treated as
-            //     already-direct and skipped the resolver entirely. Instead
-            //     the regex didn't find window.location and the resolver
-            //     returned null.
-            //
-            // The FIX: do a no-redirect probe. Three outcomes:
-            //   a) 200/206 with Content-Length > 0 → the URL IS the file
-            //      (already on the /d/... path). Return as-is.
-            //   b) 302 with Location → the URL is a token-mint redirector.
-            //      Follow the Location header and return that. Today the
-            //      /d/<token>/<file> hop itself 302s to a PRESIGNED R2 URL
-            //      that serves the bytes — see probeStorageLocation below
-            //      for how a storage Location is accepted vs rejected.
-            //   c) HTML page that doesn't redirect → the URL is a true
-            //      landing page with embedded player (rare). Try the
-            //      legacy window.location regex as a final fallback.
-            //
-            // No 3MB body fetch here. The whole exchange fits in headers
-            // (~500 bytes) and a 1-byte probe body, so the resolver
-            // cost is ~600 bytes per call — no data waste.
-            // Unified terminal gate (HttpClient.probeTerminal) — replaces the
-            // old inline no-redirect copy so ALL terminal checks share one
-            // accept matrix, one timeout, and the cancellable registry.
-            // Failure semantics preserved: the old code let a network throw
-            // skip everything (return null) — it did NOT fall through to (c),
-            // so a null probe keeps that behavior.
-            val tp = HttpClient.probeTerminal(url, referer = "https://www.naijavault.com/")
-                ?: return null
-            // Case (a): the URL is already the direct file
-            if (tp.totalBytes != null) {
-                com.anonrode.downloader.util.DebugLog.resolve(
-                    "VikingFileResolver: $url is the direct file (Range probe ${tp.code}, size=${tp.totalBytes}) — returning as-is"
-                )
-                return url
-            }
-            // Case (b): the URL is a token-mint redirector
-            val rawLoc = tp.location
-            if (tp.code in 301..308 && !rawLoc.isNullOrBlank()) {
-                // A 3xx Location may be RELATIVE ("Location: /d/<tok>/<f>.mkv")
-                // — the old copy fed it to OkHttp/probes raw, which only worked
-                // because vikingfile answers with absolute Locations. Absolutize
-                // explicitly so relative hops resolve too.
-                val loc = HttpClient.safeResolveUri(url, rawLoc)
-                val lowLoc = loc.lowercase()
-                if (lowLoc.contains("r2.cloudflarestorage.com") ||
-                    lowLoc.contains(".r2.dev/") ||
-                    lowLoc.contains("cloudflarestorage.com/")) {
-                    return probeStorageLocation(loc)
+            // 2. /d/<token>/<file>  → 302 redirect to Cloudflare R2 presigned URL
+            //    which serves 206 Partial Content on a Range probe.
+            //    Resolving follows hops until reaching the terminal R2 storage URL,
+            //    preventing 16 parallel download sockets from hammering Vikingfile's
+            //    Nginx frontend with 429 Too Many Requests.
+            var curr = url
+            for (hop in 1..5) {
+                val tp = HttpClient.probeTerminal(curr, referer = "https://www.naijavault.com/")
+                    ?: return null
+                // Case (a): curr is already the direct storage/media URL (e.g. Cloudflare R2)
+                if (tp.totalBytes != null) {
+                    val lowCurr = curr.lowercase()
+                    if (lowCurr.contains("r2.cloudflarestorage.com") ||
+                        lowCurr.contains(".r2.dev/") ||
+                        lowCurr.contains("cloudflarestorage.com/")) {
+                        val verified = probeStorageLocation(curr)
+                        if (verified != null) return verified
+                    }
+                    if (tp.code in 200..206 && !hostClaim(curr, listOf("vikingfile.com"))) {
+                        com.anonrode.downloader.util.DebugLog.resolve(
+                            "VikingFileResolver: $curr is the direct file (Range probe ${tp.code}, size=${tp.totalBytes}) — returning as-is"
+                        )
+                        return curr
+                    }
                 }
-                com.anonrode.downloader.util.DebugLog.resolve(
-                    "VikingFileResolver: followed ${tp.code} → ${loc.take(120)}"
-                )
-                return HttpClient.safeUrl(loc)
-            }
-            // Case (c): the URL is a true landing page. Try the legacy
-            // window.location regex as a last resort.
-            val html = HttpClient.getText(url, referer = "https://www.naijavault.com/") ?: return null
-            val m = Pattern.compile("""(?:window\.location|location\.href)\s*=\s*["']([^"']+)["']""").matcher(html)
-            if (m.find()) {
-                val loc = m.group(1) ?: return null
-                val lowLoc = loc.lowercase()
-                if (lowLoc.contains("r2.cloudflarestorage.com") ||
-                    lowLoc.contains(".r2.dev/") ||
-                    lowLoc.contains("cloudflarestorage.com/")) {
+                // Case (b): 30x redirect
+                val rawLoc = tp.location
+                if (tp.code in 301..308 && !rawLoc.isNullOrBlank()) {
+                    val loc = HttpClient.safeResolveUri(curr, rawLoc)
+                    val lowLoc = loc.lowercase()
+                    if (lowLoc.contains("r2.cloudflarestorage.com") ||
+                        lowLoc.contains(".r2.dev/") ||
+                        lowLoc.contains("cloudflarestorage.com/")) {
+                        val verified = probeStorageLocation(loc)
+                        if (verified != null) return verified
+                    }
                     com.anonrode.downloader.util.DebugLog.resolve(
-                        "VikingFileResolver: rejected misdirect to storage backend: ${loc.take(120)}"
+                        "VikingFileResolver: followed ${tp.code} → ${loc.take(120)}"
                     )
-                    return null
+                    curr = HttpClient.safeUrl(loc)
+                    continue
                 }
-                return loc
+                // Case (c): HTML page that doesn't redirect
+                val html = HttpClient.getText(curr, referer = "https://www.naijavault.com/") ?: return null
+                val m = Pattern.compile("""(?:window\.location|location\.href)\s*=\s*["']([^"']+)["']""").matcher(html)
+                if (m.find()) {
+                    val loc = m.group(1) ?: return null
+                    val lowLoc = loc.lowercase()
+                    if (lowLoc.contains("r2.cloudflarestorage.com") ||
+                        lowLoc.contains(".r2.dev/") ||
+                        lowLoc.contains("cloudflarestorage.com/")) {
+                        val verified = probeStorageLocation(loc)
+                        if (verified != null) return verified
+                    }
+                    curr = HttpClient.safeUrl(HttpClient.safeResolveUri(curr, loc))
+                    continue
+                }
+                return extractMp4FromHtml(html) ?: extractM3u8FromHtml(html)
             }
-            return extractMp4FromHtml(html) ?: extractM3u8FromHtml(html)
         } catch (_: Exception) {}
         return null
     }
@@ -1307,12 +1284,43 @@ object LoadedfilesResolver : BaseResolver {
                             return safeDirect
                         }
 
-                        val m = Pattern.compile("""var downloadUrl = '(https://loadedfiles\.[a-z0-9-]+/[^']+)'""", Pattern.CASE_INSENSITIVE).matcher(body)
-                        if (m.find()) {
-                            // Use the matched URL VERBATIM: the token is bound to
-                            // the host in the link -- rewriting it onto the last
-                            // working host breaks the chain (live-verified).
-                            val next = m.group(1) ?: return@use
+                        var next: String? = null
+                        val mDlTimer = Pattern.compile(
+                            """dlTimer\(\{\s*seconds:\s*\d+,\s*link:\s*['"]([^'"]+)['"]""",
+                            Pattern.CASE_INSENSITIVE
+                        ).matcher(body)
+                        if (mDlTimer.find()) {
+                            val raw = mDlTimer.group(1)
+                            if (!raw.isNullOrBlank()) {
+                                next = unescapeJsUrl(raw)
+                            }
+                        }
+                        if (next == null) {
+                            val mLegacy = Pattern.compile(
+                                """var downloadUrl = '(https://loadedfiles\.[a-z0-9-]+/[^']+)'""",
+                                Pattern.CASE_INSENSITIVE
+                            ).matcher(body)
+                            if (mLegacy.find()) {
+                                next = mLegacy.group(1)
+                            }
+                        }
+                        if (next == null) {
+                            val cfg = DynamicRulesManager.getResolverConfig("loadedfiles")
+                            val customRegex = cfg?.optString("tokenRegex")
+                            if (!customRegex.isNullOrBlank()) {
+                                val mCustom = Pattern.compile(customRegex, Pattern.CASE_INSENSITIVE).matcher(body)
+                                if (mCustom.find()) {
+                                    for (g in 1..mCustom.groupCount()) {
+                                        val v = mCustom.group(g)
+                                        if (!v.isNullOrBlank()) {
+                                            next = unescapeJsUrl(v)
+                                            break
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if (!next.isNullOrBlank()) {
                             currUrl = HttpClient.safeUrl(next)
                             ptHops++
                         }
@@ -1368,6 +1376,24 @@ object LoadedfilesResolver : BaseResolver {
             }
         }
         return null
+    }
+
+    private fun unescapeJsUrl(s: String): String {
+        var str = s.replace("\\/", "/")
+        if (str.contains("\\u")) {
+            val m = Pattern.compile("""\\u([0-9a-fA-F]{4})""").matcher(str)
+            val sb = StringBuffer()
+            while (m.find()) {
+                val hex = m.group(1)
+                val code = hex?.toIntOrNull(16)
+                if (code != null) {
+                    m.appendReplacement(sb, Matcher.quoteReplacement(code.toChar().toString()))
+                }
+            }
+            m.appendTail(sb)
+            str = sb.toString()
+        }
+        return str
     }
 }
 
