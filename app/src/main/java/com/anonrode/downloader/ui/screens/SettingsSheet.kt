@@ -101,6 +101,7 @@ internal class SettingsState(
     // the built-in player (MKV/embedded subs show up automatically).
     var downloadSubs by mutableStateOf(viewModel.engine.downloadSubtitles)
     var subLang by mutableStateOf(viewModel.engine.subtitleLanguage)
+    var filterExplicit by mutableStateOf(viewModel.engine.filterExplicitContent)
 
     var isUpdatingYtDlp by mutableStateOf(false)
     var isSyncingRules by mutableStateOf(false)
@@ -128,7 +129,8 @@ internal class SettingsState(
         debugLog = debugLogging,
         logRetention = logRetention,
         downloadSubs = downloadSubs,
-        subLang = subLang
+        subLang = subLang,
+        filterExplicit = filterExplicit
     )
 
     /** Instant-apply: every control persists the moment the user changes it —
@@ -160,7 +162,8 @@ internal class SettingsState(
             debugLog = s.debugLog,
             logRetention = s.logRetention,
             downloadSubs = s.downloadSubs,
-            subLang = s.subLang
+            subLang = s.subLang,
+            filterExplicit = s.filterExplicit
         )
     }
 }
@@ -187,7 +190,8 @@ internal data class SettingsStateSnapshot(
     val debugLog: Boolean,
     val logRetention: Int,
     val downloadSubs: Boolean,
-    val subLang: String
+    val subLang: String,
+    val filterExplicit: Boolean
 )
 
 @Composable
@@ -655,6 +659,19 @@ internal fun SettingsGeneralSection(
                 state.showPosters = it
                 // Instant-apply: persisted + live in one write, so the next
                 // search reflects it immediately.
+                state.persist()
+            }
+        )
+
+        HorizontalDivider(color = BorderHairline, modifier = Modifier.padding(horizontal = Spacing.md))
+
+        SettingsSwitchRow(
+            icon = Icons.Rounded.Shield,
+            title = "Filter Explicit Content",
+            subtitle = "Hide adult, nude, and x-rated titles from Trending and Genre feeds (search is never filtered)",
+            checked = state.filterExplicit,
+            onCheckedChange = {
+                state.filterExplicit = it
                 state.persist()
             }
         )

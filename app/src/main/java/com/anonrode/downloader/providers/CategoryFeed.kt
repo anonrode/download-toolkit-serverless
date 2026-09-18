@@ -142,23 +142,27 @@ object CategoryFeed {
      * a slow site never starves the grid). Runs under Dispatchers.IO from
      * the VM: one lock serializes slot writes + publishing.
      */
-    suspend fun fetch(category: Category, onPartial: (List<ShowCard>) -> Unit = {}): List<ShowCard> = coroutineScope {
+    suspend fun fetch(
+        category: Category,
+        filterExplicit: Boolean = true,
+        onPartial: (List<ShowCard>) -> Unit = {}
+    ): List<ShowCard> = coroutineScope {
         val candidates = category.candidateSites()
         val slots = arrayOfNulls<List<ShowCard>>(candidates.size)
         val lock = Any()
         candidates.mapIndexed { i, site ->
             async {
-                val cards = withTimeoutOrNull(TIMEOUT_MS) { fetchSite(site, category) } ?: emptyList()
+                val cards = withTimeoutOrNull(TIMEOUT_MS) { fetchSite(site, category, filterExplicit) } ?: emptyList()
                 synchronized(lock) {
                     slots[i] = cards
                     if (cards.isNotEmpty()) {
-                        onPartial(mixCards(candidates.mapIndexed { j, s -> s to (slots[j] ?: emptyList()) }))
+                        onPartial(mixCards(candidates.mapIndexed { j, s -> s to (slots[j] ?: emptyList()) }, filterExplicit))
                     }
                 }
             }
         }.awaitAll()
         val pairs = candidates.mapIndexed { j, site -> site to (slots[j] ?: emptyList()) }
-        val mixed = mixCards(pairs)
+        val mixed = mixCards(pairs, filterExplicit)
         com.anonrode.downloader.util.DebugLog.resolve(
             "category '${category.label}': ${mixed.size} mixed (${pairs.joinToString { it.first + "=" + it.second.size }})"
         )
@@ -166,20 +170,25 @@ object CategoryFeed {
     }
 
     /** One site's confirmed cards for a genre, by its feed kind. */
-    private suspend fun fetchSite(site: String, category: Category): List<ShowCard> {
+    private suspend fun fetchSite(site: String, category: Category, filterExplicit: Boolean = true): List<ShowCard> {
         val (kind, template) = FEED_SOURCES[site] ?: return emptyList()
         val term = category.termFor(site)
         return when (kind) {
             FeedKind.WP_REST -> TrendingFeed.fetchWpRest(
                 site, query = term, limit = PER_ROW_LIMIT,
                 extraParams = "&orderby=relevance",
-                confirmTerms = category.aliases
+                confirmTerms = category.aliases,
+                filterExplicit = filterExplicit
             )
             FeedKind.RSS -> TrendingFeed.fetchRss(
                 site, String.format(template, encodedTerm(term)),
-                confirmTerms = category.aliases
+                confirmTerms = category.aliases,
+                filterExplicit = filterExplicit
             )
-            FeedKind.API_JSON -> TrendingFeed.fetchApiSearch(site, term, PER_ROW_LIMIT)
+            FeedKind.API_JSON -> {
+                val cards = TrendingFeed.fetchApiSearch(site, term, PER_ROW_LIMIT)
+                if (filterExplicit) com.anonrode.downloader.util.ExplicitContentFilter.filterSafe(cards) else cards
+            }
         }
     }
 
@@ -193,7 +202,10 @@ object CategoryFeed {
      * a late site interleaves its own cards between what's on screen but
      * never reorders, removes, or duplicates a card already painted.
      */
-    internal fun mixCards(pairs: List<Pair<String, List<ShowCard>>>): List<ShowCard> {
+    internal fun mixCards(
+        pairs: List<Pair<String, List<ShowCard>>>,
+        filterExplicit: Boolean = true
+    ): List<ShowCard> {
         val out = mutableListOf<ShowCard>()
         val seen = mutableSetOf<String>()
         var idx = 0
@@ -203,7 +215,8 @@ object CategoryFeed {
                 if (idx < cards.size) {
                     val card = cards[idx]
                     val key = card.title.lowercase().filter { it.isLetterOrDigit() }
-                    if (out.size < GRID_CAP && key.isNotBlank() && seen.add(key)) out.add(card)
+                    val isSafe = !filterExplicit || !com.anonrode.downloader.util.ExplicitContentFilter.isExplicit(card)
+                    if (out.size < GRID_CAP && key.isNotBlank() && isSafe && seen.add(key)) out.add(card)
                     advanced = true
                 }
             }
@@ -221,25 +234,26 @@ object CategoryFeed {
      * Lite requests only (~2KB via _fields / API per_page=1): tiles are
      * artwork, tapping opens the real gated page.
      */
-    suspend fun tilePosters(): List<GenreTile> = coroutineScope {
+    suspend fun tilePosters(filterExplicit: Boolean = true): List<GenreTile> = coroutineScope {
         CATEGORIES.map { category ->
-            async { GenreTile(category, tilePosterFor(category)) }
+            async { GenreTile(category, tilePosterFor(category, filterExplicit)) }
         }.awaitAll()
     }
 
-    private suspend fun tilePosterFor(category: Category): String {
+    private suspend fun tilePosterFor(category: Category, filterExplicit: Boolean = true): String {
         for (site in category.candidateSites()) {
             val (kind, template) = FEED_SOURCES[site] ?: continue
             val term = category.termFor(site)
             val poster = withTimeoutOrNull(TIMEOUT_MS) {
                 when (kind) {
-                    FeedKind.WP_REST -> TrendingFeed.fetchWpRestLitePoster(site, term)
+                    FeedKind.WP_REST -> TrendingFeed.fetchWpRestLitePoster(site, term, filterExplicit)
                     FeedKind.RSS -> TrendingFeed.fetchRss(
                         site, String.format(template, encodedTerm(term)),
-                        confirmTerms = category.aliases
-                    ).firstOrNull()?.posterUrl.orEmpty()
-                    FeedKind.API_JSON -> TrendingFeed.fetchApiSearch(site, term, 1)
-                        .firstOrNull()?.posterUrl.orEmpty()
+                        confirmTerms = category.aliases,
+                        filterExplicit = filterExplicit
+                    ).firstOrNull { !filterExplicit || !com.anonrode.downloader.util.ExplicitContentFilter.isExplicit(it) }?.posterUrl.orEmpty()
+                    FeedKind.API_JSON -> TrendingFeed.fetchApiSearch(site, term, 5)
+                        .firstOrNull { !filterExplicit || !com.anonrode.downloader.util.ExplicitContentFilter.isExplicit(it) }?.posterUrl.orEmpty()
                 }
             }.orEmpty()
             if (poster.isNotBlank()) return poster

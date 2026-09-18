@@ -190,7 +190,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val debugLog: Boolean,
         val logRetention: Int,
         val downloadSubs: Boolean,
-        val subLang: String
+        val subLang: String,
+        val filterExplicit: Boolean = true
     )
 
     private var pendingSettings: SettingsSnapshot? = null
@@ -227,7 +228,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             debugLog = snapshot.debugLog,
             logRetention = snapshot.logRetention,
             downloadSubs = snapshot.downloadSubs,
-            subLang = snapshot.subLang
+            subLang = snapshot.subLang,
+            filterExplicit = snapshot.filterExplicit
         )
         com.anonrode.downloader.util.DebugLog.user(
             "settings saved (sockets=${snapshot.parallelSockets} quality=${snapshot.quality} stall=${snapshot.stallTimeout}s hls=${snapshot.hlsFragments} peers=${snapshot.peers} speedLimit=${snapshot.speedLimit})"
@@ -241,8 +243,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // stuff will still be there"). The loaders below then refetch
         // silently only when a group is stale (>30 min) or forced.
         val cached = com.anonrode.downloader.providers.FeedCache.snapshot
-        if (cached.trending.isNotEmpty() || cached.categories.isNotEmpty()) {
-            categoryCache.putAll(cached.categories.mapValues { it.value.cards })
+        val filterExplicit = engine.filterExplicitContent
+        val cachedTrending = if (filterExplicit) com.anonrode.downloader.util.ExplicitContentFilter.filterSafe(cached.trending) else cached.trending
+        val cachedCategories = if (filterExplicit) {
+            cached.categories.mapValues { e ->
+                e.value.copy(cards = com.anonrode.downloader.util.ExplicitContentFilter.filterSafe(e.value.cards))
+            }
+        } else cached.categories
+
+        if (cachedTrending.isNotEmpty() || cachedCategories.isNotEmpty()) {
+            categoryCache.putAll(cachedCategories.mapValues { it.value.cards })
             val tiles = cached.tiles.mapNotNull { t ->
                 com.anonrode.downloader.providers.CategoryFeed.CATEGORIES
                     .firstOrNull { it.label == t.label }
@@ -250,9 +260,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             _uiState.update {
                 it.copy(
-                    trending = cached.trending,
+                    trending = cachedTrending,
                     genreTiles = tiles,
-                    catalogRows = cached.categories.mapValues { e -> e.value.cards }
+                    catalogRows = cachedCategories.mapValues { e -> e.value.cards }
                 )
             }
         }
@@ -281,7 +291,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         genreTilesJob = viewModelScope.launch {
             try {
                 val tiles = withContext(Dispatchers.IO) {
-                    com.anonrode.downloader.providers.CategoryFeed.tilePosters()
+                    com.anonrode.downloader.providers.CategoryFeed.tilePosters(filterExplicit = engine.filterExplicitContent)
                 }
                 if (tiles.any { it.posterUrl.isNotBlank() }) {
                     _uiState.update { it.copy(genreTiles = tiles) }
@@ -316,6 +326,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     // round-robin merge the moment it lands, so the row fills
                     // while a laggard (9jarocks' RSS) is still crawling.
                     com.anonrode.downloader.providers.TrendingFeed.fetch(
+                        filterExplicit = engine.filterExplicitContent,
                         onPartial = { partial ->
                             if (partial.isNotEmpty()) {
                                 _uiState.update { it.copy(trending = partial) }
@@ -463,7 +474,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     // fast sites paint while a laggard crawls. Label-guarded
                     // like the final write — a partial from a genre the user
                     // already left must never bleed into the open page.
-                    com.anonrode.downloader.providers.CategoryFeed.fetch(category) { partial ->
+                    com.anonrode.downloader.providers.CategoryFeed.fetch(
+                        category,
+                        filterExplicit = engine.filterExplicitContent
+                    ) { partial ->
                         if (partial.isNotEmpty()) {
                             _uiState.update {
                                 it.copy(
@@ -788,8 +802,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         debugLog: Boolean = false,
         logRetention: Int = 7,
         downloadSubs: Boolean = true,
-        subLang: String = "en"
+        subLang: String = "en",
+        filterExplicit: Boolean = true
     ) {
+        val explicitFilterChanged = (filterExplicit != engine.filterExplicitContent)
+        if (explicitFilterChanged) {
+            if (filterExplicit) {
+                _uiState.update { current ->
+                    current.copy(
+                        trending = com.anonrode.downloader.util.ExplicitContentFilter.filterSafe(current.trending),
+                        categoryCards = com.anonrode.downloader.util.ExplicitContentFilter.filterSafe(current.categoryCards),
+                        catalogRows = current.catalogRows.mapValues { (_, list) ->
+                            com.anonrode.downloader.util.ExplicitContentFilter.filterSafe(list)
+                        }
+                    )
+                }
+                categoryCache.keys.toList().forEach { k ->
+                    categoryCache[k] = com.anonrode.downloader.util.ExplicitContentFilter.filterSafe(categoryCache[k] ?: emptyList())
+                }
+            } else {
+                categoryCache.clear()
+            }
+        }
         // Coalesce: hold the latest snapshot and flush once 500ms after the
         // last change (see the SettingsSnapshot note above). No persistence
         // format change — engine.saveAllSettings signature untouched.
@@ -815,7 +849,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             debugLog = debugLog,
             logRetention = logRetention,
             downloadSubs = downloadSubs,
-            subLang = subLang
+            subLang = subLang,
+            filterExplicit = filterExplicit
         )
         settingsSaveJob?.cancel()
         settingsSaveJob = viewModelScope.launch {
