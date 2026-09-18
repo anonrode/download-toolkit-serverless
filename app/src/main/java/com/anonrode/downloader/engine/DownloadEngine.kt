@@ -23,11 +23,26 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.regex.Pattern
 
+enum class DramaCountry {
+    KOREAN,
+    CHINESE,
+    JAPANESE,
+    THAI,
+    TAIWANESE,
+    WESTERN,
+    UNKNOWN
+}
+
 class DownloadEngine(
     private val context: Context,
     private val repository: DownloadRepository,
     private val networkObserver: NetworkObserver = NetworkObserver(context)
 ) {
+    private val ASIAN_DRAMA_CLUSTER = setOf("asianc", "dramarain", "dramakey", "pluto", "nepu")
+    private val WESTERN_CLUSTER = setOf("nkiri", "9jarocks", "naijavault", "naijaprey")
+    private val DEDICATED_ASIAN_SITES = setOf("asianc", "dramarain", "dramakey")
+    private val YEAR_REGEX = Regex("""\b(19\d\d|20[0-3]\d)\b""")
+
     private val engineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val activeJobs = ConcurrentHashMap<String, Job>()
     // Task ids whose NEXT resolution may bypass the HostHealth gate — one-shot
@@ -736,6 +751,13 @@ class DownloadEngine(
      * with the normal park/fail path.
      */
     private suspend fun attemptCrossProviderFailover(task: DownloadTask): Boolean {
+        // Progress Banking Guard: failover MUST only run if task.downloadedBytes == 0L && bytesLanded(task) == 0L
+        if (task.downloadedBytes > 0L || bytesLanded(task) > 0L) {
+            com.anonrode.downloader.util.DebugLog.resolve(
+                "task=${task.id} failover: skipped because task already banked ${bytesLanded(task)} bytes"
+            )
+            return false
+        }
         if (task.site.isBlank()) return false
         if (task.directUrl.startsWith("magnet:", ignoreCase = true)) return false
         val tried = failoverSites.getOrPut(task.id) { ConcurrentHashMap.newKeySet() }
@@ -747,19 +769,33 @@ class DownloadEngine(
         val query = task.showTitle.ifBlank { task.episodeTitle }
         if (query.isBlank()) return false
 
+        val isAsian = isAsianDramaContext(task)
+        val origYear = extractYear(task.showTitle)
+            ?: extractYear(task.episodeTitle)
+            ?: extractYear(task.sourceUrl)
+        val origCountry = extractCountry("${task.showTitle} ${task.episodeTitle}", task.site)
+        val (origSeason, origEpNum) = parseSeasonAndEpisode(task)
+
         com.anonrode.downloader.util.DebugLog.resolve(
-            "task=${task.id} failover: '${task.site}' cannot serve \"$query\" — searching other providers"
+            "task=${task.id} failover: '${task.site}' cannot serve \"$query\" (isAsian=$isAsian, year=$origYear, country=$origCountry, S${origSeason}E${origEpNum}) — searching other providers"
         )
 
-        // Search every other provider in parallel, each bounded; skip hosts
+        // 4-Layer "Suits" Remake Guard - Layer 1: Genre / Cluster Boundary Guard
+        // If isAsian: candidates filtered to ASIAN_DRAMA_CLUSTER.
+        // If not isAsian: candidates filtered to WESTERN_CLUSTER (must not query DEDICATED_ASIAN_SITES).
+        val allowedCluster = if (isAsian) ASIAN_DRAMA_CLUSTER else WESTERN_CLUSTER
+
+        // Search eligible providers in parallel, each bounded; skip hosts
         // currently in backoff so a failover never lands on another dead site.
-        // The whole search is bounded too — a failover must never pin a task
-        // in RESOLVING for minutes on a batch queue.
         val candidates = kotlinx.coroutines.withTimeoutOrNull(25_000L) {
             coroutineScope {
                 ProviderRegistry.allProviders
                     .filter { provider ->
-                        provider.searchEnabled && tried.none { it.equals(provider.name, ignoreCase = true) }
+                        val pName = provider.name.lowercase()
+                        provider.searchEnabled &&
+                            pName in allowedCluster &&
+                            (!isAsian || pName !in DEDICATED_ASIAN_SITES) &&
+                            tried.none { it.equals(provider.name, ignoreCase = true) }
                     }
                     .map { provider ->
                         async(Dispatchers.IO) {
@@ -775,21 +811,58 @@ class DownloadEngine(
             }
         } ?: emptyList()
 
-        // A season declared in the title ("Suits S02", "Season 2") MUST match
-        // on the candidate, or the episode lookup could grab S01E10 for a
-        // S02E10 request — a silent WRONG download is worse than a failed one.
-        val seasonNum = Regex("(?:s|season)[\\s._-]?0*(\\d{1,2})\\b")
-            .find(query.lowercase())?.groupValues?.get(1)?.toIntOrNull()
-
         val normQuery = normalizeTitleQuery(query)
         val ranked = candidates
             .asSequence()
             .filter { card ->
-                card.url.isNotBlank() &&
-                    tried.none { it.equals(card.site, ignoreCase = true) } &&
-                    com.anonrode.downloader.pipeline.HostHealth.isUsable(card.url) &&
-                    titleMatches(query, card.title) &&
-                    seasonConsistent(query, card.title, seasonNum)
+                val candSite = card.site.lowercase()
+                // Layer 1: Genre / Cluster Boundary Guard on candidate card
+                val clusterMatch = if (isAsian) {
+                    candSite in ASIAN_DRAMA_CLUSTER
+                } else {
+                    candSite in WESTERN_CLUSTER && candSite !in DEDICATED_ASIAN_SITES
+                }
+                if (!clusterMatch) return@filter false
+
+                if (card.url.isBlank()) return@filter false
+                if (tried.any { it.equals(card.site, ignoreCase = true) }) return@filter false
+                if (!com.anonrode.downloader.pipeline.HostHealth.isUsable(card.url)) return@filter false
+                if (!titleMatches(query, card.title)) return@filter false
+
+                // Layer 2: Release Year Matching
+                val candYear = extractYear(card.year)
+                    ?: extractYear(card.title)
+                    ?: extractYear(card.url)
+                if (origYear != null && candYear != null && origYear != candYear) {
+                    com.anonrode.downloader.util.DebugLog.resolve(
+                        "task=${task.id} failover: rejected card \"${card.title}\" due to year mismatch (orig=$origYear, cand=$candYear)"
+                    )
+                    return@filter false
+                }
+
+                // Layer 3: Country Tag Matching
+                val candCountry = extractCountry("${card.title} ${card.category}", card.site)
+                if (origCountry != DramaCountry.UNKNOWN && candCountry != DramaCountry.UNKNOWN && origCountry != candCountry) {
+                    com.anonrode.downloader.util.DebugLog.resolve(
+                        "task=${task.id} failover: rejected card \"${card.title}\" due to country mismatch (orig=$origCountry, cand=$candCountry)"
+                    )
+                    return@filter false
+                }
+
+                // Season guard on title
+                if (!seasonConsistent(query, card.title, if (origEpNum > 0) origSeason else null)) {
+                    return@filter false
+                }
+
+                // Layer 4 pre-check: if candidate specifies totalEpisodes, reject if less than origEpNum
+                if (origEpNum > 0 && card.totalEpisodes > 0 && card.totalEpisodes < origEpNum) {
+                    com.anonrode.downloader.util.DebugLog.resolve(
+                        "task=${task.id} failover: rejected card \"${card.title}\" totalEpisodes (${card.totalEpisodes}) < origEpNum ($origEpNum)"
+                    )
+                    return@filter false
+                }
+
+                true
             }
             // Exact title match first, then a provider whose host has proven
             // itself in the ledger, then everything else.
@@ -804,19 +877,36 @@ class DownloadEngine(
         for (card in ranked) {
             if (System.currentTimeMillis() > failoverDeadline) break
             var newMirrors = emptyList<String>()
-            val newUrl: String? = if (task.episodeNum > 0) {
-                // Series: match the exact episode on the candidate show page.
-                // A candidate with no matching episode number is SKIPPED, not
-                // coerced — an episode-less or wrong-show match must never be
-                // downloaded as this episode.
+            val newUrl: String? = if (origEpNum > 0) {
+                // Layer 4: Season & Episode Boundary Verification
                 try {
                     val details = kotlinx.coroutines.withTimeoutOrNull(20_000L) {
                         ProviderRegistry.loadEpisodes(card)
                     } ?: continue
-                    val episode = details.episodes.firstOrNull { it.episodeNum == task.episodeNum } ?: continue
-                    if (!com.anonrode.downloader.pipeline.HostHealth.isUsable(episode.url)) continue
-                    newMirrors = episode.mirrorUrls
-                    episode.url
+
+                    // Total episodes check: candidate with fewer episodes than origEpNum is rejected
+                    if (details.episodes.size < origEpNum) {
+                        com.anonrode.downloader.util.DebugLog.resolve(
+                            "task=${task.id} failover: rejected \"${card.title}\" loaded episodes (${details.episodes.size}) < origEpNum ($origEpNum)"
+                        )
+                        continue
+                    }
+
+                    // Candidate must have matching (origSeason, origEpNum)
+                    val matchingEp = details.episodes.firstOrNull { candEp ->
+                        val (candS, candE) = parseCandidateSeasonAndEpisode(card, candEp)
+                        candS == origSeason && candE == origEpNum
+                    }
+                    if (matchingEp == null) {
+                        com.anonrode.downloader.util.DebugLog.resolve(
+                            "task=${task.id} failover: no episode matching S${origSeason}E${origEpNum} in \"${card.title}\""
+                        )
+                        continue
+                    }
+
+                    if (!com.anonrode.downloader.pipeline.HostHealth.isUsable(matchingEp.url)) continue
+                    newMirrors = matchingEp.mirrorUrls
+                    matchingEp.url
                 } catch (_: Exception) {
                     continue
                 }
@@ -825,41 +915,54 @@ class DownloadEngine(
             }
             if (newUrl.isNullOrBlank()) continue
 
+            // Atomic Pause Guard Before Deleting Partials:
+            // Verify task.userPaused inside repository.update before deleting partial files on disk.
+            var wasUserPaused = false
+            repository.update(task.id) { current ->
+                if (current.userPaused) {
+                    wasUserPaused = true
+                    current
+                } else {
+                    current.copy(
+                        sourceUrl = newUrl,
+                        directUrl = newUrl,
+                        mirrorUrls = newMirrors,
+                        selectedMirrorUrl = "",
+                        site = card.site,
+                        quality = current.quality, // Preserve User Quality
+                        status = TaskStatus.QUEUED,
+                        errorMessage = null,
+                        speedBytesPerSec = 0.0,
+                        downloadedBytes = 0L,
+                        totalBytes = 0L
+                    )
+                }
+            }
+
+            if (wasUserPaused) {
+                com.anonrode.downloader.util.DebugLog.resolve(
+                    "task=${task.id} failover: aborted because task was paused by user"
+                )
+                return false
+            }
+
             com.anonrode.downloader.util.DebugLog.user(
                 "task=${task.id} failover: switching source ${task.site} -> ${card.site} for \"$query\"" +
-                    (if (task.episodeNum > 0) " (episode ${task.episodeNum})" else "")
+                    (if (origEpNum > 0) " (S${origSeason}E${origEpNum})" else "")
             )
             failoverSites[task.id] = tried // keep the tried-set for the next cycle
-            // A different site serves a DIFFERENT file: any partial left by the
-            // old source must be deleted, or the download backend would resume
-            // the old bytes at the old offset into the new file (silent
-            // corruption). Counters reset with it.
+
+            // Safe to delete partial files ONLY after verifying task is actively continuing (not user paused)
             try {
                 File(task.filePath + ".part").delete()
                 File(task.filePath + ".ytdl").delete()
                 File(task.filePath + ".aria2").delete()
                 File(task.filePath + ".turbo").delete()
-                File(File(task.filePath).parentFile, ".work-" + task.id).deleteRecursively()
+                File(task.filePath).parentFile?.let {
+                    File(it, ".work-" + task.id).deleteRecursively()
+                }
             } catch (_: Throwable) {}
-            repository.update(task.id) {
-                // A pause that landed while the provider search was in flight
-                // must win (engine-audit P1) — same rule as every other
-                // auto-requeue site: user intent is never overwritten.
-                if (it.userPaused) it
-                else it.copy(
-                    sourceUrl = newUrl,
-                    directUrl = newUrl,
-                    mirrorUrls = newMirrors,
-                    selectedMirrorUrl = "",
-                    site = card.site,
-                    quality = null,
-                    status = TaskStatus.QUEUED,
-                    errorMessage = null,
-                    speedBytesPerSec = 0.0,
-                    downloadedBytes = 0L,
-                    totalBytes = 0L
-                )
-            }
+
             return true
         }
 
@@ -870,6 +973,80 @@ class DownloadEngine(
             "task=${task.id} failover: no other provider could serve \"$query\""
         )
         return false
+    }
+
+    internal fun extractYear(text: String): Int? {
+        if (text.isBlank()) return null
+        return YEAR_REGEX.find(text)?.groupValues?.get(1)?.toIntOrNull()
+    }
+
+    internal fun extractCountry(text: String, site: String = ""): DramaCountry {
+        val lower = text.lowercase()
+        return when {
+            lower.contains("korean") || lower.contains("k-drama") || lower.contains("kdrama") ||
+                lower.contains("k drama") || lower.contains("korea") -> DramaCountry.KOREAN
+            lower.contains("chinese") || lower.contains("c-drama") || lower.contains("cdrama") ||
+                lower.contains("c drama") || lower.contains("china") -> DramaCountry.CHINESE
+            lower.contains("japanese") || lower.contains("j-drama") || lower.contains("jdrama") ||
+                lower.contains("j drama") || lower.contains("japan") -> DramaCountry.JAPANESE
+            lower.contains("taiwanese") || lower.contains("tw-drama") || lower.contains("taiwan") -> DramaCountry.TAIWANESE
+            lower.contains("thai") || lower.contains("thailand") || lower.contains("lakorn") ||
+                lower.contains("th-drama") -> DramaCountry.THAI
+            lower.contains("western") || lower.contains("hollywood") || lower.contains("american") ||
+                lower.contains("nollywood") -> DramaCountry.WESTERN
+            WESTERN_CLUSTER.contains(site.lowercase()) -> DramaCountry.WESTERN
+            else -> DramaCountry.UNKNOWN
+        }
+    }
+
+    internal fun isAsianDramaContext(task: DownloadTask): Boolean {
+        val site = task.site.lowercase()
+        if (site in DEDICATED_ASIAN_SITES) return true
+        val country = extractCountry("${task.showTitle} ${task.episodeTitle} ${task.sourceUrl}", task.site)
+        if (country in setOf(DramaCountry.KOREAN, DramaCountry.CHINESE, DramaCountry.JAPANESE, DramaCountry.THAI, DramaCountry.TAIWANESE)) {
+            return true
+        }
+        if (site in ASIAN_DRAMA_CLUSTER && site !in WESTERN_CLUSTER) return true
+        return false
+    }
+
+    internal fun parseSeasonAndEpisode(task: DownloadTask): Pair<Int, Int> {
+        if (task.site.equals("9jarocks", ignoreCase = true) && task.episodeNum >= 100) {
+            return Pair(task.episodeNum / 100, task.episodeNum % 100)
+        }
+        if (task.episodeNum >= 100 && !isAsianDramaContext(task)) {
+            return Pair(task.episodeNum / 100, task.episodeNum % 100)
+        }
+        val text = "${task.showTitle} ${task.episodeTitle} ${task.sourceUrl}".lowercase()
+        val season = Regex("""(?:s|season)[\s._-]?0*(\d{1,2})\b""")
+            .find(text)?.groupValues?.get(1)?.toIntOrNull() ?: 1
+        val ep = if (task.episodeNum > 0) {
+            task.episodeNum
+        } else {
+            Regex("""(?:e|ep|episode)[\s._-]?0*(\d{1,3})\b""")
+                .find(text)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+        }
+        return Pair(season, ep)
+    }
+
+    internal fun parseCandidateSeasonAndEpisode(card: com.anonrode.downloader.data.models.ShowCard, ep: com.anonrode.downloader.data.models.EpisodeItem): Pair<Int, Int> {
+        if (card.site.equals("9jarocks", ignoreCase = true) && ep.episodeNum >= 100) {
+            return Pair(ep.episodeNum / 100, ep.episodeNum % 100)
+        }
+        val text = "${card.title} ${ep.title} ${ep.url}".lowercase()
+        val season = Regex("""(?:s|season)[\s._-]?0*(\d{1,2})\b""")
+            .find(text)?.groupValues?.get(1)?.toIntOrNull() ?: 1
+        val epNum = if (ep.episodeNum > 0) {
+            if (ep.episodeNum >= 100 && card.site.lowercase() !in ASIAN_DRAMA_CLUSTER) {
+                ep.episodeNum % 100
+            } else {
+                ep.episodeNum
+            }
+        } else {
+            Regex("""(?:e|ep|episode)[\s._-]?0*(\d{1,3})\b""")
+                .find(text)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+        }
+        return Pair(season, epNum)
     }
 
     /** Lowercase and strip everything but letters/digits — the loose title
@@ -904,7 +1081,20 @@ class DownloadEngine(
             .filter { it.length >= 2 && !TITLE_STOPWORDS.contains(it) && !it.all { c -> c.isDigit() } }
             .toList()
         if (words.isEmpty()) return false
-        return words.all { normCard.contains(it) }
+        if (!words.all { normCard.contains(it) }) return false
+
+        // Year check inside titleMatches if both present
+        val qYear = extractYear(query)
+        val cYear = extractYear(candidate)
+        if (qYear != null && cYear != null && qYear != cYear) return false
+
+        // Sequel / Part check if both present
+        val partRegex = Regex("""\b(?:part|chapter|pt)[\s._-]?(\d+|[ivx]+)\b""")
+        val qPart = partRegex.find(query.lowercase())?.groupValues?.get(1)
+        val cPart = partRegex.find(candidate.lowercase())?.groupValues?.get(1)
+        if (qPart != null && cPart != null && qPart != cPart) return false
+
+        return true
     }
 
     /** Season guard for failover: when the task title declares a season
