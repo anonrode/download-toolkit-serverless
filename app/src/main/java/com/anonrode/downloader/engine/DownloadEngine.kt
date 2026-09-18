@@ -1987,7 +1987,16 @@ class DownloadEngine(
                 // Routing those through yt-dlp's generic extractor (the old
                 // behavior) was slower and could misfire. Only non-media URLs
                 // (pages/embeds) are extractor tasks for yt-dlp to crack.
-                val isEmbedOrPage = !isMagnet && !isProvablyDirectFile(streamUrl) && !isDirectMediaUrl(streamUrl)
+                val isProvablyDirect = isProvablyDirectFile(streamUrl) || isDirectMediaUrl(streamUrl)
+                val isEmbedOrPage = !isMagnet && !isProvablyDirect && run {
+                    if (!isSocial) {
+                        // Non-social URLs: probe unknown links. If the server answers with 200..206
+                        // and valid media bytes, it is a direct media file from an unlisted host,
+                        // not an embed page.
+                        val tp = com.anonrode.downloader.data.net.HttpClient.probeTerminal(streamUrl, referer = getRefererForUrl(streamUrl))
+                        tp?.totalBytes == null
+                    } else true
+                }
                 val finalBackend = if (isSocial || isHlsStream || isEmbedOrPage || task.audioOnly) "yt-dlp" else "aria2c"
                 val isExtractor = isSocial || task.audioOnly || isEmbedOrPage
                 com.anonrode.downloader.util.DebugLog.engine(
@@ -2750,6 +2759,22 @@ class DownloadEngine(
                 coroutineContext.ensureActive()
 
                 if (producedFile != null && producedFile.exists()) {
+                    // Normalize .unknown_video extension if present
+                    if (producedFile.extension.equals("unknown_video", ignoreCase = true) || producedFile.extension.isBlank()) {
+                        val properExt = if (task.filePath.lowercase().endsWith(".mkv")) "mkv" else "mp4"
+                        val corrected = File(producedFile.parentFile, "${producedFile.nameWithoutExtension}.$properExt")
+                        if (!corrected.exists() && producedFile.renameTo(corrected)) {
+                            producedFile = corrected
+                        }
+                    }
+                    // For non-social downloads, ensure the artifact adopts the clean target filename
+                    // if it was mangled by an extractor backend template.
+                    if (!isSocial && producedFile.name != File(task.filePath).name) {
+                        val targetDest = File(task.filePath)
+                        if (!targetDest.exists() && producedFile.renameTo(targetDest)) {
+                            producedFile = targetDest
+                        }
+                    }
                     repository.update(task.id) { it.copy(status = TaskStatus.VALIDATING) }
                     updateServiceState(force = true)
                 }
@@ -2816,7 +2841,7 @@ class DownloadEngine(
                     repository.update(task.id) {
                         it.copy(
                             filePath = producedFile.absolutePath,
-                            episodeTitle = if (isExtractor) finalTitle else it.episodeTitle,
+                            episodeTitle = if (isSocial) finalTitle else it.episodeTitle,
                             downloadedBytes = finalBytes,
                             totalBytes = finalBytes,
                             speedBytesPerSec = 0.0,
@@ -2849,7 +2874,7 @@ class DownloadEngine(
                     com.anonrode.downloader.util.MediaScan.notifyFile(context, producedFile)
 
                     if (completionNotifications) {
-                        DownloadService.notifyCompleted(context, finalTitle)
+                        DownloadService.notifyCompleted(context, if (isSocial) finalTitle else task.episodeTitle)
                     }
                     com.anonrode.downloader.util.DebugLog.write("completed task=${task.id} file=${producedFile.absolutePath} bytes=$finalBytes validation=$path")
                 } else if (producedFile != null && producedFile.exists() && fileSize(producedFile) >= minSize
@@ -2864,7 +2889,7 @@ class DownloadEngine(
                     repository.update(task.id) {
                         it.copy(
                             filePath = producedFile.absolutePath,
-                            episodeTitle = if (isExtractor) finalTitle else it.episodeTitle,
+                            episodeTitle = if (isSocial) finalTitle else it.episodeTitle,
                             downloadedBytes = finalBytes,
                             totalBytes = finalBytes,
                             speedBytesPerSec = 0.0,
