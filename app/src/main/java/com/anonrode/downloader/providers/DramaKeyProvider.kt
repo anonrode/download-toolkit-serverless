@@ -8,6 +8,10 @@ import com.anonrode.downloader.data.models.ShowDetails
 import com.anonrode.downloader.data.net.HttpClient
 import com.anonrode.downloader.data.rules.DynamicRulesManager
 import com.anonrode.downloader.resolvers.ResolverRegistry
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import org.jsoup.Jsoup
 import java.net.URLEncoder
 
@@ -47,6 +51,13 @@ object DramaKeyProvider : SiteProvider {
                 val href = titleA.attr("abs:href")
                 if (href.isBlank()) continue
 
+                // Check title relevance to prevent ingesting static catalog on sites like dramakey.cc
+                val queryTokens = clean.lowercase().split(Regex("[^a-z0-9]+")).filter { it.isNotBlank() }
+                val titleLower = rawTitle.lowercase()
+                val isRelevant = (queryTokens.isNotEmpty() && queryTokens.all { it in titleLower }) ||
+                    titleLower.contains(clean.lowercase())
+                if (!isRelevant) continue
+
                 val category = article.classNames()
                     .firstOrNull { it.startsWith("category-") }
                     ?.removePrefix("category-")?.replace('-', ' ')
@@ -65,6 +76,44 @@ object DramaKeyProvider : SiteProvider {
                         category = category
                     )
                 )
+            }
+
+            if (results.isEmpty()) {
+                val slug = clean.lowercase().replace(Regex("[^a-z0-9]+"), "-").trim('-')
+                val base = mainUrl.trimEnd('/')
+                val prefixes = listOf("chinese", "korean", "thai", "japanese", "philippines", "drama", "")
+                val candidateUrls = prefixes.map { prefix ->
+                    if (prefix.isEmpty()) "$base/$slug/" else "$base/$prefix/$slug/"
+                }
+
+                val alive = coroutineScope {
+                    candidateUrls.map { candUrl ->
+                        async(Dispatchers.IO) {
+                            if (HttpClient.probe(candUrl, referer = "$mainUrl/", timeoutMs = 3_000L, tag = "search")) candUrl else null
+                        }
+                    }.awaitAll().filterNotNull().toSet()
+                }
+
+                for (candUrl in candidateUrls.filter { it in alive }) {
+                    val directHtml = HttpClient.getText(candUrl, tag = "search") ?: continue
+                    val pDoc = Jsoup.parse(directHtml, candUrl)
+                    val rawTitle = pDoc.selectFirst("h1.entry-title, h1")?.text()?.trim() ?: continue
+                    val title = rawTitle.removePrefix("DOWNLOAD").trim().substringBefore(" |").trim()
+                    val poster = pDoc.selectFirst(".entry-content img, .post-thumbnail img, meta[property='og:image']")?.let {
+                        if (it.tagName() == "meta") it.attr("content") else it.attr("abs:src").ifBlank { it.attr("src") }
+                    } ?: ""
+
+                    results.add(
+                        ShowCard(
+                            title = title.ifBlank { rawTitle },
+                            url = candUrl,
+                            posterUrl = poster,
+                            site = name,
+                            category = "Asian Drama"
+                        )
+                    )
+                    break
+                }
             }
         } catch (_: Exception) {}
         return results

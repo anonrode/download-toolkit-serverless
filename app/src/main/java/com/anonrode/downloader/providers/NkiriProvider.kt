@@ -189,14 +189,24 @@ object NkiriProvider : SiteProvider {
 
                     if (nums.size > 1) {
                         for (n in nums) {
-                            episodes.add(
-                                EpisodeItem(
-                                    title = "Episode $n",
-                                    url = href,
-                                    episodeNum = n,
-                                    site = name
+                            val existingIdx = episodes.indexOfFirst { it.episodeNum == n }
+                            if (existingIdx >= 0) {
+                                val existing = episodes[existingIdx]
+                                val isNewDirect = href.contains("nkiserv.com") || com.anonrode.downloader.pipeline.StrictLinkClassifier.isDirectMedia(href)
+                                val isOldDirect = existing.url.contains("nkiserv.com") || com.anonrode.downloader.pipeline.StrictLinkClassifier.isDirectMedia(existing.url)
+                                if (isNewDirect && !isOldDirect) {
+                                    episodes[existingIdx] = existing.copy(url = href)
+                                }
+                            } else {
+                                episodes.add(
+                                    EpisodeItem(
+                                        title = "Episode $n",
+                                        url = href,
+                                        episodeNum = n,
+                                        site = name
+                                    )
                                 )
-                            )
+                            }
                         }
                         count = nums.last() + 1
                     } else {
@@ -213,15 +223,25 @@ object NkiriProvider : SiteProvider {
                             else -> "Episode $num"
                         }
 
-                        episodes.add(
-                            EpisodeItem(
-                                title = epTitle,
-                                url = href,
-                                episodeNum = num,
-                                site = name
+                        val existingIdx = episodes.indexOfFirst { it.episodeNum == num }
+                        if (existingIdx >= 0) {
+                            val existing = episodes[existingIdx]
+                            val isNewDirect = href.contains("nkiserv.com") || com.anonrode.downloader.pipeline.StrictLinkClassifier.isDirectMedia(href)
+                            val isOldDirect = existing.url.contains("nkiserv.com") || com.anonrode.downloader.pipeline.StrictLinkClassifier.isDirectMedia(existing.url)
+                            if (isNewDirect && !isOldDirect) {
+                                episodes[existingIdx] = existing.copy(url = href)
+                            }
+                        } else {
+                            episodes.add(
+                                EpisodeItem(
+                                    title = epTitle,
+                                    url = href,
+                                    episodeNum = num,
+                                    site = name
+                                )
                             )
-                        )
-                        count = num + 1
+                            count = num + 1
+                        }
                     }
                 }
             }
