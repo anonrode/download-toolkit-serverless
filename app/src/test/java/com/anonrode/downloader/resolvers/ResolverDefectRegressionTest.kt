@@ -70,7 +70,14 @@ class ResolverDefectRegressionTest {
             .substringBefore("return ResolverOutcome.Success(direct)")
         assertTrue(branch.contains("if (deeper is ResolverOutcome.Success) return deeper"))
         assertTrue(branch.contains("if (deeper is ResolverOutcome.Failure) return deeper"))
-        assertTrue(source.contains("if (!(sameResolverReclaims && mediaPath))"))
+        // The guard condition includes the sameResolverReclaims check:
+        assertTrue(source.contains("!(sameResolverReclaims && mediaPath)"))
+        // Universal direct-stream guard (bd93aae follow-up): any provably-direct
+        // resolver output bypasses the recursive descent entirely so no other
+        // resolver can POST to a finished media file. Both conditions must appear
+        // together in the guard branch.
+        assertTrue(source.contains("isProvablyDirectFile(direct)"))
+        assertTrue(source.contains("!com.anonrode.downloader.pipeline.LinkResolver.isProvablyDirectFile(direct) &&"))
         // Does not claim coverage/fixes for NoMatch or exhausted depth.
     }
 

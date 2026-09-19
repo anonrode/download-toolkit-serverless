@@ -210,7 +210,17 @@ object ResolverRegistry {
                         val path = direct.substringBefore('?').substringBefore('#').lowercase()
                         val mediaPath = isDirectMediaUrl(path)
                         val sameResolverReclaims = resolver.canResolve(direct)
-                        if (!(sameResolverReclaims && mediaPath)) {
+                        // Universal direct-stream guard: if the resolver output
+                        // is already a provably-direct CDN endpoint (kissorgrab
+                        // /dl/, downloadwella /d/, vikingfile /d/, token-signed
+                        // R2/S3, etc.) the recursion STOPS HERE. No subsequent
+                        // resolver can claim and POST to a finished media file.
+                        // This closes the entire class of bugs where a different
+                        // resolver hijacked a working stream and killed it with
+                        // HTTP 405 (root case: Pluto → kissorgrab, bd93aae;
+                        // guard now covers all future cross-provider handoffs).
+                        if (!com.anonrode.downloader.pipeline.LinkResolver.isProvablyDirectFile(direct) &&
+                            !(sameResolverReclaims && mediaPath)) {
                             val deeper = resolveInternal(direct, quality, depth + 1)
                             if (deeper is ResolverOutcome.Success) return deeper
                             // Reference parity (resolvers.py:2473-2475): a failed
