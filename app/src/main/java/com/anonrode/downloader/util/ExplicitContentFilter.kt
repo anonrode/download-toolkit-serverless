@@ -58,6 +58,7 @@ object ExplicitContentFilter {
             """dildo|""" +
             """camgirl|""" +
             """chaturbate|""" +
+            """threesomes?|""" +
             """18\+\s*(?:adult|porn|sex|erotic)|""" +
             """adult\s*18\+|""" +
             """adult\s*(?:film|movie|video|content)|""" +
