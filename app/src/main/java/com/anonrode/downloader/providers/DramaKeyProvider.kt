@@ -110,7 +110,10 @@ object DramaKeyProvider : SiteProvider {
                 val h = a.attr("abs:href").ifBlank { a.attr("href") }
                 h.contains("downloadwella.com") || h.contains("wetafiles.com") ||
                     h.contains("loadedfiles.") || h.contains("dood.") ||
-                    h.contains("mega.") || h.contains("/download/") || h.contains("?download")
+                    h.contains("mega.") || h.contains("/download/") || h.contains("?download") ||
+                    h.contains("vikingfile") || h.contains("kissorgrab") ||
+                    h.contains("wildshare") || h.contains("waffi") ||
+                    com.anonrode.downloader.pipeline.StrictLinkClassifier.isKnownLocker(h)
             }
 
             var count = 1

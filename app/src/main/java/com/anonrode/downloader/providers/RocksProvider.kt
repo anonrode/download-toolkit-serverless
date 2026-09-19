@@ -139,7 +139,11 @@ object RocksProvider : SiteProvider {
                             lowerHref.contains("wetafiles") ||
                             lowerHref.contains("waffi") ||
                             lowerHref.contains("vikingfile") ||
-                            lowerHref.contains("lulacloud")
+                            lowerHref.contains("lulacloud") ||
+                            lowerHref.contains("kissorgrab") ||
+                            lowerHref.contains("wildshare") ||
+                            lowerHref.contains("pixeldrain") ||
+                            com.anonrode.downloader.pipeline.StrictLinkClassifier.isKnownLocker(href)
 
                     if (isLocker) {
                         seen.add(href)

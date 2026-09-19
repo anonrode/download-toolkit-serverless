@@ -193,7 +193,7 @@ object DramaRainProvider : SiteProvider {
         return DownloadRecipe(
             directUrl = target,
             filename = target.substringAfterLast('/').substringBefore('?').ifEmpty { "episode.mp4" },
-            backend = if (isHls) "ytdlp" else "aria2c",
+            backend = if (isHls) "yt-dlp" else "aria2c",
             parallelSockets = 16
         )
     }

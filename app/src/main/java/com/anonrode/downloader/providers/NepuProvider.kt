@@ -148,7 +148,7 @@ object NepuProvider : SiteProvider {
         return DownloadRecipe(
             directUrl = direct,
             filename = filename,
-            backend = "ytdlp",
+            backend = "yt-dlp",
             parallelSockets = 16
         )
     }
