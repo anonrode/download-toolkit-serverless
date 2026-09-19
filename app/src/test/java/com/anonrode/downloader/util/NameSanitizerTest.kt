@@ -164,4 +164,61 @@ class NameSanitizerTest {
         assertEquals("Feeling online and free 🎬",
             NameSanitizer.savedName("Feeling online and free 🎬 full movie", 80))
     }
+
+    @Test
+    fun testAllSites_showFolderAndEpisodeNaming() {
+        // Nkiri batch & single
+        assertEquals("All American - Homecoming Season 1",
+            NameSanitizer.cleanShowFolder("All American: Homecoming Season 1 Episode 1 – 13 (Complete)"))
+        assertEquals("All American - Homecoming S01E01",
+            NameSanitizer.formatEpisodeTitle("All American: Homecoming Season 1 Episode 1 – 13 (Complete)", 1))
+
+        // DramaRain
+        assertEquals("A Love Other Than Yours S01",
+            NameSanitizer.cleanShowFolder("A Love Other Than Yours S01 | Korean Drama"))
+        assertEquals("A Love Other Than Yours S01E01",
+            NameSanitizer.formatEpisodeTitle("A Love Other Than Yours S01 | Korean Drama", 1))
+
+        // AsianC / DramaKey
+        assertEquals("Love in Contract",
+            NameSanitizer.cleanShowFolder("Love in Contract Episode 10 Eng Sub"))
+        assertEquals("Love in Contract S01E10",
+            NameSanitizer.formatEpisodeTitle("Love in Contract Episode 10 Eng Sub", 10))
+
+        // 9jaRocks
+        assertEquals("Suits Season 1",
+            NameSanitizer.cleanShowFolder("Suits Season 1 (Complete)"))
+        assertEquals("Suits S01E01",
+            NameSanitizer.formatEpisodeTitle("Suits Season 1 (Complete)", 1))
+
+        // NaijaVault
+        assertEquals("Lanterns (2026) Season 1",
+            NameSanitizer.cleanShowFolder("Lanterns (2026) Season 1 Episode Added"))
+        assertEquals("Lanterns (2026) S01E01",
+            NameSanitizer.formatEpisodeTitle("Lanterns (2026) Season 1 Episode Added", 1))
+
+        // NaijaPrey
+        assertEquals("Severance Season 2",
+            NameSanitizer.cleanShowFolder("Severance Season 2 (Episode 1 – 10 Added)"))
+        assertEquals("Severance S02E02",
+            NameSanitizer.formatEpisodeTitle("Severance Season 2 (Episode 1 – 10 Added)", 2))
+
+        // Anitaku
+        assertEquals("Solo Leveling Season 2",
+            NameSanitizer.cleanShowFolder("Solo Leveling Season 2 Episode 1 English Subbed"))
+        assertEquals("Solo Leveling S02E01",
+            NameSanitizer.formatEpisodeTitle("Solo Leveling Season 2 Episode 1 English Subbed", 1))
+
+        // Pluto
+        assertEquals("Star Trek - The Next Generation Season 3",
+            NameSanitizer.cleanShowFolder("Star Trek: The Next Generation Season 3 Episode 15"))
+        assertEquals("Star Trek - The Next Generation S03E15",
+            NameSanitizer.formatEpisodeTitle("Star Trek: The Next Generation Season 3 Episode 15", 15))
+
+        // Standalone Movie
+        assertEquals("Bad Boys - Ride or Die (2024)",
+            NameSanitizer.cleanShowFolder("Bad Boys: Ride or Die (2024)"))
+        assertEquals("Bad Boys - Ride or Die (2024)",
+            NameSanitizer.formatEpisodeTitle("Bad Boys: Ride or Die (2024)", 0))
+    }
 }

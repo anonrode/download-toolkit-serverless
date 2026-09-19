@@ -316,11 +316,17 @@ fun EpisodeDrawer(
                             viewModel.viewModelScope.launch(Dispatchers.Default) {
                                 try {
                                     val sorted = toEnqueue.sortedBy { it.episodeNum }
+                                    val cleanFolder = com.anonrode.downloader.util.NameSanitizer.cleanShowFolder(show.title)
                                     for (ep in sorted) {
-                                        viewModel.engine.enqueue(
+                                        val cleanEpTitle = com.anonrode.downloader.util.NameSanitizer.formatEpisodeTitle(
                                             showTitle = show.title,
                                             episodeNum = ep.episodeNum,
-                                            episodeTitle = "${show.title} - ${ep.title}",
+                                            rawEpisodeLabel = ep.title
+                                        )
+                                        viewModel.engine.enqueue(
+                                            showTitle = cleanFolder,
+                                            episodeNum = ep.episodeNum,
+                                            episodeTitle = cleanEpTitle,
                                             sourceUrl = ep.url,
                                             mirrorUrls = ep.mirrorUrls,
                                             isDirect = false,
@@ -430,9 +436,13 @@ fun EpisodeDrawer(
                                     enqueued = true
                                     hapticView.confirmHaptic()
                                     viewModel.engine.enqueue(
-                                        showTitle = show.title,
+                                        showTitle = com.anonrode.downloader.util.NameSanitizer.cleanShowFolder(show.title),
                                         episodeNum = ep.episodeNum,
-                                        episodeTitle = "${show.title} - ${ep.title}",
+                                        episodeTitle = com.anonrode.downloader.util.NameSanitizer.formatEpisodeTitle(
+                                            showTitle = show.title,
+                                            episodeNum = ep.episodeNum,
+                                            rawEpisodeLabel = ep.title
+                                        ),
                                         sourceUrl = ep.url,
                                         mirrorUrls = ep.mirrorUrls,
                                         isDirect = false,
@@ -497,11 +507,17 @@ fun EpisodeDrawer(
                                 viewModel.viewModelScope.launch(Dispatchers.Default) {
                                     try {
                                         val sorted = toEnqueue.sortedBy { it.episodeNum }
+                                        val cleanFolder = com.anonrode.downloader.util.NameSanitizer.cleanShowFolder(show.title)
                                         for (ep in sorted) {
-                                            viewModel.engine.enqueue(
+                                            val cleanEpTitle = com.anonrode.downloader.util.NameSanitizer.formatEpisodeTitle(
                                                 showTitle = show.title,
                                                 episodeNum = ep.episodeNum,
-                                                episodeTitle = "${show.title} - ${ep.title}",
+                                                rawEpisodeLabel = ep.title
+                                            )
+                                            viewModel.engine.enqueue(
+                                                showTitle = cleanFolder,
+                                                episodeNum = ep.episodeNum,
+                                                episodeTitle = cleanEpTitle,
                                                 sourceUrl = ep.url,
                                                 mirrorUrls = ep.mirrorUrls,
                                                 isDirect = false,
