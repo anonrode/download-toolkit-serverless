@@ -1994,7 +1994,11 @@ class DownloadEngine(
                 // (pages/embeds) are extractor tasks for yt-dlp to crack.
                 val isProvablyDirect = isProvablyDirectFile(streamUrl) || isDirectMediaUrl(streamUrl)
                 val isEmbedOrPage = !isMagnet && !isProvablyDirect && run {
-                    if (!isSocial) {
+                    if (task.site.isNotBlank() || task.backend.contains("aria2c")) {
+                        // Scraped tasks from supported sites (NaijaVault, Nkiri, 9jaRocks, DramaRain, etc.)
+                        // or tasks explicitly targeting aria2c are direct media transfers, NEVER web embed pages!
+                        false
+                    } else if (!isSocial) {
                         // Non-social URLs: probe unknown links. If the server answers with 200..206
                         // and valid media bytes, it is a direct media file from an unlisted host,
                         // not an embed page.

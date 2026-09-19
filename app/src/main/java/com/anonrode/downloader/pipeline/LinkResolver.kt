@@ -69,9 +69,19 @@ object LinkResolver {
      * in TurboDownloader still rejects any server that lies and serves HTML).
      */
     fun isProvablyDirectFile(url: String): Boolean {
+        if (url.isBlank()) return false
         val lower = url.lowercase()
         val path = lower.substringAfter("://", "").substringBefore('?').substringBefore('#')
-        if (path.contains("/api/file/")) return true
+        val host = path.substringBefore('/')
+        if (path.contains("/api/file/") || path.contains("/token/download/")) return true
+
+        // Direct CDN locker endpoints
+        if (host.contains("downloadwella.com") && path.contains("/d/")) return true
+        if (host.contains("vikingfile.com") && path.contains("/d/")) return true
+        if (host.contains("wildshare.net") && (lower.contains("download_token=") || path.contains("/d/"))) return true
+        if (host.contains("gfrdaseazzs.com")) return true
+        if (host.contains("loadedfiles") && (path.contains("/token/download/") || path.contains("/d/"))) return true
+
         val query = lower.substringAfter('?', "").substringBefore('#')
         if (query.contains("pt=") || query.contains("token=") || query.contains("download")) return true
         // R2 / S3 / Object Storage signed links: the query string contains
@@ -80,8 +90,18 @@ object LinkResolver {
         // the raw file object, not web pages.
         if (query.contains("response-content-disposition=") ||
             query.contains("x-amz-signature=") ||
-            query.contains("x-amz-credential=")) return true
+            query.contains("x-amz-credential=") ||
+            query.contains("x-amz-algorithm=") ||
+            query.contains("filename=") ||
+            query.contains("filename*=")) return true
+
+        // Cloud storage object endpoints
         if (lower.contains("r2.cloudflarestorage.com") || lower.contains(".r2.dev/")) return true
+        if (host.contains("b-cdn.net") || host.contains("backblazeb2.com") ||
+            host.contains("digitaloceanspaces.com") || host.contains("wasabisys.com") ||
+            host.contains("storage.googleapis.com") || host.contains("blob.core.windows.net") ||
+            host.contains(".amazonaws.com")) return true
+
         return false
     }
 
