@@ -152,8 +152,6 @@ object NameSanitizer {
     fun cleanTitle(raw: String, stripNoise: Boolean = true): String {
         var s = org.jsoup.parser.Parser.unescapeEntities(raw, false)
         s = s.replace('\u00A0', ' ')
-        s = s.replace('\u2013', '-').replace('\u2014', '-')
-        s = s.replace(Regex("""\s*:\s*"""), " - ")
         for (dec in DECORATIONS) {
             s = dec.replace(s) { m ->
                 val group = m.groupValues[1]
@@ -235,6 +233,7 @@ object NameSanitizer {
      */
     fun cleanShowFolder(raw: String): String {
         var s = cleanTitle(raw, stripNoise = true)
+        s = s.replace(Regex("""\s*:\s*"""), " - ")
         s = s.replace(Regex("""[\s_|\-]+ep(isode)?\.?\s*\d+\s*$""", RegexOption.IGNORE_CASE), " ")
         s = s.replace(Regex("""\bep(isode)?\.?\s*\d+\s*$""", RegexOption.IGNORE_CASE), " ")
         s = s.replace(Regex("""\s+"""), " ").trim()
