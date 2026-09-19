@@ -5,6 +5,7 @@
         <item name="android:navigationBarColor">#00000000</item>
         <item name="android:windowBackground">@color/splash_background</item>
         <item name="android:enforceNavigationBarContrast" tools:targetApi="q">false</item>
+        <item name="android:enforceStatusBarContrast" tools:targetApi="q">false</item>
     </style>
 
     <style name="Theme.AnonDownloader.Splash" parent="Theme.SplashScreen">
