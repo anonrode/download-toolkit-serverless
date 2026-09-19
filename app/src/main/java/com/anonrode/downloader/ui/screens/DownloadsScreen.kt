@@ -293,8 +293,7 @@ fun DownloadsScreen(
         // card). Chips only appear when they have something to act on.
         if (tasks.isNotEmpty()) {
             val hasPausable = tasks.any {
-                it.status == TaskStatus.DOWNLOADING || it.status == TaskStatus.RESOLVING ||
-                    it.status == TaskStatus.VALIDATING || it.status == TaskStatus.QUEUED
+                it.status == TaskStatus.DOWNLOADING || it.status == TaskStatus.RESOLVING
             }
             val hasPaused = tasks.any { it.status == TaskStatus.PAUSED }
             val hasFailed = tasks.any { it.status == TaskStatus.FAILED }
@@ -546,8 +545,7 @@ fun DownloadCard(
     onDelete: () -> Unit = onCancel
 ) {
     val isCompleted = task.status == TaskStatus.COMPLETED
-    val isPausable = task.status == TaskStatus.DOWNLOADING || task.status == TaskStatus.RESOLVING ||
-        task.status == TaskStatus.QUEUED || task.status == TaskStatus.VALIDATING
+    val isDownloading = task.status == TaskStatus.DOWNLOADING || task.status == TaskStatus.RESOLVING
     val isPaused = task.status == TaskStatus.PAUSED
     val isFailed = task.status == TaskStatus.FAILED
 
@@ -899,7 +897,7 @@ fun DownloadCard(
                     )
 
                     Row(horizontalArrangement = Arrangement.spacedBy(Spacing.xs)) {
-                        if (isPausable) {
+                        if (isDownloading) {
                             IconButton(onClick = onPause) {
                                 Icon(Icons.Rounded.Pause, contentDescription = "Pause", tint = TextSecondary, modifier = Modifier.size(20.dp))
                             }
