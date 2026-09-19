@@ -78,6 +78,12 @@ class ResolverHostClaimTest {
         assertTrue(DownloadwellaResolver.canResolve(
             "https://downloadwella.com/otvefiigsf40/Love.on.the.Menu.S01E01.(THENKIRI.COM).mkv.html?preview"))
         assertTrue(DownloadwellaResolver.canResolve("https://wetafiles.com/f/abc.mkv"))
+        // kissorgrab.com/dl/ is a DIRECT media CDN endpoint — DownloadwellaResolver
+        // must NOT claim it. POSTing a form to a raw file returns HTTP 405 and
+        // kills the download (activity log f17d792c, live-verified 2026-09-19).
+        assertFalse(DownloadwellaResolver.canResolve("https://ol3.kissorgrab.com/dl/2f8cca/all-american-s01e16-55186-mkv"))
+        // But a kissorgrab PAGE URL (no /dl/) is still the locker-form path:
+        assertTrue(DownloadwellaResolver.canResolve("https://kissorgrab.com/f/abc"))
         assertTrue(DoodstreamResolver.canResolve("https://d0000d.com/f/abc"))
         assertTrue(MixdropResolver.canResolve("https://mixdrop.bz/f/abc"))
         assertTrue(StreamtapeResolver.canResolve("https://streamtape.com/v/abc"))
