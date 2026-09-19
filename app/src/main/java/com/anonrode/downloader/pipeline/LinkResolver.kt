@@ -76,7 +76,7 @@ object LinkResolver {
         if (path.contains("/api/file/") || path.contains("/token/download/")) return true
 
         // Direct CDN locker endpoints
-        if (host.contains("downloadwella.com") && path.contains("/d/")) return true
+        if ((host.contains("downloadwella.com") || host.contains("wetafiles.com")) && path.contains("/d/")) return true
         if (host.contains("vikingfile.com") && path.contains("/d/")) return true
         if (host.contains("wildshare.net") && (lower.contains("download_token=") || path.contains("/d/"))) return true
         if (host.contains("gfrdaseazzs.com")) return true

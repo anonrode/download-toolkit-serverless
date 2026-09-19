@@ -82,6 +82,8 @@ class ResolverHostClaimTest {
         // must NOT claim it. POSTing a form to a raw file returns HTTP 405 and
         // kills the download (activity log f17d792c, live-verified 2026-09-19).
         assertFalse(DownloadwellaResolver.canResolve("https://ol3.kissorgrab.com/dl/2f8cca/all-american-s01e16-55186-mkv"))
+        assertFalse(DownloadwellaResolver.canResolve("https://wetafiles.com/d/abc/file.mkv"))
+        assertFalse(DownloadwellaResolver.canResolve("https://dwbe03.downloadwella.com/d/abc/file.mkv"))
         // But a kissorgrab PAGE URL (no /dl/) is still the locker-form path:
         assertTrue(DownloadwellaResolver.canResolve("https://kissorgrab.com/f/abc"))
         assertTrue(DoodstreamResolver.canResolve("https://d0000d.com/f/abc"))

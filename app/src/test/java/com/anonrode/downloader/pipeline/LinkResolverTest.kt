@@ -55,6 +55,9 @@ class LinkResolverTest {
         // f17d792c). Both classifiers must agree it is NOT a locker page.
         assertTrue(LinkResolver.isProvablyDirectFile("https://ol3.kissorgrab.com/dl/2f8cca675e/all-american-s01e16-55186-mkv"))
         assertFalse(LinkResolver.isKnownLockerHost("https://ol3.kissorgrab.com/dl/2f8cca675e/all-american-s01e16-55186-mkv"))
+        // wetafiles.com/d/ is also a direct CDN endpoint:
+        assertTrue(LinkResolver.isProvablyDirectFile("https://wetafiles.com/d/abc/movie.mkv"))
+        assertFalse(LinkResolver.isKnownLockerHost("https://wetafiles.com/d/abc/movie.mkv"))
     }
 
     @Test

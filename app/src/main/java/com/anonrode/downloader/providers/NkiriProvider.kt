@@ -158,7 +158,11 @@ object NkiriProvider : SiteProvider {
                         lowerHref.contains("nkiserv.com") ||
                         lowerHref.contains("vikingfile") ||
                         lowerHref.contains("lulacloud") ||
-                        lowerHref.contains("waffi")
+                        lowerHref.contains("waffi") ||
+                        lowerHref.contains("kissorgrab") ||
+                        lowerHref.contains("wildshare") ||
+                        lowerHref.contains("pixeldrain") ||
+                        com.anonrode.downloader.pipeline.StrictLinkClassifier.isKnownLocker(href)
 
                 if (isLocker) {
                     seen.add(href)

@@ -1297,11 +1297,13 @@ object DownloadwellaResolver : BaseResolver {
     override fun lastResolveFailure(): String? = lastFailure
 
     override fun canResolve(url: String): Boolean {
-        // kissorgrab.com/dl/ URLs are already-cracked direct media files
-        // (live-verified: HTTP 206, MKV magic header). The resolver must NOT
-        // claim them — POSTing a web form to a direct file returns HTTP 405
-        // and kills the entire download chain (activity log f17d792c).
-        if (url.lowercase().let { it.contains("kissorgrab.com") && it.contains("/dl/") }) return false
+        // kissorgrab.com/dl/ and downloadwella/wetafiles /d/ URLs are
+        // already-cracked direct media files (live-verified: HTTP 206, MKV/MP4).
+        // The resolver must NOT claim them — POSTing a web form to a direct file
+        // returns HTTP 405/400 and kills the entire download chain.
+        val lower = url.lowercase()
+        if (lower.contains("kissorgrab.com") && lower.contains("/dl/")) return false
+        if ((lower.contains("downloadwella.com") || lower.contains("wetafiles.com")) && lower.contains("/d/")) return false
         return hostClaim(url, listOf("downloadwella.com", "wetafiles.com", "kissorgrab.com"))
     }
 
