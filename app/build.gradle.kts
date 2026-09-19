@@ -13,8 +13,8 @@ android {
         applicationId = "com.anonrode.downloader"
         minSdk = 26
         targetSdk = 34
-        versionCode = 321
-        versionName = "3.2.1"
+        versionCode = 322
+        versionName = "3.2.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
