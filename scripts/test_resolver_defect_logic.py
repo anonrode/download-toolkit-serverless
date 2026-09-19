@@ -105,7 +105,12 @@ class ResolverDefectLogicTest(unittest.TestCase):
     def test_models_are_wired_to_expected_source_branches(self):
         source = (MAIN / 'resolvers/Resolvers.kt').read_text(encoding='utf-8')
         self.assertIn('if (deeper is ResolverOutcome.Failure) return deeper', source)
-        self.assertIn('if (!(sameResolverReclaims && mediaPath))', source)
+        # Guard condition: the sameResolverReclaims sub-condition must be present.
+        self.assertIn('!(sameResolverReclaims && mediaPath)', source)
+        # Universal direct-stream guard (added to prevent cross-resolver stream
+        # hijacking — bd93aae follow-up): must appear before the recursion branch.
+        self.assertIn('isProvablyDirectFile(direct)', source)
+        self.assertIn('!com.anonrode.downloader.pipeline.LinkResolver.isProvablyDirectFile(direct) &&', source)
         chain = source.split('object LoadedfilesResolver : BaseResolver {', 1)[1]
         self.assertIn('val pageBeforeStep = currUrl', chain)
         self.assertRegex(chain, r'if \(currUrl == pageBeforeStep\) \{[^}]*\bbreak\b')
