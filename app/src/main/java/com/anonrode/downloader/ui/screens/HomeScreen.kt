@@ -794,13 +794,15 @@ private fun TrendingCard(
             maxLines = 2,
             overflow = TextOverflow.Ellipsis
         )
-        Spacer(modifier = Modifier.height(2.dp))
-        Text(
-            text = show.site.uppercase(),
-            color = AccentPrimary,
-            fontSize = Type.micro.fontSize,
-            fontWeight = FontWeight.Bold
-        )
+        if (show.year.isNotBlank()) {
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = show.year,
+                color = TextSecondary,
+                fontSize = Type.micro.fontSize,
+                fontWeight = FontWeight.Medium
+            )
+        }
     }
 }
 
@@ -854,54 +856,107 @@ private fun CategoryTilesGrid(
             }
             Spacer(modifier = Modifier.height(Spacing.md))
         }
+        val morePoster = posters.values.reversed().firstOrNull { it.isNotBlank() }
+            ?: posters.values.firstOrNull { it.isNotBlank() }.orEmpty()
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(Spacing.sm)
         ) {
             Box(modifier = Modifier.weight(1f)) {
-                ViewMoreTileCard(onClick = onMore)
+                ViewMoreTileCard(
+                    posterUrl = morePoster,
+                    showPosters = showPosters,
+                    onClick = onMore,
+                    isLoading = isLoading
+                )
             }
             repeat(2) { Spacer(modifier = Modifier.weight(1f)) }
         }
     }
 }
 
-/** The 7th cell: opens the per-genre catalog. Deliberately NOT a poster —
- *  a dashed accent frame + plus glyph, so it reads as "more of this" and
- *  never masquerades as a genre with missing artwork. */
+/**
+ * The "View More" tile: opens the per-genre catalog.
+ * Renders with a rich poster backdrop just like the other genre tiles,
+ * with a cinematic dark overlay and an accent circular '+' badge.
+ */
 @Composable
-private fun ViewMoreTileCard(onClick: () -> Unit) {
+private fun ViewMoreTileCard(
+    posterUrl: String = "",
+    showPosters: Boolean = true,
+    onClick: () -> Unit,
+    isLoading: Boolean = false
+) {
+    val shimmerX = if (showPosters && isLoading && posterUrl.isBlank()) {
+        rememberShimmerX(rememberReduceMotion())
+    } else 0f
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(Radius.md))
-            .clickable { onClick() },
-        horizontalAlignment = Alignment.CenterHorizontally
+            .clickable { onClick() }
     ) {
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .aspectRatio(2f / 3f)
                 .clip(RoundedCornerShape(Radius.md))
-                .border(1.5.dp, AccentPrimary, RoundedCornerShape(Radius.md)),
-            contentAlignment = Alignment.Center
+                .background(tileColor("View More"))
+                .border(1.dp, BorderHairline, RoundedCornerShape(Radius.md))
         ) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Icon(
-                    imageVector = Icons.Rounded.Add,
-                    contentDescription = null,
-                    tint = AccentPrimary,
-                    modifier = Modifier.size(26.dp)
+            if (showPosters && posterUrl.isNotBlank()) {
+                SubcomposeAsyncImage(
+                    model = posterUrl,
+                    contentDescription = "View More",
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize(),
+                    loading = { InitialGlyph("+") },
+                    error = { InitialGlyph("+") }
                 )
-                Spacer(modifier = Modifier.height(Spacing.xs))
-                Text(
-                    text = "View More",
-                    color = AccentPrimary,
-                    fontSize = Type.label.fontSize,
-                    fontWeight = FontWeight.Bold
+            } else if (showPosters && isLoading) {
+                SkeletonBox(
+                    modifier = Modifier.fillMaxSize(),
+                    shape = RoundedCornerShape(Radius.md),
+                    x = shimmerX
                 )
+            } else {
+                InitialGlyph("+")
+            }
+            // Darker cinematic scrim over the artwork so the + badge pops
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.45f))
+            )
+            PosterScrim()
+            Box(
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.Center
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(36.dp)
+                        .background(AccentPrimary.copy(alpha = 0.92f), CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Add,
+                        contentDescription = null,
+                        tint = Color.Black,
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
             }
         }
+        Spacer(modifier = Modifier.height(Spacing.xs))
+        Text(
+            text = "View More",
+            color = TextPrimary,
+            fontSize = Type.body.fontSize,
+            fontWeight = FontWeight.Bold,
+            lineHeight = 17.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
     }
 }
 

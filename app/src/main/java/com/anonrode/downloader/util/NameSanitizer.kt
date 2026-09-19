@@ -58,9 +58,11 @@ object NameSanitizer {
         """^[\s.!-]*(added?|updated?|new episode.*|now streaming.*|coming soon.*|""" +
             """(full )?(movie|episode|hd|4k|uhd|cam|ts|scr|web-?rip|dvd-?rip|blu-?ray)( .*)?|""" +
             """watch( online| free)?( hd)?( in high quality)?|online( now| free)?|free( download| watch)?|""" +
+            """complete|completed|full (season|series)|s\d+\s*complete|""" +
             """tv series|series|dorama|k-?drama|anime|movie series|""" +
-            """episode \d+( added| new| update[d]?)?|season \d+ added|""" +
-            """english sub(title)?s?|eng sub.*|dual audio|multi sub.*)[\s.!-]*$""",
+            """episode \d+( added| new| update[d]?)?|episode added|season \d+ added|\d+(st|nd|rd|th) season added|""" +
+            """episode\s*\d+\s*[-–—~]\s*\d+.*|ep\s*\d+\s*[-–—~]\s*\d+.*|""" +
+            """english\s*(subtitles?|subbed|subs?)|eng\s*(subtitles?|subbed|subs?)|subbed|dual audio|multi sub.*)[\s.!-]*$""",
         RegexOption.IGNORE_CASE
     )
 
@@ -128,14 +130,15 @@ object NameSanitizer {
         // no leading \s and is never cut).
         Regex("""\s\b(?:$alts)\s*$""", RegexOption.IGNORE_CASE)
     private val BARE_NOISE_PHRASES = listOf(
+        sepBare("""(?:korean|chinese|c|thai|japanese|j|bl|asian|filipino)?\s*(?:drama|dorama)"""),
         sepBare("""tv series|k-?drama|dorama|web series|movie series|anime series"""),
-        sepBare("""ep(isode)?\.?\s*\d+\s+(added|new|updat(e|ed))"""),
+        sepBare("""ep(isode)?\.?\s*\d+\s+(added|new|updat(e|ed))|ep(isode)?\s+added"""),
         sepBare("""watch( online)?( hd| in hd)?|online( now)?|free (download|watch)|full (movie|episode|hd)"""),
-        sepBare("""english sub(title)?s?|eng subs?|dual audio|multi audio"""),
+        sepBare("""english\s*(?:subtitles?|subbed|subs?)|eng\s*(?:subtitles?|subbed|subs?)|dual\s*audio|multi\s*audio|subbed"""),
         endBare("""tv series|k-?drama|web series|movie series|anime series|""" +
-            """ep(isode)?\.?\s*\d+\s+(added|new|updat(e|ed))|""" +
+            """ep(isode)?\.?\s*\d+\s+(added|new|updat(e|ed))|ep(isode)?\s+added|""" +
             """watch online( hd)?|online hd|free (download|watch)|full (movie|episode|hd)|""" +
-            """english sub(title)?s?|eng subs?|dual audio|multi audio""")
+            """english\s*(?:subtitles?|subbed|subs?)|eng\s*(?:subtitles?|subbed|subs?)|dual\s*audio|multi\s*audio|subbed|sub""")
     )
 
     /**
@@ -149,6 +152,8 @@ object NameSanitizer {
     fun cleanTitle(raw: String, stripNoise: Boolean = true): String {
         var s = org.jsoup.parser.Parser.unescapeEntities(raw, false)
         s = s.replace('\u00A0', ' ')
+        s = s.replace('\u2013', '-').replace('\u2014', '-')
+        s = s.replace(Regex("""\s*:\s*"""), " - ")
         for (dec in DECORATIONS) {
             s = dec.replace(s) { m ->
                 val group = m.groupValues[1]
@@ -160,6 +165,7 @@ object NameSanitizer {
             }
         }
         if (stripNoise) {
+            s = s.replace(Regex("""\bep(isode)?s?\.?\s*\d+\s*[-–—~]\s*\d+\b(\s*complete)?""", RegexOption.IGNORE_CASE), " ")
             for (p in BARE_NOISE_PHRASES) s = p.replace(s, " ")
             // isolated "_" field separators left by the cuts
             s = s.replace(Regex("""\s+_\s*"""), " ")
@@ -221,6 +227,51 @@ object NameSanitizer {
      *  stripNoise=false for USER PROSE (captions, shared filenames). */
     fun savedName(raw: String, maxChars: Int = 80, stripNoise: Boolean = true): String =
         safeComponent(cleanTitle(raw, stripNoise), maxChars)
+
+    /**
+     * Cleans a raw scraped show title for directory creation.
+     * Drops batch range noise ("Episode 1 - 13", "(Complete)", "Episode Added", etc.),
+     * strips trailing episode markers, and normalizes colons to " - ".
+     */
+    fun cleanShowFolder(raw: String): String {
+        var s = cleanTitle(raw, stripNoise = true)
+        s = s.replace(Regex("""[\s_|\-]+ep(isode)?\.?\s*\d+\s*$""", RegexOption.IGNORE_CASE), " ")
+        s = s.replace(Regex("""\bep(isode)?\.?\s*\d+\s*$""", RegexOption.IGNORE_CASE), " ")
+        s = s.replace(Regex("""\s+"""), " ").trim()
+        s = s.replace(Regex("""[\s._\-–—]+$"""), "").trim()
+        return safeComponent(if (s.isBlank()) raw else s, maxChars = 80)
+    }
+
+    /**
+     * Formats an episode file title: "{BaseShow} S{SS}E{EE}".
+     * If episodeNum <= 0, returns the clean show name (for single movies).
+     */
+    fun formatEpisodeTitle(showTitle: String, episodeNum: Int, rawEpisodeLabel: String = ""): String {
+        val cleanShow = cleanShowFolder(showTitle)
+        if (episodeNum <= 0) {
+            return safeComponent(cleanShow, maxChars = 80)
+        }
+
+        val seasonMatch = Regex(
+            """\b(?:season\s*(\d+)|s(\d{1,2})|(\d+)(?:st|nd|rd|th)\s*season)\b""",
+            RegexOption.IGNORE_CASE
+        ).find(cleanShow)
+
+        val seasonNum = seasonMatch?.let { m ->
+            (m.groupValues[1].ifEmpty { m.groupValues[2].ifEmpty { m.groupValues[3] } }).toIntOrNull()
+        } ?: 1
+
+        var baseShow = cleanShow.replace(
+            Regex("""\s*\b(?:season\s*\d+|s\d{1,2}|\d+(?:st|nd|rd|th)\s*season)\b""", RegexOption.IGNORE_CASE),
+            ""
+        ).trim()
+        baseShow = baseShow.replace(Regex("""[\s._\-–—]+$"""), "").trim()
+        if (baseShow.isBlank()) baseShow = cleanShow
+
+        val s = seasonNum.toString().padStart(2, '0')
+        val e = episodeNum.toString().padStart(2, '0')
+        return safeComponent("$baseShow S${s}E${e}", maxChars = 80)
+    }
 
     private const val MAX_COMPONENT_BYTES = 240
 
