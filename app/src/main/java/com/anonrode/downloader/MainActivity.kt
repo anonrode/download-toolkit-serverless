@@ -38,6 +38,7 @@ import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.core.view.WindowCompat
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -117,20 +118,13 @@ class MainActivity : ComponentActivity() {
                 else -> true
             }
 
-            // Theme-flip sync: re-applies enableEdgeToEdge with the newly
-            // resolved bar style and swaps the window background. Re-running
-            // enableEdgeToEdge is the only way the bar FILL repaints — flipping
-            // the icon-appearance flags alone leaves the fill on the leaving
-            // theme's contrast-scrim decision (the gray band the previous
-            // build showed on dark→light). Its 1-frame window re-fit is
-            // invisible because onThemeChanged below already landed the window
-            // background on the target color BEFORE the state write.
+            // Theme-flip sync: flips ONLY the bar icon appearance and swaps
+            // the window background — never re-invoke enableEdgeToEdge, which
+            // re-fits the window (setDecorFitsSystemWindows) and re-dispatches
+            // window insets (the root cause of the half-screen flicker/jump).
             // SideEffect (not LaunchedEffect): it runs after this scope
             // recomposes successfully and BEFORE the frame is dispatched, so
-            // the bar restyle and the Compose color swap land in the SAME
-            // frame. This scope only recomposes when themeMode changes (or the
-            // device night mode changes in Auto), so the sync never runs on
-            // unrelated recompositions.
+            // the bar restyle and the Compose color swap land in the SAME frame.
             SideEffect { syncSystemBars(isDark) }
 
             AnonDownloaderTheme(themeMode = themeMode) {
@@ -493,6 +487,12 @@ private fun MainActivity.applyEdgeToEdge(themeMode: String) {
         )
     }
     enableEdgeToEdge(statusBarStyle = style, navigationBarStyle = style)
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        window.isStatusBarContrastEnforced = false
+        window.isNavigationBarContrastEnforced = false
+    }
+    window.statusBarColor = android.graphics.Color.TRANSPARENT
+    window.navigationBarColor = android.graphics.Color.TRANSPARENT
     // Match the window background too, so even frames drawn before the first
     // composition (e.g. splash dismissal) show the resolved theme's color
     // instead of the XML default black.
@@ -500,30 +500,25 @@ private fun MainActivity.applyEdgeToEdge(themeMode: String) {
 }
 
 /**
- * Theme-flip sync: re-applies `enableEdgeToEdge` with the resolved bar style
- * and swaps the window background. Re-running `enableEdgeToEdge` is the only
- * way the system bar FILL repaints — `isAppearanceLight*Bars =` alone only
- * changes the icon color and the bar fill stays on the leaving theme's
- * contrast-scrim decision (the gray band visible in the previous build's
- * dark→light flip). The previous run kept this lightweight to avoid
- * re-fitting the window on every flip, but that left a guaranteed
- * wrong-color band. Land the background on the target color first (see
- * `onThemeChanged` in setContent) so a 1-frame insets re-dispatch is
- * invisible, and re-apply the bar style here. Called from a `SideEffect`,
- * which runs after a successful recomposition and before the frame is
- * dispatched — so the bar appearance and the Compose color swap land in
- * the same frame.
+ * Lightweight theme-flip sync: flips ONLY the bar icon appearance, enforces
+ * zero contrast scrim, and swaps the window background. Unlike `enableEdgeToEdge`
+ * it never re-fits the window (`setDecorFitsSystemWindows`) and never re-dispatches
+ * window insets, eliminating the mid-transition flicker / half-screen jump.
+ * Invoked from a `SideEffect` in `setContent`, which runs after a
+ * successful recomposition and before the frame is dispatched — so the bar
+ * appearance and window background change land in the same frame as the
+ * Compose color swap.
  */
 private fun MainActivity.syncSystemBars(isDark: Boolean) {
-    val style = if (isDark) {
-        SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
-    } else {
-        SystemBarStyle.light(
-            android.graphics.Color.TRANSPARENT,
-            android.graphics.Color.TRANSPARENT
-        )
+    val insetsController = WindowCompat.getInsetsController(window, window.decorView)
+    insetsController.isAppearanceLightStatusBars = !isDark
+    insetsController.isAppearanceLightNavigationBars = !isDark
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        window.isStatusBarContrastEnforced = false
+        window.isNavigationBarContrastEnforced = false
     }
-    enableEdgeToEdge(statusBarStyle = style, navigationBarStyle = style)
+    window.statusBarColor = android.graphics.Color.TRANSPARENT
+    window.navigationBarColor = android.graphics.Color.TRANSPARENT
     setWindowBackground(isDark)
 }
 

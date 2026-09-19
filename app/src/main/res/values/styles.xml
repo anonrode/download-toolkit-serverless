@@ -14,6 +14,7 @@
              automatic contrast scrim would otherwise lay a translucent gray
              band over the nav area on API 29+. -->
         <item name="android:enforceNavigationBarContrast" tools:targetApi="q">false</item>
+        <item name="android:enforceStatusBarContrast" tools:targetApi="q">false</item>
     </style>
 
     <style name="Theme.AnonDownloader.Splash" parent="Theme.SplashScreen">
