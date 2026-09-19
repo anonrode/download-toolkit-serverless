@@ -333,7 +333,7 @@ fun DownloadsScreen(
                             icon = Icons.Rounded.Refresh,
                             onClick = {
                                 tasks.filter { it.status == TaskStatus.FAILED }.forEach {
-                                    viewModel.engine.retryTask(it.id)
+                                    viewModel.engine.retry(it.id)
                                 }
                             }
                         )
