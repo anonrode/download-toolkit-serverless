@@ -148,7 +148,7 @@ fun EpisodeDrawer(
                         fontSize = Type.screenTitle.fontSize,
                         fontWeight = FontWeight.Bold,
                         color = TextPrimary,
-                        maxLines = 1,
+                        maxLines = 2,
                         overflow = TextOverflow.Ellipsis
                     )
                     Text(
@@ -623,7 +623,7 @@ fun EpisodeRow(
                     color = if (isSelected) TextPrimary else TextSecondary,
                     fontSize = Type.body.fontSize,
                     fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
-                    maxLines = 1,
+                    maxLines = 2,
                     overflow = TextOverflow.Ellipsis
                 )
             }

@@ -455,7 +455,7 @@ fun HomeScreen(
                         }
                     }
                 }
-            } else if (visibleResults.isEmpty() && uiState.query.trim().length >= 2 && !uiState.isSearching) {
+            } else if (visibleResults.isEmpty() && uiState.query.trim().isNotEmpty() && !uiState.isSearching) {
                 // Note: keyed off visibleResults, not the raw crawl — when
                 // every returned card was proven dead, the honest message is
                 // "No matches", not a blank landing page under a live query.
@@ -1207,7 +1207,7 @@ private fun GridPosterCard(
             fontSize = Type.caption.fontSize,
             fontWeight = FontWeight.Bold,
             lineHeight = 14.sp,
-            maxLines = 1,
+            maxLines = 2,
             overflow = TextOverflow.Ellipsis
         )
     }

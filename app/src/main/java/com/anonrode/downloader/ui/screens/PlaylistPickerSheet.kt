@@ -295,7 +295,7 @@ fun PlaylistPickerSheet(viewModel: MainViewModel, onDismiss: () -> Unit) {
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f)
-                    .heightIn(min = 200.dp, max = 440.dp)
+                    .heightIn(min = 120.dp, max = 440.dp)
             ) {
                 items(filtered, key = { it }) { idx ->
                     val entry = meta.entries[idx - 1]

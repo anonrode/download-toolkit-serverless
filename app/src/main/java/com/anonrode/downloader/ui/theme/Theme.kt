@@ -60,7 +60,7 @@ val LightAnonColors = AnonColors(
     accentPink = Color(0xFFDB2777),
     statusSuccess = Color(0xFF059669),
     statusError = Color(0xFFDC2626),
-    statusWarning = Color(0xFFD97706)
+    statusWarning = Color(0xFFB45309)
 )
 
 val LocalAnonColors = staticCompositionLocalOf { DarkAnonColors }
