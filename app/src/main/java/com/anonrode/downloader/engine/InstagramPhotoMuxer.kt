@@ -175,12 +175,11 @@ object InstagramPhotoMuxer {
         val photoUrl = bestCandidate(m.optJSONObject("image_versions2")?.optJSONArray("candidates"))
             ?: firstCarouselPhoto(m)
             ?: return null
-        val audio = musicAssetInfo(m) ?: return null
-        val audioUrl = audio.optString("progressive_download_url").takeIf { it.isNotBlank() } ?: return null
-        val durationMs = audio.optLong("duration_in_ms", 0L).coerceAtLeast(0L)
-        val title = audio.optString("title").takeIf { it.isNotBlank() }
-        val artist = (audio.optString("display_artist").ifBlank { audio.optString("ig_artist") })
-            .takeIf { it.isNotBlank() }
+        val audio = musicAssetInfo(m)
+        val audioUrl = audio?.optString("progressive_download_url")?.takeIf { it.isNotBlank() } ?: ""
+        val durationMs = audio?.optLong("duration_in_ms", 0L)?.coerceAtLeast(0L) ?: 0L
+        val title = audio?.optString("title")?.takeIf { it.isNotBlank() }
+        val artist = audio?.let { (it.optString("display_artist").ifBlank { it.optString("ig_artist") }).takeIf { a -> a.isNotBlank() } }
         val caption = m.optJSONObject("caption")?.optString("text")?.takeIf { it.isNotBlank() }
             ?: m.optJSONObject("edge_media_to_caption")?.optJSONArray("edges")?.optJSONObject(0)
                 ?.optJSONObject("node")?.optString("text")?.takeIf { it.isNotBlank() }
@@ -227,7 +226,7 @@ object InstagramPhotoMuxer {
         for (o in objects) {
             val parts = mediaToParts(o) ?: continue
             if (parts.hasVideo) continue
-            if (parts.photoUrl.isNotBlank() && parts.audioUrl.isNotBlank()) return parts
+            if (parts.photoUrl.isNotBlank()) return parts
         }
         return null
     }
@@ -248,11 +247,16 @@ object InstagramPhotoMuxer {
 
     /** ffmpeg arg vectors for a still-image mux, best codec first, then the
      *  universally-present mpeg4 fallback. Split out for exact unit testing. */
-    internal fun ffmpegVariants(libPath: String, cover: String, audio: String, out: String): List<List<String>> {
+    internal fun ffmpegVariants(libPath: String, cover: String, audio: String?, out: String): List<List<String>> {
         val scale = "scale=trunc(iw/2)*2:trunc(ih/2)*2" // libx264 rejects odd pixel dims
-        val common = mutableListOf("-hide_banner", "-loglevel", "error", "-y",
-            "-framerate", "1", "-loop", "1", "-i", cover, "-i", audio,
-            "-vf", scale, "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-shortest")
+        val common = mutableListOf("-hide_banner", "-loglevel", "error", "-y")
+        if (!audio.isNullOrBlank()) {
+            common.addAll(listOf("-framerate", "1", "-loop", "1", "-i", cover, "-i", audio,
+                "-vf", scale, "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-shortest"))
+        } else {
+            common.addAll(listOf("-framerate", "1", "-loop", "1", "-i", cover, "-t", "3",
+                "-vf", scale, "-pix_fmt", "yuv420p"))
+        }
         val x264 = ArrayList(common).apply { addAll(listOf("-c:v", "libx264", "-preset", "veryfast", "-tune", "stillimage")) }
         val mpeg4 = ArrayList(common).apply { addAll(listOf("-c:v", "mpeg4", "-vtag", "xvid", "-q:v", "4")) }
         x264.add(out); mpeg4.add(out)
@@ -370,18 +374,21 @@ object InstagramPhotoMuxer {
             DebugLog.backend("task=$taskId ig-mux probe failed: ${(t.message ?: t.javaClass.simpleName).take(200)}")
             return null
         }
-        if (parts.hasVideo || parts.photoUrl.isBlank() || parts.audioUrl.isBlank()) return null
+        if (parts.hasVideo || parts.photoUrl.isBlank()) return null
 
         val work = File(outDir, ".igmux-$taskId").apply { mkdirs() }
         val produced = File(outDir, buildFilename(shortcode, parts))
         var delivered = false
         try {
             val imgExt = guessExt(parts.photoUrl, ".jpg")
-            val audExt = guessExt(parts.audioUrl, ".m4a")
             val cover = fetchTo(work, "cover$imgExt", parts.photoUrl) ?: return null
             if (isCancelled()) throw CancellationException("IG mux cancelled after cover fetch")
-            val audio = fetchTo(work, "audio$audExt", parts.audioUrl) ?: return null
-            if (isCancelled()) throw CancellationException("IG mux cancelled after audio fetch")
+            val audio = if (parts.audioUrl.isNotBlank()) {
+                val audExt = guessExt(parts.audioUrl, ".m4a")
+                val a = fetchTo(work, "audio$audExt", parts.audioUrl) ?: return null
+                if (isCancelled()) throw CancellationException("IG mux cancelled after audio fetch")
+                a
+            } else null
 
             val lib = File(context.applicationInfo.nativeLibraryDir, "libffmpeg.so")
             if (!lib.exists()) {
@@ -390,7 +397,7 @@ object InstagramPhotoMuxer {
             }
             try { lib.setExecutable(true) } catch (_: Exception) {}
 
-            val variants = ffmpegVariants(lib.absolutePath, cover.absolutePath, audio.absolutePath, produced.absolutePath)
+            val variants = ffmpegVariants(lib.absolutePath, cover.absolutePath, audio?.absolutePath, produced.absolutePath)
             for (cmd in variants) {
                 if (isCancelled()) throw CancellationException("IG mux cancelled before ffmpeg")
                 val ok = runFffmpeg(cmd, work.parentFile, isCancelled)

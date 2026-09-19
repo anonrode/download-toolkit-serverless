@@ -146,18 +146,25 @@ class InstagramPhotoMuxerTest {
     }
 
     @Test
-    fun pickMuxable_photoWithoutAudio_isNotMuxable() {
+    fun pickMuxable_photoWithoutAudio_isMuxable() {
         val m = photoMusicMedia()
         m.remove("music_metadata")
-        assertNull(InstagramPhotoMuxer.pickMuxable(listOf(m)))
+        val parts = InstagramPhotoMuxer.pickMuxable(listOf(m))
+        assertNotNull(parts)
+        assertEquals("https://lookaside.fbsbx.com/hi.jpg", parts!!.photoUrl)
+        assertEquals("", parts.audioUrl)
+        assertFalse(parts.hasVideo)
     }
 
     @Test
-    fun pickMuxable_audioWithoutProgressiveUrl_isNotMuxable() {
+    fun pickMuxable_audioWithoutProgressiveUrl_fallsBackToSilentVideo() {
         val m = photoMusicMedia()
         m.getJSONObject("music_metadata").getJSONObject("music_info")
             .getJSONObject("music_asset_info").remove("progressive_download_url")
-        assertNull(InstagramPhotoMuxer.pickMuxable(listOf(m)))
+        val parts = InstagramPhotoMuxer.pickMuxable(listOf(m))
+        assertNotNull(parts)
+        assertEquals("https://lookaside.fbsbx.com/hi.jpg", parts!!.photoUrl)
+        assertEquals("", parts.audioUrl)
     }
 
     @Test
@@ -301,5 +308,16 @@ class InstagramPhotoMuxerTest {
         assertEquals("/out/final.mp4", x264.last())
         val mpeg = v[1]
         assertTrue(mpeg.windowed(2).any { it == listOf("-c:v", "mpeg4") })
+    }
+
+    @Test
+    fun ffmpegVariants_withoutAudio() {
+        val v = InstagramPhotoMuxer.ffmpegVariants("/x/libffmpeg.so", "/w/c.jpg", null, "/out/final.mp4")
+        assertEquals(2, v.size)
+        val x264 = v[0]
+        assertEquals("/x/libffmpeg.so", x264[0])
+        assertTrue(x264.containsAll(listOf("-loop", "1", "-t", "3")))
+        assertFalse(x264.contains("-shortest"))
+        assertEquals("/out/final.mp4", x264.last())
     }
 }

@@ -20,6 +20,8 @@ object DramaRainProvider : SiteProvider {
     override val name: String = "dramarain"
     override val mainUrl: String get() = DynamicRulesManager.getBaseUrl(name)
 
+    private val CATEGORY_DRAMA_RE = Regex("""(?i)^https?://[^/]+/[a-z]+-drama/?$""")
+
     override suspend fun search(query: String): List<ShowCard> {
         DynamicRulesManager.getPipeline(name)?.search?.let { pl ->
             val results = RulesPipeline.runSearch(name, pl, query)
@@ -47,6 +49,16 @@ object DramaRainProvider : SiteProvider {
                     val img = item.selectFirst("img")?.let {
                         it.attr("abs:src").ifBlank { it.attr("src") }
                     } ?: ""
+
+                    val lowerHref = href.lowercase()
+                    if (CATEGORY_DRAMA_RE.matches(href) ||
+                        lowerHref.contains("/category/") ||
+                        lowerHref.contains("/tag/") ||
+                        lowerHref.contains("/page/") ||
+                        lowerHref.contains("/genre/")
+                    ) {
+                        continue
+                    }
 
                     if (href.isNotBlank() && title.isNotBlank() && results.none { it.url == href }) {
                         results.add(
