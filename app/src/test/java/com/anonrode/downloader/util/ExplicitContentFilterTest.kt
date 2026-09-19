@@ -75,10 +75,7 @@ class ExplicitContentFilterTest {
             "Blowjob & Deepthroat Special",
             "Nude Sex Scenes Collection 18+",
             "How We Fuck In The Shadows XXX (2024) [+18]",
-            "BBC Threesomes 5 (2025) [+18]",
-            "Enjoy Your Ride (2026) [+18]",
-            "Sex: 3 erotic positions to try when you are bored in the bedroom",
-            "Maheeda: 10 times singer showed off her erotic hottest photos!"
+            "BBC Threesomes 5 (2025) [+18]"
         )
 
         for (title in adultTitles) {
@@ -109,6 +106,23 @@ class ExplicitContentFilterTest {
         )
         assertTrue(
             ExplicitContentFilter.isExplicit("Drama", listOf("Erotica"))
+        )
+
+        // Real adult section posts from live site audits (9jaRocks and NaijaPrey)
+        assertTrue(
+            ExplicitContentFilter.isExplicit("Enjoy Your Ride (2026) [+18]", listOf("[+18] Section"))
+        )
+        assertTrue(
+            ExplicitContentFilter.isExplicit(
+                "Sex: 3 erotic positions to try when you are bored in the bedroom",
+                listOf("Adult")
+            )
+        )
+        assertTrue(
+            ExplicitContentFilter.isExplicit(
+                "Maheeda: 10 times singer showed off her erotic hottest photos!",
+                listOf("Adult")
+            )
         )
     }
 
