@@ -81,6 +81,11 @@ object LinkResolver {
         if (host.contains("wildshare.net") && (lower.contains("download_token=") || path.contains("/d/"))) return true
         if (host.contains("gfrdaseazzs.com")) return true
         if (host.contains("loadedfiles") && (path.contains("/token/download/") || path.contains("/d/"))) return true
+        // kissorgrab.com/dl/ is the cracked direct media endpoint — NOT a locker
+        // page. The dl.plutomovies.com redirect chain lands here and the bytes
+        // are a real MKV file (live-verified 2026-09-19: HTTP 206,
+        // Content-Disposition: attachment; filename=".mkv", MKV magic header).
+        if (host.contains("kissorgrab.com") && path.contains("/dl/")) return true
 
         val query = lower.substringAfter('?', "").substringBefore('#')
         if (query.contains("pt=") || query.contains("token=") || query.contains("download")) return true

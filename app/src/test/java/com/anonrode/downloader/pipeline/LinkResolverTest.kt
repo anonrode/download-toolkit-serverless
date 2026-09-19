@@ -48,6 +48,13 @@ class LinkResolverTest {
         // but a plain locker PAGE is still a page:
         assertFalse(LinkResolver.isProvablyDirectFile("https://downloadwella.com/f/12345"))
         assertTrue(LinkResolver.isKnownLockerHost("https://downloadwella.com/f/12345"))
+
+        // kissorgrab.com/dl/ is the direct cracked media endpoint (live-verified
+        // 2026-09-19: HTTP 206, MKV magic header). A POST to this URL returned
+        // HTTP 405 when DownloadwellaResolver mistakenly claimed it (activity log
+        // f17d792c). Both classifiers must agree it is NOT a locker page.
+        assertTrue(LinkResolver.isProvablyDirectFile("https://ol3.kissorgrab.com/dl/2f8cca675e/all-american-s01e16-55186-mkv"))
+        assertFalse(LinkResolver.isKnownLockerHost("https://ol3.kissorgrab.com/dl/2f8cca675e/all-american-s01e16-55186-mkv"))
     }
 
     @Test
