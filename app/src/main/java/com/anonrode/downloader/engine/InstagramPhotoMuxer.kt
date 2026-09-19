@@ -172,10 +172,16 @@ object InstagramPhotoMuxer {
         // `post["music_metadata"]`, instagram.py). Requiring both on one
         // object made every carousel-with-music unmuxable; the first photo
         // child becomes the cover instead.
-        val photoUrl = bestCandidate(m.optJSONObject("image_versions2")?.optJSONArray("candidates"))
+        val singlePhoto = bestCandidate(m.optJSONObject("image_versions2")?.optJSONArray("candidates"))
+        val isCarousel = m.has("carousel_media")
+        val photoUrl = singlePhoto
             ?: firstCarouselPhoto(m)
             ?: return null
         val audio = musicAssetInfo(m)
+        // Carousels are gallery posts — the mux only makes sense when there is
+        // music on the post object. A carousel without music is just a gallery;
+        // let yt-dlp (or a future gallery handler) deal with it.
+        if (isCarousel && audio == null) return null
         val audioUrl = audio?.optString("progressive_download_url")?.takeIf { it.isNotBlank() } ?: ""
         val durationMs = audio?.optLong("duration_in_ms", 0L)?.coerceAtLeast(0L) ?: 0L
         val title = audio?.optString("title")?.takeIf { it.isNotBlank() }

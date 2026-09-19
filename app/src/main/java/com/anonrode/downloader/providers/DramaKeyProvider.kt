@@ -115,7 +115,9 @@ object DramaKeyProvider : SiteProvider {
                     break
                 }
             }
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+        }
         return results
     }
 
