@@ -37,9 +37,14 @@ class LinkResolverTest {
         assertTrue(LinkResolver.isProvablyDirectFile("https://cdn.x/Show.mkv?pt=abc%3D"))
         assertTrue(LinkResolver.isProvablyDirectFile("https://pixeldrain.com/api/file/xyz"))
         assertTrue(LinkResolver.isProvablyDirectFile("https://x.f/cd?token=123"))
+        assertTrue(LinkResolver.isProvablyDirectFile("https://west-eu-upload.04b3d96d52475741e6b10f97f0a84a16.r2.cloudflarestorage.com/RBNNj1sIT2?response-content-disposition=attachment"))
+        assertTrue(LinkResolver.isProvablyDirectFile("https://vikingfile.04b3d96d52475741e6b10f97f0a84a16.r2.cloudflarestorage.com/DMFZgz5wue?X-Amz-Signature=xyz"))
+        assertTrue(LinkResolver.isProvablyDirectFile("https://3static.gfrdaseazzs.com/token/download/tempuser/83e68101e3976ae8/All.American.Homecoming"))
+        assertTrue(LinkResolver.isProvablyDirectFile("https://dwbe02.downloadwella.com/d/viw53sddbwatc4c5fdyu2xprtubrseoplbakytzsqfnjj/video"))
         // The exemption overrides the locker-host membership (resolver outputs
         // legitimately embed the locker name):
         assertFalse(LinkResolver.isKnownLockerHost("https://fsmc02.downloadwella.com/d/Show.mkv?pt=t1"))
+        assertFalse(LinkResolver.isKnownLockerHost("https://vikingfile.04b3d96d52475741e6b10f97f0a84a16.r2.cloudflarestorage.com/DMFZgz5wue"))
         // but a plain locker PAGE is still a page:
         assertFalse(LinkResolver.isProvablyDirectFile("https://downloadwella.com/f/12345"))
         assertTrue(LinkResolver.isKnownLockerHost("https://downloadwella.com/f/12345"))
