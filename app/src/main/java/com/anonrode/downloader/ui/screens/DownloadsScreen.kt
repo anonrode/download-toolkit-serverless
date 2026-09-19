@@ -297,12 +297,13 @@ fun DownloadsScreen(
                     it.status == TaskStatus.VALIDATING || it.status == TaskStatus.QUEUED
             }
             val hasPaused = tasks.any { it.status == TaskStatus.PAUSED }
+            val hasFailed = tasks.any { it.status == TaskStatus.FAILED }
             val hasCancellable = tasks.any {
                 it.status == TaskStatus.QUEUED || it.status == TaskStatus.DOWNLOADING ||
                     it.status == TaskStatus.RESOLVING || it.status == TaskStatus.VALIDATING ||
                     it.status == TaskStatus.PAUSED
             }
-            if (hasPausable || hasPaused || hasCancellable) {
+            if (hasPausable || hasPaused || hasFailed || hasCancellable) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -323,6 +324,18 @@ fun DownloadsScreen(
                             label = "Resume all",
                             icon = Icons.Rounded.PlayArrow,
                             onClick = { viewModel.engine.resumeAll() }
+                        )
+                        Spacer(modifier = Modifier.width(Spacing.sm))
+                    }
+                    if (hasFailed) {
+                        BulkActionChip(
+                            label = "Retry failed",
+                            icon = Icons.Rounded.Refresh,
+                            onClick = {
+                                tasks.filter { it.status == TaskStatus.FAILED }.forEach {
+                                    viewModel.engine.retryTask(it.id)
+                                }
+                            }
                         )
                         Spacer(modifier = Modifier.width(Spacing.sm))
                     }
@@ -533,7 +546,8 @@ fun DownloadCard(
     onDelete: () -> Unit = onCancel
 ) {
     val isCompleted = task.status == TaskStatus.COMPLETED
-    val isDownloading = task.status == TaskStatus.DOWNLOADING || task.status == TaskStatus.RESOLVING
+    val isPausable = task.status == TaskStatus.DOWNLOADING || task.status == TaskStatus.RESOLVING ||
+        task.status == TaskStatus.QUEUED || task.status == TaskStatus.VALIDATING
     val isPaused = task.status == TaskStatus.PAUSED
     val isFailed = task.status == TaskStatus.FAILED
 
@@ -885,7 +899,7 @@ fun DownloadCard(
                     )
 
                     Row(horizontalArrangement = Arrangement.spacedBy(Spacing.xs)) {
-                        if (isDownloading) {
+                        if (isPausable) {
                             IconButton(onClick = onPause) {
                                 Icon(Icons.Rounded.Pause, contentDescription = "Pause", tint = TextSecondary, modifier = Modifier.size(20.dp))
                             }
