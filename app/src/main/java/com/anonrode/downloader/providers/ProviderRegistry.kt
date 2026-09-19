@@ -186,7 +186,9 @@ object ProviderRegistry {
         // into an empty list ("No episodes found"). Guaranteeing it at the
         // source makes that whole failure class impossible regardless of caller.
         val details = withContext(Dispatchers.IO) { provider.loadEpisodes(show.url) }
-        episodesCache[cacheKey] = Pair(now, details)
+        if (details.episodes.isNotEmpty()) {
+            episodesCache[cacheKey] = Pair(now, details)
+        }
         return details
     }
 

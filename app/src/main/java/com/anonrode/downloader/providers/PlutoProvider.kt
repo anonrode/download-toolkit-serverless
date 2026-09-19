@@ -9,6 +9,10 @@ import com.anonrode.downloader.data.models.ShowDetails
 import com.anonrode.downloader.data.net.HttpClient
 import com.anonrode.downloader.resolvers.ResolverRegistry
 import org.jsoup.Jsoup
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.Dispatchers
 import java.net.URI
 import java.net.URLEncoder
 
@@ -107,10 +111,11 @@ object PlutoProvider : SiteProvider {
 
                 // Collect this show's season hubs and pagination pages.
                 val pagesToScan = mutableListOf(showUrl)
+                val isSpecificSeason = seasonLinkRegex.containsMatchIn(showUrl)
                 for (a in doc.select("a[href]")) {
                     val href = a.attr("abs:href").ifBlank { HttpClient.safeResolveUri(showUrl, a.attr("href")) }
                     if (href.isBlank() || href == showUrl || href in pagesToScan) continue
-                    if (seasonLinkRegex.containsMatchIn(href) &&
+                    if (!isSpecificSeason && seasonLinkRegex.containsMatchIn(href) &&
                         sameSlugStem(stem, slugStem(href.substringAfterLast('/').substringBefore('?')))
                     ) {
                         pagesToScan.add(href)
@@ -182,11 +187,26 @@ object PlutoProvider : SiteProvider {
                 //    every episode, pagination continues the list. The stem
                 //    filter rejects the unrelated-show sidebar links that also
                 //    use /series/ URLs.
-                for (pageUrl in pagesToScan.distinct()) {
-                    val pageDoc = if (pageUrl == showUrl) doc else {
-                        val pageHtml = HttpClient.getText(pageUrl, referer = "$mainUrl/") ?: continue
-                        Jsoup.parse(pageHtml, pageUrl)
+                // Fetch extra pages (season hubs / pagination) concurrently with
+                // Dispatchers.IO so an 8-season hub completes in parallel instead of
+                // crawling sequentially for 40+ seconds.
+                val otherPages = pagesToScan.distinct().filter { it != showUrl }
+                val extraDocs = if (otherPages.isNotEmpty()) {
+                    coroutineScope {
+                        otherPages.map { pUrl ->
+                            async(Dispatchers.IO) {
+                                val pHtml = try {
+                                    HttpClient.getText(pUrl, referer = "$mainUrl/")
+                                } catch (_: Exception) { null }
+                                if (!pHtml.isNullOrBlank()) Jsoup.parse(pHtml, pUrl) else null
+                            }
+                        }.awaitAll().filterNotNull()
                     }
+                } else emptyList()
+
+                val allDocs = listOf(doc) + extraDocs
+                for (pageDoc in allDocs) {
+                    val pageUrl = pageDoc.baseUri().ifBlank { showUrl }
                     for (a in pageDoc.select("a[href]")) {
                         val href = a.attr("abs:href").ifBlank {
                             HttpClient.safeResolveUri(pageUrl, a.attr("href"))
@@ -207,7 +227,7 @@ object PlutoProvider : SiteProvider {
                     }
                 }
 
-                episodes.sortBy { it.episodeNum }
+                episodes.sortWith(compareBy({ parseEpisodeKey(it.url)?.first ?: 1 }, { it.episodeNum }))
             } else {
                 // Movie download links from the detail page. The old
                 // selectFirst kept ONLY THE FIRST anchor: a film published
