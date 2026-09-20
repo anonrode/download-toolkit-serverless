@@ -183,9 +183,9 @@ object PlutoProvider : SiteProvider {
                         if (num < 1) continue
                         val epCode = selfKey.first * 100 + num
                         val label = a.text().trim()
-                            .replace(Regex("""(?i)^(previous|next)\s+episode\b\s*"""), "")
+                            .replace(Regex("""^(previous|next)\s+episode\b\s*""", RegexOption.IGNORE_CASE), "")
                             .trim()
-                        val epTitle = if (label.isBlank() || Regex("""(?i)^(episode\s*\d+|\d+)$""").matches(label)) {
+                        val epTitle = if (label.isBlank() || Regex("""^(episode\s*\d+|\d+)$""", RegexOption.IGNORE_CASE).matches(label)) {
                             "S%02dE%02d".format(selfKey.first, num)
                         } else {
                             "S%02dE%02d - $label".format(selfKey.first, num)
@@ -227,7 +227,7 @@ object PlutoProvider : SiteProvider {
                         if (key == null && !href.contains("/episodes/")) continue
                         if (!sameSlugStem(stem, slugStem(href.substringAfterLast('/').substringBefore('?')))) continue
                         val label = a.text().trim()
-                            .replace(Regex("""(?i)^(previous|next)\s+episode\b\s*"""), "")
+                            .replace(Regex("""^(previous|next)\s+episode\b\s*""", RegexOption.IGNORE_CASE), "")
                             .trim()
                         val epCode = if (key != null) {
                             key.first * 100 + key.second
@@ -235,7 +235,7 @@ object PlutoProvider : SiteProvider {
                             episodes.size + 1
                         }
                         val epTitle = if (key != null) {
-                            if (label.isBlank() || Regex("""(?i)^(episode\s*\d+|\d+)$""").matches(label)) {
+                            if (label.isBlank() || Regex("""^(episode\s*\d+|\d+)$""", RegexOption.IGNORE_CASE).matches(label)) {
                                 "S%02dE%02d".format(key.first, key.second)
                             } else {
                                 "S%02dE%02d - $label".format(key.first, key.second)
