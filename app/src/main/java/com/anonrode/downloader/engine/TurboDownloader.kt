@@ -325,10 +325,10 @@ object TurboDownloader {
         // them too (v3.0.4: turborouter traffic outlived a cancel).
         try {
             HttpClient.executeRegistered(client.newCall(buildReq(true))).use { r ->
-                if (isHtmlPage(r.header("Content-Type"))) return ProbeResult.HtmlPage
+                val ct = r.header("Content-Type")
                 val len = r.header("Content-Length")?.toLongOrNull() ?: -1L
                 val ranges = r.header("Accept-Ranges")?.contains("bytes", true) == true
-                if (r.isSuccessful && len > 0) {
+                if (r.isSuccessful && len > 0 && !isHtmlPage(ct)) {
                     totalLength = len
                     if (ranges) {
                         return ProbeResult.File(totalLength, true)
@@ -339,16 +339,18 @@ object TurboDownloader {
             onFailure(e)
         }
 
-        // 2. If Accept-Ranges was not explicit on HEAD, probe with Range: bytes=0-0
+        // 2. If Accept-Ranges was not explicit on HEAD (or HEAD returned HTML/unsupported), probe with Range: bytes=0-0
         try {
             HttpClient.executeRegistered(client.newCall(buildReq(false))).use { r ->
-                if (isHtmlPage(r.header("Content-Type"))) return ProbeResult.HtmlPage
+                val ct = r.header("Content-Type")
                 val cr = r.header("Content-Range")
                 val totalFromCr = cr?.substringAfter('/')?.trim()?.toLongOrNull() ?: -1L
                 val is206 = r.code == 206
                 if (is206) {
                     val finalTotal = if (totalFromCr > 0) totalFromCr else totalLength
                     return ProbeResult.File(finalTotal, true)
+                } else if (isHtmlPage(ct)) {
+                    return ProbeResult.HtmlPage
                 } else if (r.isSuccessful && totalLength <= 0) {
                     val len = r.header("Content-Length")?.toLongOrNull() ?: -1L
                     if (len > 0) totalLength = len

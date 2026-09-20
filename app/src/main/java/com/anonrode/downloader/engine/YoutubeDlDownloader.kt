@@ -180,6 +180,29 @@ object YoutubeDlDownloader {
             )
         }
 
+        // Direct HTTP downloads explicitly routed to aria2c (CDNs, movie lockers, etc.).
+        // Native aria2c executable handles HTTP downloads directly without invoking yt-dlp.
+        if (backend.equals("aria2c", true) && !isM3u8 && !isExtractorTask) {
+            val aria2Exec = findAria2Executable(context)
+            if (aria2Exec != null) {
+                return downloadHttpAria2c(
+                    context = context,
+                    taskId = taskId,
+                    url = sourceUrl,
+                    targetDir = targetDir,
+                    preferredFilename = preferredFilename,
+                    referer = referer,
+                    ua = if (ua.isNotBlank()) ua else com.anonrode.downloader.data.net.HttpClient.DEFAULT_UA,
+                    customHeaders = customHeaders,
+                    parallelSockets = parallelSockets,
+                    speedLimitKbs = speedLimitKbs,
+                    maxAttempts = ytdlpMaxAttempts,
+                    onProgress = onProgress,
+                    isActiveCheck = { coroutineContext.isActive }
+                )
+            }
+        }
+
         // The yt-dlp/ffmpeg runtime initializes in the app's background
         // bootstrap (AnonApp.appScope): a yt-dlp task enqueued before that
         // finishes would otherwise burn its first attempt on an uninitialized
@@ -209,10 +232,7 @@ object YoutubeDlDownloader {
                 // which can produce garbage like "RBNNj1sIT2 [id].unknown_video".
                 // %(title)s [%(id)s] is reserved for social video downloads where the title
                 // is unknown in advance.
-                val isGenericName = preferredFilename.isBlank() ||
-                    preferredFilename.equals("video.mp4", ignoreCase = true) ||
-                    preferredFilename.equals("download.mp4", ignoreCase = true) ||
-                    preferredFilename.startsWith("Social_", ignoreCase = true)
+                val isGenericName = isGenericPreferredName(preferredFilename)
                 val outTemplate = if (!isGenericName) {
                     val stem = File(outDir, preferredFilename.substringBeforeLast('.')).absolutePath
                     val ext = File(preferredFilename).extension.ifBlank { "mp4" }
@@ -384,33 +404,52 @@ object YoutubeDlDownloader {
         fun attemptOnce(): File? {
             var lastDl = 0L
             var lastTot = 0L
+            var currentStreamDl = 0L
+            var currentStreamTot = 0L
+            var bankedDl = 0L
+            var bankedTot = 0L
 
             try {
                 YoutubeDL.getInstance().execute(request, taskId) { progress, etaInSeconds, line ->
-                    // Parse EVERY stdout line. The library only moves its own
-                    // `progress` float when its narrow regexes match —
-                    // "[download] X.X% ... ETA MM:SS" (a numeric ETA is
-                    // required) or aria2c's "(NN%)" summary — and HLS ticks
-                    // report "ETA Unknown" while fragments are still being
-                    // measured. The float then stays at its -1 initial, and
-                    // the old `if (progress >= 0f)` gate silently dropped the
-                    // structured @@DLP@@ lines: the card froze on "Starting…"
-                    // and jumped straight to DONE. parseProgressTick is a
-                    // no-op on lines it doesn't understand, so feeding it
-                    // everything is safe.
-                    val tick = parseProgressTick(line, progress, lastDl, lastTot)
+                    if (line != null) {
+                        val trimmedLine = line.trim()
+                        // Detect format/stream transition (e.g. video finished, audio starting)
+                        if (trimmedLine.startsWith("[download] Destination:") || trimmedLine.startsWith("[download] Downloading item")) {
+                            if (currentStreamDl > 0L) {
+                                bankedDl += currentStreamDl
+                                bankedTot += if (currentStreamTot > 0L) currentStreamTot else currentStreamDl
+                                currentStreamDl = 0L
+                                currentStreamTot = 0L
+                            }
+                        }
+                    }
+
+                    // Parse progress against current stream
+                    val tick = parseProgressTick(line, progress, currentStreamDl, currentStreamTot)
+                    if (tick.downloadedBytes > 0L || tick.totalBytes > 0L) {
+                        currentStreamDl = tick.downloadedBytes
+                        if (tick.totalBytes > 0L) {
+                            currentStreamTot = tick.totalBytes
+                        }
+                    }
+
+                    var effectiveDl = bankedDl + currentStreamDl
+                    var effectiveTot = bankedTot + currentStreamTot
+
+                    if (line != null && (line.contains("[Merger]") || line.contains("Merging formats"))) {
+                        if (effectiveTot > effectiveDl) {
+                            effectiveDl = effectiveTot
+                        }
+                    }
+
                     // Change-detect so the hundreds of non-progress lines
-                    // ([info], [Merger], destination notices) never spam the
-                    // UI flow with no-op updates.
-                    if (tick.downloadedBytes != lastDl || tick.totalBytes != lastTot || tick.speedBytesPerSec > 0.0) {
-                        lastDl = tick.downloadedBytes
-                        lastTot = tick.totalBytes
+                    // ([info], destination notices) never spam the UI flow with no-op updates.
+                    if (effectiveDl != lastDl || effectiveTot != lastTot || tick.speedBytesPerSec > 0.0) {
+                        lastDl = effectiveDl
+                        lastTot = effectiveTot
                         val eta = when {
                             tick.etaSeconds > 0 -> tick.etaSeconds
                             etaInSeconds > 0 -> etaInSeconds
-                            // yt-dlp said nothing, but speed + total are known:
-                            // derive it so the card reads like the aria2c CDN
-                            // path does (parity with the magnet loop).
                             tick.speedBytesPerSec > 0.0 && lastTot > lastDl ->
                                 ((lastTot - lastDl) / tick.speedBytesPerSec).toLong()
                             else -> 0L
@@ -515,10 +554,7 @@ object YoutubeDlDownloader {
         // only as a cross-volume fallback. The workdir is removed when empty
         // so a folder of one-shot YouTube jobs doesn't accumulate dot-dirs.
         if (produced != null && outDir != targetDir) {
-            val isGenericName = preferredFilename.isBlank() ||
-                preferredFilename.equals("video.mp4", ignoreCase = true) ||
-                preferredFilename.equals("download.mp4", ignoreCase = true) ||
-                preferredFilename.startsWith("Social_", ignoreCase = true)
+            val isGenericName = isGenericPreferredName(preferredFilename)
 
             val baseStem = if (!isGenericName) {
                 File(preferredFilename).nameWithoutExtension
@@ -958,6 +994,178 @@ object YoutubeDlDownloader {
             throw Exception("aria2c failed after $attempts attempt(s): ${errors.toString().trim()}")
         }
         return produced
+    }
+
+    private suspend fun downloadHttpAria2c(
+        context: Context,
+        taskId: String,
+        url: String,
+        targetDir: File,
+        preferredFilename: String,
+        referer: String = "",
+        ua: String = "",
+        customHeaders: Map<String, String> = emptyMap(),
+        parallelSockets: Int = 16,
+        speedLimitKbs: Int = 0,
+        maxAttempts: Int = 3,
+        onProgress: (downloaded: Long, total: Long, speed: Double, eta: Long) -> Unit,
+        isActiveCheck: suspend () -> Boolean = { true }
+    ): File? {
+        val before = targetDir.listFiles()?.map { it.absolutePath }?.toSet() ?: emptySet()
+        val aria2Exec = findAria2Executable(context)
+            ?: throw IllegalStateException("aria2c binary missing: libaria2c.so not found in native libs")
+
+        val cmd = mutableListOf(
+            aria2Exec.absolutePath,
+            "-c",
+            "-d", targetDir.absolutePath,
+            "-o", preferredFilename,
+            "--check-certificate=false",
+            "--summary-interval=1",
+            "--max-tries=5",
+            "--retry-wait=2",
+            "--connect-timeout=15",
+            "--timeout=30",
+            "--auto-file-renaming=false",
+            "--allow-overwrite=true",
+            "--console-log-level=error"
+        )
+
+        // Single socket constraint for fragile CDNs (plutomovies, kissorgrab)
+        val isSingleSocketHost = url.contains("plutomovies.com", ignoreCase = true) ||
+                url.contains("kissorgrab.com", ignoreCase = true) ||
+                parallelSockets <= 1
+        if (isSingleSocketHost) {
+            cmd += listOf("-s", "1", "-x", "1", "-j", "1")
+        } else {
+            val sockets = parallelSockets.coerceIn(1, 16)
+            cmd += listOf("-s", "$sockets", "-x", "$sockets", "--min-split-size=1M")
+        }
+
+        if (ua.isNotBlank()) {
+            cmd += "--user-agent=$ua"
+        }
+        if (referer.isNotBlank()) {
+            cmd += "--referer=$referer"
+        }
+        for ((k, v) in customHeaders) {
+            if (k.isNotBlank() && v.isNotBlank()) {
+                cmd += "--header=$k: $v"
+            }
+        }
+        if (speedLimitKbs > 0) {
+            cmd += "--max-download-limit=${speedLimitKbs}K"
+        }
+        cmd += url
+
+        val errors = StringBuilder()
+        var produced: File? = null
+        var attempts = 0
+
+        fun runOnce(): File? {
+            val pb = ProcessBuilder(cmd)
+            pb.environment()["TMPDIR"] = context.cacheDir.absolutePath
+            pb.directory(targetDir)
+            pb.redirectErrorStream(true)
+            val process = pb.start()
+
+            if (Thread.currentThread().isInterrupted) {
+                process.destroy()
+                throw InterruptedException("Task was cancelled before process started")
+            }
+
+            activeNativeProcesses[taskId] = process
+
+            val progressRegex = Regex("""([\d.]+[KMGT]?i?B)/([\d.]+[KMGT]?i?B)\([\d.]+%\).*?DL:\s*([\d.]+[KMGT]?i?B(?:/s)?)""", RegexOption.IGNORE_CASE)
+            val fallbackRegex = Regex("""\((\d+)%\).*?DL:\s*([\d.]+[KMGT]?i?B)""", RegexOption.IGNORE_CASE)
+            val reader = process.inputStream.bufferedReader()
+            val logBuffer = mutableListOf<String>()
+            var exitCode: Int? = null
+
+            try {
+                var line: String? = reader.readLine()
+                while (line != null) {
+                    if (logBuffer.size < 50) {
+                        logBuffer.add(line)
+                    } else {
+                        logBuffer.removeAt(0)
+                        logBuffer.add(line)
+                    }
+                    val match = progressRegex.find(line)
+                    if (match != null) {
+                        val dl = parseByteString(match.groupValues[1])
+                        val tot = parseByteString(match.groupValues[2])
+                        val spd = parseSpeedString(match.groupValues[3])
+                        val eta = if (spd > 0 && tot > dl) ((tot - dl) / spd).toLong() else 0L
+                        onProgress(dl, tot, spd, eta)
+                    } else {
+                        val fb = fallbackRegex.find(line)
+                        if (fb != null) {
+                            val spd = parseSpeedString(fb.groupValues[2])
+                            onProgress(0L, 0L, spd, 0L)
+                        }
+                    }
+                    line = reader.readLine()
+                }
+                exitCode = process.waitFor()
+            } catch (e: Exception) {
+                process.destroy()
+                errors.append("run ").append(attempts).append(": ").append(e.message ?: e.javaClass.simpleName).append('\n')
+                return null
+            } finally {
+                activeNativeProcesses.remove(taskId)
+            }
+
+            if (exitCode != 0) {
+                val errSummary = logBuffer.takeLast(3).joinToString(" | ")
+                errors.append("run ").append(attempts).append(" exit ").append(exitCode).append(": ").append(errSummary).append('\n')
+                return null
+            }
+
+            fun isFinal(f: File) = (f.length() > 0 || f.isDirectory) &&
+                    !f.name.endsWith(".aria2") && !f.name.endsWith(".part") &&
+                    !f.name.endsWith(".ytdl")
+
+            val candidates = targetDir.listFiles { f -> isFinal(f) }?.toList() ?: emptyList()
+            val fresh = candidates.filter { it.absolutePath !in before }
+            val stem = preferredFilename.substringBeforeLast('.')
+            val found = fresh.firstOrNull { it.name == preferredFilename || it.nameWithoutExtension == stem }
+                ?: candidates.firstOrNull { it.name == preferredFilename || it.nameWithoutExtension == stem }
+                ?: fresh.maxByOrNull { it.lastModified() }
+
+            if (found != null && !File(found.absolutePath + ".aria2").exists()) {
+                return found
+            }
+
+            errors.append("run ").append(attempts).append(": no complete file (control file still present)\n")
+            return null
+        }
+
+        while (attempts < maxAttempts && produced == null) {
+            attempts++
+            if (!isActiveCheck()) throw CancellationException("Task was cancelled before HTTP aria2c retry")
+            produced = runOnce()
+            if (produced == null && attempts < maxAttempts) {
+                cancellableRetryWait(2_000L * attempts, isActiveCheck = isActiveCheck)
+            }
+        }
+        if (produced == null) {
+            throw Exception("aria2c HTTP download failed after $attempts attempt(s): ${errors.toString().trim()}")
+        }
+        return produced
+    }
+
+    internal fun isGenericPreferredName(name: String): Boolean {
+        val clean = name.trim()
+        if (clean.isBlank()) return true
+        val lower = clean.lowercase()
+        if (lower == "video.mp4" || lower == "download.mp4" || lower == "video" || lower == "download") return true
+        if (clean.startsWith("Social_", ignoreCase = true)) return true
+        val genericPlatformRegex = Regex(
+            """^(Instagram|YouTube|Twitter|Facebook|TikTok|Pinterest|Reddit|X|Social|Web)[\s_]*(Video)?[-\d\s]*(\.[A-Za-z0-9]+)?$""",
+            RegexOption.IGNORE_CASE
+        )
+        return genericPlatformRegex.matches(clean)
     }
 
     private fun findAria2Executable(context: Context): File? {

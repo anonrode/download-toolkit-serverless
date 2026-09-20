@@ -195,12 +195,16 @@ object RocksProvider : SiteProvider {
                                 ?: Regex("""\b(?:file\s+)?part\s*(\d{1,2})\b""", RegexOption.IGNORE_CASE).find(parentText)
                         } else null
 
+                        val isSeries = isExplicitSingleSeasonPage || showUrl.contains("/series/") ||
+                            Regex("""\b(?:season|s\d{1,2})\b""", RegexOption.IGNORE_CASE).containsMatchIn(showUrl) ||
+                            Regex("""\b(?:season|s\d{1,2})\b""", RegexOption.IGNORE_CASE).containsMatchIn(title)
+
                         when {
                             mirrorMark != null -> episodes.add(
                                 EpisodeItem(
                                     title = "Server ${mirrorMark.groupValues[1]}$qualitySuffix",
                                     url = href,
-                                    episodeNum = itemSeason * 100 + 1,
+                                    episodeNum = if (isSeries) itemSeason * 100 + 1 else (mirrorMark.groupValues[1].toIntOrNull() ?: count),
                                     site = name
                                 )
                             )
@@ -208,10 +212,21 @@ object RocksProvider : SiteProvider {
                                 EpisodeItem(
                                     title = "Part ${partMark.groupValues[1]}$qualitySuffix",
                                     url = href,
-                                    episodeNum = itemSeason * 100 + (partMark.groupValues[1].toIntOrNull() ?: count),
+                                    episodeNum = if (isSeries) itemSeason * 100 + (partMark.groupValues[1].toIntOrNull() ?: count) else (partMark.groupValues[1].toIntOrNull() ?: count),
                                     site = name
                                 )
                             )
+                            !isSeries && explicitSm == null && epMatch == null -> {
+                                val movieLabel = if (episodes.isEmpty()) "Full Movie$qualitySuffix" else "Server ${count}$qualitySuffix"
+                                episodes.add(
+                                    EpisodeItem(
+                                        title = movieLabel,
+                                        url = href,
+                                        episodeNum = count,
+                                        site = name
+                                    )
+                                )
+                            }
                             else -> {
                                 val epNum = explicitSm?.groupValues?.getOrNull(2)?.toIntOrNull()
                                     ?: epMatch?.groupValues?.getOrNull(1)?.toIntOrNull()
