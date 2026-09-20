@@ -220,5 +220,20 @@ class NameSanitizerTest {
             NameSanitizer.cleanShowFolder("Bad Boys: Ride or Die (2024)"))
         assertEquals("Bad Boys - Ride or Die (2024)",
             NameSanitizer.formatEpisodeTitle("Bad Boys: Ride or Die (2024)", 0))
+        // Standalone Movie with episodeNum=1 and various labels (no S01E01 appended)
+        assertEquals("Bad Boys - Ride or Die (2024)",
+            NameSanitizer.formatEpisodeTitle("Bad Boys: Ride or Die (2024)", 1, "Full Movie"))
+        assertEquals("The Substance (2024)",
+            NameSanitizer.formatEpisodeTitle("The Substance (2024)", 1, "Download"))
+        assertEquals("Inception (2010)",
+            NameSanitizer.formatEpisodeTitle("Inception (2010)", 1, "Server 1"))
+        assertEquals("Titanic Part 1",
+            NameSanitizer.formatEpisodeTitle("Titanic", 1, "Part 1"))
+
+        // Multi-season series with encoded episodeNum (e.g. S08E10 = 810)
+        assertEquals("All American S08E10",
+            NameSanitizer.formatEpisodeTitle("All American", 810, "Episode 10"))
+        assertEquals("All American S02E05",
+            NameSanitizer.formatEpisodeTitle("All American", 205, "S02E05"))
     }
 }

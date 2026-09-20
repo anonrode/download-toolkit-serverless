@@ -154,8 +154,13 @@ object PlutoProvider : SiteProvider {
                     val selfTitle = title
                         .replace(Regex("""(?i)\s*download\s*(mp4|mkv|hd)?\s*$"""), "")
                         .trim()
-                    val epNum = selfKey?.second ?: 1
-                    addEpisode(showUrl, selfTitle, epNum, selfKey?.let { "s${it.first}e${it.second}" } ?: showUrl)
+                    val epNum = selfKey?.let { it.first * 100 + it.second } ?: 1
+                    val epTitle = if (selfKey != null) {
+                        "S%02dE%02d".format(selfKey.first, selfKey.second)
+                    } else {
+                        selfTitle
+                    }
+                    addEpisode(showUrl, epTitle, epNum, selfKey?.let { "s${it.first}e${it.second}" } ?: showUrl)
                 }
 
                 // 2. Previous/next navigation on episode pages. Those links
@@ -176,10 +181,16 @@ object PlutoProvider : SiteProvider {
                         if (delta == 0) continue
                         val num = selfKey.second + delta
                         if (num < 1) continue
+                        val epCode = selfKey.first * 100 + num
                         val label = a.text().trim()
                             .replace(Regex("""(?i)^(previous|next)\s+episode\b\s*"""), "")
                             .trim()
-                        addEpisode(href, label, num, "s${selfKey.first}e$num")
+                        val epTitle = if (label.isBlank() || Regex("""(?i)^(episode\s*\d+|\d+)$""").matches(label)) {
+                            "S%02dE%02d".format(selfKey.first, num)
+                        } else {
+                            "S%02dE%02d - $label".format(selfKey.first, num)
+                        }
+                        addEpisode(href, epTitle, epCode, "s${selfKey.first}e$num")
                     }
                 }
 
@@ -218,16 +229,30 @@ object PlutoProvider : SiteProvider {
                         val label = a.text().trim()
                             .replace(Regex("""(?i)^(previous|next)\s+episode\b\s*"""), "")
                             .trim()
+                        val epCode = if (key != null) {
+                            key.first * 100 + key.second
+                        } else {
+                            episodes.size + 1
+                        }
+                        val epTitle = if (key != null) {
+                            if (label.isBlank() || Regex("""(?i)^(episode\s*\d+|\d+)$""").matches(label)) {
+                                "S%02dE%02d".format(key.first, key.second)
+                            } else {
+                                "S%02dE%02d - $label".format(key.first, key.second)
+                            }
+                        } else {
+                            label.ifBlank { "Episode $epCode" }
+                        }
                         addEpisode(
                             href,
-                            label,
-                            key?.second ?: (episodes.size + 1),
+                            epTitle,
+                            epCode,
                             key?.let { "s${it.first}e${it.second}" } ?: href
                         )
                     }
                 }
 
-                episodes.sortWith(compareBy({ parseEpisodeKey(it.url)?.first ?: 1 }, { it.episodeNum }))
+                episodes.sortBy { it.episodeNum }
             } else {
                 // Movie download links from the detail page. The old
                 // selectFirst kept ONLY THE FIRST anchor: a film published

@@ -243,7 +243,7 @@ object NameSanitizer {
 
     /**
      * Formats an episode file title: "{BaseShow} S{SS}E{EE}".
-     * If episodeNum <= 0, returns the clean show name (for single movies).
+     * If episodeNum <= 0, or if the link is a single/multi-part movie, returns the clean show name.
      */
     fun formatEpisodeTitle(showTitle: String, episodeNum: Int, rawEpisodeLabel: String = ""): String {
         val cleanShow = cleanShowFolder(showTitle)
@@ -251,14 +251,30 @@ object NameSanitizer {
             return safeComponent(cleanShow, maxChars = 80)
         }
 
+        val rawClean = rawEpisodeLabel.trim()
+        val partMatch = Regex("""\b(?:part|cd)\s*(\d+)\b""", RegexOption.IGNORE_CASE).find(rawClean)
+        val isMovieLabel = rawClean.matches(
+            Regex("""(?i)^(full\s*movie|movie|download(\s*\d+)?|server\s*\d+|mirror\s*\d+|link\s*\d+|watch\s*now|watch\s*movie)$""")
+        ) || rawClean.contains("Full Movie", ignoreCase = true) || rawClean.equals("Movie", ignoreCase = true)
+
         val seasonMatch = Regex(
             """\b(?:season\s*(\d+)|s(\d{1,2})|(\d+)(?:st|nd|rd|th)\s*season)\b""",
             RegexOption.IGNORE_CASE
         ).find(cleanShow)
 
-        val seasonNum = seasonMatch?.let { m ->
-            (m.groupValues[1].ifEmpty { m.groupValues[2].ifEmpty { m.groupValues[3] } }).toIntOrNull()
-        } ?: 1
+        val explicitSm = Regex("""\bS(\d{1,2})[-_]?E(\d{1,3})\b""", RegexOption.IGNORE_CASE).find(rawClean)
+        val epMatch = Regex("""\b(?:episode|ep|e)\s*(\d{1,3})\b""", RegexOption.IGNORE_CASE).find(rawClean)
+
+        // Single movie / multi-part movie detection:
+        // No season in show title, no explicit season/episode in raw label,
+        // and either labelled as a movie/server link or episodeNum <= 1 with no episode token.
+        if (seasonMatch == null && explicitSm == null && (isMovieLabel || (partMatch != null) || (epMatch == null && episodeNum <= 1 && !rawClean.contains("Episode", ignoreCase = true)))) {
+            return if (partMatch != null) {
+                safeComponent("$cleanShow Part ${partMatch.groupValues[1]}", maxChars = 80)
+            } else {
+                safeComponent(cleanShow, maxChars = 80)
+            }
+        }
 
         var baseShow = cleanShow.replace(
             Regex("""\s*\b(?:season\s*\d+|s\d{1,2}|\d+(?:st|nd|rd|th)\s*season)\b""", RegexOption.IGNORE_CASE),
@@ -267,8 +283,19 @@ object NameSanitizer {
         baseShow = baseShow.replace(Regex("""[\s._\-–—]+$"""), "").trim()
         if (baseShow.isBlank()) baseShow = cleanShow
 
+        // Season number: prioritize explicit SxxExx in raw label, then show title match, then episodeNum / 100
+        val seasonNum = explicitSm?.groupValues?.getOrNull(1)?.toIntOrNull()
+            ?: seasonMatch?.let { m ->
+                (m.groupValues[1].ifEmpty { m.groupValues[2].ifEmpty { m.groupValues[3] } }).toIntOrNull()
+            }
+            ?: if (episodeNum >= 100) (episodeNum / 100) else 1
+
+        val finalEpNum = explicitSm?.groupValues?.getOrNull(2)?.toIntOrNull()
+            ?: epMatch?.groupValues?.getOrNull(1)?.toIntOrNull()
+            ?: if (episodeNum >= 100) (episodeNum % 100) else episodeNum
+
         val s = seasonNum.toString().padStart(2, '0')
-        val e = episodeNum.toString().padStart(2, '0')
+        val e = finalEpNum.toString().padStart(2, '0')
         return safeComponent("$baseShow S${s}E${e}", maxChars = 80)
     }
 
