@@ -25,8 +25,9 @@ class TrendingFeedParseTest {
 
     @Test
     fun `parseWpRestPosts strips title tags and reads both poster shapes`() {
-        // title.rendered tag-stripping is the existing behavior; WP entity
-        // escapes (&amp; etc.) are NOT decoded anywhere today.
+        // title.rendered tag-stripping is the existing behavior; entity
+        // escapes (&amp; etc.) and scraper decoration junk are now cleaned
+        // at card construction via NameSanitizer (cleanCardTitle).
         val json = """[${
             post("The <b>Movie</b> (2026)", "https://nk.test/scary/", "watch it", poster = "https://nk.test/a.jpg")
         },${
@@ -47,6 +48,69 @@ class TrendingFeedParseTest {
         assertTrue(TrendingFeed.parseWpRestPosts(json, "nkiri").isEmpty())
         assertTrue(TrendingFeed.parseWpRestPosts("not json", "nkiri").isEmpty())
         assertTrue(TrendingFeed.parseWpRestPosts("""[{"nope":1}]""", "nkiri").isEmpty())
+    }
+
+    // ---- cleanCardTitle (NameSanitizer on feed titles) ----------------------
+
+    @Test
+    fun `parseWpRestPosts strips scraper junk and decodes entities in card titles`() {
+        val json = """[${post("Bloodhounds [Episode 1-16 Complete]", "https://nk.test/bh/", "b")},${
+            post("Tom &amp; Jerry &#8211; The Movie", "https://nk.test/tj/", "b")
+        }]"""
+        val posts = TrendingFeed.parseWpRestPosts(json, "nkiri")
+        assertEquals(listOf("Bloodhounds", "Tom & Jerry – The Movie"), posts.map { it.card.title })
+    }
+
+    @Test
+    fun `parseWpRestPosts falls back to the raw title when cleaning blanks it`() {
+        // The whole title IS decoration ("_Watch Online_"): cleanTitle
+        // correctly strips it to nothing — the card must keep the raw string
+        // rather than vanish from the row.
+        val posts = TrendingFeed.parseWpRestPosts("[${post("_Watch Online_", "https://nk.test/wo/", "b")}]", "nkiri")
+        assertEquals(listOf("_Watch Online_"), posts.map { it.card.title })
+    }
+
+    @Test
+    fun `parseWpRestPosts cleans the title but keeps taxonomy terms raw`() {
+        val json = "[${postWithTerms(
+            "Solo Leveling [Episode 1-8 Added]", "https://nk.test/sl/",
+            "links: https://downloadwella.com/f/2", listOf(listOf("K-Drama", "Sci-Fi"))
+        )}]"
+        val post = TrendingFeed.parseWpRestPosts(json, "nkiri")[0]
+        assertEquals("Solo Leveling", post.card.title)
+        // Terms feed ExplicitContentFilter + genreConfirmed — never cleaned.
+        assertEquals(listOf("K-Drama", "Sci-Fi"), post.terms)
+    }
+
+    @Test
+    fun `parseRssItems cleans titles while categories stay raw for genre confirmation`() {
+        fun item(title: String, link: String, cat: String, img: String, body: String) =
+            "<item><title><![CDATA[$title]]></title><link>$link</link>" +
+                "<category><![CDATA[$cat]]></category>" +
+                "<content:encoded><![CDATA[<img src=\"$img\">$body]]></content:encoded></item>"
+        val xml = "<rss><channel>" +
+            item("Alien Wave [Episode 1-8 Added]", "https://9ja.test/alien/", "Sci-Fi", "https://9ja.test/a.jpg", "dl https://downloadwella.com/f/9") +
+            "</channel></rss>"
+        // Ungated: title cleaned, bracket junk gone.
+        assertEquals(listOf("Alien Wave"), TrendingFeed.parseRssItems(xml, "9jarocks", "https://9ja.test").map { it.title })
+        // Gated: the RAW category still confirms the genre even though the
+        // cleaned title no longer carries any genre wording.
+        val gated = TrendingFeed.parseRssItems(xml, "9jarocks", "https://9ja.test", setOf("scifi"))
+        assertEquals(listOf("Alien Wave"), gated.map { it.title })
+    }
+
+    @Test
+    fun `parseAsiancResults and parseNepuResults clean card titles`() {
+        val asianc = TrendingFeed.parseAsiancResults(
+            """[{"url":"/drama/ml/","name":"My Love (K-Drama)","cover":""}]""",
+            "asianc", "https://ac.test"
+        )
+        assertEquals(listOf("My Love"), asianc.map { it.title })
+        val nepu = TrendingFeed.parseNepuResults(
+            """{"results":[{"id":"1","media_type":"movie","title":"Fight Club 2 _Watch Online_","poster_path":""}]}""",
+            "nepu", "https://nepu.test"
+        )
+        assertEquals(listOf("Fight Club 2"), nepu.map { it.title })
     }
 
     @Test

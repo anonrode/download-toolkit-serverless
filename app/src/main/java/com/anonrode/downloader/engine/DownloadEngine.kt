@@ -41,6 +41,14 @@ class DownloadEngine(
     private val ASIAN_DRAMA_CLUSTER = setOf("asianc", "dramarain", "dramakey", "pluto", "nepu")
     private val WESTERN_CLUSTER = setOf("nkiri", "9jarocks", "naijavault", "naijaprey")
     private val DEDICATED_ASIAN_SITES = setOf("asianc", "dramarain", "dramakey")
+    // Secondary Asian-failover targets: mixed Western-cluster sites with PROVEN
+    // Asian catalogs (coverage probe 2026-09-20: 50 random Asian series,
+    // search-only — 9jarocks 98%, nkiri 62%, and a 6/6 rescue rate on titles
+    // ALL dedicated sites missed). Reached ONLY by Asian tasks, and tried at
+    // EQUAL RANK with Asian-cluster cards: exact title match + HostHealth
+    // decide (deliberate choice — no secondary-tier penalty). Western tasks
+    // never touch the dedicated sites; that one-way door stays shut.
+    private val SECONDARY_ASIAN_FALLBACK = setOf("nkiri", "9jarocks")
     private val YEAR_REGEX = Regex("""\b(19\d\d|20[0-3]\d)\b""")
 
     private val engineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -786,9 +794,11 @@ class DownloadEngine(
         )
 
         // 4-Layer "Suits" Remake Guard - Layer 1: Genre / Cluster Boundary Guard
-        // If isAsian: candidates filtered to ASIAN_DRAMA_CLUSTER.
+        // If isAsian: candidates filtered to ASIAN_DRAMA_CLUSTER plus the proven
+        // mixed-site secondaries (nkiri/9jarocks). Every candidate still faces
+        // Layers 2-4 (year, country tag, season/episode) below.
         // If not isAsian: candidates filtered to WESTERN_CLUSTER (must not query DEDICATED_ASIAN_SITES).
-        val allowedCluster = if (isAsian) ASIAN_DRAMA_CLUSTER else WESTERN_CLUSTER
+        val allowedCluster = if (isAsian) ASIAN_DRAMA_CLUSTER + SECONDARY_ASIAN_FALLBACK else WESTERN_CLUSTER
 
         // Search eligible providers in parallel, each bounded; skip hosts
         // currently in backoff so a failover never lands on another dead site.
@@ -823,7 +833,7 @@ class DownloadEngine(
                 val candSite = card.site.lowercase()
                 // Layer 1: Genre / Cluster Boundary Guard on candidate card
                 val clusterMatch = if (isAsian) {
-                    candSite in ASIAN_DRAMA_CLUSTER
+                    candSite in ASIAN_DRAMA_CLUSTER || candSite in SECONDARY_ASIAN_FALLBACK
                 } else {
                     candSite in WESTERN_CLUSTER && candSite !in DEDICATED_ASIAN_SITES
                 }
@@ -845,8 +855,13 @@ class DownloadEngine(
                     return@filter false
                 }
 
-                // Layer 3: Country Tag Matching
-                val candCountry = extractCountry("${card.title} ${card.category}", card.site)
+                // Layer 3: Country Tag Matching.
+                // Mixed-site secondaries (nkiri/9jarocks) must prove country by
+                // EXPLICIT tag only: extractCountry's site-default WESTERN would
+                // auto-reject an untagged K-drama card on nkiri — the exact
+                // content this failover exists to rescue. No explicit tag means
+                // UNKNOWN here, and UNKNOWN never rejects.
+                val candCountry = extractFailoverCountry(isAsian, "${card.title} ${card.category}", card.site)
                 if (origCountry != DramaCountry.UNKNOWN && candCountry != DramaCountry.UNKNOWN && origCountry != candCountry) {
                     com.anonrode.downloader.util.DebugLog.resolve(
                         "task=${task.id} failover: rejected card \"${card.title}\" due to country mismatch (orig=$origCountry, cand=$candCountry)"
@@ -870,16 +885,25 @@ class DownloadEngine(
                 true
             }
             // Exact title match first, then a provider whose host has proven
-            // itself in the ledger, then everything else.
+            // itself in the ledger, then country agreement (Asian tasks: an
+            // explicitly-tagged same-country card is probed before an
+            // untagged one), then everything else.
+            val agreeWith: Map<com.anonrode.downloader.data.models.ShowCard, Boolean> =
+                ranked.associateWith { card ->
+                    isAsian && origCountry != DramaCountry.UNKNOWN &&
+                        extractFailoverCountry(true, "${card.title} ${card.category}", card.site) == origCountry
+                }
+            val ordered = ranked
             .sortedWith(
                 compareByDescending<com.anonrode.downloader.data.models.ShowCard> { normalizeTitleQuery(it.title) == normQuery }
                     .thenByDescending { com.anonrode.downloader.pipeline.HostHealth.hasProvenLocker(it.url) }
+                    .thenByDescending { agreeWith[it] == true }
             )
             .toList()
 
         // Hard deadline for the whole failover (episode lookups included).
         val failoverDeadline = System.currentTimeMillis() + 60_000L
-        for (card in ranked) {
+        for (card in ordered) {
             if (System.currentTimeMillis() > failoverDeadline) break
             var newMirrors = emptyList<String>()
             val newUrl: String? = if (origEpNum > 0) {
@@ -985,7 +1009,13 @@ class DownloadEngine(
         return YEAR_REGEX.find(text)?.groupValues?.get(1)?.toIntOrNull()
     }
 
-    internal fun extractCountry(text: String, site: String = ""): DramaCountry {
+    // Keyword-only country read: the same tag vocabulary as the historical
+    // extractCountry, WITHOUT the site-default tail. Used by failover for
+    // mixed-site secondaries, where the WESTERN site default is actively
+    // wrong (an nkiri K-drama card is not a Western show). Untagged text is
+    // UNKNOWN, and UNKNOWN never rejects in Layer 3 — explicit tags still
+    // do (a Hollywood-tagged card on 9jarocks loses to a Korean task).
+    internal fun extractExplicitCountry(text: String): DramaCountry {
         val lower = text.lowercase()
         return when {
             lower.contains("korean") || lower.contains("k-drama") || lower.contains("kdrama") ||
@@ -999,9 +1029,27 @@ class DownloadEngine(
                 lower.contains("th-drama") -> DramaCountry.THAI
             lower.contains("western") || lower.contains("hollywood") || lower.contains("american") ||
                 lower.contains("nollywood") -> DramaCountry.WESTERN
+            else -> DramaCountry.UNKNOWN
+        }
+    }
+
+    internal fun extractCountry(text: String, site: String = ""): DramaCountry {
+        val explicit = extractExplicitCountry(text)
+        if (explicit != DramaCountry.UNKNOWN) return explicit
+        return when {
             WESTERN_CLUSTER.contains(site.lowercase()) -> DramaCountry.WESTERN
             else -> DramaCountry.UNKNOWN
         }
+    }
+
+    // Layer-3 country read for cross-provider failover: identical to
+    // extractCountry EXCEPT an Asian task reading a mixed-site secondary
+    // card (nkiri/9jarocks) skips the WESTERN site default.
+    internal fun extractFailoverCountry(isAsian: Boolean, text: String, site: String = ""): DramaCountry {
+        if (isAsian && site.lowercase() in SECONDARY_ASIAN_FALLBACK) {
+            return extractExplicitCountry(text)
+        }
+        return extractCountry(text, site)
     }
 
     internal fun isAsianDramaContext(task: DownloadTask): Boolean {
