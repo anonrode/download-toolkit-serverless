@@ -1019,11 +1019,19 @@ object YoutubeDlDownloader {
         val aria2Exec = findAria2Executable(context)
             ?: throw IllegalStateException("aria2c binary missing: libaria2c.so not found in native libs")
 
+        val stem = preferredFilename.substringBeforeLast('.')
+        val existingPartial = targetDir.listFiles { f ->
+            (f.name == preferredFilename || f.nameWithoutExtension == stem) &&
+            f.length() > 0 && !f.name.endsWith(".aria2") && !f.name.endsWith(".part") && !f.name.endsWith(".turbo")
+        }?.firstOrNull()
+        val effOutputName = existingPartial?.name ?: preferredFilename
+
         val cmd = mutableListOf(
             aria2Exec.absolutePath,
             "-c",
             "-d", targetDir.absolutePath,
-            "-o", preferredFilename,
+            "-o", effOutputName,
+            "--file-allocation=none",
             "--check-certificate=false",
             "--summary-interval=1",
             "--max-tries=5",
@@ -1040,10 +1048,10 @@ object YoutubeDlDownloader {
                 url.contains("kissorgrab.com", ignoreCase = true) ||
                 parallelSockets <= 1
         if (isSingleSocketHost) {
-            cmd += listOf("-s", "1", "-x", "1", "-j", "1")
+            cmd += listOf("-s", "1", "-x", "1", "-j", "1", "--max-connection-per-server=1")
         } else {
             val sockets = parallelSockets.coerceIn(1, 16)
-            cmd += listOf("-s", "$sockets", "-x", "$sockets", "--min-split-size=1M")
+            cmd += listOf("-s", "$sockets", "-x", "$sockets", "-j", "$sockets", "--max-connection-per-server=$sockets", "--min-split-size=1M")
         }
 
         if (ua.isNotBlank()) {
@@ -1132,9 +1140,8 @@ object YoutubeDlDownloader {
 
             val candidates = targetDir.listFiles { f -> isFinal(f) }?.toList() ?: emptyList()
             val fresh = candidates.filter { it.absolutePath !in before }
-            val stem = preferredFilename.substringBeforeLast('.')
-            val found = fresh.firstOrNull { it.name == preferredFilename || it.nameWithoutExtension == stem }
-                ?: candidates.firstOrNull { it.name == preferredFilename || it.nameWithoutExtension == stem }
+            val found = fresh.firstOrNull { it.name == effOutputName || it.name == preferredFilename || it.nameWithoutExtension == stem }
+                ?: candidates.firstOrNull { it.name == effOutputName || it.name == preferredFilename || it.nameWithoutExtension == stem }
                 ?: fresh.maxByOrNull { it.lastModified() }
 
             if (found != null && !File(found.absolutePath + ".aria2").exists()) {
