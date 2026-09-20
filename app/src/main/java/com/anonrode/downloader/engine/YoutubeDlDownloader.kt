@@ -181,25 +181,35 @@ object YoutubeDlDownloader {
         }
 
         // Direct HTTP downloads explicitly routed to aria2c (CDNs, movie lockers, etc.).
-        // Native aria2c executable handles HTTP downloads directly without invoking yt-dlp.
+        // Native aria2c executable handles HTTP downloads directly. If aria2c fails,
+        // it falls through to yt-dlp as the final, final safety net.
         if (backend.equals("aria2c", true) && !isM3u8 && !isExtractorTask) {
             val aria2Exec = findAria2Executable(context)
             if (aria2Exec != null) {
-                return downloadHttpAria2c(
-                    context = context,
-                    taskId = taskId,
-                    url = sourceUrl,
-                    targetDir = targetDir,
-                    preferredFilename = preferredFilename,
-                    referer = referer,
-                    ua = if (ua.isNotBlank()) ua else com.anonrode.downloader.data.net.HttpClient.DEFAULT_UA,
-                    customHeaders = customHeaders,
-                    parallelSockets = parallelSockets,
-                    speedLimitKbs = speedLimitKbs,
-                    maxAttempts = ytdlpMaxAttempts,
-                    onProgress = onProgress,
-                    isActiveCheck = { coroutineContext.isActive }
-                )
+                try {
+                    val file = downloadHttpAria2c(
+                        context = context,
+                        taskId = taskId,
+                        url = sourceUrl,
+                        targetDir = targetDir,
+                        preferredFilename = preferredFilename,
+                        referer = referer,
+                        ua = if (ua.isNotBlank()) ua else com.anonrode.downloader.data.net.HttpClient.DEFAULT_UA,
+                        customHeaders = customHeaders,
+                        parallelSockets = parallelSockets,
+                        speedLimitKbs = speedLimitKbs,
+                        maxAttempts = ytdlpMaxAttempts,
+                        onProgress = onProgress,
+                        isActiveCheck = { coroutineContext.isActive }
+                    )
+                    if (file != null) return file
+                } catch (ce: CancellationException) {
+                    throw ce
+                } catch (e: Exception) {
+                    com.anonrode.downloader.util.DebugLog.backend(
+                        "task=$taskId aria2c HTTP failed (${e.message}), falling back to yt-dlp as final fallback"
+                    )
+                }
             }
         }
 
@@ -309,25 +319,19 @@ object YoutubeDlDownloader {
                 addOption("--abort-on-unavailable-fragments")
                 if (speedLimitKbs > 0) addOption("--limit-rate", "${speedLimitKbs}K")
             } else {
-                // Direct CDN HTTP multi-socket via aria2c
+                // Direct CDN HTTP fallback via yt-dlp native chunked engine
                 val stem = File(outDir, preferredFilename.substringBeforeLast('.')).absolutePath
                 val ext = File(preferredFilename).extension.ifBlank { "mp4" }
                 val safeExt = if (ext.equals("matroska", ignoreCase = true)) "mkv" else ext
                 addOption("-o", "$stem.$safeExt")
-                addOption("--downloader", "libaria2c.so")
                 val conns = parallelSockets.coerceIn(1, 16)
-                val aria2Args = buildString {
-                    // --max-tries/--retry-wait mirror the magnet path: without them
-                    // aria2c hammers a flaky connection 5x with zero wait.
-                    append("aria2c:-x $conns -s $conns -j $conns -k 1M --max-connection-per-server=$conns --split=$conns --min-split-size=1M --continue=true --max-tries=10 --retry-wait=1 --disk-cache=64M")
-                    if (origin.isNotBlank()) append(" --header=\"Origin: $origin\"")
-                    if (referer.isNotBlank()) append(" --header=\"Referer: $referer\"")
-                    if (ua.isNotBlank()) append(" --header=\"User-Agent: $ua\"")
-                    append(" --header=\"Accept: video/mp4,video/x-matroska,video/*,*/*\"")
-                    append(" --check-certificate=false")
-                    append(" --summary-interval=1")
-                }
-                addOption("--downloader-args", aria2Args)
+                addOption("-N", "$conns")
+                addOption("--concurrent-fragments", "$conns")
+                addOption("--buffer-size", "1M")
+                addOption("--http-chunk-size", "2M")
+                addOption("--socket-timeout", "15")
+                addOption("--retries", "10")
+                if (speedLimitKbs > 0) addOption("--limit-rate", "${speedLimitKbs}K")
             }
 
             addOption("--no-mtime")
