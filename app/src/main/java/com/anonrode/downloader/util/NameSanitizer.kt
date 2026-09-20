@@ -254,7 +254,7 @@ object NameSanitizer {
         val rawClean = rawEpisodeLabel.trim()
         val partMatch = Regex("""\b(?:part|cd)\s*(\d+)\b""", RegexOption.IGNORE_CASE).find(rawClean)
         val isMovieLabel = rawClean.matches(
-            Regex("""(?i)^(full\s*movie|movie|download(\s*\d+)?|server\s*\d+|mirror\s*\d+|link\s*\d+|watch\s*now|watch\s*movie)$""")
+            Regex("""^(full\s*movie|movie|download(\s*\d+)?|server\s*\d+|mirror\s*\d+|link\s*\d+|watch\s*now|watch\s*movie)$""", RegexOption.IGNORE_CASE)
         ) || rawClean.contains("Full Movie", ignoreCase = true) || rawClean.equals("Movie", ignoreCase = true)
 
         val seasonMatch = Regex(
