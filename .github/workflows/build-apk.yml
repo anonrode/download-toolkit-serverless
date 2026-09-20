@@ -61,7 +61,17 @@ jobs:
           gradle-version: '8.8'
 
       - name: Run Unit Tests
-        run: gradle :app:testDebugUnitTest --no-daemon
+        run: |
+          gradle :app:testDebugUnitTest --no-daemon || {
+            echo "::error::Unit tests failed! Dumping test failure XML reports:"
+            for f in $(find app/build/test-results/testDebugUnitTest/ -name "*.xml" 2>/dev/null); do
+              if grep -q '<failure' "$f"; then
+                echo "================ FAILURE IN $f ================"
+                cat "$f"
+              fi
+            done
+            exit 1
+          }
 
       - name: Upload Test Results
         if: always()
