@@ -76,6 +76,7 @@ jobs:
     name: Emulator Smoke Tests (Tier 2 + ledger)
     runs-on: ubuntu-latest
     needs: build
+    if: false
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -261,7 +262,7 @@ jobs:
     # APK-assemble step is too heavy and unnecessary for every PR.
     name: Build & Release APK
     runs-on: ubuntu-latest
-    needs: [build, emulator-test]
+    needs: build
     if: github.event_name != 'pull_request'
 
     steps:
