@@ -3,6 +3,7 @@ package com.anonrode.downloader.providers
 import com.anonrode.downloader.data.models.ShowCard
 import com.anonrode.downloader.data.net.HttpClient
 import com.anonrode.downloader.data.rules.DynamicRulesManager
+import com.anonrode.downloader.util.NameSanitizer
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -32,6 +33,21 @@ object TrendingFeed {
     private const val PER_SITE_LIMIT = 8
     private const val ROW_LIMIT = 16
     private const val TIMEOUT_MS = 7000L
+
+    /**
+     * Card-title hygiene for every feed parser below: scraped titles carry
+     * site decoration junk ("[Episode 1-16 Complete]", "_Watch Online_",
+     * "(Korean Drama)") and entity escapes ("&#8211;") straight into the
+     * Home UI, and their per-site variants defeat the cross-site dedup in
+     * [mergeRoundRobin] / CategoryFeed.mixCards ("Show (Korean Drama)" vs
+     * "Show" never key equal). Running the standard noise layer aligns the
+     * variants so the same show dedupes across sites and reads like a title.
+     * `.ifBlank { raw }` is the hard floor: a title can never vanish.
+     * Taxonomy terms (wp:term, RSS <category>) deliberately stay RAW — the
+     * explicit filter and genreConfirmed alias matching read them as-is.
+     */
+    private fun cleanCardTitle(raw: String): String =
+        NameSanitizer.cleanTitle(raw).ifBlank { raw }
 
     /** Same nav-pattern NaijaPreyProvider uses to drop category pages. */
     private val NAV_GARBAGE = Regex(
@@ -208,7 +224,7 @@ object TrendingFeed {
                 if (title.isNotBlank() && link.isNotBlank()) {
                     out.add(
                         RestPost(
-                            card = ShowCard(title = title, url = link, posterUrl = poster, site = site),
+                            card = ShowCard(title = cleanCardTitle(title), url = link, posterUrl = poster, site = site),
                             body = item.optJSONObject("content")?.optString("rendered") ?: "",
                             terms = terms
                         )
@@ -278,13 +294,16 @@ object TrendingFeed {
         try {
             val doc = Jsoup.parse(xml, "", org.jsoup.parser.Parser.xmlParser())
             for (item in doc.select("item")) {
-                val title = item.selectFirst("title")?.text()
+                val rawTitle = item.selectFirst("title")?.text()
                     ?.replace("<![CDATA[", "")?.replace("]]>", "")?.trim() ?: ""
                 val link = item.selectFirst("link")?.text()?.trim() ?: ""
                 val desc = item.selectFirst("content|encoded")?.text()
                     ?: item.selectFirst("description")?.text() ?: ""
                 val cats = item.select("category").map { it.text().trim() }.filter { it.isNotBlank() }
-                if (filterExplicit && com.anonrode.downloader.util.ExplicitContentFilter.isExplicit(title, cats)) {
+                // Explicit filter keeps reading the RAW title + raw categories —
+                // cleanCardTitle strips decoration words, and a filter that only
+                // sees the cleaned string would miss a term the site decorated.
+                if (filterExplicit && com.anonrode.downloader.util.ExplicitContentFilter.isExplicit(rawTitle, cats)) {
                     continue
                 }
                 // First <img> = the _Poster.jpg, and it STAYS that way on
@@ -298,8 +317,8 @@ object TrendingFeed {
                     """<img[^>]+src=["']([^"']+\.(?:jpg|jpeg|png|webp)[^"']*)["']""",
                     RegexOption.IGNORE_CASE
                 ).find(desc)?.groupValues?.get(1) ?: ""
-                if (title.isNotBlank() && link.isNotBlank() && !NAV_GARBAGE.containsMatchIn(link)) {
-                    val card = ShowCard(title = title, url = link, posterUrl = poster, site = site)
+                if (rawTitle.isNotBlank() && link.isNotBlank() && !NAV_GARBAGE.containsMatchIn(link)) {
+                    val card = ShowCard(title = cleanCardTitle(rawTitle), url = link, posterUrl = poster, site = site)
                     if (DownloadLinkGate.hasDownloadLink(desc)) out.add(card to cats) else noLinks.add(card to cats)
                 }
             }
@@ -362,7 +381,7 @@ object TrendingFeed {
                 if (id.isBlank() || title.isBlank()) continue
                 out.add(
                     ShowCard(
-                        title = title,
+                        title = cleanCardTitle(title),
                         url = "$base/watch/$type/$id",
                         posterUrl = if (posterPath.isBlank()) "" else "https://image.tmdb.org/t/p/w342$posterPath",
                         site = site,
@@ -388,7 +407,7 @@ object TrendingFeed {
                 if (rawUrl.isBlank() || title.isBlank()) continue
                 out.add(
                     ShowCard(
-                        title = title,
+                        title = cleanCardTitle(title),
                         url = if (rawUrl.startsWith("/")) "$base$rawUrl" else rawUrl,
                         posterUrl = cover,
                         site = site,

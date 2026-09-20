@@ -23,6 +23,10 @@ ENGINE_PATH = ROOT / "app/src/main/java/com/anonrode/downloader/engine/DownloadE
 ASIAN_DRAMA_CLUSTER = {"asianc", "dramarain", "dramakey", "pluto", "nepu"}
 WESTERN_CLUSTER = {"nkiri", "9jarocks", "naijavault", "naijaprey"}
 DEDICATED_ASIAN_SITES = {"asianc", "dramarain", "dramakey"}
+# Proven mixed-site secondaries (coverage probe 2026-09-20, search-only over
+# 50 random Asian series: 9jarocks 98%, nkiri 62%, 6/6 rescue rate on titles
+# all dedicated sites missed). Asian tasks may reach them at EQUAL rank.
+SECONDARY_ASIAN_FALLBACK = {"nkiri", "9jarocks"}
 YEAR_REGEX = re.compile(r"\b(19\d\d|20[0-3]\d)\b")
 PART_REGEX = re.compile(r"\b(?:part|chapter|pt)[\s._-]?(\d+|[ivx]+)\b", re.I)
 
@@ -61,6 +65,36 @@ def extract_country(text: str, site: str = "") -> str:
     if site.lower() in WESTERN_CLUSTER:
         return DramaCountry.WESTERN
     return DramaCountry.UNKNOWN
+
+
+def extract_explicit_country(text: str) -> str:
+    """Keyword-only country read — same tag vocabulary as extract_country,
+    WITHOUT the site-default tail. Mirror of DownloadEngine.extractExplicitCountry."""
+    lower = text.lower()
+    if any(k in lower for k in ("korean", "k-drama", "kdrama", "k drama", "korea")):
+        return DramaCountry.KOREAN
+    if any(k in lower for k in ("chinese", "c-drama", "cdrama", "c drama", "china")):
+        return DramaCountry.CHINESE
+    if any(k in lower for k in ("japanese", "j-drama", "jdrama", "j drama", "japan")):
+        return DramaCountry.JAPANESE
+    if any(k in lower for k in ("taiwanese", "tw-drama", "taiwan")):
+        return DramaCountry.TAIWANESE
+    if any(k in lower for k in ("thai", "thailand", "lakorn", "th-drama")):
+        return DramaCountry.THAI
+    if any(k in lower for k in ("western", "hollywood", "american", "nollywood")):
+        return DramaCountry.WESTERN
+    return DramaCountry.UNKNOWN
+
+
+def extract_failover_country(is_asian: bool, text: str, site: str = "") -> str:
+    """Layer-3 country read for cross-provider failover. Mirror of
+    DownloadEngine.extractFailoverCountry: an Asian task reading a
+    mixed-site secondary skips the WESTERN site default (untagged text is
+    UNKNOWN there and never rejects); every other case is plain
+    extract_country."""
+    if is_asian and site.lower() in SECONDARY_ASIAN_FALLBACK:
+        return extract_explicit_country(text)
+    return extract_country(text, site)
 
 
 def is_asian_drama_context(site: str, show_title: str, ep_title: str = "", source_url: str = "") -> bool:
@@ -165,9 +199,11 @@ def evaluate_failover_candidate(
     is_asian = is_asian_drama_context(orig_site, orig_show_title, orig_ep_title)
     cand_site_low = cand_site.lower()
 
-    # Layer 1: Genre / Cluster Boundary Guard
+    # Layer 1: Genre / Cluster Boundary Guard. Asian tasks reach the Asian
+    # cluster PLUS the proven mixed-site secondaries (nkiri/9jarocks); the
+    # Western one-way door (never query dedicated Asian sites) stays shut.
     if is_asian:
-        if cand_site_low not in ASIAN_DRAMA_CLUSTER:
+        if cand_site_low not in ASIAN_DRAMA_CLUSTER and cand_site_low not in SECONDARY_ASIAN_FALLBACK:
             return False
     else:
         if cand_site_low not in WESTERN_CLUSTER or cand_site_low in DEDICATED_ASIAN_SITES:
@@ -184,9 +220,10 @@ def evaluate_failover_candidate(
     if orig_year is not None and cand_year is not None and orig_year != cand_year:
         return False
 
-    # Layer 3: Country Tag Matching
+    # Layer 3: Country Tag Matching. Mixed-site secondaries prove country by
+    # explicit tag only — untagged text is UNKNOWN there, never a rejection.
     orig_country = extract_country(f"{orig_show_title} {orig_ep_title}", orig_site)
-    cand_country = extract_country(f"{cand_show_title} {cand_category}", cand_site)
+    cand_country = extract_failover_country(is_asian, f"{cand_show_title} {cand_category}", cand_site)
     if orig_country != DramaCountry.UNKNOWN and cand_country != DramaCountry.UNKNOWN and orig_country != cand_country:
         return False
 
@@ -334,8 +371,15 @@ class FederatedFailoverTestSuite(unittest.TestCase):
     # --------------------------------------------------------------------------
 
     def test_layer1_genre_cluster_boundary(self):
-        """Layer 1: Prevents cross-cluster queries and candidate matching."""
-        # Asian Suits on AsianC attempting failover to Nkiri
+        """Layer 1: cluster boundary with the proven mixed-site secondaries.
+
+        Asian tasks reach the Asian cluster PLUS nkiri/9jarocks (coverage
+        probe 2026-09-20): an untagged "Suits" on asianc IS rescuable from
+        nkiri now — the old hard-reject would strand it. The Western
+        one-way door (never query dedicated Asian sites) is unchanged.
+        """
+        # Asian Suits on AsianC failing over to Nkiri: rescued (was a
+        # hard reject before the secondary-fallback expansion).
         cand_nkiri = evaluate_failover_candidate(
             orig_site="asianc",
             orig_show_title="Suits",
@@ -348,7 +392,21 @@ class FederatedFailoverTestSuite(unittest.TestCase):
             cand_total_episodes=16,
             cand_episodes=[(1, "Episode 1", "https://nkiri.com/ep1")]
         )
-        self.assertFalse(cand_nkiri, "Asian drama on AsianC must not match Western candidate on Nkiri")
+        self.assertTrue(cand_nkiri, "Untagged Asian Suits must be rescuable from Nkiri")
+        # Explicitly Western-tagged candidate still loses to the Asian task.
+        cand_western_tag = evaluate_failover_candidate(
+            orig_site="asianc",
+            orig_show_title="Suits (Korean Drama)",
+            orig_ep_title="Episode 1",
+            orig_ep_num=1,
+            cand_site="nkiri",
+            cand_show_title="Suits (Hollywood)",
+            cand_year_str="2011",
+            cand_category="Series",
+            cand_total_episodes=16,
+            cand_episodes=[(1, "Suits S01E01", "https://nkiri.com/ep1")]
+        )
+        self.assertFalse(cand_western_tag, "Hollywood tag must still block the match")
 
     def test_layer2_release_year_matching(self):
         """Layer 2: Reject remake / sequel when both declare years and they differ."""
@@ -454,3 +512,139 @@ class FederatedFailoverTestSuite(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+    # --------------------------------------------------------------------------
+    # 5. Secondary Asian fallback (nkiri / 9jarocks, coverage probe 2026-09-20)
+    # --------------------------------------------------------------------------
+
+    def test_asian_task_reaches_nkiri_and_9jarocks(self):
+        """Asian tasks may fail over onto the proven mixed-site secondaries."""
+        for site, ep in (("nkiri", 5), ("9jarocks", 105)):
+            cand = evaluate_failover_candidate(
+                orig_site="asianc",
+                orig_show_title="Queen of Tears",
+                orig_ep_title="Episode 5",
+                orig_ep_num=5,
+                cand_site=site,
+                cand_show_title="Queen of Tears",
+                cand_year_str="2024",
+                cand_category="Series",
+                cand_total_episodes=16,
+                cand_episodes=[(ep, "Queen of Tears Episode 5", f"https://{site}/ep5")],
+            )
+            self.assertTrue(cand, f"Asian task must reach {site} secondary")
+
+    def test_secondary_rescues_untagged_nkiri_card(self):
+        """Untagged nkiri K-drama card: no WESTERN site-default poisoning."""
+        self.assertEqual(
+            extract_failover_country(True, "Queen of Tears Series", "nkiri"),
+            DramaCountry.UNKNOWN,
+        )
+        # ...while the same untagged card is still WESTERN under the plain read.
+        self.assertEqual(
+            extract_country("Queen of Tears Series", "nkiri"),
+            DramaCountry.WESTERN,
+        )
+        cand = evaluate_failover_candidate(
+            orig_site="asianc",
+            orig_show_title="Queen of Tears (Korean Drama)",
+            orig_ep_title="Episode 5",
+            orig_ep_num=5,
+            cand_site="nkiri",
+            cand_show_title="Queen of Tears",
+            cand_year_str="2024",
+            cand_category="Series",
+            cand_total_episodes=16,
+            cand_episodes=[(5, "Queen of Tears Episode 5", "https://nkiri/ep5")],
+        )
+        self.assertTrue(cand, "Untagged nkiri card must NOT be country-rejected")
+
+    def test_secondary_explicit_western_tag_still_rejects(self):
+        """Explicit Hollywood tag on a mixed site still loses to a Korean task."""
+        cand = evaluate_failover_candidate(
+            orig_site="asianc",
+            orig_show_title="Suits (Korean Drama)",
+            orig_ep_title="Episode 1",
+            orig_ep_num=1,
+            cand_site="9jarocks",
+            cand_show_title="Suits (Hollywood)",
+            cand_year_str="2011",
+            cand_category="Series",
+            cand_total_episodes=16,
+            cand_episodes=[(101, "Suits S01E01", "https://9jarocks/ep101")],
+        )
+        self.assertFalse(cand, "Hollywood-tagged card must lose to a Korean task")
+
+    def test_secondary_western_door_stays_shut(self):
+        """Western tasks still never touch dedicated Asian sites."""
+        for dedicated in ("asianc", "dramarain", "dramakey"):
+            cand = evaluate_failover_candidate(
+                orig_site="nkiri",
+                orig_show_title="Suits",
+                orig_ep_title="Episode 3",
+                orig_ep_num=3,
+                cand_site=dedicated,
+                cand_show_title="Suits",
+                cand_year_str="2011",
+                cand_category="Drama",
+                cand_total_episodes=16,
+                cand_episodes=[(3, "Episode 3", f"https://{dedicated}/ep3")],
+            )
+            self.assertFalse(cand, f"Western task must NEVER reach {dedicated}")
+
+    def test_secondary_tagged_card_outranks_untagged(self):
+        """Probe-backed ranking: an explicitly-tagged same-country card must
+        sort (probe-for-load-episodes order) ahead of an untagged twin —
+        70% of real nkiri cards carry tags, so the likely-right card goes
+        first without rejecting anything.
+        """
+        def order_key(card_title, card_site, norm_query, proven, orig_country):
+            cand = extract_failover_country(True, card_title, card_site)
+            return (
+                normalize_title(card_title) == norm_query,
+                proven,
+                orig_country != DramaCountry.UNKNOWN and cand == orig_country,
+            )
+
+        norm = normalize_title("Queen of Tears")
+        tagged = order_key("Queen of Tears (Korean Drama)", "nkiri", norm, False, DramaCountry.KOREAN)
+        untagged = order_key("Queen of Tears", "nkiri", norm, False, DramaCountry.KOREAN)
+        self.assertGreater(tagged, untagged, "tagged same-country card must probe first")
+        # Probing order is nonzero-cost but never a rejection: the untagged
+        # twin is still accepted by the candidate filter.
+        cand = evaluate_failover_candidate(
+            orig_site="asianc",
+            orig_show_title="Queen of Tears (Korean Drama)",
+            orig_ep_title="Episode 5",
+            orig_ep_num=5,
+            cand_site="nkiri",
+            cand_show_title="Queen of Tears",
+            cand_year_str="2024",
+            cand_category="Series",
+            cand_total_episodes=16,
+            cand_episodes=[(5, "Queen of Tears Episode 5", "https://nkiri/ep5")],
+        )
+        self.assertTrue(cand, "untagged twin must still be accepted")
+
+    def test_secondary_ranking_in_engine(self):
+        """Invariant: the tiebreak comparator sits below exact/host-health."""
+        src = self.source
+        exact = src.index("normalizeTitleQuery(it.title) == normQuery")
+        health = src.index("hasProvenLocker(it.url)")
+        agree = src.index("agreeWith[it] == true")
+        self.assertLess(exact, health, "exact match sorts above host health")
+        self.assertLess(health, agree, "host health sorts above country agreement")
+        self.assertIn("for (card in ordered)", src)
+
+    def test_secondary_country_split_keeps_working(self):
+        """Refactor guard: plain extractCountry behavior is unchanged."""
+        self.assertEqual(extract_country("Hidden Love [Chinese Drama]"), DramaCountry.CHINESE)
+        self.assertEqual(extract_country("Queen of Tears", "nkiri"), DramaCountry.WESTERN)
+        self.assertEqual(extract_country("Goblin", "pluto"), DramaCountry.UNKNOWN)
+
+    def test_secondary_cluster_constant_in_engine(self):
+        """Invariant: the engine declares the secondary set with both members."""
+        self.assertIn('private val SECONDARY_ASIAN_FALLBACK = setOf("nkiri", "9jarocks")', self.source)
+        self.assertIn("ASIAN_DRAMA_CLUSTER + SECONDARY_ASIAN_FALLBACK", self.source)
+        self.assertIn("extractFailoverCountry(isAsian,", self.source)
