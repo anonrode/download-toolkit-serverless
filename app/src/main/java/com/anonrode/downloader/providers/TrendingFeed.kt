@@ -362,8 +362,8 @@ object TrendingFeed {
         val enc = java.net.URLEncoder.encode(term, "UTF-8")
         val url = if (site == "nepu") "$base/api/search?q=$enc" else "$base/api?a=search&keyword=$enc"
         val json = HttpClient.getText(url, referer = "$base/", tag = "trending") ?: return emptyList()
-        return (if (site == "nepu") parseNepuResults(json, site, base) else parseAsiancResults(json, site, base))
-            .take(limit)
+        val cards = if (site == "nepu") parseNepuResults(json, site, base) else parseAsiancResults(json, site, base)
+        return (if (site == "nepu") NepuProvider.filterAvailable(cards) else cards).take(limit)
     }
 
     /** nepu: TMDB-proxy — {results:[{id, media_type, title|name, poster_path}]}
