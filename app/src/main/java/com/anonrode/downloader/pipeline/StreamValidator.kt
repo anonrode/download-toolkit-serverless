@@ -9,7 +9,7 @@ import java.io.ByteArrayOutputStream
  *
  * History: HTML error pages entered the download queue as "mp4" tasks and
  * produced corrupted files that Layer 7 could only catch AFTER a full
- * download. This validator spends one ranged request (<=1KB) to reject dead
+ * download. This validator spends one ranged request (<=1 KiB) to reject dead
  * links BEFORE any bytes are persisted.
  *
  * Conservative by design — it rejects only provable garbage:
@@ -20,7 +20,7 @@ import java.io.ByteArrayOutputStream
  */
 object StreamValidator {
 
-    private const val PROBE_BYTES = 1024
+    private const val PROBE_BYTES = 1025
 
     /**
      * @param headers the EXACT headers the real download will send (referer

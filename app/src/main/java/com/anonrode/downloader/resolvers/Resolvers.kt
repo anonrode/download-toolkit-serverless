@@ -446,8 +446,36 @@ object KisskhMegaplayResolver : BaseResolver {
         "gogoanime.me.uk", "vkspeed.com", "ansembed.net", "sibnet.ru"
     )
     @Volatile private var lastFailure: String? = null
+    private val MEGAPLAY_KEY = ByteArray(32).also { target ->
+        val src = "i?LMTAx0Q6,:}50U".toByteArray(Charsets.UTF_8)
+        System.arraycopy(src, 0, target, 0, minOf(32, src.size))
+    }
+    private val MEGAPLAY_IV = "W0;27ToaUpl_P%'c".toByteArray(Charsets.UTF_8)
 
     override fun lastResolveFailure(): String? = lastFailure
+
+    private fun decryptMegaplayEnc(enc: String): String? {
+        return try {
+            val clean = enc.replace('-', '+').replace('_', '/').replace(Regex("""\s"""), "")
+            val pad = clean.length % 4
+            val padded = if (pad > 0) clean + "=".repeat(4 - pad) else clean
+            val cipherBytes = try {
+                android.util.Base64.decode(padded, android.util.Base64.DEFAULT)
+            } catch (_: Exception) {
+                java.util.Base64.getDecoder().decode(padded)
+            }
+            val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
+            val keySpec = SecretKeySpec(MEGAPLAY_KEY, "AES")
+            val ivSpec = IvParameterSpec(MEGAPLAY_IV)
+            cipher.init(Cipher.DECRYPT_MODE, keySpec, ivSpec)
+            val decryptedBytes = cipher.doFinal(cipherBytes)
+            val jsonStr = String(decryptedBytes, Charsets.UTF_8)
+            val jsonObj = JSONObject(jsonStr)
+            jsonObj.optString("file").takeIf { it.isNotBlank() }
+        } catch (_: Exception) {
+            null
+        }
+    }
 
     override fun canResolve(url: String): Boolean {
         if (url.contains("/playlist.php") || url.contains("/api/")) return false
@@ -530,6 +558,11 @@ object KisskhMegaplayResolver : BaseResolver {
                         val data = JSONObject(apiJson)
                         val fileUrl = data.optJSONObject("sources")?.optString("file")
                         if (!fileUrl.isNullOrBlank()) return fileUrl
+                        val enc = data.optString("enc")
+                        if (enc.isNotBlank()) {
+                            val decrypted = decryptMegaplayEnc(enc)
+                            if (!decrypted.isNullOrBlank()) return decrypted
+                        }
                     }
                 }
             }
@@ -1319,7 +1352,15 @@ object DownloadwellaResolver : BaseResolver {
                 return null
             }
             val doc = Jsoup.parse(html, url)
-            val formEl = doc.selectFirst("form")
+            val cfg = DynamicRulesManager.getResolverConfig("downloadwella")
+            val formSelector = cfg?.optString("formActionSelector")
+                ?.takeIf { it.isNotBlank() && it.length <= 600 }
+                ?: "form"
+            val formEl = try {
+                doc.selectFirst(formSelector)
+            } catch (_: Exception) {
+                null
+            }
 
             // Movie pages of this locker family sometimes render with NO form
             // at all (live-verified 2026-09-11: downloadwella.com/9mktxnflcqtc/
@@ -1330,6 +1371,23 @@ object DownloadwellaResolver : BaseResolver {
             // to the synthetic body instead of returning null; the response
             // scan below finds the /d/ direct anchor either way.
             val formAction = formEl?.attr("abs:action").orEmpty().ifBlank { url }
+            fun configuredDirect(bodyText: String): String? {
+                val tokenRegex = cfg?.optString("tokenRegex")?.takeIf { it.isNotBlank() && it.length <= 600 } ?: return null
+                return try {
+                    val matcher = Pattern.compile(tokenRegex, Pattern.CASE_INSENSITIVE).matcher(bodyText)
+                    if (!matcher.find()) return null
+                    for (group in 1..matcher.groupCount()) {
+                        val value = matcher.group(group)?.replace("\\\\/", "/")?.trim().orEmpty()
+                        if (value.startsWith("http://", true) || value.startsWith("https://", true)) {
+                            val safe = HttpClient.safeUrl(HttpClient.safeResolveUri(url, value))
+                            if (isDirectMediaUrl(safe) || safe.contains("/d/") || safe.contains("/token/download/")) return safe
+                        }
+                    }
+                    null
+                } catch (_: Exception) {
+                    null
+                }
+            }
 
             // LIVE (2026-08): the server rejects the POST when method_free is
             // forced to "Free Download" — submit every form input verbatim
@@ -1378,7 +1436,7 @@ object DownloadwellaResolver : BaseResolver {
                     return null
                 }
 
-                val directMedia = findDirectMediaUrl(body)
+                val directMedia = findDirectMediaUrl(body) ?: configuredDirect(body)
                 if (!directMedia.isNullOrBlank() && !directMedia.equals(url, ignoreCase = true) && !isRootLockerDomain(directMedia)) {
                     return directMedia
                 }
@@ -1392,7 +1450,11 @@ object DownloadwellaResolver : BaseResolver {
                 if (!directAnchor.isNullOrBlank()) return directAnchor
 
                 // Step 2 form if present
-                val step2Form = postDoc.selectFirst("form[name='F1'], form")
+                val step2Form = try {
+                    postDoc.selectFirst(formSelector)
+                } catch (_: Exception) {
+                    null
+                } ?: postDoc.selectFirst("form[name='F1'], form")
                 if (step2Form != null && step2Form.select("input[name='op']").isNotEmpty()) {
                     val step2Builder = FormBody.Builder()
                     for (inp in step2Form.select("input[name]")) {
@@ -1407,7 +1469,7 @@ object DownloadwellaResolver : BaseResolver {
                     HttpClient.executeCancellable(HttpClient.permissiveClient, step2Req) use@{ res2 ->
                         if (res2.isSuccessful) {
                             val body2 = HttpClient.cappedText(res2) ?: ""
-                            val direct2 = findDirectMediaUrl(body2)
+                            val direct2 = findDirectMediaUrl(body2) ?: configuredDirect(body2)
                             if (!direct2.isNullOrBlank() && !isRootLockerDomain(direct2)) return direct2
                             val postDoc2 = Jsoup.parse(body2, url)
                             val directAnchor2 = postDoc2.select("a[href]").mapNotNull { a ->
@@ -1646,6 +1708,7 @@ object LoadedfilesResolver : BaseResolver {
                         if (next == null) {
                             val cfg = DynamicRulesManager.getResolverConfig("loadedfiles")
                             val customRegex = cfg?.optString("tokenRegex")
+                                ?.takeIf { it.isNotBlank() && it.length <= 600 }
                             if (!customRegex.isNullOrBlank()) {
                                 val mCustom = Pattern.compile(customRegex, Pattern.CASE_INSENSITIVE).matcher(body)
                                 if (mCustom.find()) {

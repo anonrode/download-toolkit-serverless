@@ -223,6 +223,29 @@ class DynamicRulesManagerTest {
     // ---------------- declarative step pipelines ----------------
 
     @Test
+    fun resolverConfigs_parseAndExposeBoundedFields() {
+        DynamicRulesManager.parseRulesJson(
+            """
+            {
+              "version": "test.resolvers",
+              "resolvers": {
+                "loadedfiles": {"tokenRegex": "token-([a-z0-9]+)", "maxRedirectHops": 4},
+                "downloadwella": {"formActionSelector": "form#download"}
+              }
+            }
+            """.trimIndent()
+        )
+        assertEquals(
+            "token-([a-z0-9]+)",
+            DynamicRulesManager.getResolverConfig("loadedfiles")?.optString("tokenRegex")
+        )
+        assertEquals(
+            "form#download",
+            DynamicRulesManager.getResolverConfig("downloadwella")?.optString("formActionSelector")
+        )
+    }
+
+    @Test
     fun pipelines_parseAndExposePerSite() {
         val ok = DynamicRulesManager.parseRulesJson(
             """

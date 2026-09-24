@@ -811,7 +811,7 @@ object HttpClient {
                 .url(safeUrl(url))
                 .header("User-Agent", DEFAULT_UA)
                 .header("Accept", "*/*")
-                .header("Range", "bytes=0-0")
+                .header("Range", "bytes=0-1024")
             if (!referer.isNullOrBlank()) reqBuilder.header("Referer", referer)
             val call = shared.newCall(reqBuilder.build())
             call.timeout().timeout(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
@@ -822,7 +822,7 @@ object HttpClient {
             return try {
                 val res = call.execute()
                 // 2xx proves the host serves; 416 (range not satisfiable for a
-                // bytes=0-0 probe) still proves it is reachable and alive.
+                // bounded probe) still proves it is reachable and alive.
                 val ok = res.code in 200..299 || res.code == 416
                 // Headers-only check: close the body without reading it, so a
                 // server that ignores Range cannot stream data past us.
@@ -852,7 +852,7 @@ object HttpClient {
      *  - no-redirect client: a 3xx is a HOP, never an acceptance. The shared
      *    client auto-follows, which HIDES Locations inside OkHttp — that is why
      *    this must run on a no-follow client (see [TerminalProbe.location]).
-     *  - `Range: bytes=0-0`: at most 1 body byte crosses the wire (metered-
+     *  - `Range: bytes=0-1024`: at most 1 KiB crosses the wire (metered-
      *    data discipline); servers honoring it answer 206 + Content-Range.
      *  - 200 with Content-Length = whole-file size: also accepted (servers
      *    ignoring Range). No size proof (chunked/absent CL) = reject.
@@ -881,7 +881,7 @@ object HttpClient {
             val reqBuilder = Request.Builder()
                 .url(safeUrl(url))
                 .header("User-Agent", DEFAULT_UA)
-                .header("Range", "bytes=0-0")
+                .header("Range", "bytes=0-1024")
             if (!referer.isNullOrBlank()) reqBuilder.header("Referer", referer)
             val client = if (permissive) terminalProbeClientPermissive else terminalProbeClient
             val call = client.newCall(reqBuilder.build())
