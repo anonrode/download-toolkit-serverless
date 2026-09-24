@@ -19,6 +19,30 @@ class DynamicLockerEngineTest {
     }
 
     @Test
+    fun canResolve_returnsFalseWhenTerminalHasNoResolveRecipe() {
+        DynamicRulesManager.parseRulesJson(
+            """
+            {
+              "version": "test.terminal-only",
+              "pipelines": {
+                "gateway.test": {
+                  "schema": 1,
+                  "terminal": {
+                    "source": "entry",
+                    "regex": "^(https?://\\\\S+)$",
+                    "group": 1,
+                    "hosts": ["gateway.test"],
+                    "mode": "handoff"
+                  }
+                }
+              }
+            }
+            """.trimIndent()
+        )
+        assertFalse(DynamicLockerEngine.canResolve("https://gateway.test/dl-123"))
+    }
+
+    @Test
     fun canResolve_returnsFalseForProviderOnlyPipeline() {
         DynamicRulesManager.parseRulesJson(
             """
@@ -42,6 +66,31 @@ class DynamicLockerEngineTest {
     }
 
     @Test
+    fun canResolve_handlesMultiPartRegisteredKeys() {
+        DynamicRulesManager.parseRulesJson(
+            """
+            {
+              "version": "test.multipart",
+              "pipelines": {
+                "testlocker.co.uk": {
+                  "schema": 1,
+                  "resolve": {"steps": [{"sources": [{"url": "https://x.test/page"}]}]},
+                  "terminal": {
+                    "source": "entry",
+                    "regex": "^(https?://\\\\S+)$",
+                    "group": 1,
+                    "hosts": ["testlocker.co.uk"],
+                    "mode": "handoff"
+                  }
+                }
+              }
+            }
+            """.trimIndent()
+        )
+        assertTrue(DynamicLockerEngine.canResolve("https://www.testlocker.co.uk/v/1"))
+    }
+
+    @Test
     fun canResolve_returnsTrueWhenPipelineMatches() {
         val json = """
         {
@@ -49,7 +98,9 @@ class DynamicLockerEngineTest {
           "pipelines": {
             "testlocker.com": {
               "schema": 1,
-              "resolve": { "steps": [] },
+              "resolve": {
+                "steps": [{"sources": [{"url": "https://testlocker.com/page"}]}]
+              },
               "terminal": {
                 "source": "entry",
                 "regex": "^(https?://\\S+)$",
