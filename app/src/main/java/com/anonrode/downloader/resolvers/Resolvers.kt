@@ -2335,7 +2335,7 @@ object DynamicLockerResolver : BaseResolver {
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
         lastFailure = null
-        val result = DynamicLockerEngine.resolve(url, quality)
+        val result = DynamicLockerEngine.resolve(url, quality, depth)
         if (result.isNullOrBlank()) {
             lastFailure = "DynamicLocker: OTA pipeline yielded no stream for $url"
         }

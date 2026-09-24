@@ -13,6 +13,15 @@ import java.io.File
 
 object YoutubeDlDownloader {
 
+    /** Native yt-dlp teardown, not a user cancellation or a media verdict. */
+    class BackendInterruptedException(message: String) : Exception(message)
+
+    private fun isNativeBackendInterruption(error: Throwable): Boolean {
+        val message = error.message?.lowercase().orEmpty()
+        return message.contains("canceledexception") ||
+            message.contains("read interrupted by close() on another thread")
+    }
+
     // Task-level retry counts are now AppSettings-backed (pref_magnet_retries /
     // pref_ytdlp_retries), threaded in via download()'s maxAttempts params.
 
@@ -464,6 +473,9 @@ object YoutubeDlDownloader {
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (e: Exception) {
+                if (isNativeBackendInterruption(e)) {
+                    throw BackendInterruptedException("yt-dlp backend interrupted; preserving partial data")
+                }
                 errors.append("run ").append(attempts).append(": ").append(e.message ?: e.javaClass.simpleName).append('\n')
                 // Per-attempt visibility: the aggregate error only lands after
                 // ALL attempts, and an HLS stall gave the log nothing to work

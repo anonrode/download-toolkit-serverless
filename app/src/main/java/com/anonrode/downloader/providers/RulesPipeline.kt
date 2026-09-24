@@ -292,17 +292,28 @@ object RulesPipeline {
      * ANY network I/O (zero behavior change until a recipe ships).
      *
      * handoff mode feeds the host-gated candidate to the compiled
-     * [ResolverRegistry]; the registry never calls back into RulesPipeline,
-     * so this cannot recurse.
+     * [ResolverRegistry]. The current resolver depth is carried through the
+     * handoff, so a malformed OTA recipe cannot reset the recursion budget.
      */
-    suspend fun runResolveForSite(site: String, episodeUrl: String, quality: String): String? {
+    suspend fun runResolveForSite(
+        site: String,
+        episodeUrl: String,
+        quality: String,
+        depth: Int = 0
+    ): String? {
+        if (depth > ResolverRegistry.RESOLVE_DEPTH_LIMIT) {
+            DebugLog.resolve("$site pipeline resolve: depth limit reached at $depth — refusing")
+            return null
+        }
         if (episodeUrl.isBlank()) return null
         val sp = DynamicRulesManager.getPipeline(site) ?: return null
         val term = sp.terminal ?: return null
         return try {
-            runResolveInner(site, sp.resolve, term, episodeUrl) { cand ->
-                ResolverRegistry.resolve(cand, quality)
+            runResolveInner(site, sp.resolve, term, episodeUrl, depth) { cand ->
+                ResolverRegistry.resolve(cand, quality, depth + 1)
             }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (e: Exception) {
             DebugLog.error("$site pipeline resolve: aborted (${e.javaClass.simpleName}: ${e.message})")
             null
@@ -333,6 +344,7 @@ object RulesPipeline {
         pipeline: Pipeline?,
         terminal: PipelineTerminal,
         episodeUrl: String,
+        depth: Int,
         handoff: suspend (String) -> String?
     ): String? {
         val bases = DynamicRulesManager.getBaseUrls(site)

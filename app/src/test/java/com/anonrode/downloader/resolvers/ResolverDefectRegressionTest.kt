@@ -57,11 +57,32 @@ class ResolverDefectRegressionTest {
         inputs.forEach { assertEquals(it, it, unwrap(it)) }
     }
 
-    private fun resolverSource(): String {
+    private fun sourceAt(relativePath: String): String {
         val root = generateSequence(File(System.getProperty("user.dir"))) { it.parentFile }
             .firstOrNull { File(it, "app/src/main/java/com/anonrode/downloader/resolvers/Resolvers.kt").isFile }
             ?: error("Repository source needed for source-contract regression checks")
-        return File(root, "app/src/main/java/com/anonrode/downloader/resolvers/Resolvers.kt").readText()
+        return File(root, relativePath).readText()
+    }
+
+    private fun resolverSource(): String = sourceAt("app/src/main/java/com/anonrode/downloader/resolvers/Resolvers.kt")
+
+    @Test fun concurrencyDefaultsAndBoundsStayBounded() {
+        val settings = sourceAt("app/src/main/java/com/anonrode/downloader/data/settings/AppSettings.kt")
+        val engine = sourceAt("app/src/main/java/com/anonrode/downloader/engine/DownloadEngine.kt")
+        assertTrue(settings.contains("val maxConcurrentDownloads: Int = 4"))
+        assertTrue(settings.contains("""pref_max_downloads", 4).coerceIn(1, 6"""))
+        assertTrue(settings.contains("""pref_parallel_sockets", 16).coerceIn(1, 16"""))
+        assertTrue(engine.contains("var maxConcurrentDownloads: Int = 4"))
+        assertTrue(engine.contains("val startingActive = startingTaskIds.size"))
+        assertTrue(engine.contains("jobActive + startingActive"))
+    }
+
+    @Test fun otaHandoffCarriesResolverDepth() {
+        val source = sourceAt("app/src/main/java/com/anonrode/downloader/providers/RulesPipeline.kt")
+        val engine = sourceAt("app/src/main/java/com/anonrode/downloader/resolvers/DynamicLockerEngine.kt")
+        assertTrue(source.contains("ResolverRegistry.resolve(cand, quality, depth + 1)"))
+        assertTrue(source.contains("depth > ResolverRegistry.RESOLVE_DEPTH_LIMIT"))
+        assertTrue(engine.contains("runResolveForSite(siteKey, url, quality, depth)"))
     }
 
     @Test fun recursiveFailureGuardStaysBeforeIntermediarySuccess() {
