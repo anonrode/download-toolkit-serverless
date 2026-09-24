@@ -11,7 +11,7 @@ import android.content.SharedPreferences
  */
 data class AppSettings(
     // --- Engine ---
-    val maxConcurrentDownloads: Int = 3,
+    val maxConcurrentDownloads: Int = 4,
     val parallelSockets: Int = 16,
     val defaultQuality: String = "720p",
     val stallTimeoutSec: Int = 60,
@@ -48,8 +48,8 @@ data class AppSettings(
         fun load(context: Context): AppSettings {
             val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             return AppSettings(
-                maxConcurrentDownloads = prefs.getInt("pref_max_downloads", 3),
-                parallelSockets = prefs.getInt("pref_parallel_sockets", 16),
+                maxConcurrentDownloads = prefs.getInt("pref_max_downloads", 4).coerceIn(1, 6),
+                parallelSockets = prefs.getInt("pref_parallel_sockets", 16).coerceIn(1, 16),
                 defaultQuality = prefs.getString("pref_default_quality", "720p") ?: "720p",
                 stallTimeoutSec = prefs.getInt("pref_stall_timeout", 60),
                 magnetMaxAttempts = prefs.getInt("pref_magnet_retries", 3),
@@ -76,8 +76,8 @@ data class AppSettings(
 
         fun save(context: Context, s: AppSettings) {
             context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
-                .putInt("pref_max_downloads", s.maxConcurrentDownloads)
-                .putInt("pref_parallel_sockets", s.parallelSockets)
+                .putInt("pref_max_downloads", s.maxConcurrentDownloads.coerceIn(1, 6))
+                .putInt("pref_parallel_sockets", s.parallelSockets.coerceIn(1, 16))
                 .putString("pref_default_quality", s.defaultQuality)
                 .putInt("pref_stall_timeout", s.stallTimeoutSec)
                 .putInt("pref_magnet_retries", s.magnetMaxAttempts)

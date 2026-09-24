@@ -90,7 +90,7 @@ class DownloadEngine(
     // equally dead providers.
     private val failoverSites = ConcurrentHashMap<String, MutableSet<String>>()
 
-    var maxConcurrentDownloads: Int = 3
+    var maxConcurrentDownloads: Int = 4
     var parallelSocketsPerFile: Int = 16
     var defaultQuality: String = "720p"
     var autoOrganizeByShow: Boolean = true
@@ -293,8 +293,8 @@ class DownloadEngine(
 
     private fun loadPreferences() {
         val prefs = context.getSharedPreferences("downloader_settings", Context.MODE_PRIVATE)
-        maxConcurrentDownloads = prefs.getInt("pref_max_downloads", 3)
-        parallelSocketsPerFile = prefs.getInt("pref_parallel_sockets", 16)
+        maxConcurrentDownloads = prefs.getInt("pref_max_downloads", 4).coerceIn(1, 6)
+        parallelSocketsPerFile = prefs.getInt("pref_parallel_sockets", 16).coerceIn(1, 16)
         defaultQuality = prefs.getString("pref_default_quality", "720p") ?: "720p"
         autoOrganizeByShow = prefs.getBoolean("pref_auto_organize", true)
         instantSocialDownload = prefs.getBoolean("pref_instant_social", false)
@@ -362,8 +362,8 @@ class DownloadEngine(
         subLang: String = "en",
         filterExplicit: Boolean = true
     ) {
-        this.maxConcurrentDownloads = maxConcurrent
-        this.parallelSocketsPerFile = parallelSockets
+        this.maxConcurrentDownloads = maxConcurrent.coerceIn(1, 6)
+        this.parallelSocketsPerFile = parallelSockets.coerceIn(1, 16)
         this.defaultQuality = quality
         this.autoOrganizeByShow = autoOrganize
         this.storageGuardGb = storageGuard
@@ -1520,7 +1520,8 @@ class DownloadEngine(
                 it.status == TaskStatus.DOWNLOADING || it.status == TaskStatus.RESOLVING || it.status == TaskStatus.VALIDATING
             }
             val jobActive = activeJobs.values.count { it.isActive }
-            val activeCount = maxOf(statusActive, jobActive)
+            val startingActive = startingTaskIds.size
+            val activeCount = maxOf(statusActive, jobActive + startingActive)
 
             if (activeCount >= maxConcurrentDownloads) return
 
