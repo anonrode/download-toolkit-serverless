@@ -303,6 +303,11 @@ object HttpClient {
         inFlightCalls.add(call)
         try {
             return call.execute()
+        } catch (e: Exception) {
+            if (call.isCanceled()) {
+                throw kotlinx.coroutines.CancellationException("HTTP call canceled").apply { initCause(e) }
+            }
+            throw e
         } finally {
             inFlightCalls.remove(call)
         }
@@ -475,11 +480,20 @@ object HttpClient {
         }
         val started = System.currentTimeMillis()
         return try {
-            val res = call.execute()
+            val res = try {
+                call.execute()
+            } catch (e: Exception) {
+                if (call.isCanceled()) {
+                    throw kotlinx.coroutines.CancellationException("HTTP call canceled").apply { initCause(e) }
+                }
+                throw e
+            }
             com.anonrode.downloader.util.DebugLog.net(
                 "GET ${safeUrl(url)} -> ${res.code} in ${System.currentTimeMillis() - started}ms"
             )
             consume(res)
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
         } catch (e: Exception) {
             com.anonrode.downloader.util.DebugLog.net(
                 "GET ${safeUrl(url)} FAILED ${e.javaClass.simpleName}: ${e.message} after ${System.currentTimeMillis() - started}ms"
@@ -518,8 +532,13 @@ object HttpClient {
         // them (cancelTagged). The log showed pausing one download aborting
         // unrelated in-flight searches mid-keystroke.
         val searchCalls = taggedCalls["search"]
+        val strategyCalls = taggedCalls["search-strategy"]
+        val trendingCalls = taggedCalls["trending"]
         for (c in inFlightCalls) {
-            if (searchCalls?.contains(c) == true) continue
+            if (searchCalls?.contains(c) == true ||
+                strategyCalls?.contains(c) == true ||
+                trendingCalls?.contains(c) == true
+            ) continue
             try { c.cancel() } catch (_: Exception) {}
         }
         inFlightCalls.clear()
@@ -560,7 +579,14 @@ object HttpClient {
 
     @PublishedApi
     internal fun executeResolverCall(call: okhttp3.Call): Response {
-        val response = call.execute()
+        val response = try {
+            call.execute()
+        } catch (e: Exception) {
+            if (call.isCanceled()) {
+                throw kotlinx.coroutines.CancellationException("HTTP call canceled").apply { initCause(e) }
+            }
+            throw e
+        }
         recordCooldown(response)
         if (response.code == 429 || response.code == 503) {
             val url = response.request.url.toString()
@@ -758,7 +784,15 @@ object HttpClient {
             }
             val started = System.currentTimeMillis()
             try {
-                call.execute().use { res ->
+                val response = try {
+                    call.execute()
+                } catch (e: Exception) {
+                    if (call.isCanceled()) {
+                        throw kotlinx.coroutines.CancellationException("HTTP call canceled").apply { initCause(e) }
+                    }
+                    throw e
+                }
+                response.use { res ->
                     com.anonrode.downloader.util.DebugLog.net(
                         "POST ${safeUrl(url)} -> ${res.code} in ${System.currentTimeMillis() - started}ms"
                     )
@@ -820,7 +854,14 @@ object HttpClient {
                 taggedCalls.computeIfAbsent(tag) { java.util.concurrent.CopyOnWriteArrayList() }.add(call)
             }
             return try {
-                val res = call.execute()
+                val res = try {
+                    call.execute()
+                } catch (e: Exception) {
+                    if (call.isCanceled()) {
+                        throw kotlinx.coroutines.CancellationException("HTTP call canceled").apply { initCause(e) }
+                    }
+                    throw e
+                }
                 // 2xx proves the host serves; 416 (range not satisfiable for a
                 // bounded probe) still proves it is reachable and alive.
                 val ok = res.code in 200..299 || res.code == 416
@@ -835,6 +876,8 @@ object HttpClient {
                     taggedCalls[tag]?.remove(call)
                 }
             }
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
         } catch (e: Exception) {
             com.anonrode.downloader.util.DebugLog.net("PROBE ${url.take(140)} FAILED ${e.javaClass.simpleName}: ${e.message}")
             return false

@@ -5,8 +5,11 @@ import com.anonrode.downloader.data.rules.DynamicRulesManager
 import com.anonrode.downloader.data.models.ShowCard
 import com.anonrode.downloader.pipeline.PipelineJournal
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.async
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.withContext
 import org.jsoup.Jsoup
 import java.net.URLEncoder
@@ -41,6 +44,8 @@ object SearchStrategyRunner {
                     "slugGuess" -> runSlugGuess(st, query, mainUrl, siteName)
                     else -> null
                 }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
             } catch (e: Exception) {
                 errDetail = "${e.javaClass.simpleName}: ${e.message ?: "unknown"}"
                 null
@@ -48,7 +53,7 @@ object SearchStrategyRunner {
             val ok = !results.isNullOrEmpty()
             val hopDetail = if (ok) "${results?.size} match(es)"
                 else if (errDetail.isNotBlank()) errDetail
-                else "0 results returned (lastFailure=${HttpClient.lastFailure ?: "none"})"
+                else "0 results returned"
             PipelineJournal.hop(
                 site = siteName, stage = "search:$type", url = mainUrl + " q=" + query.take(40),
                 ok = ok, ms = System.currentTimeMillis() - start, detail = hopDetail
@@ -135,9 +140,8 @@ val a = if (item.tagName() == "a") item
             // walk cost one full probe timeout per miss — 7 dramarain suffixes
             // of 404s = ~56s added to every search for a title the site doesn't
             // have. One parallel round caps the miss at a single probe
-            // timeout. Awaiting in list order keeps suffix priority ("" before
-            // "-korean-drama" etc.); the finally cancels the losers so a hit
-            // isn't held hostage by straggler probes.
+            // timeout. The first successful completion wins; the finally cancels
+            // the losers so a fast hit is not held hostage by straggler probes.
             val hit = coroutineScope {
                 val defs = suffixes.map { suffix ->
                     async {
@@ -148,7 +152,16 @@ val a = if (item.tagName() == "a") item
                     }
                 }
                 try {
-                    defs.firstOrNull { it.await() != null }?.await()
+                    val pending = defs.toMutableList()
+                    var hit: String? = null
+                    while (pending.isNotEmpty() && hit == null) {
+                        val (done, result) = select<Pair<Deferred<String?>, String?>> {
+                            pending.forEach { work -> work.onAwait { work to it } }
+                        }
+                        pending.remove(done)
+                        if (result != null) hit = result
+                    }
+                    hit
                 } finally {
                     defs.forEach { it.cancel() }
                 }

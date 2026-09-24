@@ -23,7 +23,7 @@ import kotlin.coroutines.coroutineContext
  * High-performance multi-socket segmented downloader for direct CDN files.
  *
  * Designed with:
- * 1. Definitive Range verification (probe with fallback bytes=0-0 GET).
+ * 1. Definitive Range verification (probe with fallback bytes=0-1024 GET).
  * 2. Decoupled telemetry ticker (250ms cadence) with EMA speed smoothing.
  * 3. Non-blocking parallel worker streams writing to pre-allocated FileChannels.
  * 4. Throttled sidecar resume state commits.
@@ -301,7 +301,7 @@ object TurboDownloader {
     /**
      * Definitive range probe:
      * 1. Check HEAD. If Content-Length > 0 and Accept-Ranges is explicit, return (len, true).
-     * 2. If Accept-Ranges is omitted on HEAD (common on CDNs), test Range: bytes=0-0.
+     * 2. If Accept-Ranges is omitted on HEAD (common on CDNs), test Range: bytes=0-1024.
      * 3. If server responds with HTTP 206 Partial Content, return (total, true).
      * Any step that proves the URL serves an HTML page (Content-Type text/html)
      * short-circuits to HtmlPage so the caller never downloads a locker page or
@@ -311,7 +311,7 @@ object TurboDownloader {
         fun buildReq(head: Boolean) = Request.Builder().url(url).apply {
             header("User-Agent", headers["User-Agent"] ?: HttpClient.DEFAULT_UA)
             headers.forEach { (k, v) -> if (!k.equals("User-Agent", true)) header(k, v) }
-            if (head) head() else header("Range", "bytes=0-0")
+            if (head) head() else header("Range", "bytes=0-1024")
         }.build()
 
         fun isHtmlPage(contentType: String?): Boolean {
@@ -335,11 +335,13 @@ object TurboDownloader {
                     }
                 }
             }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (e: Exception) {
             onFailure(e)
         }
 
-        // 2. If Accept-Ranges was not explicit on HEAD (or HEAD returned HTML/unsupported), probe with Range: bytes=0-0
+        // 2. If Accept-Ranges was not explicit on HEAD (or HEAD returned HTML/unsupported), probe with Range: bytes=0-1024
         try {
             HttpClient.executeRegistered(client.newCall(buildReq(false))).use { r ->
                 val ct = r.header("Content-Type")
@@ -356,6 +358,8 @@ object TurboDownloader {
                     if (len > 0) totalLength = len
                 }
             }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (e: Exception) {
             onFailure(e)
         }

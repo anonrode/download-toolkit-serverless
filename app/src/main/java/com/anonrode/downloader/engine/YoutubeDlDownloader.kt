@@ -461,6 +461,8 @@ object YoutubeDlDownloader {
                         onProgress(lastDl, lastTot, tick.speedBytesPerSec, eta)
                     }
                 }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
             } catch (e: Exception) {
                 errors.append("run ").append(attempts).append(": ").append(e.message ?: e.javaClass.simpleName).append('\n')
                 // Per-attempt visibility: the aggregate error only lands after

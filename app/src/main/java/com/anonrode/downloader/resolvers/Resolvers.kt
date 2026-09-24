@@ -19,6 +19,7 @@ import java.net.URI
 import java.net.URLDecoder
 import java.net.URLEncoder
 import com.anonrode.downloader.data.rules.DynamicRulesManager
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.regex.Matcher
 import java.util.regex.Pattern
@@ -238,7 +239,6 @@ object ResolverRegistry {
                 }
                 val failureDetail = (outcome as? ResolverOutcome.Failure)?.reason
                     ?: resolver.lastResolveFailure()
-                    ?: com.anonrode.downloader.data.net.HttpClient.lastFailure
                     ?: "no playable stream or token extracted"
                 com.anonrode.downloader.pipeline.PipelineJournal.hop(
                     site = "", stage = "crack:${resolver::class.simpleName}",
@@ -698,6 +698,8 @@ object VidsrcResolver : BaseResolver {
     )
     private val TMDB_PATTERN = Pattern.compile("""/(?:movie|tv)/(\d+)(?:[/_-](\d+)[/_-](\d+))?""")
     private val ORIGIN_PATTERN = Pattern.compile("""https?://[^/]+""")
+    private val missingTmdb = ConcurrentHashMap<String, Long>()
+    private const val MISSING_TMDB_TTL_MS = 15 * 60_000L
     @Volatile private var lastFailure: String? = null
 
     override fun lastResolveFailure(): String? = lastFailure
@@ -729,6 +731,8 @@ object VidsrcResolver : BaseResolver {
                             embedUrl = HttpClient.safeResolveUri(embedUrl, iframe.attr("src"))
                         }
                     }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
                 } catch (_: Exception) {}
             }
 
@@ -749,6 +753,8 @@ object VidsrcResolver : BaseResolver {
                             }
                         }
                     }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
                 } catch (_: Exception) {}
             }
 
@@ -759,6 +765,16 @@ object VidsrcResolver : BaseResolver {
                 return null
             }
             val tmdb = m.group(1) ?: return null
+            val mediaType = if (embedUrl.contains("/tv/")) "tv" else "movie"
+            val cacheKey = "$mediaType:$tmdb:${m.group(2).orEmpty()}:${m.group(3).orEmpty()}"
+            val cachedMissingAt = missingTmdb[cacheKey]
+            if (cachedMissingAt != null) {
+                if (System.currentTimeMillis() - cachedMissingAt < MISSING_TMDB_TTL_MS) {
+                    lastFailure = "Vidsrc: known unavailable tmdb=$tmdb"
+                    return null
+                }
+                missingTmdb.remove(cacheKey, cachedMissingAt)
+            }
             val apiUrl = if (embedUrl.contains("/tv/")) {
                 val season = m.group(2) ?: return null
                 val episode = m.group(3) ?: return null
@@ -774,6 +790,7 @@ object VidsrcResolver : BaseResolver {
             val root = JSONObject(json)
             val data = root.optJSONObject("data") ?: run {
                 val sc = root.optInt("status_code", 404)
+                if (sc == 404) missingTmdb[cacheKey] = System.currentTimeMillis()
                 lastFailure = "Vidsrc: API returned status $sc for tmdb=$tmdb"
                 return null
             }

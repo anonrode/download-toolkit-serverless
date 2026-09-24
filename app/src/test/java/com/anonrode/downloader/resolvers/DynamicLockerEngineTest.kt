@@ -19,6 +19,29 @@ class DynamicLockerEngineTest {
     }
 
     @Test
+    fun canResolve_returnsFalseForProviderOnlyPipeline() {
+        DynamicRulesManager.parseRulesJson(
+            """
+            {
+              "version": "test.provider-only",
+              "pipelines": {
+                "nepu.gd": {
+                  "schema": 1,
+                  "search": {
+                    "steps": [{
+                      "sources": [{"url": "{base}/search?q={query}"}],
+                      "items": {"cardSelector": "article", "title": "self", "url": "self"}
+                    }]
+                  }
+                }
+              }
+            }
+            """.trimIndent()
+        )
+        assertFalse(DynamicLockerEngine.canResolve("https://nepu.gd/watch/tv/4347"))
+    }
+
+    @Test
     fun canResolve_returnsTrueWhenPipelineMatches() {
         val json = """
         {

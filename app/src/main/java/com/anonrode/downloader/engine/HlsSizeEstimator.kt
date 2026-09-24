@@ -13,7 +13,7 @@ import kotlinx.coroutines.coroutineScope
  * The media playlist lists every segment with an exact #EXTINF duration, so
  * the segment count N is exact; the only unknown is the average segment size.
  * That unknown is probed: k=4 segments at ~5/35/65/95% of the playlist with
- * a `Range: bytes=0-0` request (headers only — the body is never read), all
+ * a `Range: bytes=0-1024` request (headers only — the body is never read), all
  * run concurrently. estimate_wire = mean(sampled sizes) * N. When the master
  * carries an #EXT-X-MEDIA:TYPE=AUDIO rendition, that audio playlist is
  * fetched, ONE audio segment is probed, and its projected size
@@ -120,7 +120,7 @@ object HlsSizeEstimator {
     }
 
     /**
-     * Headers-only size probe: GET with `Range: bytes=0-0` and read the full
+     * Headers-only size probe: GET with `Range: bytes=0-1024` and read the full
      * size out of the response headers — the body is closed, never read
      * (same pattern as HttpClient.probe).
      *  - 206 (range honored): the full size rides in `Content-Range:
@@ -134,7 +134,7 @@ object HlsSizeEstimator {
             HttpClient.get(
                 url,
                 referer = referer,
-                headers = mapOf("Range" to "bytes=0-0", "Accept-Encoding" to "identity"),
+                headers = mapOf("Range" to "bytes=0-1024", "Accept-Encoding" to "identity"),
                 tag = "hls-estimate"
             ).use { res ->
                 when (res.code) {

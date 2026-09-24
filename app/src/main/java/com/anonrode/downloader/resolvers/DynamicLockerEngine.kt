@@ -17,15 +17,22 @@ object DynamicLockerEngine {
     fun canResolve(url: String): Boolean {
         val host = HttpClient.parsedHost(url) ?: return false
         val clean = host.removePrefix("www.").lowercase()
-        return DynamicRulesManager.getPipeline(clean) != null ||
-            DynamicRulesManager.getPipeline(clean.substringBeforeLast('.').substringAfterLast('.')) != null
+        return pipelineKeyForHost(clean)
+            ?.let { DynamicRulesManager.getPipeline(it)?.terminal != null }
+            ?: false
     }
 
     suspend fun resolve(url: String, quality: String = "720p"): String? {
         val host = HttpClient.parsedHost(url) ?: return null
         val clean = host.removePrefix("www.").lowercase()
-        val siteKey = if (DynamicRulesManager.getPipeline(clean) != null) clean
-            else clean.substringBeforeLast('.').substringAfterLast('.')
+        val siteKey = pipelineKeyForHost(clean) ?: return null
         return RulesPipeline.runResolveForSite(siteKey, url, quality)
+    }
+
+    /** A provider/search-only pipeline is not a locker resolver. */
+    private fun pipelineKeyForHost(host: String): String? {
+        DynamicRulesManager.getPipeline(host)?.let { return host }
+        val baseKey = host.substringBeforeLast('.').substringAfterLast('.')
+        return baseKey.takeIf { DynamicRulesManager.getPipeline(it) != null }
     }
 }

@@ -130,7 +130,7 @@ object NaijaVaultProvider : SiteProvider {
         try {
             val html = HttpClient.getText(showUrl)
             if (html.isNullOrBlank()) {
-                com.anonrode.downloader.util.DebugLog.error("naijavault loadEpisodes: fetch returned null for $showUrl (lastFailure=${HttpClient.lastFailure})")
+                com.anonrode.downloader.util.DebugLog.error("naijavault loadEpisodes: fetch returned null for $showUrl")
                 return ShowDetails(show = show)
             }
             com.anonrode.downloader.util.DebugLog.resolve("naijavault loadEpisodes: ${html.length / 1024}KiB from $showUrl")
