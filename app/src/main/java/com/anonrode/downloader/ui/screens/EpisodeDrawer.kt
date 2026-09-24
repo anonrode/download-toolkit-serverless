@@ -8,6 +8,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.item
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -59,20 +60,25 @@ fun EpisodeDrawer(
     // acknowledgement. Default flags only — the system haptics toggle wins.
     val hapticView = LocalView.current
 
-    var selectedEpisodes by remember(episodes) { mutableStateOf(setOf<EpisodeItem>()) }
+    // Keying by the show (rather than EpisodeItem equality or the full episode
+    // list) keeps checks through harmless episode refreshes, while a different
+    // show starts with a clean selection.
+    var selectedUrls by remember(show.url) { mutableStateOf(emptySet<String>()) }
+    val selectedEpisodes = episodes.filter { it.url in selectedUrls }
     var rangeText by remember { mutableStateOf("") }
     var enqueued by remember { mutableStateOf(false) }
     var isEnqueuing by remember { mutableStateOf(false) }
+    var showBatchConfirmation by remember { mutableStateOf(false) }
 
     // Parse range string (e.g. "1-5, 8, 10-12", "all", "none")
     fun applyRange(input: String) {
         val clean = input.trim()
         if (clean.isBlank() || clean.equals("none", ignoreCase = true) || clean.equals("clear", ignoreCase = true) || clean.equals("deselect", ignoreCase = true)) {
-            selectedEpisodes = emptySet()
+            selectedUrls = emptySet()
             return
         }
         if (clean.equals("all", ignoreCase = true) || clean.equals("*", ignoreCase = true)) {
-            selectedEpisodes = episodes.toSet()
+            selectedUrls = episodes.map { it.url }.toSet()
             return
         }
         val targetNums = mutableSetOf<Int>()
@@ -98,19 +104,75 @@ fun EpisodeDrawer(
         // every keystroke. Only a parsed non-empty set re-marks the list
         // (clearing stays available via "none"/backspace-to-empty/above).
         if (targetNums.isEmpty()) return
-        selectedEpisodes = episodes.filter { it.episodeNum in targetNums }.toSet()
+        selectedUrls = episodes.filter { it.episodeNum in targetNums }.map { it.url }.toSet()
     }
 
     // Dynamic Season Grouping for 1-Tap Filter Chips
     val seasonGroups = remember(episodes) {
         val groups = mutableMapOf<Int, MutableList<EpisodeItem>>()
         for (ep in episodes) {
-            val seasonMatch = Regex("S([0-9]{1,2})", RegexOption.IGNORE_CASE).find(ep.title)
+            val seasonMatch = Regex("S([0-9]{1,2})(?:E([0-9]{1,3}))?", RegexOption.IGNORE_CASE).find(ep.title)
             val sNum = seasonMatch?.groupValues?.getOrNull(1)?.toIntOrNull()
+                ?: Regex("/watch/(?:tv|movie)/\\d+/(\\d+)(?:/|$)", RegexOption.IGNORE_CASE)
+                    .find(ep.url)?.groupValues?.getOrNull(1)?.toIntOrNull()
                 ?: if (ep.episodeNum >= 100) ep.episodeNum / 100 else 1
             groups.getOrPut(sNum) { mutableListOf() }.add(ep)
         }
-        groups.toSortedMap()
+        groups.toSortedMap().mapValues { (_, values) -> values.sortedBy { it.episodeNum } }
+    }
+    var expandedSeasons by remember(show.url, seasonGroups.keys) {
+        mutableStateOf(seasonGroups.keys)
+    }
+    val uniqueSelectedCount = selectedEpisodes.distinctBy { it.url }.size
+
+    fun enqueueSelected() {
+        if (enqueued || isEnqueuing) return
+        // Combined provider pages may intentionally reuse one anchor URL for
+        // multiple episodes. Keep every selected row visible, but never enqueue
+        // that source more than once in the same batch.
+        val toEnqueue = selectedEpisodes
+            .distinctBy { it.url }
+            .sortedWith(compareBy(
+                { episode -> seasonGroups.entries.firstOrNull { it.value.any { it === episode } }?.key ?: Int.MAX_VALUE },
+                { it.episodeNum }
+            ))
+        if (toEnqueue.isEmpty()) {
+            Toast.makeText(context, "Select at least one episode first", Toast.LENGTH_SHORT).show()
+            return
+        }
+        isEnqueuing = true
+        enqueued = true
+        hapticView.confirmHaptic()
+        viewModel.viewModelScope.launch(Dispatchers.Default) {
+            try {
+                val cleanFolder = com.anonrode.downloader.util.NameSanitizer.cleanShowFolder(show.title)
+                toEnqueue.forEach { ep ->
+                    viewModel.engine.enqueue(
+                        showTitle = cleanFolder,
+                        episodeNum = ep.episodeNum,
+                        episodeTitle = com.anonrode.downloader.util.NameSanitizer.formatEpisodeTitle(
+                            showTitle = show.title,
+                            episodeNum = ep.episodeNum,
+                            rawEpisodeLabel = ep.title
+                        ),
+                        sourceUrl = ep.url,
+                        mirrorUrls = ep.mirrorUrls,
+                        isDirect = false,
+                        backend = "aria2c",
+                        site = ep.site.ifBlank { show.site },
+                        parallelSockets = viewModel.engine.parallelSocketsPerFile,
+                        verifiedDirectUrl = com.anonrode.downloader.pipeline.ResultVerifier.verifiedDirect(ep.url)
+                    )
+                }
+                withContext(Dispatchers.Main) { onDismiss() }
+            } catch (_: Exception) {
+                withContext(Dispatchers.Main) {
+                    isEnqueuing = false
+                    enqueued = false
+                    Toast.makeText(context, "Could not queue downloads. Try again.", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
     }
 
     ModalBottomSheet(
@@ -201,11 +263,11 @@ fun EpisodeDrawer(
                     horizontalArrangement = Arrangement.spacedBy(Spacing.sm)
                 ) {
                     // All Chip
-                    val isAllSelected = selectedEpisodes.size == episodes.size
+                    val isAllSelected = selectedUrls.size == episodes.size
                     FilterChip(
                         selected = isAllSelected,
                         onClick = {
-                            selectedEpisodes = if (isAllSelected) emptySet() else episodes.toSet()
+                            selectedUrls = if (isAllSelected) emptySet() else episodes.map { it.url }.toSet()
                         },
                         label = { Text("All (${episodes.size})", fontSize = Type.caption.fontSize, fontWeight = FontWeight.SemiBold) },
                         colors = FilterChipDefaults.filterChipColors(
@@ -225,14 +287,15 @@ fun EpisodeDrawer(
                     // Individual Season Chips
                     if (seasonGroups.size > 1) {
                         for ((sNum, sEps) in seasonGroups) {
-                            val isSeasonSelected = sEps.all { it in selectedEpisodes }
+                            val isSeasonSelected = sEps.all { it.url in selectedUrls }
                             FilterChip(
                                 selected = isSeasonSelected,
                                 onClick = {
-                                    selectedEpisodes = if (isSeasonSelected) {
-                                        selectedEpisodes - sEps.toSet()
+                                    val seasonUrls = sEps.map { it.url }.toSet()
+                                    selectedUrls = if (isSeasonSelected) {
+                                        selectedUrls - seasonUrls
                                     } else {
-                                        selectedEpisodes + sEps.toSet()
+                                        selectedUrls + seasonUrls
                                     }
                                 },
                                 label = { Text("Season $sNum (${sEps.size})", fontSize = Type.caption.fontSize) },
@@ -256,7 +319,7 @@ fun EpisodeDrawer(
                     if (selectedEpisodes.isNotEmpty()) {
                         FilterChip(
                             selected = false,
-                            onClick = { selectedEpisodes = emptySet() },
+                            onClick = { selectedUrls = emptySet() },
                             label = { Text("Clear (${selectedEpisodes.size})", fontSize = Type.caption.fontSize, color = StatusError) },
                             colors = FilterChipDefaults.filterChipColors(containerColor = SurfaceCard),
                             border = FilterChipDefaults.filterChipBorder(
@@ -298,69 +361,7 @@ fun EpisodeDrawer(
                         shape = RoundedCornerShape(Radius.md)
                     )
 
-                    Button(
-                        onClick = {
-                            if (enqueued || isEnqueuing) return@Button
-                            // Never silently queue the whole show: an empty
-                            // selection is a tap mistake, not a request for
-                            // every episode (40+ items, tens of GB on mobile).
-                            if (selectedEpisodes.isEmpty()) {
-                                Toast.makeText(context, "Select at least one episode first", Toast.LENGTH_SHORT).show()
-                                return@Button
-                            }
-                            isEnqueuing = true
-                            enqueued = true
-                            // Respect the range the user typed: the field feeds
-                            // selectedEpisodes, so queue exactly those.
-                            val toEnqueue = selectedEpisodes.toList()
-                            viewModel.viewModelScope.launch(Dispatchers.Default) {
-                                try {
-                                    val sorted = toEnqueue.sortedBy { it.episodeNum }
-                                    val cleanFolder = com.anonrode.downloader.util.NameSanitizer.cleanShowFolder(show.title)
-                                    for (ep in sorted) {
-                                        val cleanEpTitle = com.anonrode.downloader.util.NameSanitizer.formatEpisodeTitle(
-                                            showTitle = show.title,
-                                            episodeNum = ep.episodeNum,
-                                            rawEpisodeLabel = ep.title
-                                        )
-                                        viewModel.engine.enqueue(
-                                            showTitle = cleanFolder,
-                                            episodeNum = ep.episodeNum,
-                                            episodeTitle = cleanEpTitle,
-                                            sourceUrl = ep.url,
-                                            mirrorUrls = ep.mirrorUrls,
-                                            isDirect = false,
-                                            backend = "aria2c",
-                                            site = ep.site.ifBlank { show.site },
-                                            parallelSockets = viewModel.engine.parallelSocketsPerFile,
-                                            verifiedDirectUrl = com.anonrode.downloader.pipeline.ResultVerifier.verifiedDirect(ep.url)
-                                        )
-                                    }
-                                } finally {
-                                    withContext(Dispatchers.Main) {
-                                        onDismiss()
-                                    }
-                                }
-                            }
-                        },
-                        enabled = !isEnqueuing,
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = AccentPrimary,
-                            contentColor = BackgroundDark
-                        ),
-                        shape = RoundedCornerShape(Radius.md),
-                        contentPadding = PaddingValues(horizontal = Spacing.md, vertical = Spacing.sm)
-                    ) {
-                        if (isEnqueuing) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(14.dp),
-                                strokeWidth = 2.dp,
-                                color = BackgroundDark
-                            )
-                        } else {
-                            Text("Download", fontSize = Type.label.fontSize, fontWeight = FontWeight.Bold)
-                        }
-                    }
+
                 }
             }
 
@@ -412,24 +413,52 @@ fun EpisodeDrawer(
                         .heightIn(max = 380.dp),
                     verticalArrangement = Arrangement.spacedBy(Spacing.xs)
                 ) {
-                    // Combined posts expand into MULTIPLE episodes that share
-                    // one anchor URL (RulesPipeline: "same anchor URL reused —
-                    // never an invented one"), and episodeNum uniqueness is
-                    // only re-stamped on grouped pages — so a url- or
-                    // num-only key can still collide and crash LazyColumn
-                    // with "Key was already used". Index-composed keys cannot.
-                    itemsIndexed(episodes, key = { i, ep -> "${ep.episodeNum}|$i" }) { _, ep ->
-                        val isSelected = ep in selectedEpisodes
+                    seasonGroups.forEach { (season, seasonEpisodes) ->
+                    item(key = "season-$season") {
+                        val isExpanded = season in expandedSeasons
+                        val selectedInSeason = seasonEpisodes.count { it.url in selectedUrls }
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    expandedSeasons = if (isExpanded) expandedSeasons - season else expandedSeasons + season
+                                }
+                                .padding(top = Spacing.sm, bottom = Spacing.xs),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(Spacing.sm)
+                        ) {
+                            Icon(
+                                imageVector = if (isExpanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
+                                contentDescription = if (isExpanded) "Collapse season $season" else "Expand season $season",
+                                tint = TextSecondary,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Text(
+                                text = "Season $season",
+                                color = TextPrimary,
+                                fontSize = Type.sectionTitle.fontSize,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Text(
+                                text = "$selectedInSeason/${seasonEpisodes.size} selected",
+                                color = TextSecondary,
+                                fontSize = Type.caption.fontSize
+                            )
+                        }
+                    }
+                    if (season in expandedSeasons) {
+                        itemsIndexed(
+                            items = seasonEpisodes,
+                            key = { i, ep -> "season-$season-${ep.url}|$i" }
+                        ) { _, ep ->
+                        val isSelected = ep.url in selectedUrls
                         EpisodeRow(
                             episode = ep,
                             isSelected = isSelected,
                             onToggle = {
                                 hapticView.tick()
-                                selectedEpisodes = if (isSelected) {
-                                    selectedEpisodes - ep
-                                } else {
-                                    selectedEpisodes + ep
-                                }
+                                selectedUrls = if (isSelected) selectedUrls - ep.url else selectedUrls + ep.url
                             },
                             onDownloadSingle = {
                                 if (!enqueued && !isEnqueuing) {
@@ -455,6 +484,7 @@ fun EpisodeDrawer(
                                 }
                             }
                         )
+                        }
                     }
                 }
             }
@@ -482,7 +512,7 @@ fun EpisodeDrawer(
                     ) {
                         Column {
                             Text(
-                                text = "${selectedEpisodes.size} Selected",
+                                text = "$uniqueSelectedCount Selected",
                                 color = TextPrimary,
                                 fontSize = Type.body.fontSize,
                                 fontWeight = FontWeight.Bold
@@ -496,42 +526,11 @@ fun EpisodeDrawer(
 
                         Button(
                             onClick = {
-                                // Double-tap guard: the dismiss animation takes
-                                // ~300ms and a second tap would re-enqueue every
-                                // selected episode (duplicate tasks, same filePath).
-                                if (enqueued || isEnqueuing) return@Button
-                                isEnqueuing = true
-                                enqueued = true
-                                hapticView.confirmHaptic()
-                                val toEnqueue = selectedEpisodes.toList()
-                                viewModel.viewModelScope.launch(Dispatchers.Default) {
-                                    try {
-                                        val sorted = toEnqueue.sortedBy { it.episodeNum }
-                                        val cleanFolder = com.anonrode.downloader.util.NameSanitizer.cleanShowFolder(show.title)
-                                        for (ep in sorted) {
-                                            val cleanEpTitle = com.anonrode.downloader.util.NameSanitizer.formatEpisodeTitle(
-                                                showTitle = show.title,
-                                                episodeNum = ep.episodeNum,
-                                                rawEpisodeLabel = ep.title
-                                            )
-                                            viewModel.engine.enqueue(
-                                                showTitle = cleanFolder,
-                                                episodeNum = ep.episodeNum,
-                                                episodeTitle = cleanEpTitle,
-                                                sourceUrl = ep.url,
-                                                mirrorUrls = ep.mirrorUrls,
-                                                isDirect = false,
-                                                backend = "aria2c",
-                                                site = ep.site.ifBlank { show.site },
-                                                parallelSockets = viewModel.engine.parallelSocketsPerFile,
-                                                verifiedDirectUrl = com.anonrode.downloader.pipeline.ResultVerifier.verifiedDirect(ep.url)
-                                            )
-                                        }
-                                    } finally {
-                                        withContext(Dispatchers.Main) {
-                                            onDismiss()
-                                        }
-                                    }
+                                val uniqueCount = selectedEpisodes.distinctBy { it.url }.size
+                                if (uniqueCount > 10) {
+                                    showBatchConfirmation = true
+                                } else {
+                                    enqueueSelected()
                                 }
                             },
                             enabled = !isEnqueuing,
@@ -552,11 +551,39 @@ fun EpisodeDrawer(
                             } else {
                                 Icon(Icons.Rounded.Download, contentDescription = null, modifier = Modifier.size(16.dp))
                                 Spacer(modifier = Modifier.width(Spacing.xs))
-                                Text("Download (${selectedEpisodes.size})", fontWeight = FontWeight.Bold, fontSize = Type.label.fontSize)
+                                Text("Download ($uniqueSelectedCount)", fontWeight = FontWeight.Bold, fontSize = Type.label.fontSize)
                             }
                         }
                     }
                 }
+            }
+
+            if (showBatchConfirmation) {
+                val uniqueCount = selectedEpisodes.distinctBy { it.url }.size
+                AlertDialog(
+                    onDismissRequest = { showBatchConfirmation = false },
+                    title = { Text("Queue $uniqueCount episodes?") },
+                    text = {
+                        Text(
+                            "This starts one download task per selected episode and may use a large amount of mobile data."
+                        )
+                    },
+                    confirmButton = {
+                        TextButton(
+                            onClick = {
+                                showBatchConfirmation = false
+                                enqueueSelected()
+                            }
+                        ) {
+                            Text("Queue $uniqueCount")
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { showBatchConfirmation = false }) {
+                            Text("Cancel")
+                        }
+                    }
+                )
             }
         }
     }
