@@ -147,4 +147,17 @@ class RelevanceScorerTest {
         val partial = RelevanceScorer.score("The Pitt", "The Pitt Season 2")
         assertTrue(exact > partial)
     }
+
+    @Test
+    fun multiPartMovieIsNotClassifiedAsEpisode() {
+        val results = listOf(
+            ShowCard("Dune: Part Two", "https://nepu.gd/watch/movie/693134", site = "nepu", category = "Movie"),
+            ShowCard("Dune: Part One", "https://nepu.gd/watch/movie/438631", site = "nepu", category = "Movie"),
+            ShowCard("Dune S01E01", "https://nepu.gd/watch/tv/123/1/1", site = "nepu", category = "TV Show")
+        )
+        val ranked = RelevanceScorer.filterAndSort("Dune", results)
+        assertEquals("https://nepu.gd/watch/movie/693134", ranked[0].url)
+        assertEquals("https://nepu.gd/watch/movie/438631", ranked[1].url)
+        assertEquals("https://nepu.gd/watch/tv/123/1/1", ranked[2].url)
+    }
 }
