@@ -50,20 +50,52 @@ object RelevanceScorer {
     }
 
     private val EPISODE_MARKER = Pattern.compile(
-        """(?i)\b(?:episode|ep\.?|s\d+e\d+|e\d+|part|chapter)\s*\d+\b""",
+        """(?i)\b(?:(?:episode|ep\.?|part|chapter)\s*\d+|s\d+e\d+|e\d+)\b""",
         Pattern.CASE_INSENSITIVE
     )
     private val SEASON_MARKER = Pattern.compile("""(?i)\bseason\s*(\d+)\b""", Pattern.CASE_INSENSITIVE)
     private val EPISODE_URL = Pattern.compile(
-        """(?i)/watch/(?:tv|movie)/\d+/\d+(?:/\d+)?(?:/|$)""",
+        """(?i)/watch/(?:tv|movie)/\d+/\d+/\d+(?:/|$)""",
+        Pattern.CASE_INSENSITIVE
+    )
+    private val SEASON_HUB_URL = Pattern.compile(
+        """(?i)/watch/(?:tv|movie)/\d+/\d+(?:/|$)""",
+        Pattern.CASE_INSENSITIVE
+    )
+    private val TV_SHOW_URL = Pattern.compile(
+        """(?i)/watch/tv/\d+(?:[?#]|$)""",
+        Pattern.CASE_INSENSITIVE
+    )
+    private val MOVIE_URL = Pattern.compile(
+        """(?i)/watch/movie/\d+(?:[?#]|$)""",
         Pattern.CASE_INSENSITIVE
     )
     private val YEAR_MARKER = Pattern.compile("""\b(?:19|20)\d{2}\b""")
 
-    private fun isEpisodeCard(item: ShowCard): Boolean {
-        val text = "${item.title} ${item.url}"
-        return EPISODE_MARKER.matcher(text).find() ||
-            EPISODE_URL.matcher(item.url).find()
+    private enum class ResultKind(val rank: Int) {
+        TV_SHOW(0),
+        SEASON_HUB(1),
+        MOVIE(2),
+        UNKNOWN(3),
+        EPISODE(4)
+    }
+
+    private fun classify(item: ShowCard): ResultKind {
+        if (EPISODE_URL.matcher(item.url).find() || EPISODE_MARKER.matcher(item.title).find()) {
+            return ResultKind.EPISODE
+        }
+        if (SEASON_HUB_URL.matcher(item.url).find() || SEASON_MARKER.matcher(item.title).find()) {
+            return ResultKind.SEASON_HUB
+        }
+        if (TV_SHOW_URL.matcher(item.url).find() ||
+            item.category.contains("tv", ignoreCase = true) ||
+            item.category.contains("series", ignoreCase = true) ||
+            item.category.contains("show", ignoreCase = true)
+        ) return ResultKind.TV_SHOW
+        if (MOVIE_URL.matcher(item.url).find() || item.category.contains("movie", ignoreCase = true)) {
+            return ResultKind.MOVIE
+        }
+        return ResultKind.UNKNOWN
     }
 
     private fun showKey(item: ShowCard): String {
@@ -75,27 +107,25 @@ object RelevanceScorer {
             .split(Regex("\\s+"))
             .filter { it.isNotBlank() && it !in STOP_WORDS }
             .joinToString(" ")
-        val year = YEAR_MARKER.matcher(item.title).let { m -> if (m.find()) m.group() else "" }
+        val titleYear = YEAR_MARKER.matcher(item.title).let { m -> if (m.find()) m.group() else "" }
+        val year = item.year.ifBlank { titleYear }
         val season = SEASON_MARKER.matcher(item.title).let { m -> if (m.find()) m.group(1) else "" }
         val suffix = listOf(year, season).filter { it.isNotBlank() }.joinToString("|")
-        return if (suffix.isNotBlank()) "$base|$suffix" else base
+        return "${item.site.lowercase()}|$base|$suffix"
     }
 
+    /**
+     * Collapse only proven duplicates of the same non-episode content within
+     * one provider. Episodes are never collapsed: when a series exists they
+     * remain available underneath it, and providers that only return episodes
+     * keep all of their results.
+     */
     private fun preferShows(items: List<Pair<ShowCard, Double>>): List<ShowCard> {
-        val groups = LinkedHashMap<String, MutableList<Pair<ShowCard, Double>>>()
-        items.forEach { grouped ->
-            groups.getOrPut(showKey(grouped.first)) { mutableListOf() }.add(grouped)
+        val seenContent = mutableSetOf<String>()
+        return items.map { it.first }.filter { card ->
+            if (classify(card) == ResultKind.EPISODE) return@filter true
+            seenContent.add(showKey(card))
         }
-        val out = mutableListOf<ShowCard>()
-        groups.values.forEach { group ->
-            val shows = group.filterNot { isEpisodeCard(it.first) }
-            if (shows.isNotEmpty()) {
-                out += shows.maxByOrNull { it.second }!!.first
-            } else {
-                out += group.map { it.first }
-            }
-        }
-        return out
     }
 
     fun filterAndSort(query: String, items: List<ShowCard>): List<ShowCard> {
@@ -109,7 +139,8 @@ object RelevanceScorer {
         }
 
         val sorted = scored.sortedWith(
-            compareByDescending<Pair<ShowCard, Double>> { it.second }
+            compareBy<Pair<ShowCard, Double>> { classify(it.first).rank }
+                .thenByDescending { it.second }
                 .thenBy { orderKey(it.first) }
         )
 

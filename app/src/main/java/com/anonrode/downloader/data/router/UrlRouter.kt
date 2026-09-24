@@ -103,9 +103,15 @@ object UrlRouter {
         }
 
         if (lower.contains("nepu.gd") || lower.contains("nepu.to")) {
+            val isTv = lower.contains("/watch/tv/")
             return ParsedUrl.DramaUrl(
                 site = "nepu",
-                showCard = ShowCard(title = slugToTitle(extractSlug(trimmed)), url = trimmed, site = "nepu", category = "Movies")
+                showCard = ShowCard(
+                    title = slugToTitle(extractSlug(trimmed)),
+                    url = trimmed,
+                    site = "nepu",
+                    category = if (isTv) "TV Show" else "Movie"
+                )
             )
         }
 
