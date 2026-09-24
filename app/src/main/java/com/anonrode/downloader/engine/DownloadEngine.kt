@@ -2550,6 +2550,62 @@ class DownloadEngine(
                         }
                     }
 
+                    // A zero-byte task may rotate to a different source URL on an
+                    // explicit dead-source response. Once any bytes exist, switching
+                    // hosts would risk mixing different files, so the park/resume
+                    // path below remains authoritative for partial transfers.
+                    val rejectionStatus = turboFailure?.httpStatus
+                    if (producedFile == null &&
+                        (rejectionStatus == 404 || rejectionStatus == 410 || rejectionStatus == 429) &&
+                        bytesLanded(t) == 0L && coroutineContext.isActive && !isSocial
+                    ) {
+                        val nextSource = MirrorPool.nextMirror(task.sourceUrl, task.mirrorUrls, failedUrl = permUrl)
+                        if (!nextSource.isNullOrBlank() && nextSource != permUrl) {
+                            val nextStream = try {
+                                resolveStreamUrl(nextSource, task.site, task.quality ?: defaultQuality)
+                            } catch (cancelled: CancellationException) {
+                                throw cancelled
+                            } catch (_: Exception) {
+                                null
+                            }
+                            if (!nextStream.isNullOrBlank() &&
+                                (isDirectMediaUrl(nextStream) || isProvablyDirectFile(nextStream))
+                            ) {
+                                val nextReferer = getRefererForUrl(nextStream)
+                                val nextHeaders = mutableMapOf("User-Agent" to HttpClient.DEFAULT_UA)
+                                if (nextReferer.isNotBlank()) nextHeaders["Referer"] = nextReferer
+                                // A dead alternate must not replace the original
+                                // failure state or throw out of the task coroutine.
+                                if (StreamValidator.validateResult(nextStream, nextHeaders) == null) {
+                                    permUrl = nextSource
+                                    streamUrl = nextStream
+                                    repository.update(task.id) {
+                                        it.copy(
+                                            selectedMirrorUrl = nextSource,
+                                            directUrl = nextStream
+                                        )
+                                    }
+                                    updateServiceState(force = true)
+                                    refererToPass = nextReferer
+                                    hdrs.clear()
+                                    hdrs.putAll(nextHeaders)
+                                    turboResult = TurboDownloader.download(
+                                        url = nextStream,
+                                        dest = dest,
+                                        headers = hdrs,
+                                        configuredSockets = effectiveSockets,
+                                        onProgress = progressCb,
+                                        taskId = task.id
+                                    )
+                                    when (turboResult) {
+                                        is TurboDownloader.TurboResult.Success -> producedFile = turboResult.file
+                                        is TurboDownloader.TurboResult.Failure -> turboFailure = turboResult
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     // Rate-limited (429)? Do NOT relaunch the fallback chain.
                     // Every fresh connection to a server that just said "too
                     // many requests" deepens the block and burns mobile data —
