@@ -19,6 +19,7 @@ import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.URLEncoder
 import java.util.Locale
+import kotlinx.coroutines.CancellationException
 
 /**
  * Executor for the declarative step-pipeline schema (see PipelineModels.kt for
@@ -61,6 +62,8 @@ object RulesPipeline {
     suspend fun runSearch(site: String, pipeline: Pipeline, query: String): List<ShowCard> {
         return try {
             runSearchInner(site, pipeline, query)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (e: Exception) {
             DebugLog.error("$site pipeline search: aborted (${e.javaClass.simpleName}: ${e.message})")
             emptyList()
@@ -102,6 +105,8 @@ object RulesPipeline {
         if (showUrl.isBlank()) return null
         return try {
             runEpisodesInner(site, pipeline, showUrl)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (e: Exception) {
             DebugLog.error("$site pipeline episodes: aborted (${e.javaClass.simpleName}: ${e.message})")
             null
@@ -230,7 +235,7 @@ object RulesPipeline {
             HttpClient.getText(url, referer, headers, tag = tag)
         }
         if (body.isNullOrBlank()) {
-            DebugLog.error("$site pipeline $stage: no body from ${source.method} $url (${HttpClient.lastFailure ?: "blank"})")
+            DebugLog.error("$site pipeline $stage: no body from ${source.method} $url")
             return null
         }
 

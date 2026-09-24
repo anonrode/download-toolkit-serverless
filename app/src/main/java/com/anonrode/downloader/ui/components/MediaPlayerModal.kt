@@ -121,6 +121,7 @@ import com.anonrode.downloader.R
 import com.anonrode.downloader.ui.theme.Spacing
 import kotlinx.coroutines.delay
 import java.io.File
+import java.util.UUID
 
 /**
  * The public context the player needs beyond the single file being opened.
@@ -447,8 +448,11 @@ private fun MediaPlayerModalImpl(
     }
     val mediaSession = remember {
         // Scoped to the modal lifetime — the OS picks it up for media-button
-        // / Bluetooth intents; no persistent notification needed.
-        MediaSession.Builder(context, exoPlayer).build()
+        // / Bluetooth intents; no persistent notification needed. Media3 rejects
+        // an empty/default session ID when two modal compositions overlap.
+        MediaSession.Builder(context, exoPlayer)
+            .setId("anonrode-player-${UUID.randomUUID()}")
+            .build()
     }
 
     // MediaItem for the current file. Embedded subtitle tracks (MKV multi-

@@ -53,6 +53,7 @@ class DownloadEngine(
 
     private val engineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val activeJobs = ConcurrentHashMap<String, Job>()
+    private val startingTaskIds = ConcurrentHashMap.newKeySet<String>()
     // Task ids whose NEXT resolution may bypass the HostHealth gate — one-shot
     // manual-retry tokens, consumed (read-and-remove) at the start of the next
     // startTask so a cooling-down host still gets the user's explicit attempt.
@@ -1889,6 +1890,12 @@ class DownloadEngine(
         if (existingJob != null && existingJob.isActive) {
             return
         }
+        if (!startingTaskIds.add(task.id)) return
+        val live = repository.find(task.id)
+        if (live == null || live.status !in setOf(TaskStatus.QUEUED, TaskStatus.RESOLVING, TaskStatus.DOWNLOADING)) {
+            startingTaskIds.remove(task.id)
+            return
+        }
         com.anonrode.downloader.util.DebugLog.write("start task=${task.id} url=${task.directUrl.take(80)} backend=${task.backend}")
 
         val job = engineScope.launch {
@@ -1974,7 +1981,6 @@ class DownloadEngine(
                             // audit showed these only as RESOLVE lines (audit
                             // finding: "silent failures, no ERROR line").
                             val hostReason = com.anonrode.downloader.pipeline.HostHealth.lastReason(streamUrl)
-                                ?: com.anonrode.downloader.data.net.HttpClient.lastFailure
                             val reasonSuffix = if (!hostReason.isNullOrBlank()) " ($hostReason)" else ""
                             com.anonrode.downloader.util.DebugLog.error("task=${task.id} could not crack stream link (host=$host)$reasonSuffix for ${streamUrl.take(120)}")
                             // Cross-provider auto-failover BEFORE parking or
@@ -3117,6 +3123,7 @@ class DownloadEngine(
                 if (thisJob != null && activeJobs[task.id] === thisJob) {
                     activeJobs.remove(task.id)
                 }
+                startingTaskIds.remove(task.id)
                 // Rewritten HLS masters live in cacheDir/hls as scratch files
                 // (950+ lines each). The inline sweep only ran on the success
                 // path; a throw or cancel anywhere in the chain leaked them
@@ -3133,6 +3140,10 @@ class DownloadEngine(
         }
 
         activeJobs[task.id] = job
+        val current = repository.find(task.id)
+        if (current == null || current.userPaused || current.status !in setOf(TaskStatus.RESOLVING, TaskStatus.DOWNLOADING, TaskStatus.VALIDATING)) {
+            job.cancel()
+        }
         // A fast-failing job can finish BEFORE this registration lands: its
         // finally-guard then saw no entry and could not remove itself, so the
         // line above would leave a dead job in activeJobs — a stale key that

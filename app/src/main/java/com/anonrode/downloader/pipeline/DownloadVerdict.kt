@@ -7,7 +7,7 @@ import com.anonrode.downloader.data.models.ShowCard
  * below is the product spec, not implementation detail):
  *
  *  - [Live]  — the card's chain cracked AND the terminal URL answered the
- *    no-redirect Range: bytes=0-0 probe with real file bytes. This is the
+ *    no-redirect Range: bytes=0-1024 probe with real file bytes. This is the
  *    ONLY state allowed to badge ("✓ 220 MB"); its payload (direct URL,
  *    episode count, size) is what makes the drawer and first bytes instant.
  *  - [Unreachable] — we could not prove anything: timeout, 429/5xx, TLS,

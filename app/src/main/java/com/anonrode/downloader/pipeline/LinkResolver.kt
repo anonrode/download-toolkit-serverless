@@ -213,8 +213,8 @@ object LinkResolver {
         return if (accept(resolved)) resolved else null
     }
 
-    /** The oracle's terminal check: one no-redirect Range: bytes=0-0 request
-     *  (at most 1 body byte — metered-data discipline, see probeTerminal doc).
+    /** The oracle's terminal check: one no-redirect Range: bytes=0-1024 request
+     *  (at most 1 KiB — metered-data discipline, see probeTerminal doc).
      *  Non-null totalBytes = the URL really serves a file: LIVE proof. */
     fun probeTerminal(url: String, referer: String? = null, tag: String? = null): Long? =
         HttpClient.probeTerminal(url, referer = referer, tag = tag)?.totalBytes

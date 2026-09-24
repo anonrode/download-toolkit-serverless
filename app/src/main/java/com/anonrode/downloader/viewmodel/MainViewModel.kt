@@ -537,6 +537,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             // its blocking search HTTP keeps draining until it finishes.
             // Killing the tagged calls keeps a cleared search from trailing.
             com.anonrode.downloader.data.net.HttpClient.cancelTagged("search")
+            com.anonrode.downloader.data.net.HttpClient.cancelTagged("search-strategy")
             _uiState.update { it.copy(isSearching = false, searchResults = emptyList(), searchError = null) }
         }
     }
@@ -652,6 +653,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // per keystroke, overlapping searches). Kill just the search-tagged
         // calls; download/resolver calls are untouched.
         com.anonrode.downloader.data.net.HttpClient.cancelTagged("search")
+        com.anonrode.downloader.data.net.HttpClient.cancelTagged("search-strategy")
         searchJob = viewModelScope.launch {
             val seq = ++searchSequence
             _uiState.update { it.copy(isSearching = true, searchError = null) }

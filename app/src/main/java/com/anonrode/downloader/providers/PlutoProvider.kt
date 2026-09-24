@@ -82,7 +82,7 @@ object PlutoProvider : SiteProvider {
         try {
             val html = HttpClient.getText(showUrl, referer = "$mainUrl/")
             if (html.isNullOrBlank()) {
-                com.anonrode.downloader.util.DebugLog.error("pluto loadEpisodes: fetch returned null for $showUrl (lastFailure=${HttpClient.lastFailure})")
+                com.anonrode.downloader.util.DebugLog.error("pluto loadEpisodes: fetch returned null for $showUrl")
                 return ShowDetails(show = show)
             }
             if (looksLikeSecurityChallenge(html)) {
