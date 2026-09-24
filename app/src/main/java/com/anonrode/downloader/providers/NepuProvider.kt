@@ -91,6 +91,66 @@ object NepuProvider : SiteProvider {
         }.awaitAll().filterNotNull()
     }
 
+    private val SRV_MAP_PATTERN = Pattern.compile("""SRV_MAP\s*=\s*(\{.+?\})\s*[,;]""")
+
+    internal fun extractSrvMap(html: String): Map<String, String> {
+        val m = SRV_MAP_PATTERN.matcher(html)
+        if (!m.find()) return emptyMap()
+        val jsonStr = m.group(1) ?: return emptyMap()
+        val out = mutableMapOf<String, String>()
+        try {
+            val obj = JSONObject(jsonStr)
+            val keys = obj.keys()
+            while (keys.hasNext()) {
+                val k = keys.next()
+                val v = obj.optString(k).replace("\\/", "/")
+                if (v.isNotBlank()) out[k] = v
+            }
+        } catch (_: Exception) {}
+        return out
+    }
+
+    internal fun buildMirrors(
+        mediaType: String,
+        tmdbId: String,
+        season: Int? = null,
+        episode: Int? = null,
+        srvMap: Map<String, String> = emptyMap(),
+        primaryUrl: String = ""
+    ): List<String> {
+        val mirrors = mutableListOf<String>()
+        srvMap.values.forEach { url ->
+            val clean = url.trim()
+            if (clean.isNotBlank() && clean != primaryUrl && !mirrors.contains(clean)) {
+                mirrors.add(clean)
+            }
+        }
+        val isTv = mediaType == "tv" && season != null && episode != null
+        val tvPath = if (isTv) "tv/$tmdbId/$season/$episode" else "movie/$tmdbId"
+        val synthetic = listOf(
+            "https://vidsrc.mov/embed/$tvPath",
+            "https://vidsrc.fyi/embed/$tvPath",
+            "https://vidrock.net/" + (if (isTv) "tv/$tmdbId/$season/$episode" else "movie/$tmdbId"),
+            "https://vidnest.fun/" + (if (isTv) "tv/$tmdbId/$season/$episode" else "movie/$tmdbId"),
+            "https://www.vidking.net/embed/$tvPath",
+            "https://vidlink.pro/" + (if (isTv) "tv/$tmdbId/$season/$episode?autoplay=true&title=true" else "movie/$tmdbId?autoplay=true&title=true"),
+            "https://vidfast.pro/" + (if (isTv) "tv/$tmdbId/$season/$episode?autoPlay=true" else "movie/$tmdbId?autoPlay=true"),
+            "https://vidup.to/" + (if (isTv) "tv/$tmdbId/$season/$episode?autoPlay=true" else "movie/$tmdbId?autoPlay=true"),
+            "https://player.videasy.net/" + (if (isTv) "tv/$tmdbId/$season/$episode" else "movie/$tmdbId"),
+            "https://111movies.com/" + (if (isTv) "tv/$tmdbId/$season/$episode" else "movie/$tmdbId"),
+            if (isTv) "https://www.2embed.cc/embedtv/$tmdbId&s=$season&e=$episode" else "https://www.2embed.cc/embed/$tmdbId",
+            if (isTv) "https://multiembed.mov/?video_id=$tmdbId&tmdb=1&s=$season&e=$episode" else "https://multiembed.mov/?video_id=$tmdbId&tmdb=1",
+            if (isTv) "https://superflixapi.co/serie/$tmdbId/$season/$episode" else "https://superflixapi.co/filme/$tmdbId",
+            "https://peachify.top/embed/$tvPath"
+        )
+        synthetic.forEach { sUrl ->
+            if (sUrl != primaryUrl && !mirrors.contains(sUrl)) {
+                mirrors.add(sUrl)
+            }
+        }
+        return mirrors
+    }
+
     private val EPISODE_PATTERN = Pattern.compile("""watch/tv/\d+/(\d+)/(\d+)(?:[?&#].*)?$""")
 
     override suspend fun loadEpisodes(showUrl: String): ShowDetails {
@@ -100,14 +160,8 @@ object NepuProvider : SiteProvider {
             site = name
         )
 
-        // Fast upstream pre-check: if Vidsrc is known unavailable or 404, fail early
         val tmdbId = showUrl.substringAfterLast('/').substringBefore('?')
         val mediaType = if (showUrl.contains("/tv/")) "tv" else "movie"
-        if (tmdbId.isNotBlank() && tmdbId.all { it.isDigit() }) {
-            if (!VidsrcResolver.checkAvailability(mediaType, tmdbId, tag = "load_episodes")) {
-                return ShowDetails(show = show, episodes = emptyList())
-            }
-        }
 
         DynamicRulesManager.getPipeline(name)?.episodes?.let { pl ->
             val res = RulesPipeline.runEpisodes(name, pl, showUrl)
@@ -122,7 +176,8 @@ object NepuProvider : SiteProvider {
         if (showUrl.contains("/tv/")) {
             val episodes = mutableListOf<EpisodeItem>()
             try {
-                val html = HttpClient.getText(showUrl, referer = "$mainUrl/") ?: ""
+                val html = HttpClient.getText(showUrl, referer = "$mainUrl/", headers = mapOf("Cookie" to "hv=1")) ?: ""
+                val srvMap = extractSrvMap(html)
                 val doc = Jsoup.parse(html, showUrl)
                 val seen = mutableSetOf<Pair<Int, Int>>()
                 val links = mutableListOf<Triple<Int, Int, String>>() // (season, episode, url)
@@ -139,12 +194,14 @@ object NepuProvider : SiteProvider {
                 }
                 links.sortWith(compareBy({ it.first }, { it.second }))
                 links.forEachIndexed { idx, (season, episode, url) ->
+                    val mirrors = buildMirrors("tv", tmdbId, season, episode, srvMap, primaryUrl = url)
                     episodes.add(
                         EpisodeItem(
                             title = "S%02d E%02d".format(season, episode),
                             url = url,
                             episodeNum = idx + 1,
-                            site = name
+                            site = name,
+                            mirrorUrls = mirrors
                         )
                     )
                 }
@@ -154,33 +211,44 @@ object NepuProvider : SiteProvider {
             }
         }
 
+        val html = try {
+            HttpClient.getText(showUrl, referer = "$mainUrl/", headers = mapOf("Cookie" to "hv=1")) ?: ""
+        } catch (_: Exception) { "" }
+        val srvMap = extractSrvMap(html)
+        val mirrors = buildMirrors("movie", tmdbId, srvMap = srvMap, primaryUrl = showUrl)
+
         val episodes = listOf(
             EpisodeItem(
                 title = "Stream / Movie",
                 url = showUrl,
                 episodeNum = 1,
-                site = name
+                site = name,
+                mirrorUrls = mirrors
             )
         )
         return ShowDetails(show = show, episodes = episodes)
     }
 
     override suspend fun resolveEpisode(episodeUrl: String, quality: String): DownloadRecipe {
-        // Watch pages embed a vidsrc player whose chain (embed -> data.vidsrcme.ru
-        // API -> wasm ChaCha20 decrypt -> CDN playlist) VidsrcResolver now cracks,
-        // so directUrl is the token-stamped master playlist the engine feeds
-        // straight to yt-dlp.
-        // OTA resolve recipe first (a signed playbook can replace the vidsrc
-        // chain knowledge without an app update); compiled registry fallback.
         val ota = RulesPipeline.runResolveForSite(name, episodeUrl, quality)
         var direct = ota ?: ResolverRegistry.resolve(episodeUrl, quality)
-        // No iframe fallback here: the watch page's iframe is only a pointer
-        // into the vidsrc chain, not a stream. Returning the embed URL as
-        // directUrl made the engine persist an un-downloadable page and loop
-        // yt-dlp on "Unsupported URL" forever (user-reported nepu movie stuck
-        // on "starting" — the movie API returns null stream_urls, so there is
-        // genuinely nothing to download). Coming up empty lets the engine fail
-        // cleanly with a retryable message instead.
+
+        // If primary URL didn't resolve to a stream, try the other 13 embed servers!
+        if (direct.isNullOrBlank()) {
+            val tmdbId = episodeUrl.substringAfterLast('/').substringBefore('?')
+            val mediaType = if (episodeUrl.contains("/tv/")) "tv" else "movie"
+            if (tmdbId.isNotBlank() && tmdbId.all { it.isDigit() }) {
+                val candidateMirrors = buildMirrors(mediaType, tmdbId, primaryUrl = episodeUrl)
+                for (mirror in candidateMirrors) {
+                    val resolved = ResolverRegistry.resolve(mirror, quality)
+                    if (!resolved.isNullOrBlank()) {
+                        direct = resolved
+                        break
+                    }
+                }
+            }
+        }
+
         if (direct.isNullOrBlank()) direct = ""
         var filename = direct.substringAfterLast('/').substringBefore('?').ifEmpty { "movie.mp4" }
         if (filename.lowercase().endsWith(".m3u8")) filename = filename.dropLast(5) + ".mp4"

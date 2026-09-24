@@ -694,9 +694,14 @@ object VidsrcResolver : BaseResolver {
         "vidsrc.mov", "vidsrc.me", "vidsrc.net", "vidsrc.cc", "vidsrc.to",
         "vidsrc.in", "vidsrc.pm", "vidsrc.xyz", "vsembed.ru",
         "cloudorchestranova.com", "data.vidsrcme.ru",
-        "nepu.gd/watch", "nepu.to/watch"
+        "nepu.gd/watch", "nepu.to/watch",
+        "vidsrc.fyi", "vidrock.net", "vidnest.fun", "vidking.net",
+        "vidlink.pro", "vidfast.pro", "vidup.to", "player.videasy.net",
+        "111movies.com", "2embed.cc", "vidsrc.buzz", "multiembed.mov",
+        "superflixapi.co", "peachify.top"
     )
-    private val TMDB_PATTERN = Pattern.compile("""/(?:movie|tv)/(\d+)(?:[/_-](\d+)[/_-](\d+))?""")
+    private val TMDB_PATTERN = Pattern.compile("""/(?:movie|tv|filme|serie|embed|embedtv)/(\d+)(?:[/_&?=-](\d+)[/_&?=-](\d+))?""")
+    private val MULTIEMBED_PATTERN = Pattern.compile("""(?:video_id|tmdb|id)=(\d+)(?:.*?[&?]s=(\d+)&e=(\d+))?""")
     private val ORIGIN_PATTERN = Pattern.compile("""https?://[^/]+""")
     internal val missingTmdb = ConcurrentHashMap<String, Long>()
     internal val availableTmdb = ConcurrentHashMap<String, Long>()
@@ -819,15 +824,48 @@ object VidsrcResolver : BaseResolver {
                 } catch (_: Exception) {}
             }
 
+            // 2embed wrapper unwrap (contains vidsrc.buzz / 2embed player)
+            if (embedUrl.contains("2embed.cc") || embedUrl.contains("vidsrc.buzz")) {
+                try {
+                    val twoHtml = HttpClient.getText(embedUrl, referer = "https://nepu.gd/")
+                    if (!twoHtml.isNullOrBlank()) {
+                        val twoDoc = Jsoup.parse(twoHtml, embedUrl)
+                        val buzzIframe = twoDoc.selectFirst("iframe[src*=vidsrc]")
+                            ?: twoDoc.selectFirst("iframe[src*=vsembed]")
+                            ?: twoDoc.selectFirst("iframe[src]")
+                        if (buzzIframe != null && buzzIframe.attr("src").isNotBlank()) {
+                            embedUrl = HttpClient.safeResolveUri(embedUrl, buzzIframe.attr("src"))
+                        }
+                    }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {}
+            }
+
             // The embed URL carries the TMDB id (and season/episode for TV).
+            var tmdb: String? = null
+            var season: String? = null
+            var episode: String? = null
             val m = TMDB_PATTERN.matcher(embedUrl)
-            if (!m.find()) {
+            if (m.find()) {
+                tmdb = m.group(1)
+                season = m.group(2)
+                episode = m.group(3)
+            } else {
+                val mm = MULTIEMBED_PATTERN.matcher(embedUrl)
+                if (mm.find()) {
+                    tmdb = mm.group(1)
+                    season = mm.group(2)
+                    episode = mm.group(3)
+                }
+            }
+
+            if (tmdb.isNullOrBlank()) {
                 lastFailure = "Vidsrc: no TMDB id pattern matched in $embedUrl"
                 return null
             }
-            val tmdb = m.group(1) ?: return null
-            val mediaType = if (embedUrl.contains("/tv/")) "tv" else "movie"
-            val cacheKey = "$mediaType:$tmdb:${m.group(2).orEmpty()}:${m.group(3).orEmpty()}"
+            val mediaType = if (embedUrl.contains("/tv/") || embedUrl.contains("/serie/") || embedUrl.contains("embedtv") || season != null) "tv" else "movie"
+            val cacheKey = "$mediaType:$tmdb:${season.orEmpty()}:${episode.orEmpty()}"
             val cachedMissingAt = missingTmdb[cacheKey]
             if (cachedMissingAt != null) {
                 if (System.currentTimeMillis() - cachedMissingAt < MISSING_TMDB_TTL_MS) {
@@ -836,10 +874,10 @@ object VidsrcResolver : BaseResolver {
                 }
                 missingTmdb.remove(cacheKey, cachedMissingAt)
             }
-            val apiUrl = if (embedUrl.contains("/tv/")) {
-                val season = m.group(2) ?: return null
-                val episode = m.group(3) ?: return null
-                "https://data.vidsrcme.ru/api.php?type=tv&tmdb=$tmdb&season=$season&episode=$episode&stream_urls"
+            val apiUrl = if (mediaType == "tv") {
+                val s = season ?: "1"
+                val ep = episode ?: "1"
+                "https://data.vidsrcme.ru/api.php?type=tv&tmdb=$tmdb&season=$s&episode=$ep&stream_urls"
             } else {
                 "https://data.vidsrcme.ru/api.php?type=movie&tmdb=$tmdb&stream_urls"
             }
