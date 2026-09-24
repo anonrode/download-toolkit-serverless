@@ -38,9 +38,13 @@ object DramaRainProvider : SiteProvider {
             val html = HttpClient.getText(searchUrl, tag = "search")
             if (!html.isNullOrBlank()) {
                 val doc = Jsoup.parse(html, searchUrl)
-                val articles = doc.select("article, .post-item, .entry-title a, h2.entry-title a")
+                val articles = doc.select("article, .post-item, .post-title, .entry-title a, h2.entry-title a")
                 for (item in articles) {
-                    val a = if (item.tagName() == "a") item else item.selectFirst("h2 a, .entry-title a, a[href]")
+                    val a = if (item.tagName() == "a") item else item.selectFirst(".post-title a")
+                        ?: item.selectFirst("h2.post-title a")
+                        ?: item.selectFirst(".entry-title a")
+                        ?: item.selectFirst("h2 a")
+                        ?: item.selectFirst("a[href]")
                     val title = a?.text()?.trim() ?: ""
                     val rawHref = a?.attr("href") ?: ""
                     val href = a?.attr("abs:href")?.ifBlank {
