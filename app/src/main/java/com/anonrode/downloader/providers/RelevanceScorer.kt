@@ -50,7 +50,11 @@ object RelevanceScorer {
     }
 
     private val EPISODE_MARKER = Pattern.compile(
-        """(?i)\b(?:(?:episode|ep\.?|part|chapter)\s*\d+|s\d+e\d+|e\d+)\b""",
+        """(?i)\b(?:(?:episode|ep\.?)\s*\d+|s\d+e\d+|e\d+)\b""",
+        Pattern.CASE_INSENSITIVE
+    )
+    private val PART_OR_CHAPTER_MARKER = Pattern.compile(
+        """(?i)\b(?:part|chapter)\s*\d+\b""",
         Pattern.CASE_INSENSITIVE
     )
     private val SEASON_MARKER = Pattern.compile("""(?i)\bseason\s*(\d+)\b""", Pattern.CASE_INSENSITIVE)
@@ -84,6 +88,10 @@ object RelevanceScorer {
         if (EPISODE_URL.matcher(item.url).find() || EPISODE_MARKER.matcher(item.title).find()) {
             return ResultKind.EPISODE
         }
+        val isMovie = MOVIE_URL.matcher(item.url).find() || item.category.contains("movie", ignoreCase = true)
+        if (PART_OR_CHAPTER_MARKER.matcher(item.title).find() && !isMovie) {
+            return ResultKind.EPISODE
+        }
         if (SEASON_HUB_URL.matcher(item.url).find() || SEASON_MARKER.matcher(item.title).find()) {
             return ResultKind.SEASON_HUB
         }
@@ -92,14 +100,16 @@ object RelevanceScorer {
             item.category.contains("series", ignoreCase = true) ||
             item.category.contains("show", ignoreCase = true)
         ) return ResultKind.TV_SHOW
-        if (MOVIE_URL.matcher(item.url).find() || item.category.contains("movie", ignoreCase = true)) {
+        if (isMovie) {
             return ResultKind.MOVIE
         }
         return ResultKind.UNKNOWN
     }
 
     private fun showKey(item: ShowCard): String {
+        val kind = classify(item)
         val base = EPISODE_MARKER.matcher(item.title).replaceAll(" ")
+            .let { PART_OR_CHAPTER_MARKER.matcher(it).replaceAll(" ") }
             .replace(Regex("""(?i)\bseason\s*\d+\b"""), " ")
             .lowercase()
             .replace(Regex("[^a-z0-9]+"), " ")
@@ -111,7 +121,7 @@ object RelevanceScorer {
         val year = item.year.ifBlank { titleYear }
         val season = SEASON_MARKER.matcher(item.title).let { m -> if (m.find()) m.group(1) else "" }
         val suffix = listOf(year, season).filter { it.isNotBlank() }.joinToString("|")
-        return "${item.site.lowercase()}|$base|$suffix"
+        return "${item.site.lowercase()}|$kind|$base|$suffix"
     }
 
     /**
