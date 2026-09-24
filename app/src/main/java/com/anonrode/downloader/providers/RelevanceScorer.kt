@@ -49,6 +49,55 @@ object RelevanceScorer {
         return finalScore
     }
 
+    private val EPISODE_MARKER = Pattern.compile(
+        """(?i)\b(?:episode|ep\.?|s\d+e\d+|e\d+|part|chapter)\s*\d+\b""",
+        Pattern.CASE_INSENSITIVE
+    )
+    private val SEASON_MARKER = Pattern.compile("""(?i)\bseason\s*(\d+)\b""", Pattern.CASE_INSENSITIVE)
+    private val EPISODE_URL = Pattern.compile(
+        """(?i)/watch/(?:tv|movie)/\d+/\d+(?:/\d+)?(?:/|$)""",
+        Pattern.CASE_INSENSITIVE
+    )
+    private val YEAR_MARKER = Pattern.compile("""\b(?:19|20)\d{2}\b""")
+
+    private fun isEpisodeCard(item: ShowCard): Boolean {
+        val text = "${item.title} ${item.url}"
+        return EPISODE_MARKER.matcher(text).find() ||
+            EPISODE_URL.matcher(item.url).find()
+    }
+
+    private fun showKey(item: ShowCard): String {
+        val base = EPISODE_MARKER.matcher(item.title).replaceAll(" ")
+            .replace(Regex("""(?i)\bseason\s*\d+\b"""), " ")
+            .lowercase()
+            .replace(Regex("[^a-z0-9]+"), " ")
+            .trim()
+            .split(Regex("\\s+"))
+            .filter { it.isNotBlank() && it !in STOP_WORDS }
+            .joinToString(" ")
+        val year = YEAR_MARKER.matcher(item.title).let { m -> if (m.find()) m.group() else "" }
+        val season = SEASON_MARKER.matcher(item.title).let { m -> if (m.find()) m.group(1) else "" }
+        val suffix = listOf(year, season).filter { it.isNotBlank() }.joinToString("|")
+        return if (suffix.isNotBlank()) "$base|$suffix" else base
+    }
+
+    private fun preferShows(items: List<Pair<ShowCard, Double>>): List<ShowCard> {
+        val groups = LinkedHashMap<String, MutableList<Pair<ShowCard, Double>>>()
+        items.forEach { grouped ->
+            groups.getOrPut(showKey(grouped.first)) { mutableListOf() }.add(grouped)
+        }
+        val out = mutableListOf<ShowCard>()
+        groups.values.forEach { group ->
+            val shows = group.filterNot { isEpisodeCard(it.first) }
+            if (shows.isNotEmpty()) {
+                out += shows.maxByOrNull { it.second }!!.first
+            } else {
+                out += group.map { it.first }
+            }
+        }
+        return out
+    }
+
     fun filterAndSort(query: String, items: List<ShowCard>): List<ShowCard> {
         val validItems = items.filter { item ->
             com.anonrode.downloader.security.TorrentSecurityShield.checkNegativeFilters(item.title, query).first
@@ -64,7 +113,7 @@ object RelevanceScorer {
                 .thenBy { orderKey(it.first) }
         )
 
-        return sorted.map { it.first }.distinctBy { it.url }
+        return preferShows(sorted).distinctBy { it.url }
     }
 
     private fun orderKey(item: ShowCard): Int {

@@ -565,7 +565,7 @@ class DownloadEngine(
         // cannot interrupt. Sweep exactly like cancel() when it is safe —
         // with other tasks running their requests must stay untouched (the
         // cross-talk rule); the stragglers then die on their read timeout.
-        if (activeJobs.isEmpty()) HttpClient.cancelInFlight()
+        if (!hasOtherActiveWork(taskId)) HttpClient.cancelInFlight()
         com.anonrode.downloader.util.DebugLog.user("pause $taskId")
         // userPaused=true is the authoritative "the user asked for this pause"
         // mark: every auto-resume path (network reconnect, storage self-heal,
@@ -597,6 +597,11 @@ class DownloadEngine(
      * strand the task in a stuck state: either the rescue lands first (PAUSED,
      * overwritten by this QUEUED) or this lands first (QUEUED, rescue no-ops).
      */
+    private fun hasOtherActiveWork(ignoredTaskId: String): Boolean {
+        return activeJobs.keys.any { it != ignoredTaskId && activeJobs[it]?.isActive == true } ||
+            startingTaskIds.any { it != ignoredTaskId }
+    }
+
     private fun enforceConcurrencyLimit() {
         val actives = repository.tasks.value.filter {
             it.status == TaskStatus.DOWNLOADING || it.status == TaskStatus.RESOLVING || it.status == TaskStatus.VALIDATING
@@ -639,7 +644,7 @@ class DownloadEngine(
         TurboDownloader.cancelTask(taskId)
         // Same in-flight sweep as pause(): a network park mid-resolve must
         // not leave blocking HTTP draining data until its read timeout.
-        if (activeJobs.isEmpty()) HttpClient.cancelInFlight()
+        if (!hasOtherActiveWork(taskId)) HttpClient.cancelInFlight()
         // Atomic re-check inside the StateFlow transform: the find()/status
         // guard above is a non-atomic snapshot, and on a flaky network a
         // disconnect-triggered park races a user pause() — its marker write
@@ -671,7 +676,7 @@ class DownloadEngine(
         // safe: with no other running task there is nothing to cross-talk
         // into. Otherwise the job's cancellation handler sweeps once this
         // task's current blocking call unwinds (bounded by the read timeout).
-        if (activeJobs.isEmpty()) HttpClient.cancelInFlight()
+        if (!hasOtherActiveWork(taskId)) HttpClient.cancelInFlight()
         com.anonrode.downloader.util.DebugLog.user("cancel $taskId")
         if (task != null) {
             purgeTaskArtifacts(task)
@@ -1516,12 +1521,14 @@ class DownloadEngine(
             // status flip and its job registration. Taking the max closes the
             // window both ways: this is THE concurrency choke-point, and no
             // other code may start a backend outside it.
-            val statusActive = currentTasks.count {
-                it.status == TaskStatus.DOWNLOADING || it.status == TaskStatus.RESOLVING || it.status == TaskStatus.VALIDATING
+            val activeIds = buildSet {
+                currentTasks.filter {
+                    it.status == TaskStatus.DOWNLOADING || it.status == TaskStatus.RESOLVING || it.status == TaskStatus.VALIDATING
+                }.forEach { add(it.id) }
+                activeJobs.keys.forEach { id -> if (activeJobs[id]?.isActive == true) add(id) }
+                addAll(startingTaskIds)
             }
-            val jobActive = activeJobs.values.count { it.isActive }
-            val startingActive = startingTaskIds.size
-            val activeCount = maxOf(statusActive, jobActive + startingActive)
+            val activeCount = activeIds.size
 
             if (activeCount >= maxConcurrentDownloads) return
 
@@ -2564,7 +2571,7 @@ class DownloadEngine(
                     val rejectionStatus = turboFailure?.httpStatus
                     if (producedFile == null &&
                         (rejectionStatus == 404 || rejectionStatus == 410 || rejectionStatus == 429) &&
-                        bytesLanded(t) == 0L && coroutineContext.isActive && !isSocial
+                        bytesLanded(task) == 0L && coroutineContext.isActive && !isSocial
                     ) {
                         val nextSource = MirrorPool.nextMirror(task.sourceUrl, task.mirrorUrls, failedUrl = permUrl)
                         if (!nextSource.isNullOrBlank() && nextSource != permUrl) {
@@ -3073,7 +3080,7 @@ class DownloadEngine(
                 // as a safety net for removals that bypassed cancel(). Even
                 // then, only sweep when no other task is running.
                 if (fullyCancelledIds.remove(task.id) || repository.find(task.id) == null) {
-                    if (activeJobs.keys.none { it != task.id }) {
+                    if (!hasOtherActiveWork(task.id)) {
                         HttpClient.cancelInFlight()
                     }
                 }
@@ -3202,7 +3209,7 @@ class DownloadEngine(
         }
         // pause() sweeps in-flight HTTP only when the last job is gone; with
         // everything paused that condition holds by definition.
-        if (activeJobs.isEmpty()) HttpClient.cancelInFlight()
+        if (activeJobs.isEmpty() && startingTaskIds.isEmpty()) HttpClient.cancelInFlight()
         // One service/notification update for the whole batch, and NO
         // processQueue(): "Pause all" means everything stops, so the free
         // slots must not be refilled from the (now also paused) queue.
@@ -3269,7 +3276,7 @@ class DownloadEngine(
         }
         // Every job was cancelled above, so a global in-flight sweep cannot
         // cross-talk into another task — the condition cancel() relies on.
-        if (activeJobs.isEmpty()) HttpClient.cancelInFlight()
+        if (activeJobs.isEmpty() && startingTaskIds.isEmpty()) HttpClient.cancelInFlight()
         updateServiceState(force = true)
         processQueue()
     }

@@ -66,6 +66,12 @@ class ResolverDefectRegressionTest {
 
     private fun resolverSource(): String = sourceAt("app/src/main/java/com/anonrode/downloader/resolvers/Resolvers.kt")
 
+    @Test fun queueSourceDoesNotUseStaleTaskVariable() {
+        val source = sourceAt("app/src/main/java/com/anonrode/downloader/engine/DownloadEngine.kt")
+        assertTrue(source.contains("bytesLanded(task)"))
+        assertFalse(source.contains("bytesLanded(t)"))
+    }
+
     @Test fun concurrencyDefaultsAndBoundsStayBounded() {
         val settings = sourceAt("app/src/main/java/com/anonrode/downloader/data/settings/AppSettings.kt")
         val engine = sourceAt("app/src/main/java/com/anonrode/downloader/engine/DownloadEngine.kt")
