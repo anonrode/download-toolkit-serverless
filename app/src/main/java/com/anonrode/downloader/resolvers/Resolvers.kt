@@ -698,11 +698,72 @@ object VidsrcResolver : BaseResolver {
     )
     private val TMDB_PATTERN = Pattern.compile("""/(?:movie|tv)/(\d+)(?:[/_-](\d+)[/_-](\d+))?""")
     private val ORIGIN_PATTERN = Pattern.compile("""https?://[^/]+""")
-    private val missingTmdb = ConcurrentHashMap<String, Long>()
+    internal val missingTmdb = ConcurrentHashMap<String, Long>()
+    internal val availableTmdb = ConcurrentHashMap<String, Long>()
     private const val MISSING_TMDB_TTL_MS = 15 * 60_000L
+    private const val AVAILABLE_TMDB_TTL_MS = 60 * 60_000L
     @Volatile private var lastFailure: String? = null
 
     override fun lastResolveFailure(): String? = lastFailure
+
+    fun isKnownUnavailable(mediaType: String, tmdbId: String, season: String = "", episode: String = ""): Boolean {
+        val cacheKey = "$mediaType:$tmdbId:$season:$episode"
+        val cachedMissingAt = missingTmdb[cacheKey] ?: return false
+        if (System.currentTimeMillis() - cachedMissingAt < MISSING_TMDB_TTL_MS) {
+            return true
+        }
+        missingTmdb.remove(cacheKey, cachedMissingAt)
+        return false
+    }
+
+    fun isKnownAvailable(mediaType: String, tmdbId: String, season: String = "", episode: String = ""): Boolean {
+        val cacheKey = "$mediaType:$tmdbId:$season:$episode"
+        val cachedAvailableAt = availableTmdb[cacheKey] ?: return false
+        if (System.currentTimeMillis() - cachedAvailableAt < AVAILABLE_TMDB_TTL_MS) {
+            return true
+        }
+        availableTmdb.remove(cacheKey, cachedAvailableAt)
+        return false
+    }
+
+    fun markUnavailable(mediaType: String, tmdbId: String, season: String = "", episode: String = "") {
+        val cacheKey = "$mediaType:$tmdbId:$season:$episode"
+        missingTmdb[cacheKey] = System.currentTimeMillis()
+    }
+
+    fun markAvailable(mediaType: String, tmdbId: String, season: String = "", episode: String = "") {
+        val cacheKey = "$mediaType:$tmdbId:$season:$episode"
+        availableTmdb[cacheKey] = System.currentTimeMillis()
+    }
+
+    suspend fun checkAvailability(mediaType: String, tmdbId: String, tag: String? = "search"): Boolean {
+        if (tmdbId.isBlank()) return false
+        if (isKnownUnavailable(mediaType, tmdbId)) return false
+        if (isKnownAvailable(mediaType, tmdbId)) return true
+
+        val cacheKey = "$mediaType:$tmdbId::"
+        return try {
+            val apiUrl = "https://data.vidsrcme.ru/api.php?type=$mediaType&tmdb=$tmdbId&stream_urls"
+            val json = HttpClient.getText(apiUrl, referer = "https://cloudorchestranova.com/", tag = tag)
+                ?: return true // Fail open on network/timeout error so offline/flaky connection doesn't drop items
+            val root = JSONObject(json)
+            val sc = root.optInt("status_code", 0)
+            val data = root.optJSONObject("data")
+            if (sc == 404 || (sc == 0 && data == null)) {
+                missingTmdb[cacheKey] = System.currentTimeMillis()
+                false
+            } else if (data != null || sc == 200) {
+                availableTmdb[cacheKey] = System.currentTimeMillis()
+                true
+            } else {
+                true
+            }
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (_: Exception) {
+            true // Fail open on transient error
+        }
+    }
 
     override fun canResolve(url: String): Boolean {
         return hostClaim(url, HOSTS)
@@ -794,6 +855,7 @@ object VidsrcResolver : BaseResolver {
                 lastFailure = "Vidsrc: API returned status $sc for tmdb=$tmdb"
                 return null
             }
+            availableTmdb[cacheKey] = System.currentTimeMillis()
             val streamUrl: String = when (val su = data.opt("stream_urls")) {
                 is JSONArray -> if (su.length() > 0) su.getString(0) else null
                 is String -> {

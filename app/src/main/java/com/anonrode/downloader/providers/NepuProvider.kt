@@ -7,6 +7,13 @@ import com.anonrode.downloader.data.models.ShowCard
 import com.anonrode.downloader.data.models.ShowDetails
 import com.anonrode.downloader.data.net.HttpClient
 import com.anonrode.downloader.resolvers.ResolverRegistry
+import com.anonrode.downloader.resolvers.VidsrcResolver
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import org.json.JSONObject
 import org.jsoup.Jsoup
 import java.net.URLEncoder
@@ -19,46 +26,69 @@ object NepuProvider : SiteProvider {
     override suspend fun search(query: String): List<ShowCard> {
         // OTA pipeline first (JSON API + URL synthesis live in the playbook);
         // non-empty wins, else the compiled path below runs.
-        DynamicRulesManager.getPipeline(name)?.search?.let { pl ->
+        val rawResults = DynamicRulesManager.getPipeline(name)?.search?.let { pl ->
             val results = RulesPipeline.runSearch(name, pl, query)
-            if (results.isNotEmpty()) return results
+            if (results.isNotEmpty()) results else null
+        } ?: run {
+            val results = mutableListOf<ShowCard>()
+            try {
+                val encoded = URLEncoder.encode(query, "UTF-8")
+                val url = "$mainUrl/api/search?q=$encoded"
+                val jsonStr = HttpClient.getText(url, tag = "search") ?: return emptyList()
+
+                val obj = JSONObject(jsonStr)
+                val array = obj.optJSONArray("results") ?: return emptyList()
+
+                for (i in 0 until array.length()) {
+                    val item = array.getJSONObject(i)
+                    val tmdbId = item.optString("id")
+                    val mediaType = item.optString("media_type", "movie")
+                    val title = item.optString("title").ifEmpty { item.optString("name") }
+                    val releaseDate = item.optString("release_date").ifEmpty { item.optString("first_air_date") }
+                    val year = if (releaseDate.contains("-")) releaseDate.substringBefore('-') else ""
+                    val posterPath = item.optString("poster_path")
+                    val poster = if (posterPath.isNotBlank() && posterPath != "null") "https://image.tmdb.org/t/p/w342$posterPath" else ""
+
+                    if (tmdbId.isNotBlank() && title.isNotBlank()) {
+                        val fullUrl = "$mainUrl/watch/$mediaType/$tmdbId"
+                        results.add(
+                            ShowCard(
+                                title = if (year.isNotBlank()) "$title ($year)" else title,
+                                url = fullUrl,
+                                posterUrl = poster,
+                                site = name,
+                                category = if (mediaType == "tv") "TV Show" else "Movie",
+                                year = year
+                            )
+                        )
+                    }
+                }
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (_: Exception) {}
+            results
         }
 
-        val results = mutableListOf<ShowCard>()
-        try {
-            val encoded = URLEncoder.encode(query, "UTF-8")
-            val url = "$mainUrl/api/search?q=$encoded"
-            val jsonStr = HttpClient.getText(url, tag = "search") ?: return emptyList()
+        if (rawResults.isEmpty()) return emptyList()
+        return filterAvailable(rawResults)
+    }
 
-            val obj = JSONObject(jsonStr)
-            val array = obj.optJSONArray("results") ?: return emptyList()
-
-            for (i in 0 until array.length()) {
-                val item = array.getJSONObject(i)
-                val tmdbId = item.optString("id")
-                val mediaType = item.optString("media_type", "movie")
-                val title = item.optString("title").ifEmpty { item.optString("name") }
-                val releaseDate = item.optString("release_date").ifEmpty { item.optString("first_air_date") }
-                val year = if (releaseDate.contains("-")) releaseDate.substringBefore('-') else ""
-                val posterPath = item.optString("poster_path")
-                val poster = if (posterPath.isNotBlank() && posterPath != "null") "https://image.tmdb.org/t/p/w342$posterPath" else ""
-
-                if (tmdbId.isNotBlank() && title.isNotBlank()) {
-                    val fullUrl = "$mainUrl/watch/$mediaType/$tmdbId"
-                    results.add(
-                        ShowCard(
-                            title = if (year.isNotBlank()) "$title ($year)" else title,
-                            url = fullUrl,
-                            posterUrl = poster,
-                            site = name,
-                            category = if (mediaType == "tv") "TV Show" else "Movie",
-                            year = year
-                        )
-                    )
+    internal suspend fun filterAvailable(cards: List<ShowCard>): List<ShowCard> = coroutineScope {
+        val semaphore = Semaphore(6)
+        cards.map { card ->
+            async {
+                val tmdbId = card.url.substringAfterLast('/').substringBefore('?')
+                val mediaType = if (card.url.contains("/tv/")) "tv" else "movie"
+                if (tmdbId.isBlank() || !tmdbId.all { it.isDigit() }) {
+                    card
+                } else {
+                    val isAvail = semaphore.withPermit {
+                        VidsrcResolver.checkAvailability(mediaType, tmdbId, tag = "search")
+                    }
+                    if (isAvail) card else null
                 }
             }
-        } catch (_: Exception) {}
-        return results
+        }.awaitAll().filterNotNull()
     }
 
     private val EPISODE_PATTERN = Pattern.compile("""watch/tv/\d+/(\d+)/(\d+)(?:[?&#].*)?$""")
@@ -69,6 +99,15 @@ object NepuProvider : SiteProvider {
             url = showUrl,
             site = name
         )
+
+        // Fast upstream pre-check: if Vidsrc is known unavailable or 404, fail early
+        val tmdbId = showUrl.substringAfterLast('/').substringBefore('?')
+        val mediaType = if (showUrl.contains("/tv/")) "tv" else "movie"
+        if (tmdbId.isNotBlank() && tmdbId.all { it.isDigit() }) {
+            if (!VidsrcResolver.checkAvailability(mediaType, tmdbId, tag = "load_episodes")) {
+                return ShowDetails(show = show, episodes = emptyList())
+            }
+        }
 
         DynamicRulesManager.getPipeline(name)?.episodes?.let { pl ->
             val res = RulesPipeline.runEpisodes(name, pl, showUrl)
