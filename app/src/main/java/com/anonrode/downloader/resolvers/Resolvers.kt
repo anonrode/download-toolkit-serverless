@@ -305,6 +305,20 @@ object VidbasicResolver : BaseResolver {
             val direct = decryptPayload(html)
             if (!direct.isNullOrBlank()) return direct
 
+            // 1a) fast-path for 3rdplayer: if page contains data-video or iframe src pointing to 3rdplayer,
+            // fetch and decrypt directly
+            val playerMatcher = Pattern.compile("""(?:data-video|<iframe[^>]+src)=["']([^"']*3rdplayer[^"']*)["']""").matcher(html)
+            if (playerMatcher.find()) {
+                val playerUrl = HttpClient.safeResolveUri(url, playerMatcher.group(1)?.replace("&amp;", "&") ?: "")
+                if (playerUrl.startsWith("http")) {
+                    val playerHtml = HttpClient.getText(playerUrl, referer = url)
+                    if (!playerHtml.isNullOrBlank()) {
+                        val pDirect = decryptPayload(playerHtml)
+                        if (!pDirect.isNullOrBlank()) return pDirect
+                    }
+                }
+            }
+
             // 1b) server-selector layout: vidb.top serves a multi-server page whose
             // data-video / data-src / iframe attrs point at EXTERNAL mirror embeds
             // (streamwish, vidhide, doodstream, streamtape). Try resolving the
@@ -320,6 +334,16 @@ object VidbasicResolver : BaseResolver {
                 var cand = raw.trim().replace("&amp;", "&")
                 cand = HttpClient.safeResolveUri(url, cand)
                 if (!cand.startsWith("http") || cand == url || !seen.add(cand)) continue
+
+                if (cand.contains("3rdplayer.html")) {
+                    val playerHtml = HttpClient.getText(cand, referer = url)
+                    if (!playerHtml.isNullOrBlank()) {
+                        val pDirect = decryptPayload(playerHtml)
+                        if (!pDirect.isNullOrBlank()) return pDirect
+                    }
+                    continue
+                }
+
                 for (other in ResolverRegistry.RESOLVERS) {
                     if (other is VidbasicResolver) continue
                     try {
@@ -334,27 +358,15 @@ object VidbasicResolver : BaseResolver {
                 }
             }
 
-            // 2) embed page points at /3rdplayer.html — fetch and decrypt
-            val mvMatcher = Pattern.compile("""data-video=["']([^"']+)["']""").matcher(html)
-            if (mvMatcher.find()) {
-                var playerUrl = mvMatcher.group(1) ?: ""
-                playerUrl = HttpClient.safeResolveUri(url, playerUrl)
-                val playerHtml = HttpClient.getText(playerUrl, referer = url)
-                if (!playerHtml.isNullOrBlank()) {
-                    val pDirect = decryptPayload(playerHtml)
-                    if (!pDirect.isNullOrBlank()) return pDirect
-                }
-            }
-
-            // 3) embedload.cfd wrapper iframes the real vidbasic host. This
+            // 2) embedload.cfd wrapper iframes the real vidbasic host. This
             // recursion is our own counter capped at 3 so A->B->A cycles end
             // instead of spinning through the registry depth limit
             // (resolvers.py:606-611).
-            val miMatcher = Pattern.compile("""<iframe[^>]+src=["']([^"']*(?:vidbasic|vidb\.top)[^"']*)["']""").matcher(html)
+            val miMatcher = Pattern.compile("""<iframe[^>]+src=["']([^"']*(?:vidbasic|vidb\.top|3rdplayer|/embed/)[^"']*)["']""").matcher(html)
             if (miMatcher.find() && depth < 3) {
-                var inner = miMatcher.group(1) ?: ""
+                var inner = miMatcher.group(1)?.replace("&amp;", "&") ?: ""
                 inner = HttpClient.safeResolveUri(url, inner)
-                if (inner != url) {
+                if (inner != url && inner.startsWith("http")) {
                     val innerDirect = resolve(inner, quality, depth + 1)
                     if (!innerDirect.isNullOrBlank()) return innerDirect
                 }
@@ -2079,9 +2091,9 @@ object StreamwishResolver : BaseResolver {
             val vid = url.trimEnd('/').substringAfterLast('/')
             val candidates = if (vid.length >= 6) {
                 listOf(
+                    url,
                     "https://sfastwish.com/e/$vid",
-                    "https://embedwish.com/e/$vid",
-                    url
+                    "https://embedwish.com/e/$vid"
                 )
             } else {
                 listOf(url)
