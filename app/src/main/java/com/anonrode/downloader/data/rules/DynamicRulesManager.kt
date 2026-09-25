@@ -68,6 +68,9 @@ object DynamicRulesManager {
     private val DEFAULT_HOST_POLICIES = listOf(
         HostPolicyRule("cdn.watching.onl", "exact:https://megaplay.buzz/"),
         HostPolicyRule("anivideo.sbs", "exact:https://megaplay.buzz/"),
+        HostPolicyRule("nexabloom", "exact:https://megaplay.buzz/"),
+        HostPolicyRule("vyrnex", "exact:https://megaplays.se/"),
+        HostPolicyRule("megaplays.se", "exact:https://megaplays.se/"),
         HostPolicyRule("megap.", "exact:https://megaplay.buzz/"),
         HostPolicyRule("watching.onl", "exact:https://megaplay.buzz/"),
         HostPolicyRule("lisaido", "none"),
