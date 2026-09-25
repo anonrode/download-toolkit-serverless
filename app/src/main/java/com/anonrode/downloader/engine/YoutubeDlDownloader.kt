@@ -133,10 +133,9 @@ object YoutubeDlDownloader {
         // https://megaplay.buzz/ (live-verified 2026-08-22).
         val effReferer = if (hlsMasterFile != null && !requiresExplicitReferer(referer)) "" else referer
 
-        val height = when (quality.lowercase()) {
-            "480p", "480" -> 480
-            "1080p", "1080" -> 1080
-            "4k", "2160p" -> 2160
+        val height = quality.filter { it.isDigit() }.toIntOrNull() ?: when (quality.lowercase()) {
+            "4k" -> 2160
+            "sd" -> 480
             else -> 720
         }
 
@@ -1205,6 +1204,7 @@ object YoutubeDlDownloader {
     /** CDN families that 403 WITHOUT an exact referer (inverse of the
      *  referer-suppression family) — rewritten-master runs must keep it. */
     private fun requiresExplicitReferer(referer: String): Boolean {
-        return referer.equals("https://megaplay.buzz/", ignoreCase = true)
+        val low = referer.lowercase().trimEnd('/')
+        return low.contains("megaplay") || low.contains("megaplays")
     }
 }

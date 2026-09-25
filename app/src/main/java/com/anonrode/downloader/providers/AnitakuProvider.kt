@@ -96,7 +96,40 @@ object AnitakuProvider : SiteProvider {
             }
 
             val allResults = deferreds.awaitAll().flatten()
-            allResults.distinctBy { it.url }
+            val distinct = allResults.distinctBy { it.url }
+            if (distinct.isNotEmpty()) return@coroutineScope distinct
+
+            // HTML search fallback on gogoanime.or.at if AJAX autocomplete returned empty
+            try {
+                val searchUrl = "https://gogoanime.or.at/?s=" + java.net.URLEncoder.encode(queryToUse, "UTF-8")
+                val html = HttpClient.getText(searchUrl, referer = "https://gogoanime.or.at/")
+                if (!html.isNullOrBlank()) {
+                    val doc = Jsoup.parse(html, searchUrl)
+                    val items = mutableListOf<ShowCard>()
+                    for (el in doc.select(".film_list-wrap .flw-item, .last_episodes ul li, .items li, .listupd article, div.anime-card")) {
+                        val a = el.selectFirst("a[href]") ?: continue
+                        val href = a.attr("abs:href").ifBlank { a.attr("href") }
+                        if (href.isBlank() || href.contains("/category/") || href.contains("/genre/")) continue
+                        val titleEl = el.selectFirst(".film-name, .name, .entry-title, h2, h3") ?: a
+                        val title = titleEl.text().trim()
+                        val img = el.selectFirst("img[src]")?.let { it.attr("abs:src").ifBlank { it.attr("src") } } ?: ""
+                        if (title.isNotBlank()) {
+                            items.add(
+                                ShowCard(
+                                    title = title,
+                                    url = href,
+                                    posterUrl = img,
+                                    site = name,
+                                    category = "Anime"
+                                )
+                            )
+                        }
+                    }
+                    if (items.isNotEmpty()) return@coroutineScope items.distinctBy { it.url }
+                }
+            } catch (_: Exception) {}
+
+            emptyList()
         }
     }
 
@@ -243,8 +276,21 @@ object AnitakuProvider : SiteProvider {
                                 val dlHtml = JSONObject(body).optJSONObject("data")?.optString("result") ?: ""
                                 if (dlHtml.isNotBlank()) {
                                     val dlDoc = Jsoup.parse(dlHtml, episodeUrl)
-                                    val dlLinks = dlDoc.select("a[href]").map { it.attr("href") }
-                                    val resolved = ResolverRegistry.resolveAny(dlLinks, quality)
+                                    val dlMap = mutableMapOf<Int, String>()
+                                    for (a in dlDoc.select("a[href]")) {
+                                        val label = a.text().trim().lowercase()
+                                        val hVal = Regex("""(\d+)p?""").find(label)?.groupValues?.get(1)?.toIntOrNull() ?: 720
+                                        dlMap[hVal] = a.attr("href")
+                                    }
+                                    val reqHeight = quality.filter { it.isDigit() }.toIntOrNull() ?: 720
+                                    val sortedLinks = if (dlMap.isNotEmpty()) {
+                                        dlMap.entries
+                                            .sortedWith(compareBy({ (h, _) -> if (h <= reqHeight) 0 else 1 }, { (h, _) -> Math.abs(h - reqHeight) }))
+                                            .map { it.value }
+                                    } else {
+                                        dlDoc.select("a[href]").map { it.attr("href") }
+                                    }
+                                    val resolved = ResolverRegistry.resolveAny(sortedLinks, quality)
                                     if (!resolved.isNullOrBlank()) {
                                         direct = resolved
                                     }
