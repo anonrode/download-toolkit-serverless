@@ -3,7 +3,7 @@ package com.anonrode.downloader.engine
 import java.io.File
 
 private const val PIECE_SIZE = 1024L * 1024 // 1 MiB, aria2c -k 1M parity
-private const val MAX_PIECES_PER_SOCKET = 8 // queue cap: sockets * 8 pieces max
+private const val MAX_TOTAL_PIECES = 2048 // queue cap: up to 2048 pieces (allows up to 2-4 GB with 1-2 MB pieces)
 
 /**
  * Sidecar resume state for [TurboDownloader], the equivalent of aria2c's .aria2
@@ -37,7 +37,7 @@ class TurboState(private val file: File) {
         // unfinished piece, so a slow connection can't hold up the download tail.
         val s = sockets.coerceAtLeast(1)
         val pieceCount = ((total + PIECE_SIZE - 1) / PIECE_SIZE)
-            .coerceIn(1L, s.toLong() * MAX_PIECES_PER_SOCKET)
+            .coerceIn(1L, MAX_TOTAL_PIECES.toLong())
             .toInt()
         val pieceSize = (total + pieceCount - 1) / pieceCount
         val plan = (0 until pieceCount).map { i ->

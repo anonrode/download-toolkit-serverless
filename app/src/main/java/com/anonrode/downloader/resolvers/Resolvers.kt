@@ -1744,6 +1744,7 @@ object LoadedfilesResolver : BaseResolver {
 
             onFailure(null)
             val workingHost = HttpClient.parsedHost(currUrl!!)
+            val cookieMap = mutableMapOf<String, String>()
             var ptHops = 0
             for (step in 1..8) {
                 currentCoroutineContext().ensureActive()
@@ -1765,13 +1766,33 @@ object LoadedfilesResolver : BaseResolver {
                     step == 1 -> "https://my9jarocks.bz/"
                     else -> currUrl
                 }
+                val cookieHeader = if (cookieMap.isNotEmpty()) {
+                    cookieMap.entries.joinToString("; ") { "${it.key}=${it.value}" }
+                } else null
                 val req = Request.Builder()
                     .url(HttpClient.safeUrl(currUrl!!))
                     .header("User-Agent", HttpClient.DEFAULT_UA)
-                    .apply { referer?.let { header("Referer", it) } }
+                    .apply {
+                        referer?.let { header("Referer", it) }
+                        cookieHeader?.let { header("Cookie", it) }
+                    }
                     .build()
 
+                var waitSecs = 0
                 HttpClient.executeCancellable(noRedirectClient, req) use@{ res ->
+                    val setCookies = res.headers("Set-Cookie")
+                    for (sc in setCookies) {
+                        val cookiePart = sc.substringBefore(";").trim()
+                        val eq = cookiePart.indexOf('=')
+                        if (eq > 0) {
+                            val k = cookiePart.substring(0, eq).trim()
+                            val v = cookiePart.substring(eq + 1).trim()
+                            if (k.isNotBlank() && v.isNotBlank()) {
+                                cookieMap[k] = v
+                            }
+                        }
+                    }
+
                     val loc = res.header("Location")
                     if (!loc.isNullOrBlank()) {
                         val safeLoc = HttpClient.safeUrl(HttpClient.safeResolveUri(res.request.url.toString(), loc))
@@ -1816,11 +1837,12 @@ object LoadedfilesResolver : BaseResolver {
 
                         var next: String? = null
                         val mDlTimer = Pattern.compile(
-                            """dlTimer\(\{\s*seconds:\s*\d+,\s*link:\s*['"]([^'"]+)['"]""",
+                            """dlTimer\(\{\s*seconds:\s*(\d+),\s*link:\s*['"]([^'"]+)['"]""",
                             Pattern.CASE_INSENSITIVE
                         ).matcher(body)
                         if (mDlTimer.find()) {
-                            val raw = mDlTimer.group(1)
+                            waitSecs = mDlTimer.group(1)?.toIntOrNull() ?: 5
+                            val raw = mDlTimer.group(2)
                             if (!raw.isNullOrBlank()) {
                                 next = unescapeJsUrl(raw)
                             }
@@ -1868,6 +1890,10 @@ object LoadedfilesResolver : BaseResolver {
                             ptHops++
                         }
                     }
+                }
+                if (waitSecs > 0) {
+                    android.util.Log.d("AnonDownload", "Loadedfiles dlTimer: waiting ${waitSecs + 1}s")
+                    delay((waitSecs.coerceIn(1, 15) + 1) * 1000L)
                 }
                 if (currUrl == pageBeforeStep) {
                     onFailure(ResolverOutcome.Failure("Loadedfiles token chain stalled on step $step ($currUrl) — neither dlTimer nor downloadUrl found"))

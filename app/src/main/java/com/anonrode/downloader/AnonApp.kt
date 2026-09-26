@@ -53,17 +53,8 @@ class AnonApp : Application(), ImageLoaderFactory {
                 com.anonrode.downloader.pipeline.HostHealth.init(this@AnonApp)
                 com.anonrode.downloader.providers.FeedCache.init(this@AnonApp)
 
+                initYoutubeDlInternal(this@AnonApp)
                 maybeSyncRules()
-                initMutex.withLock {
-                    if (ytdlpReady) return@withLock
-                    try {
-                        YoutubeDL.getInstance().init(this@AnonApp)
-                        FFmpeg.getInstance().init(this@AnonApp)
-                        ytdlpReady = true
-                    } catch (t: Throwable) {
-                        Log.e("AnonApp", "youtubedl-android init failed", t)
-                    }
-                }
                 if (ytdlpReady) maybeUpdateYoutubeDL()
             } catch (t: Throwable) {
                 Log.e("AnonApp", "Background initialization error", t)
@@ -138,9 +129,29 @@ class AnonApp : Application(), ImageLoaderFactory {
         var ytdlpReady: Boolean = false
             private set
 
+        internal suspend fun initYoutubeDlInternal(context: Context) {
+            if (ytdlpReady) return
+            initMutex.withLock {
+                if (ytdlpReady) return@withLock
+                try {
+                    YoutubeDL.getInstance().init(context)
+                    FFmpeg.getInstance().init(context)
+                    ytdlpReady = true
+                    Log.i("AnonApp", "youtubedl-android and ffmpeg initialized successfully")
+                } catch (t: Throwable) {
+                    Log.e("AnonApp", "youtubedl-android init failed", t)
+                }
+            }
+        }
+
         suspend fun ensureReady(): Boolean {
             if (ytdlpReady) return true
-            initMutex.withLock { return ytdlpReady }
+            if (::instance.isInitialized) {
+                initYoutubeDlInternal(instance)
+            } else {
+                initMutex.withLock { /* wait for any in-flight init */ }
+            }
+            return ytdlpReady
         }
     }
 }

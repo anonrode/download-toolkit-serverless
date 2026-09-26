@@ -2074,14 +2074,14 @@ class DownloadEngine(
                     "task=${task.id} route: social=$isSocial hls=$isHlsStream embedOrPage=$isEmbedOrPage provablyDirect=${isProvablyDirectFile(streamUrl)} mediaExt=${isDirectMediaUrl(streamUrl)} -> backend=$finalBackend url=${streamUrl.take(110)}"
                 )
 
-                // kissorgrab.com rejects multi-connection downloads; force a single
-                // socket there (monolith parity, downloader.py aria2c forced 1/1).
-                // dl.plutomovies.com redirects to kissorgrab (live-verified 2026-08-22
-                // activity log: turbo 16-socket → redirect → kissorgrab kills multi → fail
-                // → yt-dlp rescue → "Unsupported URL" on -mkv → loop).
+                // Sensitive hosts (kissorgrab, plutomovies) trip 429/connection-drop
+                // if overwhelmed by 16 sockets, but collapsing to 1 socket destroys
+                // throughput over high-latency cellular networks (crawls to 6-30 KB/s).
+                // Port aria2c/1DM safe concurrency: cap at 4 parallel sockets, which
+                // stays under server connection limits while delivering 4x throughput.
                 val effectiveSockets = if (streamUrl.lowercase().let { u ->
                         u.contains("kissorgrab.com") || u.contains("dl.plutomovies.com")
-                    }) 1 else task.parallelSockets
+                    }) minOf(4, task.parallelSockets.coerceAtLeast(2)) else task.parallelSockets
 
                 coroutineContext.ensureActive()
                 // Persist the resolved URL only when it's genuinely downloadable.
@@ -2104,8 +2104,10 @@ class DownloadEngine(
                 // forever with 0.0 MB/s. Runs until the job is paused/cancelled or
                 // the task leaves DOWNLOADING.
                 launch {
-                    var lastDisk = 0L
-                    var lastParsed = 0L
+                    val initialDisk = computeDiskBytes(task)
+                    val initialParsed = task.downloadedBytes
+                    var lastDisk = initialDisk
+                    var lastParsed = initialParsed
                     var lastActivity = System.currentTimeMillis()
                     var lastKillTime = 0L
                     var stallKills = 0
@@ -2120,23 +2122,13 @@ class DownloadEngine(
                     // it counts as stalled and the backend is relaunched (fresh
                     // token/edge on re-resolve), exactly like the monolith's
                     // idle-timeout handling.
-                    var windowStartDisk = 0L
-                    var windowStartParsed = 0L
+                    var windowStartDisk = initialDisk
+                    var windowStartParsed = initialParsed
                     var windowStartTime = System.currentTimeMillis()
-                    // Rate-drop detection: some CDNs (vidsrc edge nodes) grant a
-                    // fast burst (~40 MB at full speed) then collapse to a
-                    // token-bucket trickle (~0.1-1.8 MiB/s, oscillating). The
-                    // crawl floor can't see this — bytes DO move — but the drop
-                    // from the task's own best window is unmistakable.
                     var bestWindowBps = 0.0
                     var lastProgressLog = 0L
-                    // Zombie cap: the crawl floor (64KiB/60s ≈ 1KiB/s) lets a
-                    // task trickling just above it escape forever — the rate-drop
-                    // detector needs a ≥1MiB/s burst it never had. After 4x the
-                    // stall timeout with under 1MiB moved total, the stream is
-                    // effectively dead; fail it outright instead of relaunching.
                     val watchdogStart = System.currentTimeMillis()
-                    var startBytes: Long? = null
+                    var startBytes: Long? = initialDisk + initialParsed
                     while (isActive) {
                         delay(2000)
                         if (!isActive) break
@@ -2253,86 +2245,12 @@ class DownloadEngine(
                         // crawl=true before the swarm ever flowed). Give magnet
                         // tasks a much longer leash and skip the crawl/stall kill.
                         val magnetTask = streamUrl.startsWith("magnet:", ignoreCase = true)
-                        val zombie = now - watchdogStart > STALL_TIMEOUT_MS * (if (magnetTask) 20 else 4) &&
-                            (totalBytesNow - (startBytes ?: totalBytesNow)) < 1L * 1024 * 1024
-                        // Rate-drop detection (corrected): a throttled-but-alive
-                        // stream (e.g. downloadwella burst then 50KB/s trickle) must
-                        // NOT be killed just because the *current window* is slower
-                        // than the burst peak. The previous rule windowBps <
-                        // bestWindowBps * 0.4 culled healthy 92MB/s downloads the
-                        // moment they dropped to 50KB/s — a server-side throttle
-                        // (or just a slower segment of the file) was indistinguishable
-                        // from a dead connection, and the wrapper's 3-attempt cycle
-                        // never recovered. New rule: kill only when the current
-                        // window is BOTH (a) at least 2x slower than the burst peak
-                        // AND (b) below a sane absolute floor (8 KiB/s for direct
-                        // downloads, 2 KiB/s for HLS — a vidsrc edge that crawls at
-                        // 1-1.8 KiB/s is genuinely alive, not throttling). Anything
-                        // above the absolute floor is "slow but moving" and the
-                        // user explicitly preferred patience over false failures:
-                        // a slow ISP line should not lose a 2 GiB file 90% in.
-                        val FLOOR_DIRECT_BPS = 8L * 1024L
-                        val FLOOR_HLS_BPS = 2L * 1024L
-                        val floorBps = if (isHlsStream) FLOOR_HLS_BPS else FLOOR_DIRECT_BPS
-                        val throttled = bestWindowBps >= 1.0 * 1024 * 1024 &&
-                            windowBps < bestWindowBps * 0.5 &&
-                            windowBps < floorBps &&
-                            windowSecs >= 30
-                        if (zombie && !throttleGrace) {
-                            val zombieMsg = "Download made no meaningful progress (${(now - watchdogStart) / 1000}s, under 1 MiB) — the source server is throttling or unreachable. Try again later."
-                            com.anonrode.downloader.util.DebugLog.engine(
-                                "task=${task.id} zombie cap after ${(now - watchdogStart) / 1000}s with ${((totalBytesNow - (startBytes ?: totalBytesNow)) / 1024)}KiB total"
-                            )
-                            YoutubeDlDownloader.killProcess(task.id)
-                            TurboDownloader.cancelTask(task.id)
-                            // Park, don't fail: a task that banked bytes in an
-                            // EARLIER run before this run went zombie keeps the
-                            // partial and retries later (THE RULE). Only a
-                            // task with nothing banked gets the honest failure.
-                            if (!parkInsteadOfFail(t, zombieMsg, forcePark = false)) {
-                                repository.update(task.id) {
-                                    it.copy(
-                                        status = TaskStatus.FAILED,
-                                        errorMessage = zombieMsg
-                                    )
-                                }
-                                com.anonrode.downloader.service.DownloadService.notifyFailed(context, task.id, t.episodeTitle, zombieMsg)
-                            }
-                            activeJobs[task.id]?.cancel()
-                            break
-                        }
-                        // A task with no meaningful byte movement (parsed or on
-                        // disk) for a full minute is stalled: kill the backend so
-                        // the retry wrapper relaunches it (fresh token/edge on
-                        // re-resolve), and eventually FAILED instead of hanging.
-                        // Magnets are exempt — peer discovery is legitimately quiet.
-                        //
-                        // Correction: prior to this change, the watchdog killed
-                        // after `now - lastActivity > STALL_TIMEOUT_MS` (60s by
-                        // default) even when the wrapper had already started a
-                        // retry attempt that was making fresh progress — a slow
-                        // health probe, a slow token refresh, or a momentary
-                        // DNS hiccup was indistinguishable from a true stall,
-                        // and the kill-then-rerun-then-kill loop could consume 8
-                        // attempts in 4 minutes. The rule now treats a kill as
-                        // definitive: a kill is only allowed if BOTH
-                        //   (a) the download is dead by one of two signals —
-                        //       stalledLong (no bytes at all for 2x the window)
-                        //       OR the rate-drop rule above (burst >= 1 MiB/s,
-                        //       then a sub-floor trickle for >= 30s: bytes move,
-                        //       so lastActivity never goes stale and neither
-                        //       signal but this one catches the downloadwella
-                        //       burst-then-trickle trap), AND
-                        //   (b) the wrapper has not just started a fresh attempt
-                        //       (guards against the wrapper being mid-resolve
-                        //       when the watchdog fires).
-                        // Magnet exemption unchanged.
-                        val attemptBoundary = stallKills * STALL_TIMEOUT_MS * 2
+                        val attemptBoundary = maxOf(stallKills * STALL_TIMEOUT_MS * 2, 90_000L)
                         val stalledLong = now - lastActivity > STALL_TIMEOUT_MS
-                        if (!magnetTask && !throttleGrace && (stalledLong || throttled) && (now - watchdogStart) > attemptBoundary && (stallKills == 0 || now - lastKillTime > STALL_TIMEOUT_MS)) {
+                        if (!magnetTask && !throttleGrace && stalledLong && (now - watchdogStart) > attemptBoundary && (stallKills == 0 || now - lastKillTime > STALL_TIMEOUT_MS)) {
                             stallKills++
                             com.anonrode.downloader.util.DebugLog.engine(
-                                "task=${task.id} watchdog kill #$stallKills (idle=${(now - lastActivity) / 1000}s crawl=$crawlStalled throttled=$throttled window=${(moved / 1024).toInt()}KiB best=${(bestWindowBps / 1024).toInt()}KiB/s)"
+                                "task=${task.id} watchdog stall kill #$stallKills (idle=${(now - lastActivity) / 1000}s crawl=$crawlStalled window=${(moved / 1024).toInt()}KiB best=${(bestWindowBps / 1024).toInt()}KiB/s)"
                             )
                             android.util.Log.w("AnonDownload", "No download progress for ${t.episodeTitle}, (stall kill $stallKills)")
                             YoutubeDlDownloader.killProcess(task.id)
@@ -2346,11 +2264,7 @@ class DownloadEngine(
                             // another 3 attempts. Allow that recovery chain to
                             // play out; only then give up and fail the task.
                             if (stallKills >= MAX_STALL_KILLS) {
-                                val stallMsg = if (stalledLong) {
-                                    "Download stalled — no progress for ${stallTimeoutSec}s across $stallKills attempts"
-                                } else {
-                                    "Download throttled to ${(windowBps / 1024).toLong().coerceAtLeast(0L)} KiB/s after a healthy start — killed and re-sourced $stallKills times without recovery"
-                                }
+                                val stallMsg = "Download stalled — no progress for ${stallTimeoutSec}s across $stallKills attempts"
                                 // THE RULE: the whole point of the park system.
                                 // A task that banked bytes through these kills
                                 // (the vikingfile 429 case: 64 MiB in, then

@@ -154,67 +154,112 @@ object NepuProvider : SiteProvider {
     private val EPISODE_PATTERN = Pattern.compile("""watch/tv/\d+/(\d+)/(\d+)(?:[?&#].*)?$""")
 
     override suspend fun loadEpisodes(showUrl: String): ShowDetails {
+        val isTv = showUrl.contains("/tv/")
         val show = ShowCard(
-            title = if (showUrl.contains("/tv/")) "Nepu TV" else "Nepu Movie",
+            title = if (isTv) "Nepu TV" else "Nepu Movie",
             url = showUrl,
             site = name
         )
 
         val tmdbId = showUrl.substringAfterLast('/').substringBefore('?')
-        val mediaType = if (showUrl.contains("/tv/")) "tv" else "movie"
 
-        DynamicRulesManager.getPipeline(name)?.episodes?.let { pl ->
-            val res = RulesPipeline.runEpisodes(name, pl, showUrl)
-            if (res != null && res.episodes.isNotEmpty()) {
-                // The playbook carries no meta for nepu — the show title stays
-                // the compiled TV/Movie default derived from the URL.
-                val card = ShowCard(title = res.metaTitle ?: show.title, url = showUrl, site = name)
-                return ShowDetails(show = card, synopsis = res.metaSynopsis ?: "", episodes = res.episodes)
+        if (!isTv) {
+            DynamicRulesManager.getPipeline(name)?.episodes?.let { pl ->
+                val res = RulesPipeline.runEpisodes(name, pl, showUrl)
+                if (res != null && res.episodes.isNotEmpty()) {
+                    val card = ShowCard(title = res.metaTitle ?: show.title, url = showUrl, site = name)
+                    return ShowDetails(show = card, synopsis = res.metaSynopsis ?: "", episodes = res.episodes)
+                }
             }
         }
 
-        if (showUrl.contains("/tv/")) {
+        if (isTv) {
             val episodes = mutableListOf<EpisodeItem>()
+            var extractedTitle: String? = null
+            var extractedSynopsis: String? = null
             try {
                 val html = HttpClient.getText(showUrl, referer = "$mainUrl/", headers = mapOf("Cookie" to "hv=1")) ?: ""
                 val srvMap = extractSrvMap(html)
                 val doc = Jsoup.parse(html, showUrl)
+
+                extractedTitle = doc.selectFirst("h1")?.text()?.replace(Regex("""(?i)\s*(S\d+\s*E\d+|Season\s*\d+).*"""), "")?.trim()
+                    ?: doc.selectFirst("meta[property=og:title]")?.attr("content")?.substringBefore(" - S")?.trim()
+                extractedSynopsis = doc.selectFirst("p.leading-relaxed")?.text()?.trim()
+                    ?: doc.selectFirst("meta[property=og:description]")?.attr("content")?.trim()
+
+                // Check available seasons from select dropdown
+                val seasonOptions = doc.select("select option")
+                val seasons = mutableSetOf<Int>()
+                for (opt in seasonOptions) {
+                    val sVal = opt.attr("value").toIntOrNull()
+                    if (sVal != null && sVal > 0) {
+                        seasons.add(sVal)
+                    }
+                }
+                if (seasons.isEmpty()) seasons.add(1)
+
                 val seen = mutableSetOf<Pair<Int, Int>>()
                 val links = mutableListOf<Triple<Int, Int, String>>() // (season, episode, url)
-                for (a in doc.select("a[href]")) {
-                    val href = a.attr("href")
-                    val m = EPISODE_PATTERN.matcher(href)
-                    if (m.find()) {
-                        val season = m.group(1)?.toIntOrNull() ?: continue
-                        val episode = m.group(2)?.toIntOrNull() ?: continue
-                        if (seen.add(Pair(season, episode))) {
-                            links.add(Triple(season, episode, HttpClient.safeResolveUri(showUrl, href)))
+
+                fun parseDocEpisodes(d: org.jsoup.nodes.Document, currentSeasonHint: Int?) {
+                    for (a in d.select("a[href]")) {
+                        val href = a.attr("href")
+                        val m = EPISODE_PATTERN.matcher(href)
+                        if (m.find()) {
+                            val season = m.group(1)?.toIntOrNull() ?: currentSeasonHint ?: continue
+                            val episode = m.group(2)?.toIntOrNull() ?: continue
+                            if (seen.add(Pair(season, episode))) {
+                                links.add(Triple(season, episode, HttpClient.safeResolveUri(showUrl, href)))
+                            }
                         }
                     }
                 }
+
+                parseDocEpisodes(doc, 1)
+
+                // For other seasons (> 1), fetch their season pages: /watch/tv/$tmdbId/$s/1
+                for (s in seasons.sorted()) {
+                    if (s == 1) continue
+                    try {
+                        val seasonUrl = "$mainUrl/watch/tv/$tmdbId/$s/1"
+                        val sHtml = HttpClient.getText(seasonUrl, referer = "$mainUrl/", headers = mapOf("Cookie" to "hv=1"))
+                        if (!sHtml.isNullOrBlank()) {
+                            val sDoc = Jsoup.parse(sHtml, seasonUrl)
+                            parseDocEpisodes(sDoc, s)
+                        }
+                    } catch (_: Exception) {}
+                }
+
                 links.sortWith(compareBy({ it.first }, { it.second }))
-                links.forEachIndexed { idx, (season, episode, url) ->
+                links.forEach { (season, episode, url) ->
                     val mirrors = buildMirrors("tv", tmdbId, season, episode, srvMap, primaryUrl = url)
                     episodes.add(
                         EpisodeItem(
                             title = "S%02d E%02d".format(season, episode),
                             url = url,
-                            episodeNum = idx + 1,
+                            episodeNum = season * 100 + episode,
                             site = name,
                             mirrorUrls = mirrors
                         )
                     )
                 }
             } catch (_: Exception) {}
-            if (episodes.isNotEmpty()) {
-                return ShowDetails(show = show, episodes = episodes)
-            }
+
+            val finalTitle = extractedTitle?.takeIf { it.isNotBlank() && it != "Nepu TV" } ?: show.title
+            val finalCard = show.copy(title = finalTitle)
+            return ShowDetails(show = finalCard, synopsis = extractedSynopsis ?: "", episodes = episodes)
         }
 
         val html = try {
             HttpClient.getText(showUrl, referer = "$mainUrl/", headers = mapOf("Cookie" to "hv=1")) ?: ""
         } catch (_: Exception) { "" }
         val srvMap = extractSrvMap(html)
+        val doc = Jsoup.parse(html, showUrl)
+        val movieTitle = doc.selectFirst("h1")?.text()?.trim()
+            ?: doc.selectFirst("meta[property=og:title]")?.attr("content")?.substringBefore(" |")?.trim()
+        val movieSynopsis = doc.selectFirst("p.leading-relaxed")?.text()?.trim()
+            ?: doc.selectFirst("meta[property=og:description]")?.attr("content")?.trim()
+        val finalCard = show.copy(title = movieTitle?.takeIf { it.isNotBlank() } ?: show.title)
         val mirrors = buildMirrors("movie", tmdbId, srvMap = srvMap, primaryUrl = showUrl)
 
         val episodes = listOf(
@@ -226,7 +271,7 @@ object NepuProvider : SiteProvider {
                 mirrorUrls = mirrors
             )
         )
-        return ShowDetails(show = show, episodes = episodes)
+        return ShowDetails(show = finalCard, synopsis = movieSynopsis ?: "", episodes = episodes)
     }
 
     override suspend fun resolveEpisode(episodeUrl: String, quality: String): DownloadRecipe {
@@ -235,10 +280,18 @@ object NepuProvider : SiteProvider {
 
         // If primary URL didn't resolve to a stream, try the other 13 embed servers!
         if (direct.isNullOrBlank()) {
-            val tmdbId = episodeUrl.substringAfterLast('/').substringBefore('?')
-            val mediaType = if (episodeUrl.contains("/tv/")) "tv" else "movie"
+            val tvMatch = Regex("""watch/tv/(\d+)(?:/(\d+)/(\d+))?""").find(episodeUrl)
+            val movieMatch = Regex("""watch/movie/(\d+)""").find(episodeUrl)
+            val isTv = tvMatch != null
+            val tmdbId = tvMatch?.groupValues?.get(1)
+                ?: movieMatch?.groupValues?.get(1)
+                ?: episodeUrl.substringAfterLast('/').substringBefore('?')
+            val season = tvMatch?.groupValues?.getOrNull(2)?.toIntOrNull() ?: if (isTv) 1 else null
+            val episode = tvMatch?.groupValues?.getOrNull(3)?.toIntOrNull() ?: if (isTv) 1 else null
+            val mediaType = if (isTv) "tv" else "movie"
+
             if (tmdbId.isNotBlank() && tmdbId.all { it.isDigit() }) {
-                val candidateMirrors = buildMirrors(mediaType, tmdbId, primaryUrl = episodeUrl)
+                val candidateMirrors = buildMirrors(mediaType, tmdbId, season, episode, primaryUrl = episodeUrl)
                 for (mirror in candidateMirrors) {
                     val resolved = ResolverRegistry.resolve(mirror, quality)
                     if (!resolved.isNullOrBlank()) {
@@ -250,7 +303,7 @@ object NepuProvider : SiteProvider {
         }
 
         if (direct.isNullOrBlank()) direct = ""
-        var filename = direct.substringAfterLast('/').substringBefore('?').ifEmpty { "movie.mp4" }
+        var filename = direct.substringAfterLast('/').substringBefore('?').ifEmpty { "media.mp4" }
         if (filename.lowercase().endsWith(".m3u8")) filename = filename.dropLast(5) + ".mp4"
         return DownloadRecipe(
             directUrl = direct,

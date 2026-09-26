@@ -8,6 +8,7 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -73,7 +74,6 @@ fun DownloadsScreen(
         if (raw != null && raw in DownloadsSorter.ALL_MODES) raw else DownloadsSorter.SORT_DATE
     }
     var sortMode by remember { mutableStateOf(initialSort) }
-    var sortMenuOpen by remember { mutableStateOf(false) }
     // Destructive bulk action: "Cancel all" wipes partial files, so it asks first.
     var confirmCancelAll by remember { mutableStateOf(false) }
     // A completed card's trash icon deletes the FINISHED FILE (purgeTaskArtifacts
@@ -254,39 +254,18 @@ fun DownloadsScreen(
                     color = TextSecondary
                 )
             }
-
-            // Sort menu: four modes from the prototype, persisted in
-            // SharedPreferences. Tapping a mode writes the pref and
-            // re-groups the list immediately.
-            Box {
-                SortChip(
-                    label = sortModeLabel(sortMode),
-                    onClick = { sortMenuOpen = true }
-                )
-                DropdownMenu(
-                    expanded = sortMenuOpen,
-                    onDismissRequest = { sortMenuOpen = false }
-                ) {
-                    DownloadsSorter.ALL_MODES.forEach { mode ->
-                        DropdownMenuItem(
-                            text = {
-                                Text(
-                                    text = sortModeLabel(mode),
-                                    fontWeight = if (mode == sortMode) FontWeight.Bold else FontWeight.Normal,
-                                    color = if (mode == sortMode) AccentPrimary else TextPrimary
-                                )
-                            },
-                            onClick = {
-                                sortMode = mode
-                                sortMenuOpen = false
-                                context.getSharedPreferences(PREF_SORT, Context.MODE_PRIVATE)
-                                    .edit().putString(PREF_SORT_KEY, mode).apply()
-                            }
-                        )
-                    }
-                }
-            }
         }
+
+        // Prominent Sort Bar: big, accessible segmented buttons for Date, By Show, Status, Size
+        DownloadsSortBar(
+            selectedMode = sortMode,
+            onSelectMode = { mode ->
+                sortMode = mode
+                context.getSharedPreferences(PREF_SORT, Context.MODE_PRIVATE)
+                    .edit().putString(PREF_SORT_KEY, mode).apply()
+            },
+            modifier = Modifier.padding(bottom = Spacing.sm)
+        )
 
         // Bulk actions: pause/resume/cancel every task, the header-row idiom
         // the activity log asked for (users were hand-tapping card after
@@ -379,31 +358,55 @@ fun DownloadsScreen(
                 }
             }
         } else {
+            val expandedShows = remember { mutableStateMapOf<String, Boolean>() }
+
             LazyColumn(
                 verticalArrangement = Arrangement.spacedBy(Spacing.md),
                 modifier = Modifier.fillMaxSize()
             ) {
-                liveGroups.forEach { (header, items) ->
-                    item(key = "h-$header") {
-                        Text(
-                            text = "$header · ${items.size}",
-                            color = TextMuted,
-                            fontSize = Type.caption.fontSize,
-                            fontWeight = FontWeight.Bold,
-                            letterSpacing = 1.sp,
-                            modifier = Modifier.padding(top = Spacing.sm, bottom = Spacing.xxs)
+                if (sortMode == DownloadsSorter.SORT_LIBRARY) {
+                    items(liveGroups, key = { "show-${it.first}" }) { (showTitle, showItems) ->
+                        val isExpanded = expandedShows[showTitle] ?: (showItems.size == 1 || showItems.any {
+                            it.status == TaskStatus.DOWNLOADING || it.status == TaskStatus.RESOLVING
+                        })
+                        ShowFolderCard(
+                            showTitle = showTitle,
+                            items = showItems,
+                            isExpanded = isExpanded,
+                            onToggleExpand = {
+                                expandedShows[showTitle] = !isExpanded
+                            },
+                            context = context,
+                            onPlayTask = onPlayTask,
+                            onPauseTask = { viewModel.engine.pause(it) },
+                            onRetryTask = { viewModel.engine.retry(it) },
+                            onCancelTask = { viewModel.engine.cancel(it) },
+                            onDeleteTask = { pendingDeleteTask = it }
                         )
                     }
-                    items(items, key = { it.id }) { task ->
-                        DownloadCard(
-                            task = task,
-                            context = context,
-                            onPlay = { onPlayTask(task) },
-                            onPause = { viewModel.engine.pause(task.id) },
-                            onRetry = { viewModel.engine.retry(task.id) },
-                            onCancel = { viewModel.engine.cancel(task.id) },
-                            onDelete = { pendingDeleteTask = task }
-                        )
+                } else {
+                    liveGroups.forEach { (header, items) ->
+                        item(key = "h-$header") {
+                            Text(
+                                text = "$header · ${items.size}",
+                                color = TextMuted,
+                                fontSize = Type.caption.fontSize,
+                                fontWeight = FontWeight.Bold,
+                                letterSpacing = 1.sp,
+                                modifier = Modifier.padding(top = Spacing.sm, bottom = Spacing.xxs)
+                            )
+                        }
+                        items(items, key = { it.id }) { task ->
+                            DownloadCard(
+                                task = task,
+                                context = context,
+                                onPlay = { onPlayTask(task) },
+                                onPause = { viewModel.engine.pause(task.id) },
+                                onRetry = { viewModel.engine.retry(task.id) },
+                                onCancel = { viewModel.engine.cancel(task.id) },
+                                onDelete = { pendingDeleteTask = task }
+                            )
+                        }
                     }
                 }
             }
@@ -411,47 +414,196 @@ fun DownloadsScreen(
     }
 }
 
-private fun sortModeLabel(mode: String): String = when (mode) {
-    DownloadsSorter.SORT_LIBRARY -> "By show (Library)"
-    DownloadsSorter.SORT_STATUS -> "By status"
-    DownloadsSorter.SORT_SIZE -> "By size"
-    else -> "Date added"
+@Composable
+private fun DownloadsSortBar(
+    selectedMode: String,
+    onSelectMode: (String) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val modes = listOf(
+        Triple(DownloadsSorter.SORT_DATE, "Date", Icons.Rounded.Schedule),
+        Triple(DownloadsSorter.SORT_LIBRARY, "By Show", Icons.Rounded.Tv),
+        Triple(DownloadsSorter.SORT_STATUS, "Status", Icons.Rounded.FilterList),
+        Triple(DownloadsSorter.SORT_SIZE, "Size", Icons.Rounded.Storage)
+    )
+
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(Radius.md))
+            .background(SurfaceElevated)
+            .border(1.dp, BorderHairline, RoundedCornerShape(Radius.md))
+            .padding(4.dp),
+        horizontalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        modes.forEach { (mode, label, icon) ->
+            val isSelected = mode == selectedMode
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .height(38.dp)
+                    .clip(RoundedCornerShape(Radius.sm))
+                    .background(if (isSelected) AccentPrimary else Color.Transparent)
+                    .clickable { onSelectMode(mode) },
+                contentAlignment = Alignment.Center
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.Center,
+                    modifier = Modifier.padding(horizontal = 4.dp)
+                ) {
+                    Icon(
+                        imageVector = icon,
+                        contentDescription = null,
+                        tint = if (isSelected) BackgroundDark else TextMuted,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = label,
+                        color = if (isSelected) BackgroundDark else TextSecondary,
+                        fontSize = Type.caption.fontSize,
+                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+        }
+    }
 }
 
 @Composable
-private fun SortChip(label: String, onClick: () -> Unit) {
-    // The pill itself renders ~24dp; minimumInteractiveComponentSize grows
-    // the HIT box to the 48dp Android minimum without resizing the visual.
-    Box(
-        modifier = Modifier
-            .minimumInteractiveComponentSize()
-            .clip(RoundedCornerShape(Radius.full))
-            .clickable(onClick = onClick),
-        contentAlignment = Alignment.Center
-    ) {
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier
-            .background(SurfaceCard)
-            .border(1.dp, BorderHairline, RoundedCornerShape(Radius.full))
-            .padding(horizontal = Spacing.md, vertical = Spacing.xs)
-    ) {
-        Text(
-            text = label,
-            color = TextSecondary,
-            fontSize = Type.caption.fontSize,
-            fontWeight = FontWeight.SemiBold
-        )
-        Spacer(modifier = Modifier.width(Spacing.xs))
-        // A real glyph, not the "▾" text character (design pass): the Unicode
-        // arrow rendered inconsistently and couldn't be tinted per state.
-        Icon(
-            imageVector = Icons.Rounded.ArrowDropDown,
-            contentDescription = null,
-            tint = TextSecondary,
-            modifier = Modifier.size(16.dp)
-        )
+private fun ShowFolderCard(
+    showTitle: String,
+    items: List<DownloadTask>,
+    isExpanded: Boolean,
+    onToggleExpand: () -> Unit,
+    context: Context,
+    onPlayTask: (DownloadTask) -> Unit,
+    onPauseTask: (String) -> Unit,
+    onRetryTask: (String) -> Unit,
+    onCancelTask: (String) -> Unit,
+    onDeleteTask: (DownloadTask) -> Unit
+) {
+    val completedCount = items.count { it.status == TaskStatus.COMPLETED }
+    val activeCount = items.count {
+        it.status == TaskStatus.DOWNLOADING || it.status == TaskStatus.RESOLVING || it.status == TaskStatus.VALIDATING
     }
+    val totalBytes = items.sumOf { if (it.totalBytes > 0) it.totalBytes else it.downloadedBytes }
+
+    Card(
+        shape = RoundedCornerShape(Radius.lg),
+        colors = CardDefaults.cardColors(containerColor = SurfaceCard),
+        border = BorderStroke(1.dp, if (activeCount > 0) AccentPrimary.copy(alpha = 0.4f) else BorderHairline),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(modifier = Modifier.fillMaxWidth()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(onClick = onToggleExpand)
+                    .padding(Spacing.md),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(44.dp)
+                        .clip(RoundedCornerShape(Radius.md))
+                        .background(if (activeCount > 0) AccentPrimary.copy(alpha = 0.15f) else SurfaceElevated),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = if (activeCount > 0) Icons.Rounded.Download else Icons.Rounded.Folder,
+                        contentDescription = null,
+                        tint = if (activeCount > 0) AccentPrimary else TextSecondary,
+                        modifier = Modifier.size(24.dp)
+                    )
+                }
+
+                Spacer(modifier = Modifier.width(Spacing.md))
+
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = showTitle,
+                        fontSize = Type.rowTitle.fontSize,
+                        fontWeight = FontWeight.Bold,
+                        color = TextPrimary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(Spacing.xs)
+                    ) {
+                        Text(
+                            text = "${items.size} ep${if (items.size != 1) "s" else ""}",
+                            fontSize = Type.caption.fontSize,
+                            color = TextSecondary
+                        )
+                        if (completedCount > 0) {
+                            Text(
+                                text = "· $completedCount done",
+                                fontSize = Type.caption.fontSize,
+                                color = StatusSuccess
+                            )
+                        }
+                        if (activeCount > 0) {
+                            Text(
+                                text = "· $activeCount active",
+                                fontSize = Type.caption.fontSize,
+                                color = AccentPrimary,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                        if (totalBytes > 0) {
+                            Text(
+                                text = "· ${formatBytes(totalBytes)}",
+                                fontSize = Type.caption.fontSize,
+                                color = TextMuted
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.width(Spacing.sm))
+
+                IconButton(
+                    onClick = onToggleExpand,
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Icon(
+                        imageVector = if (isExpanded) Icons.Rounded.KeyboardArrowUp else Icons.Rounded.KeyboardArrowDown,
+                        contentDescription = if (isExpanded) "Collapse" else "Expand",
+                        tint = if (isExpanded) AccentPrimary else TextMuted,
+                        modifier = Modifier.size(24.dp)
+                    )
+                }
+            }
+
+            if (isExpanded) {
+                Divider(color = BorderHairline, thickness = 1.dp)
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = Spacing.sm, vertical = Spacing.xs),
+                    verticalArrangement = Arrangement.spacedBy(Spacing.xs)
+                ) {
+                    items.forEach { task ->
+                        DownloadCard(
+                            task = task,
+                            context = context,
+                            onPlay = { onPlayTask(task) },
+                            onPause = { onPauseTask(task.id) },
+                            onRetry = { onRetryTask(task.id) },
+                            onCancel = { onCancelTask(task.id) },
+                            onDelete = { onDeleteTask(task) }
+                        )
+                    }
+                }
+            }
+        }
     }
 }
 
