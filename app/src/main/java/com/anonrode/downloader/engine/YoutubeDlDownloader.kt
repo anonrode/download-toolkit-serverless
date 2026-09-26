@@ -215,8 +215,19 @@ object YoutubeDlDownloader {
                     throw ce
                 } catch (e: Exception) {
                     com.anonrode.downloader.util.DebugLog.backend(
-                        "task=$taskId aria2c HTTP failed (${e.message}), falling back to yt-dlp as final fallback"
+                        "task=$taskId aria2c HTTP failed (${e.message})"
                     )
+                    // If this is a direct media file (e.g. .mkv, .mp4, or locker CDN stream),
+                    // yt-dlp will fail with "Unsupported URL" or time out trying to parse binary
+                    // as HTML. Return null so the caller engine retry loop handles it.
+                    val isDirectMedia = sourceUrl.lowercase().let { u ->
+                        u.endsWith(".mp4") || u.endsWith(".mkv") || u.endsWith(".avi") ||
+                        u.endsWith(".webm") || u.contains(".static.") || u.contains("kissorgrab.com") ||
+                        u.contains("downloadwella.com") || u.contains("vikingfile.com")
+                    }
+                    if (isDirectMedia) {
+                        return null
+                    }
                 }
             }
         }
@@ -225,7 +236,9 @@ object YoutubeDlDownloader {
         // bootstrap (AnonApp.appScope): a yt-dlp task enqueued before that
         // finishes would otherwise burn its first attempt on an uninitialized
         // runtime. Magnets above run aria2c directly and don't need it.
-        com.anonrode.downloader.AnonApp.ensureReady()
+        if (!com.anonrode.downloader.AnonApp.ensureReady()) {
+            throw java.io.IOException("yt-dlp runtime is not initialized")
+        }
 
         // Extractor tasks (social/YouTube, where yt-dlp picks its own output
         // name) write into a PRIVATE workdir instead of the shared target
@@ -472,7 +485,7 @@ object YoutubeDlDownloader {
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (e: Exception) {
-                if (isNativeBackendInterruption(e)) {
+                if (isNativeBackendInterruption(e) && !coroutineContext.isActive) {
                     throw BackendInterruptedException("yt-dlp backend interrupted; preserving partial data")
                 }
                 errors.append("run ").append(attempts).append(": ").append(e.message ?: e.javaClass.simpleName).append('\n')
@@ -1056,16 +1069,16 @@ object YoutubeDlDownloader {
             "--console-log-level=error"
         )
 
-        // Single socket constraint for fragile CDNs (plutomovies, kissorgrab)
-        val isSingleSocketHost = url.contains("plutomovies.com", ignoreCase = true) ||
-                url.contains("kissorgrab.com", ignoreCase = true) ||
-                parallelSockets <= 1
-        if (isSingleSocketHost) {
-            cmd += listOf("-s", "1", "-x", "1", "-j", "1", "--max-connection-per-server=1")
+        // Sensitive hosts (kissorgrab, plutomovies) trip 429 if flooded with 16 sockets,
+        // but 1 socket chokes to 6-30 KB/s on mobile networks. Cap at safe 4 sockets.
+        val isSensitiveHost = url.contains("plutomovies.com", ignoreCase = true) ||
+                url.contains("kissorgrab.com", ignoreCase = true)
+        val sockets = if (isSensitiveHost) {
+            minOf(4, parallelSockets.coerceAtLeast(2))
         } else {
-            val sockets = parallelSockets.coerceIn(1, 16)
-            cmd += listOf("-s", "$sockets", "-x", "$sockets", "-j", "$sockets", "--max-connection-per-server=$sockets", "--min-split-size=1M")
+            parallelSockets.coerceIn(1, 16)
         }
+        cmd += listOf("-s", "$sockets", "-x", "$sockets", "-j", "$sockets", "--max-connection-per-server=$sockets", "--min-split-size=1M")
 
         if (ua.isNotBlank()) {
             cmd += "--user-agent=$ua"

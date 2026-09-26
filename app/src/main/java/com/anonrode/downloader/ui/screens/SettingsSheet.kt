@@ -692,8 +692,8 @@ internal fun SettingsEngineSection(state: SettingsState) {
                     Icon(Icons.Rounded.Speed, contentDescription = null, tint = AccentPrimary, modifier = Modifier.size(18.dp))
                     Spacer(modifier = Modifier.width(Spacing.sm))
                     Column {
-                        Text("Aria2c Parallel Sockets", fontSize = Type.body.fontSize, fontWeight = FontWeight.SemiBold, color = TextPrimary)
-                        Text("High-speed segmented CDN connections", fontSize = Type.caption.fontSize, color = TextMuted)
+                        Text("Parallel Sockets (Turbo & Aria2c)", fontSize = Type.body.fontSize, fontWeight = FontWeight.SemiBold, color = TextPrimary)
+                        Text("High-speed segmented CDN connections (1–16)", fontSize = Type.caption.fontSize, color = TextMuted)
                     }
                 }
                 Text("${state.sockets} conns", fontSize = Type.label.fontSize, fontWeight = FontWeight.Bold, color = AccentPrimary)

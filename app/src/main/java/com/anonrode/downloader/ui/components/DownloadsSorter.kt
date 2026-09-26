@@ -113,16 +113,31 @@ object DownloadsSorter {
             .toList()
     }
 
+    fun normalizeShowKey(raw: String): String {
+        var s = raw.trim()
+        if (s.isBlank()) return "Unknown"
+        // Strip site watermarks in brackets or parens: [9jaRocks.Com], [NaijaPrey], (NetNaija), etc.
+        s = s.replace(Regex("""\[[^\]]*\]"""), "")
+        s = s.replace(Regex("""\([^\)]*(?:rocks|prey|naija|netnaija|nkiri)[^\)]*\)""", RegexOption.IGNORE_CASE), "")
+        // Strip release/codec/resolution noise: 540p, 720p, 1080p, x265, x264, WEBRip, etc.
+        s = s.replace(Regex("""\b(?:\d{3,4}p|x26[45]|hevc|h26[45]|aac|web-?rip|dvd-?rip|bluray|hdrip)\b""", RegexOption.IGNORE_CASE), "")
+        // Strip trailing season markers so all seasons of the same show group into one show card:
+        // "The Pitt S02" -> "The Pitt", "President Curtis - S01" -> "President Curtis"
+        s = s.replace(Regex("""[-–—._\s]+S\d{1,2}(?:E\d{1,3})?.*""", RegexOption.IGNORE_CASE), "")
+        s = s.replace(Regex("""[-–—._\s]+Season\s*\d{1,2}.*""", RegexOption.IGNORE_CASE), "")
+        // Clean trailing separators
+        s = s.replace(Regex("""[._\-–—\s]+$"""), "").trim()
+        return if (s.isBlank()) raw.trim() else s
+    }
+
     private fun groupLibrary(tasks: List<DownloadTask>): List<Pair<String, List<DownloadTask>>> {
-        // Group by showTitle; order shows by count of COMPLETED tasks
+        // Group by normalized show key; order shows by count of COMPLETED tasks
         // descending, then by show name ascending for stability. Within a
-        // show the episodes run NUMERICALLY (ep1, ep2, ep3…) — the user
-        // asked for exactly that (2026-09-14), and the player's Next queue
-        // is built from this order via [playerQueueFor], so a group tapped
-        // at ep1 steps to ep2, not to "whatever finished next".
+        // show the episodes run NUMERICALLY (ep1, ep2, ep3…) — aggregating
+        // episodes across sites (e.g. ep 1 from 9jaRocks, ep 2 from NaijaPrey).
         val byShow: MutableMap<String, MutableList<DownloadTask>> = linkedMapOf()
         for (t in tasks) {
-            val key = t.showTitle.ifBlank { "Unknown" }
+            val key = normalizeShowKey(t.showTitle.ifBlank { "Unknown" })
             byShow.getOrPut(key) { mutableListOf() }.add(t)
         }
         return byShow.entries
@@ -148,18 +163,18 @@ object DownloadsSorter {
     /**
      * The Next/Previous playlist the in-app player steps through when a task
      * is opened: COMPLETED files of the SAME show only, in episode order
-     * (see [EPISODE_ORDER]). Used to be every completed task across every
-     * show in engine order — pressing Next on ep 1 of one series threw you
-     * into a different show's file. Pure so the ordering has a direct test.
+     * (see [EPISODE_ORDER]). Matches on normalized show key across sites.
      */
-    fun playerQueueFor(tasks: List<DownloadTask>, showTitle: String): List<String> =
-        tasks.filter {
+    fun playerQueueFor(tasks: List<DownloadTask>, showTitle: String): List<String> {
+        val normTarget = normalizeShowKey(showTitle.ifBlank { "Unknown" })
+        return tasks.filter {
             it.status == TaskStatus.COMPLETED &&
                 it.filePath.isNotBlank() &&
-                it.showTitle.ifBlank { "Unknown" } == showTitle.ifBlank { "Unknown" }
+                normalizeShowKey(it.showTitle.ifBlank { "Unknown" }) == normTarget
         }
             .sortedWith(EPISODE_ORDER)
             .map { it.filePath }
+    }
 
     /**
      * Sort-aware Next/Previous playlist (v3.1.6). The player used to ALWAYS
