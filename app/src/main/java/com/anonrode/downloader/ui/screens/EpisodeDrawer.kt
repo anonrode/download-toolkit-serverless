@@ -319,10 +319,27 @@ fun EpisodeDrawer(
                         FilterChip(
                             selected = false,
                             onClick = { selectedUrls = emptySet() },
-                            label = { Text("Clear (${selectedEpisodes.size})", fontSize = Type.caption.fontSize, color = StatusError) },
-                            colors = FilterChipDefaults.filterChipColors(containerColor = SurfaceCard),
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = Icons.Rounded.Close,
+                                    contentDescription = null,
+                                    tint = StatusError,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                            },
+                            label = {
+                                Text(
+                                    text = "Clear (${selectedEpisodes.size})",
+                                    fontSize = Type.caption.fontSize,
+                                    fontWeight = FontWeight.Bold,
+                                    color = StatusError
+                                )
+                            },
+                            colors = FilterChipDefaults.filterChipColors(
+                                containerColor = StatusError.copy(alpha = 0.12f)
+                            ),
                             border = FilterChipDefaults.filterChipBorder(
-                                borderColor = StatusError.copy(alpha = 0.4f),
+                                borderColor = StatusError.copy(alpha = 0.5f),
                                 enabled = true,
                                 selected = false
                             )
@@ -676,12 +693,21 @@ fun EpisodeRow(
                 onClick = onDownloadSingle,
                 modifier = Modifier.size(48.dp)
             ) {
-                Icon(
-                    imageVector = Icons.Rounded.DownloadForOffline,
-                    contentDescription = "Download Single",
-                    tint = if (isSelected) AccentPrimary else TextMuted,
-                    modifier = Modifier.size(20.dp)
-                )
+                Box(
+                    modifier = Modifier
+                        .size(36.dp)
+                        .clip(CircleShape)
+                        .background(if (isSelected) AccentPrimary else SurfaceElevated)
+                        .border(1.dp, if (isSelected) AccentPrimary else BorderHairline, CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.DownloadForOffline,
+                        contentDescription = "Download Single",
+                        tint = if (isSelected) BackgroundDark else AccentPrimary,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
             }
         }
 

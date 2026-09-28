@@ -22,6 +22,7 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -1341,13 +1342,14 @@ private fun PlayerCircleButton(
             modifier = Modifier
                 .size(size)
                 .clip(CircleShape)
-                .background(Color.White.copy(alpha = 0.12f)),
+                .background(Color.Black.copy(alpha = 0.50f))
+                .border(1.dp, Color.White.copy(alpha = 0.22f), CircleShape),
             contentAlignment = Alignment.Center
         ) {
             Icon(
                 icon,
                 contentDescription = contentDescription,
-                tint = Color.White.copy(alpha = if (enabled) 1f else 0.35f),
+                tint = Color.White.copy(alpha = if (enabled) 1f else 0.40f),
                 modifier = Modifier.size(iconSize)
             )
         }
@@ -1364,8 +1366,9 @@ private fun PlayerChip(
     onClick: () -> Unit,
     leading: ImageVector
 ) {
-    val bg = if (selected) PlayerAccent else Color.White.copy(alpha = 0.10f)
+    val bg = if (selected) PlayerAccent else Color.Black.copy(alpha = 0.55f)
     val fg = if (selected) Color.Black else Color.White
+    val borderCol = if (selected) PlayerAccent else Color.White.copy(alpha = 0.25f)
     Box(
         modifier = Modifier
             .minimumInteractiveComponentSize()
@@ -1381,6 +1384,7 @@ private fun PlayerChip(
         modifier = Modifier
             .clip(RoundedCornerShape(50))
             .background(bg)
+            .border(1.dp, borderCol, RoundedCornerShape(50))
             .padding(horizontal = Spacing.md, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(Spacing.xs)

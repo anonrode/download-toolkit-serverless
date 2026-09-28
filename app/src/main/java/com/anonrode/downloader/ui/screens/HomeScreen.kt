@@ -35,6 +35,7 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -275,12 +276,21 @@ fun HomeScreen(
                             onClick = { viewModel.onQueryChanged("") },
                             modifier = Modifier.size(48.dp)
                         ) {
-                            Icon(
-                                imageVector = Icons.Default.Clear,
-                                contentDescription = "Clear",
-                                tint = TextSecondary,
-                                modifier = Modifier.size(18.dp)
-                            )
+                            Box(
+                                modifier = Modifier
+                                    .size(32.dp)
+                                    .clip(CircleShape)
+                                    .background(SurfaceElevated)
+                                    .border(1.dp, BorderHairline, CircleShape),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Clear,
+                                    contentDescription = "Clear",
+                                    tint = TextSecondary,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
                         }
 
                         Spacer(modifier = Modifier.width(Spacing.xs))
@@ -306,6 +316,36 @@ fun HomeScreen(
                                     imageVector = Icons.Rounded.ArrowForward,
                                     contentDescription = "Search",
                                     tint = BackgroundDark,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        }
+                    } else {
+                        val clipManager = LocalClipboardManager.current
+                        IconButton(
+                            onClick = {
+                                val clip = clipManager.getText()?.text?.trim()
+                                if (!clip.isNullOrBlank()) {
+                                    clipboardSnippet = null
+                                    viewModel.handlePastedInput(clip) { platform, url ->
+                                        onOpenSocial(platform, url)
+                                    }
+                                }
+                            },
+                            modifier = Modifier.size(48.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .clip(CircleShape)
+                                    .background(SurfaceElevated)
+                                    .border(1.dp, BorderHairline, CircleShape),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.ContentPaste,
+                                    contentDescription = "Paste Link",
+                                    tint = AccentPrimary,
                                     modifier = Modifier.size(18.dp)
                                 )
                             }
