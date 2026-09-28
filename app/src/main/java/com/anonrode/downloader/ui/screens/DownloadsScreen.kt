@@ -293,6 +293,7 @@ fun DownloadsScreen(
                         BulkActionChip(
                             label = "Pause all",
                             icon = Icons.Rounded.Pause,
+                            accent = TextPrimary,
                             onClick = { viewModel.engine.pauseAll() }
                         )
                         Spacer(modifier = Modifier.width(Spacing.sm))
@@ -301,6 +302,7 @@ fun DownloadsScreen(
                         BulkActionChip(
                             label = "Resume all",
                             icon = Icons.Rounded.PlayArrow,
+                            accent = StatusSuccess,
                             onClick = { viewModel.engine.resumeAll() }
                         )
                         Spacer(modifier = Modifier.width(Spacing.sm))
@@ -309,6 +311,7 @@ fun DownloadsScreen(
                         BulkActionChip(
                             label = "Retry failed",
                             icon = Icons.Rounded.Refresh,
+                            accent = StatusWarning,
                             onClick = {
                                 tasks.filter { it.status == TaskStatus.FAILED }.forEach {
                                     viewModel.engine.retry(it.id)
@@ -616,27 +619,27 @@ private fun BulkActionChip(label: String, icon: ImageVector, accent: Color = Acc
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center
     ) {
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier
-            .background(SurfaceCard)
-            .border(1.dp, BorderHairline, RoundedCornerShape(Radius.full))
-            .padding(horizontal = Spacing.md, vertical = Spacing.xs)
-    ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = null,
-            tint = accent,
-            modifier = Modifier.size(14.dp)
-        )
-        Spacer(modifier = Modifier.width(Spacing.xs))
-        Text(
-            text = label,
-            color = accent,
-            fontSize = Type.caption.fontSize,
-            fontWeight = FontWeight.SemiBold
-        )
-    }
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .background(accent.copy(alpha = 0.12f), RoundedCornerShape(Radius.full))
+                .border(1.dp, accent.copy(alpha = 0.35f), RoundedCornerShape(Radius.full))
+                .padding(horizontal = Spacing.md, vertical = Spacing.xs)
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = accent,
+                modifier = Modifier.size(14.dp)
+            )
+            Spacer(modifier = Modifier.width(Spacing.xs))
+            Text(
+                text = label,
+                color = accent,
+                fontSize = Type.caption.fontSize,
+                fontWeight = FontWeight.Bold
+            )
+        }
     }
 }
 
@@ -1051,30 +1054,66 @@ fun DownloadCard(
 
                     Row(horizontalArrangement = Arrangement.spacedBy(Spacing.xs)) {
                         if (isDownloading) {
-                            IconButton(onClick = onPause) {
-                                Icon(Icons.Rounded.Pause, contentDescription = "Pause", tint = TextSecondary, modifier = Modifier.size(20.dp))
-                            }
-                        } else if (isPaused || isFailed) {
-                            IconButton(onClick = onRetry) {
+                            IconButton(
+                                onClick = onPause,
+                                modifier = Modifier.size(36.dp)
+                            ) {
                                 Box(
                                     modifier = Modifier
                                         .size(36.dp)
                                         .clip(CircleShape)
-                                        .background(AccentPrimary)
+                                        .background(SurfaceElevated)
+                                        .border(1.dp, BorderHairline, CircleShape),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Pause,
+                                        contentDescription = "Pause",
+                                        tint = TextPrimary,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                            }
+                        } else if (isPaused || isFailed) {
+                            IconButton(
+                                onClick = onRetry,
+                                modifier = Modifier.size(36.dp)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(36.dp)
+                                        .clip(CircleShape)
+                                        .background(AccentPrimary),
+                                    contentAlignment = Alignment.Center
                                 ) {
                                     Icon(
                                         imageVector = if (isFailed) Icons.Rounded.Refresh else Icons.Rounded.PlayArrow,
                                         contentDescription = if (isFailed) "Retry" else "Resume",
                                         tint = BackgroundDark,
-                                        modifier = Modifier
-                                            .size(18.dp)
-                                            .align(Alignment.Center)
+                                        modifier = Modifier.size(18.dp)
                                     )
                                 }
                             }
                         }
-                        IconButton(onClick = onCancel) {
-                            Icon(Icons.Rounded.Close, contentDescription = "Cancel", tint = TextMuted, modifier = Modifier.size(20.dp))
+                        IconButton(
+                            onClick = onCancel,
+                            modifier = Modifier.size(36.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .clip(CircleShape)
+                                    .background(SurfaceElevated)
+                                    .border(1.dp, BorderHairline, CircleShape),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Close,
+                                    contentDescription = "Cancel",
+                                    tint = if (isFailed) StatusError else TextSecondary,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
                         }
                     }
                 }

@@ -6,6 +6,7 @@ import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -469,8 +470,19 @@ internal fun SettingsSelfHealingSection(
                                 }
                             }
                         },
-                        colors = ButtonDefaults.filledTonalButtonColors(containerColor = SurfaceElevated, contentColor = AccentPrimary)
+                        colors = ButtonDefaults.filledTonalButtonColors(
+                            containerColor = AccentPrimary.copy(alpha = 0.16f),
+                            contentColor = AccentPrimary
+                        ),
+                        border = BorderStroke(1.dp, AccentPrimary.copy(alpha = 0.45f)),
+                        shape = RoundedCornerShape(Radius.sm)
                     ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Refresh,
+                            contentDescription = null,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Spacer(Modifier.width(6.dp))
                         Text("Sync Now", fontSize = Type.caption.fontSize, fontWeight = FontWeight.Bold)
                     }
                 }
@@ -523,8 +535,19 @@ internal fun SettingsSelfHealingSection(
                                 }
                             }
                         },
-                        colors = ButtonDefaults.filledTonalButtonColors(containerColor = SurfaceElevated, contentColor = AccentPrimary)
+                        colors = ButtonDefaults.filledTonalButtonColors(
+                            containerColor = AccentPrimary.copy(alpha = 0.16f),
+                            contentColor = AccentPrimary
+                        ),
+                        border = BorderStroke(1.dp, AccentPrimary.copy(alpha = 0.45f)),
+                        shape = RoundedCornerShape(Radius.sm)
                     ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Refresh,
+                            contentDescription = null,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Spacer(Modifier.width(6.dp))
                         Text("Update Core", fontSize = Type.caption.fontSize, fontWeight = FontWeight.Bold)
                     }
                 }
@@ -589,17 +612,22 @@ internal fun SettingsAppearanceSection(
             }
 
             Row(horizontalArrangement = Arrangement.spacedBy(Spacing.sm)) {
-                listOf("Dark" to "dark", "Light" to "light", "Auto" to "system").forEach { (label, mode) ->
+                listOf(
+                    Triple("Dark", "dark", Icons.Rounded.DarkMode),
+                    Triple("Light", "light", Icons.Rounded.LightMode),
+                    Triple("Auto", "system", Icons.Rounded.BrightnessAuto)
+                ).forEach { (label, mode, icon) ->
                     val isSel = state.themeMode.equals(mode, ignoreCase = true)
-                    // selectable() + RadioButton role: the chips used to be
-                    // raw clickable Boxes — TalkBack announced no selection
-                    // between the three. minimumInteractiveComponentSize
-                    // grows the ~24dp visual into the 48dp hit minimum.
                     Box(
                         modifier = Modifier
                             .minimumInteractiveComponentSize()
                             .clip(RoundedCornerShape(Radius.sm))
                             .background(if (isSel) AccentPrimary else SurfaceElevated)
+                            .border(
+                                width = 1.dp,
+                                color = if (isSel) AccentPrimary else BorderHairline.copy(alpha = 0.6f),
+                                shape = RoundedCornerShape(Radius.sm)
+                            )
                             .selectable(
                                 selected = isSel,
                                 role = Role.RadioButton,
@@ -608,15 +636,26 @@ internal fun SettingsAppearanceSection(
                                     onThemeChanged(mode)
                                 }
                             )
-                            .padding(horizontal = Spacing.md, vertical = Spacing.sm),
+                            .padding(horizontal = Spacing.sm + 2.dp, vertical = Spacing.xs + 2.dp),
                         contentAlignment = Alignment.Center
                     ) {
-                        Text(
-                            text = label,
-                            fontSize = Type.caption.fontSize,
-                            fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal,
-                            color = if (isSel) (if (AnonTheme.colors.isDark) Color.Black else Color.White) else TextSecondary
-                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Icon(
+                                imageVector = icon,
+                                contentDescription = null,
+                                modifier = Modifier.size(13.dp),
+                                tint = if (isSel) (if (AnonTheme.colors.isDark) Color.Black else Color.White) else TextSecondary
+                            )
+                            Text(
+                                text = label,
+                                fontSize = Type.caption.fontSize,
+                                fontWeight = if (isSel) FontWeight.Bold else FontWeight.Medium,
+                                color = if (isSel) (if (AnonTheme.colors.isDark) Color.Black else Color.White) else TextPrimary
+                            )
+                        }
                     }
                 }
             }
