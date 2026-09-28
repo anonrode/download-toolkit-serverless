@@ -204,7 +204,7 @@ object DramaKeyProvider : SiteProvider {
         // stages can crack this site's download flow without an app update.
         // The compiled registry stays the untouched fallback.
         val direct = RulesPipeline.runResolveForSite(name, episodeUrl, quality)
-            ?: ResolverRegistry.resolve(episodeUrl, quality) ?: episodeUrl
+            ?: ResolverRegistry.resolve(episodeUrl, quality) ?: ""
         return DownloadRecipe(
             directUrl = direct,
             filename = direct.substringAfterLast('/').substringBefore('?').ifEmpty { "episode.mp4" },

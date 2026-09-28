@@ -113,6 +113,7 @@ object ResolverRegistry {
         LulaCloudResolver,
         DramaGatewayResolver,
         NaijaVaultGatewayResolver,
+        NpDownloaderGatewayResolver,
         BloggerResolver,
         VidsrcResolver,
         EmbedResolver,
@@ -1326,6 +1327,55 @@ object NaijaVaultGatewayResolver : BaseResolver {
 }
 
 // -------------------------------------------------------------
+// NpDownloaderGatewayResolver
+// -------------------------------------------------------------
+object NpDownloaderGatewayResolver : BaseResolver {
+    @Volatile private var lastFailure: String? = null
+
+    override fun lastResolveFailure(): String? = lastFailure
+
+    override fun canResolve(url: String): Boolean {
+        val low = url.lowercase()
+        return (hostClaim(url, listOf("np-downloader.com", "vdl.np-downloader.com"))) ||
+               (low.contains("np-downloader.com") && low.contains("/sdm_downloads/"))
+    }
+
+    override suspend fun resolve(url: String, quality: String, depth: Int): String? {
+        lastFailure = null
+        try {
+            val html = HttpClient.getText(url, referer = url) ?: run {
+                lastFailure = "NpDownloader: empty HTTP response for $url"
+                return null
+            }
+            val soup = Jsoup.parse(html, url)
+            val sdmAnchor = soup.selectFirst("a.sdm_download, a[href*='wildshare'], a[href*='downloadwella'], a[href*='vikingfile'], a[href*='loadedfiles']")
+            if (sdmAnchor != null) {
+                val href = sdmAnchor.attr("abs:href").takeIf { it.isNotBlank() }
+                if (href != null && href != url) {
+                    return if (depth < ResolverRegistry.RESOLVE_DEPTH_LIMIT) {
+                        ResolverRegistry.resolve(href, quality, depth + 1) ?: href
+                    } else href
+                }
+            }
+            val anyLocker = soup.select("a[href]").map { it.attr("abs:href") }
+                .firstOrNull { LinkResolver.isKnownLockerHost(it) && it != url }
+            if (!anyLocker.isNullOrBlank()) {
+                return if (depth < ResolverRegistry.RESOLVE_DEPTH_LIMIT) {
+                    ResolverRegistry.resolve(anyLocker, quality, depth + 1) ?: anyLocker
+                } else anyLocker
+            }
+            findDirectMediaUrl(html)?.let { return it }
+            lastFailure = "NpDownloader: no target anchor found in HTML (len=${html.length})"
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (e: Exception) {
+            lastFailure = "NpDownloader: ${e.javaClass.simpleName}: ${e.message}"
+        }
+        return null
+    }
+}
+
+// -------------------------------------------------------------
 // 12. EmbedResolver
 // -------------------------------------------------------------
 object EmbedResolver : BaseResolver {
@@ -1986,27 +2036,33 @@ object WildshareResolver : BaseResolver {
                 lastFailure = "Wildshare: empty HTTP response for $url"
                 return null
             }
-            val ptMatcher = Pattern.compile("""[?&'"]pt(?:=|["']\s*:\s*["'])([A-Za-z0-9%+=/]+)""").matcher(html)
-            if (ptMatcher.find()) {
-                val pt = ptMatcher.group(1) ?: return null
-                if (pt.isBlank()) return null
-                val parts = url.trimEnd('/').split('/')
-                val fileId = parts.lastOrNull { !it.endsWith(".mkv") && !it.endsWith(".mp4") } ?: parts.last()
-                if (fileId.isBlank()) return null
+            val btnMatcher = Pattern.compile("""window\.location\s*=\s*['"](https?://wildshare\.net/[^'"]+)['"]""").matcher(html)
+            val ptUrl = if (btnMatcher.find()) {
+                btnMatcher.group(1)
+            } else {
+                val ptMatcher = Pattern.compile("""[?&'"]pt(?:=|["']\s*:\s*["'])([A-Za-z0-9%+=/]+)""").matcher(html)
+                if (ptMatcher.find()) {
+                    val pt = ptMatcher.group(1)
+                    val parts = url.substringBefore('?').trimEnd('/').split('/')
+                    val fileId = parts.lastOrNull { !it.endsWith(".mkv") && !it.endsWith(".mp4") && it.isNotBlank() } ?: parts.last()
+                    "https://wildshare.net/$fileId?pt=$pt"
+                } else null
+            }
+            if (!ptUrl.isNullOrBlank()) {
                 val noRedirectClient = HttpClient.shared.newBuilder()
                     .followRedirects(false)
                     .followSslRedirects(false)
                     .build()
                 val req = Request.Builder()
-                    .url(HttpClient.safeUrl("https://wildshare.net/$fileId?pt=$pt"))
+                    .url(HttpClient.safeUrl(ptUrl))
                     .header("User-Agent", HttpClient.DEFAULT_UA)
                     .header("Referer", url)
                     .build()
                 HttpClient.executeCancellable(noRedirectClient, req) use@{ res ->
                     if (res.code !in 200..399) {
-                        lastFailure = "Wildshare: ?pt= returned HTTP ${res.code} for $fileId"
+                        lastFailure = "Wildshare: pt request returned HTTP ${res.code} for $ptUrl"
                         com.anonrode.downloader.util.DebugLog.resolve(
-                            "WildshareResolver: ?pt= returned HTTP ${res.code} for $fileId"
+                            "WildshareResolver: pt request returned HTTP ${res.code} for $ptUrl"
                         )
                         return null
                     }
@@ -2014,7 +2070,21 @@ object WildshareResolver : BaseResolver {
                     if (!loc.isNullOrBlank()) {
                         return HttpClient.safeUrl(loc)
                     }
-                    lastFailure = "Wildshare: no Location header returned on HTTP ${res.code}"
+                    val ct = res.header("Content-Type")?.lowercase() ?: ""
+                    if (ct.contains("video/") || ct.contains("application/octet-stream")) {
+                        return ptUrl
+                    }
+                    val body = res.body?.string() ?: ""
+                    val secondBtn = Pattern.compile("""window\.location\s*=\s*['"](https?://[^'"]+)['"]""").matcher(body)
+                    if (secondBtn.find()) {
+                        val nextLoc = secondBtn.group(1)
+                        if (!nextLoc.isNullOrBlank() && nextLoc != ptUrl) {
+                            return HttpClient.safeUrl(nextLoc)
+                        }
+                    }
+                    findDirectMediaUrl(body)?.let { return it }
+                    extractMp4FromHtml(body)?.let { return it }
+                    lastFailure = "Wildshare: no Location header or media returned on HTTP ${res.code}"
                     return null
                 }
             }

@@ -1214,10 +1214,10 @@ object YoutubeDlDownloader {
         return null
     }
 
-    /** CDN families that 403 WITHOUT an exact referer (inverse of the
-     *  referer-suppression family) — rewritten-master runs must keep it. */
+    /** CDN families and stream hosts that require an explicit referer —
+     *  rewritten-master runs keep the original referer for hotlink protection. */
     private fun requiresExplicitReferer(referer: String): Boolean {
         val low = referer.lowercase().trimEnd('/')
-        return low.contains("megaplay") || low.contains("megaplays")
+        return low.startsWith("http://") || low.startsWith("https://")
     }
 }

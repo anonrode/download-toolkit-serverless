@@ -160,10 +160,12 @@ object NaijaPreyProvider : SiteProvider {
         // page URL through the registry so WildshareResolver stamps pt= and
         // follows the 302 to the tokenized CDN file (live-verified
         // 2026-08-23: 206 video/x-matroska, MKV magic).
-        if (direct != null && direct.contains("wildshare.net") &&
-            (direct.endsWith(".mkv") || direct.endsWith(".mp4"))
-        ) {
-            val pageUrl = direct.substringBeforeLast('/')
+        if (direct != null && direct.contains("wildshare.net") && !direct.contains("download_token")) {
+            val pageUrl = if (direct.endsWith(".mkv") || direct.endsWith(".mp4")) {
+                direct.substringBeforeLast('/')
+            } else {
+                direct
+            }
             ResolverRegistry.resolve(pageUrl, quality)?.let { direct = it }
         }
 
@@ -205,6 +207,9 @@ object NaijaPreyProvider : SiteProvider {
             ?: return null
 
         if (next == url) return null
+        if (next.contains("wildshare.net") || next.contains("np-downloader.com")) {
+            ResolverRegistry.resolve(next, 0)?.let { return it }
+        }
         return extractFileLink(next, depth + 1)
     }
 }

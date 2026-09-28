@@ -372,7 +372,7 @@ object NaijaVaultProvider : SiteProvider {
                 if (e is kotlinx.coroutines.CancellationException) throw e
             }
         }
-        val finalUrl = direct ?: episodeUrl
+        val finalUrl = direct ?: ""
         return DownloadRecipe(
             directUrl = finalUrl,
             filename = finalUrl.substringAfterLast('/').substringBefore('?').ifEmpty { "movie.mp4" },
