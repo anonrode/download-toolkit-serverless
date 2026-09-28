@@ -57,7 +57,9 @@ object LinkResolver {
         "lightdl.cc",
         "5play.cc",
         "megaplay.",
-        "blogger.com"
+        "blogger.com",
+        "np-downloader.com",
+        "vdl.np-downloader.com"
     )
 
     /**

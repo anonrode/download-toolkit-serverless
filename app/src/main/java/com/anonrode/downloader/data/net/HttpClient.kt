@@ -108,7 +108,16 @@ object HttpClient {
 
     private val bootstrapDohClient by lazy {
         OkHttpClient.Builder()
-            .dns(okhttp3.Dns.SYSTEM)
+            .dns { hostname ->
+                if (hostname.equals("dns.google", ignoreCase = true)) {
+                    listOf(
+                        java.net.InetAddress.getByAddress("dns.google", byteArrayOf(8, 8, 8, 8)),
+                        java.net.InetAddress.getByAddress("dns.google", byteArrayOf(8, 8, 4, 4))
+                    )
+                } else {
+                    okhttp3.Dns.SYSTEM.lookup(hostname)
+                }
+            }
             .connectTimeout(4, TimeUnit.SECONDS)
             .readTimeout(4, TimeUnit.SECONDS)
             .build()
@@ -937,7 +946,7 @@ object HttpClient {
                 call.execute().use { res ->
                     val ct = res.header("Content-Type")?.lowercase() ?: ""
                     val total = acceptsTerminalResponse(
-                        res.code, res.header("Content-Length"), res.header("Content-Range"), res.header("Content-Type")
+                        res.code, res.header("Content-Length"), res.header("Content-Range"), res.header("Content-Type"), url
                     )
                     val tp = TerminalProbe(res.code, res.header("Location"), ct, total)
                     com.anonrode.downloader.util.DebugLog.net(
@@ -991,7 +1000,8 @@ internal fun acceptsTerminalResponse(
     code: Int,
     contentLength: String?,
     contentRange: String?,
-    contentType: String?
+    contentType: String?,
+    url: String = ""
 ): Long? {
     if (code != 200 && code != 206) return null
     val ct = (contentType ?: "").lowercase()
@@ -1012,6 +1022,12 @@ internal fun acceptsTerminalResponse(
         }
         // 206 without Content-Range is spec-violating — refuse, do not guess.
         return null
+    }
+    // HLS / m3u8 streams: valid terminal response on 200 even with chunked or small size.
+    val isHls = ct.contains("mpegurl") || ct.contains("vnd.apple.mpegurl") ||
+        url.substringBefore('?').lowercase().endsWith(".m3u8")
+    if (isHls) {
+        return (contentLength?.toLongOrNull() ?: 1L).coerceAtLeast(1L)
     }
     // 200: Content-Length IS the size. Absent (chunked) = no proof.
     return (contentLength?.toLongOrNull() ?: 0L).takeIf { it > 0 }

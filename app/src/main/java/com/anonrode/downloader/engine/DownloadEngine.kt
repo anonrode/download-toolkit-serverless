@@ -1255,28 +1255,22 @@ class DownloadEngine(
             val base = File(task.filePath).name
             // Segmented Turbo downloads pre-allocate the .part file to its full
             // size before a single byte is written, so file.length() is not a
-            // progress signal there. When a .turbo sidecar exists, the piece map
-            // is the source of truth: sum committed offsets, ignore the zeros.
+            // When a .turbo sidecar exists, the piece map is the single source of truth:
+            // sum committed offsets, ignore pre-allocated zeros. Never sum with destFile.
             val sidecar = File(dir, base + ".turbo")
             if (sidecar.exists()) {
-                val written = TurboState(sidecar).writtenBytes() ?: return 0L
-                return written + files.sumOf { f ->
-                    if (!f.isFile) 0L
-                    else if (f.name == base) f.length()
-                    else if (f.name.endsWith(".ytdl") && f.name.startsWith(base)) f.length()
-                    else 0L
-                }
+                return TurboState(sidecar).writtenBytes() ?: 0L
             }
-            files.sumOf { f ->
-                if (!f.isFile) 0L
-                // Only this task's own outputs: the previous directory-wide
-                // ".part/.ytdl anywhere" rule folded SIBLING tasks' partials
-                // into this task's progress (their .part files live in the
-                // same folder), corrupting the window the watchdog acts on.
-                else if (f.name.startsWith(base) && !f.name.endsWith(".turbo")) f.length()
-                else if (f.name.endsWith(".ytdl") && f.name.startsWith(base)) f.length()
-                else 0L
-            }
+            // Non-turbo transfers: use strict single-file priority. Summing multiple
+            // files starting with base doubled bytes (e.g. .part + destFile -> 148MB
+            // on 78MB) and caused the progress bar to stick at 100% early.
+            val partFile = File(dir, "$base.part")
+            if (partFile.exists()) return partFile.length()
+            val ytdlFile = File(dir, "$base.ytdl")
+            if (ytdlFile.exists()) return ytdlFile.length()
+            val destFile = File(dir, base)
+            if (destFile.exists()) return destFile.length()
+            0L
         } catch (_: Exception) {
             0L
         }

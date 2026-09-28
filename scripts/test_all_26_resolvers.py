@@ -29,6 +29,7 @@ EXPECTED_26_RESOLVERS = [
     'LulaCloudResolver',
     'DramaGatewayResolver',
     'NaijaVaultGatewayResolver',
+    'NpDownloaderGatewayResolver',
     'EmbedResolver',
     'PlutoMoviesResolver',
     'DownloadwellaResolver',
@@ -53,7 +54,7 @@ class All26ResolversTest(unittest.TestCase):
 
     def test_all_26_resolvers_present_in_file(self):
         found = re.findall(r'object\s+(\w+Resolver)\s*:\s*BaseResolver', self.source)
-        self.assertEqual(len(found), 26, f"Expected 26 resolvers, found {len(found)}: {found}")
+        self.assertEqual(len(found), len(EXPECTED_26_RESOLVERS), f"Expected {len(EXPECTED_26_RESOLVERS)} resolvers, found {len(found)}: {found}")
         for r in EXPECTED_26_RESOLVERS:
             self.assertIn(r, found, f"Resolver {r} missing from source declarations")
 
@@ -62,7 +63,7 @@ class All26ResolversTest(unittest.TestCase):
         self.assertIsNotNone(m, "RESOLVERS list not found in ResolverRegistry")
         registered_block = m.group(1)
         registered = [line.strip().rstrip(',') for line in registered_block.splitlines() if line.strip() and not line.strip().startswith('//')]
-        self.assertEqual(len(registered), 26, f"Expected 26 registered resolvers, got {len(registered)}: {registered}")
+        self.assertEqual(len(registered), len(EXPECTED_26_RESOLVERS), f"Expected {len(EXPECTED_26_RESOLVERS)} registered resolvers, got {len(registered)}: {registered}")
         for r in EXPECTED_26_RESOLVERS:
             self.assertIn(r, registered, f"Resolver {r} missing from ResolverRegistry.RESOLVERS")
 
