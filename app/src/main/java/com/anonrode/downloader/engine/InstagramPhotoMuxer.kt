@@ -70,7 +70,9 @@ object InstagramPhotoMuxer {
         RegexOption.DOT_MATCHES_ALL
     )
 
-    /** The extracted, decided media. `hasVideo` short-circuits the mux. */
+    /** The extracted, decided media. `hasVideo` short-circuits the mux.
+     *  `carouselPhotoUrls` holds ALL photo children of a carousel (in order);
+     *  when non-empty a slideshow is built instead of the single-image mux. */
     internal data class MediaParts(
         val photoUrl: String,
         val audioUrl: String,
@@ -78,7 +80,8 @@ object InstagramPhotoMuxer {
         val title: String?,
         val artist: String?,
         val caption: String?,
-        val hasVideo: Boolean
+        val hasVideo: Boolean,
+        val carouselPhotoUrls: List<String> = emptyList()
     )
 
     // ------------------------------------------------------------------ pure
@@ -169,13 +172,12 @@ object InstagramPhotoMuxer {
         // A photo carousel keeps its images in `carousel_media` CHILDREN while
         // the music_metadata rides the post itself — gallery-dl reads them
         // from exactly those two places (`post["carousel_media"]` items +
-        // `post["music_metadata"]`, instagram.py). Requiring both on one
-        // object made every carousel-with-music unmuxable; the first photo
-        // child becomes the cover instead.
+        // `post["music_metadata"]`, instagram.py).
         val singlePhoto = bestCandidate(m.optJSONObject("image_versions2")?.optJSONArray("candidates"))
         val isCarousel = m.has("carousel_media")
+        val carouselPhotos = if (isCarousel) allCarouselPhotos(m) else emptyList()
         val photoUrl = singlePhoto
-            ?: firstCarouselPhoto(m)
+            ?: carouselPhotos.firstOrNull()
             ?: return null
         val audio = musicAssetInfo(m)
         // Carousels are gallery posts — the mux only makes sense when there is
@@ -189,7 +191,8 @@ object InstagramPhotoMuxer {
         val caption = m.optJSONObject("caption")?.optString("text")?.takeIf { it.isNotBlank() }
             ?: m.optJSONObject("edge_media_to_caption")?.optJSONArray("edges")?.optJSONObject(0)
                 ?.optJSONObject("node")?.optString("text")?.takeIf { it.isNotBlank() }
-        return MediaParts(photoUrl, audioUrl, durationMs, title, artist, caption, hasVideo = false)
+        return MediaParts(photoUrl, audioUrl, durationMs, title, artist, caption,
+            hasVideo = false, carouselPhotoUrls = carouselPhotos)
     }
 
     private fun bestCandidate(candidates: JSONArray?): String? {
@@ -205,18 +208,22 @@ object InstagramPhotoMuxer {
         return best
     }
 
-    /** First PHOTO child of a carousel — video children are skipped on the
+    /** ALL PHOTO children of a carousel — video children are skipped on the
      *  same principle as the top-level hasVideo guard: a real video is not a
-     *  still, so it can never serve as the fabricated cover. */
-    private fun firstCarouselPhoto(m: JSONObject): String? {
-        val carousel = m.optJSONArray("carousel_media") ?: return null
+     *  still, so it can never serve as the fabricated cover. When only one
+     *  photo exists (or the carousel has a single image), the list has one
+     *  element and behaves exactly like the old firstCarouselPhoto. */
+    private fun allCarouselPhotos(m: JSONObject): List<String> {
+        val carousel = m.optJSONArray("carousel_media") ?: return emptyList()
+        val urls = mutableListOf<String>()
         for (i in 0 until carousel.length()) {
             val child = carousel.optJSONObject(i) ?: continue
             val v = child.optJSONArray("video_versions")
             if (v != null && v.length() > 0) continue
-            bestCandidate(child.optJSONObject("image_versions2")?.optJSONArray("candidates"))?.let { return it }
+            bestCandidate(child.optJSONObject("image_versions2")?.optJSONArray("candidates"))
+                ?.let { urls.add(it) }
         }
-        return null
+        return urls
     }
 
     /** music_metadata.music_info.music_asset_info, with the consumption-info
@@ -262,6 +269,35 @@ object InstagramPhotoMuxer {
         } else {
             common.addAll(listOf("-framerate", "1", "-loop", "1", "-i", cover, "-t", "3",
                 "-vf", scale, "-pix_fmt", "yuv420p"))
+        }
+        val x264 = ArrayList(common).apply { addAll(listOf("-c:v", "libx264", "-preset", "veryfast", "-tune", "stillimage")) }
+        val mpeg4 = ArrayList(common).apply { addAll(listOf("-c:v", "mpeg4", "-vtag", "xvid", "-q:v", "4")) }
+        x264.add(out); mpeg4.add(out)
+        return listOf(listOf(libPath) + x264, listOf(libPath) + mpeg4)
+    }
+
+    /** ffmpeg arg vectors for a multi-image SLIDESHOW using the concat demuxer.
+     *  Each image is held for `slideDurationSec` seconds (computed by the
+     *  caller as `songDurationMs / numSlides / 1000`). The concat list file
+     *  must already exist on disk with entries like:
+     *    file '/path/to/slide_0.jpg'
+     *    duration 6.5
+     *    file '/path/to/slide_1.jpg'
+     *    duration 6.5
+     *  Best codec first (libx264), then mpeg4 fallback — same as single-image.
+     */
+    internal fun ffmpegSlideshowVariants(
+        libPath: String, concatList: String, audio: String?, out: String
+    ): List<List<String>> {
+        val scale = "scale=trunc(iw/2)*2:trunc(ih/2)*2"
+        val common = mutableListOf("-hide_banner", "-loglevel", "error", "-y",
+            "-f", "concat", "-safe", "0", "-i", concatList)
+        if (!audio.isNullOrBlank()) {
+            common.addAll(listOf("-i", audio,
+                "-vf", scale, "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-b:a", "192k", "-shortest"))
+        } else {
+            common.addAll(listOf("-vf", scale, "-pix_fmt", "yuv420p"))
         }
         val x264 = ArrayList(common).apply { addAll(listOf("-c:v", "libx264", "-preset", "veryfast", "-tune", "stillimage")) }
         val mpeg4 = ArrayList(common).apply { addAll(listOf("-c:v", "mpeg4", "-vtag", "xvid", "-q:v", "4")) }
@@ -386,9 +422,7 @@ object InstagramPhotoMuxer {
         val produced = File(outDir, buildFilename(shortcode, parts))
         var delivered = false
         try {
-            val imgExt = guessExt(parts.photoUrl, ".jpg")
-            val cover = fetchTo(work, "cover$imgExt", parts.photoUrl) ?: return null
-            if (isCancelled()) throw CancellationException("IG mux cancelled after cover fetch")
+            // ---------- fetch audio (shared for both single + slideshow)
             val audio = if (parts.audioUrl.isNotBlank()) {
                 val audExt = guessExt(parts.audioUrl, ".m4a")
                 val a = fetchTo(work, "audio$audExt", parts.audioUrl) ?: return null
@@ -403,7 +437,44 @@ object InstagramPhotoMuxer {
             }
             try { lib.setExecutable(true) } catch (_: Exception) {}
 
-            val variants = ffmpegVariants(lib.absolutePath, cover.absolutePath, audio?.absolutePath, produced.absolutePath)
+            // ---------- slideshow path: 2+ carousel photos
+            val isSlideshow = parts.carouselPhotoUrls.size >= 2
+            val variants = if (isSlideshow) {
+                // download all carousel photos
+                val slideFiles = mutableListOf<File>()
+                for ((idx, url) in parts.carouselPhotoUrls.withIndex()) {
+                    if (isCancelled()) throw CancellationException("IG mux cancelled during slide fetch")
+                    val ext = guessExt(url, ".jpg")
+                    val f = fetchTo(work, "slide_$idx$ext", url)
+                    if (f != null) slideFiles.add(f)
+                }
+                if (slideFiles.isEmpty()) return null
+                // duration per slide: song length / num slides (min 3s per slide)
+                val durationMs = if (parts.durationMs > 0) parts.durationMs else (slideFiles.size * 5000L)
+                val perSlideSec = (durationMs.toDouble() / slideFiles.size / 1000.0).coerceAtLeast(3.0)
+                // build concat list file
+                val concatFile = File(work, "slides.txt")
+                val sb = StringBuilder()
+                for (sf in slideFiles) {
+                    sb.append("file '").append(sf.absolutePath.replace("'", "'\\''")).append("'\n")
+                    sb.append("duration ").append("%.3f".format(perSlideSec)).append("\n")
+                }
+                // concat demuxer needs the last file repeated without duration to
+                // prevent a black frame at the end
+                if (slideFiles.isNotEmpty()) {
+                    sb.append("file '").append(slideFiles.last().absolutePath.replace("'", "'\\''")).append("'\n")
+                }
+                concatFile.writeText(sb.toString())
+                DebugLog.backend("task=$taskId ig-mux slideshow: ${slideFiles.size} slides, ${perSlideSec}s each")
+                ffmpegSlideshowVariants(lib.absolutePath, concatFile.absolutePath, audio?.absolutePath, produced.absolutePath)
+            } else {
+                // ---------- single-image path (original behavior)
+                val imgExt = guessExt(parts.photoUrl, ".jpg")
+                val cover = fetchTo(work, "cover$imgExt", parts.photoUrl) ?: return null
+                if (isCancelled()) throw CancellationException("IG mux cancelled after cover fetch")
+                ffmpegVariants(lib.absolutePath, cover.absolutePath, audio?.absolutePath, produced.absolutePath)
+            }
+
             for (cmd in variants) {
                 if (isCancelled()) throw CancellationException("IG mux cancelled before ffmpeg")
                 val ok = runFffmpeg(cmd, work.parentFile, isCancelled)
