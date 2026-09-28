@@ -202,6 +202,7 @@ object YoutubeDlDownloader {
                         targetDir = targetDir,
                         preferredFilename = preferredFilename,
                         referer = referer,
+                        origin = origin,
                         ua = if (ua.isNotBlank()) ua else com.anonrode.downloader.data.net.HttpClient.DEFAULT_UA,
                         customHeaders = customHeaders,
                         parallelSockets = parallelSockets,
@@ -1033,6 +1034,7 @@ object YoutubeDlDownloader {
         targetDir: File,
         preferredFilename: String,
         referer: String = "",
+        origin: String = "",
         ua: String = "",
         customHeaders: Map<String, String> = emptyMap(),
         parallelSockets: Int = 16,
@@ -1065,7 +1067,7 @@ object YoutubeDlDownloader {
             "--connect-timeout=15",
             "--timeout=30",
             "--auto-file-renaming=false",
-            "--allow-overwrite=true",
+            "--allow-overwrite=false",
             "--console-log-level=error"
         )
 
@@ -1081,14 +1083,22 @@ object YoutubeDlDownloader {
         cmd += listOf("-s", "$sockets", "-x", "$sockets", "-j", "$sockets", "--max-connection-per-server=$sockets", "--min-split-size=1M")
 
         if (ua.isNotBlank()) {
-            cmd += "--user-agent=$ua"
+            val cleanUa = ua.replace("\r", "").replace("\n", "").trim()
+            cmd += "--user-agent=$cleanUa"
         }
         if (referer.isNotBlank()) {
-            cmd += "--referer=$referer"
+            val cleanRef = referer.replace("\r", "").replace("\n", "").trim()
+            cmd += "--referer=$cleanRef"
+        }
+        if (origin.isNotBlank()) {
+            val cleanOrig = origin.replace("\r", "").replace("\n", "").trim()
+            cmd += "--header=Origin: $cleanOrig"
         }
         for ((k, v) in customHeaders) {
-            if (k.isNotBlank() && v.isNotBlank()) {
-                cmd += "--header=$k: $v"
+            val cleanK = k.replace("\r", "").replace("\n", "").trim()
+            val cleanV = v.replace("\r", "").replace("\n", "").trim()
+            if (cleanK.isNotBlank() && cleanV.isNotBlank()) {
+                cmd += "--header=$cleanK: $cleanV"
             }
         }
         if (speedLimitKbs > 0) {

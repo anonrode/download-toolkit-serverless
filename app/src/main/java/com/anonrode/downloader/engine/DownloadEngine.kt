@@ -671,7 +671,7 @@ class DownloadEngine(
         activeJobs[taskId]?.cancel()
         activeJobs.remove(taskId)
         YoutubeDlDownloader.killProcess(taskId)
-        TurboDownloader.cancelTask(taskId)
+        TurboDownloader.cancelTask(taskId, isFullCancel = true)
         // Kill this task's own in-flight resolver HTTP immediately when it is
         // safe: with no other running task there is nothing to cross-talk
         // into. Otherwise the job's cancellation handler sweeps once this
@@ -2177,7 +2177,7 @@ class DownloadEngine(
                         // between start and kill, so a stalled task and a slow
                         // one were indistinguishable (audit finding). Emit every
                         // ~10s while bytes actually move.
-                        val beaconMoved = (disk - windowStartDisk) + (parsed - windowStartParsed)
+                        val beaconMoved = maxOf(disk - windowStartDisk, parsed - windowStartParsed)
                         if (beaconMoved > 0 && now - lastProgressLog >= 10_000L) {
                             lastProgressLog = now
                             com.anonrode.downloader.util.DebugLog.engine(
@@ -2199,7 +2199,7 @@ class DownloadEngine(
                         }
                         // Window progress: healthy downloads blow through the floor
                         // in seconds; a crawl never reaches it.
-                        val moved = (disk - windowStartDisk) + (parsed - windowStartParsed)
+                        val moved = maxOf(disk - windowStartDisk, parsed - windowStartParsed)
                         // Merge/rename churn: yt-dlp's ffmpeg pass deletes the
                         // .fNNN input shards after writing the merged output, so
                         // a task's own footprint can legitimately DROP mid-run —
@@ -2243,7 +2243,7 @@ class DownloadEngine(
                         // crawl=true before the swarm ever flowed). Give magnet
                         // tasks a much longer leash and skip the crawl/stall kill.
                         val magnetTask = streamUrl.startsWith("magnet:", ignoreCase = true)
-                        val attemptBoundary = maxOf(stallKills * STALL_TIMEOUT_MS * 2, 90_000L)
+                        val attemptBoundary = if (magnetTask) 90_000L else maxOf(stallKills * STALL_TIMEOUT_MS * 2, STALL_TIMEOUT_MS)
                         val stalledLong = now - lastActivity > STALL_TIMEOUT_MS
                         if (!magnetTask && !throttleGrace && stalledLong && (now - watchdogStart) > attemptBoundary && (stallKills == 0 || now - lastKillTime > STALL_TIMEOUT_MS)) {
                             stallKills++

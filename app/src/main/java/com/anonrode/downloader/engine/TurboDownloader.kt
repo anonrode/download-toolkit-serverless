@@ -65,13 +65,15 @@ object TurboDownloader {
      * though Turbo has no native process to kill.
      */
     private val activeCalls = ConcurrentHashMap<String, CopyOnWriteArrayList<Call>>()
+    private val fullyCancelledTaskIds = ConcurrentHashMap.newKeySet<String>()
 
     /**
      * Interrupt every in-flight transfer of a task. The affected pieces fail,
      * are retried per the normal piece policy, and the task eventually FAILED
      * instead of hanging in DOWNLOADING forever. Idempotent for unknown ids.
      */
-    fun cancelTask(taskId: String) {
+    fun cancelTask(taskId: String, isFullCancel: Boolean = false) {
+        if (isFullCancel) fullyCancelledTaskIds.add(taskId)
         activeCalls.remove(taskId)?.forEach { it.cancel() }
     }
 
@@ -237,13 +239,18 @@ object TurboDownloader {
                 state.delete()
                 if (moveVerified(partFile, dest, total)) TurboResult.Success(dest, dest.length(), true)
                 else failure(failureStatus, failureMessage)
-            } else if (!partFile.exists() || partFile.length() == 0L) {
-                state.delete()
-                if (single(safe, partFile, headers, total, failureStatus, failureMessage, onProgress, effectiveClient, taskId)) {
-                    if (moveVerified(partFile, dest, total)) TurboResult.Success(dest, dest.length(), false)
-                    else failure(failureStatus, failureMessage)
+            } else {
+                val landedBytes = state.writtenBytes() ?: 0L
+                val canFallbackToSingle = !partFile.exists() || partFile.length() == 0L || landedBytes == 0L
+                if (canFallbackToSingle) {
+                    partFile.delete()
+                    state.delete()
+                    if (single(safe, partFile, headers, total, failureStatus, failureMessage, onProgress, effectiveClient, taskId)) {
+                        if (moveVerified(partFile, dest, total)) TurboResult.Success(dest, dest.length(), false)
+                        else failure(failureStatus, failureMessage)
+                    } else failure(failureStatus, failureMessage)
                 } else failure(failureStatus, failureMessage)
-            } else failure(failureStatus, failureMessage)
+            }
         } else {
             // Cross-mode resume guard (engine-audit P1): a `.part` left by a
             // SEGMENTED run is pre-allocated to the FULL length, so its length
@@ -552,7 +559,9 @@ object TurboDownloader {
                                 "Piece ${chunk.start}-${chunk.end} incomplete (attempt $attempt of $MAX_ATTEMPTS)"
                             )
                         } catch (_: CancellationException) {
-                            state.commit(plan, total, force = true)
+                            if (taskId.isEmpty() || !fullyCancelledTaskIds.contains(taskId)) {
+                                state.commit(plan, total, force = true)
+                            }
                             return false
                         } catch (e: Exception) {
                             attempt++
@@ -581,7 +590,9 @@ object TurboDownloader {
                                     if (!downloadPiece(plan[idx])) break
                                 }
                             } catch (_: CancellationException) {
-                                state.commit(plan, total, force = true)
+                                if (taskId.isEmpty() || !fullyCancelledTaskIds.contains(taskId)) {
+                                    state.commit(plan, total, force = true)
+                                }
                             }
                         }
                     }
@@ -591,7 +602,10 @@ object TurboDownloader {
         } finally {
             telemetryTicker.cancel()
             onProgress(committed(), total, speed.getSpeed())
-            if (taskId.isNotEmpty()) throttleDeadlines.remove(taskId)
+            if (taskId.isNotEmpty()) {
+                throttleDeadlines.remove(taskId)
+                fullyCancelledTaskIds.remove(taskId)
+            }
         }
 
         if (failed.get()) return@coroutineScope false

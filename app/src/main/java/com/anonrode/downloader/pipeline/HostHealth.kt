@@ -23,6 +23,7 @@ object HostHealth {
         var lastOkMs: Long = 0,
         var lastFailMs: Long = 0,
         var rate429: Int = 0,
+        var lastRate429Ms: Long = 0,
         var lastReason: String? = null
     ) {
         fun toJson(): JSONObject = JSONObject()
@@ -30,6 +31,7 @@ object HostHealth {
             .put("consecFail", consecutiveFails)
             .put("lastOk", lastOkMs).put("lastFail", lastFailMs)
             .put("rate429", rate429)
+            .put("lastRate429", lastRate429Ms)
             .apply { if (lastReason != null) put("lastReason", lastReason) }
 
         companion object {
@@ -38,6 +40,7 @@ object HostHealth {
                 consecutiveFails = o.optInt("consecFail"),
                 lastOkMs = o.optLong("lastOk"), lastFailMs = o.optLong("lastFail"),
                 rate429 = o.optInt("rate429"),
+                lastRate429Ms = o.optLong("lastRate429"),
                 lastReason = o.optString("lastReason").takeIf { it.isNotBlank() }
             )
         }
@@ -93,7 +96,7 @@ object HostHealth {
         val h = hostOf(hostOrUrl)
         if (h.isBlank()) return
         records.compute(h) { _, v -> (v ?: Rec()).apply {
-            ok++; consecutiveFails = 0; lastOkMs = System.currentTimeMillis()
+            ok++; consecutiveFails = 0; lastRate429Ms = 0L; lastOkMs = System.currentTimeMillis()
         } }
         persist()
     }
@@ -119,6 +122,7 @@ object HostHealth {
             if (consecutiveFails > 0) {
                 consecutiveFails = 0
             }
+            lastRate429Ms = 0L
             lastOkMs = System.currentTimeMillis()
         } }
         persist()
@@ -151,7 +155,10 @@ object HostHealth {
             failure.contains("timed out", ignoreCase = true)
         records.compute(h) { _, v -> (v ?: Rec()).apply {
             fail++
-            if (rateLimited) rate429++
+            if (rateLimited) {
+                rate429++
+                lastRate429Ms = System.currentTimeMillis()
+            }
             if (reason != null && reason.isNotBlank()) {
                 lastReason = reason
             }
@@ -174,9 +181,10 @@ object HostHealth {
         if (DynamicRulesManager.isKnownDead(urlOrHost)) return false
         val r = records[hostOf(urlOrHost)] ?: return true
         val sinceLastFail = System.currentTimeMillis() - r.lastFailMs
+        val sinceLast429 = System.currentTimeMillis() - r.lastRate429Ms
         // If the host explicitly returned HTTP 429 (Rate Limited), honor a minimum
         // 30s cooldown immediately so we do not hammer the server into a hard ban.
-        if (r.rate429 > 0 && sinceLastFail < 30_000L) return false
+        if (r.lastRate429Ms > 0L && sinceLast429 < 30_000L) return false
         // Backoff only after >= 3 CONSECUTIVE hard failures: a single hiccup
         // (one 404, one timeout) must not gate a host for 30s+ — search
         // cancellations and flaky single requests used to kill hosts
@@ -191,8 +199,9 @@ object HostHealth {
     fun remainingBackoffMs(urlOrHost: String): Long {
         val r = records[hostOf(urlOrHost)] ?: return 0L
         val elapsed = System.currentTimeMillis() - r.lastFailMs
-        if (r.rate429 > 0 && elapsed < 30_000L) {
-            return maxOf(0L, 30_000L - elapsed)
+        val sinceLast429 = System.currentTimeMillis() - r.lastRate429Ms
+        if (r.lastRate429Ms > 0L && sinceLast429 < 30_000L) {
+            return maxOf(0L, 30_000L - sinceLast429)
         }
         if (r.consecutiveFails < 3) return 0L
         val window = backoffWindowMs(r.consecutiveFails)

@@ -341,11 +341,12 @@ object PlutoProvider : SiteProvider {
         val target = if (!direct.isNullOrBlank()) direct else {
             if (com.anonrode.downloader.pipeline.StrictLinkClassifier.isDirectMedia(episodeUrl)) episodeUrl else ""
         }
+        val isHls = target.contains(".m3u8", ignoreCase = true) || target.contains("manifest", ignoreCase = true)
         return DownloadRecipe(
             directUrl = target,
             filename = target.substringAfterLast('/').substringBefore('?').ifEmpty { "video.mp4" },
             headers = mapOf("Referer" to "$mainUrl/"),
-            backend = "aria2c",
+            backend = if (isHls) "yt-dlp" else "aria2c",
             parallelSockets = 16
         )
     }

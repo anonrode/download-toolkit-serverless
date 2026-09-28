@@ -277,7 +277,7 @@ object NkiriProvider : SiteProvider {
             directUrl = target,
             filename = target.substringAfterLast('/').substringBefore('?').ifEmpty { "movie.mkv" },
             backend = if (isHls) "yt-dlp" else "aria2c",
-            parallelSockets = 16
+            parallelSockets = if (isSingleSocket) 1 else 16
         )
     }
 

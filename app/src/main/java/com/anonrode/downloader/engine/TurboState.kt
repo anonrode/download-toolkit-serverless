@@ -138,7 +138,12 @@ class TurboState(private val file: File) {
         val plan = read(total) ?: return null
         var prefix = 0L
         for (chunk in plan) {
-            if (chunk.current <= chunk.end) break
+            if (chunk.current <= chunk.end) {
+                if (chunk.start == 0L && chunk.current > 0L) {
+                    prefix = chunk.current
+                }
+                break
+            }
             prefix = chunk.end + 1
         }
         return prefix

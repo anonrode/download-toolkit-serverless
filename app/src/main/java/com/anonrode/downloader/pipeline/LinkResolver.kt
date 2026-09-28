@@ -90,7 +90,7 @@ object LinkResolver {
         if (host.contains("kissorgrab.com") && path.contains("/dl/")) return true
 
         val query = lower.substringAfter('?', "").substringBefore('#')
-        if (query.contains("pt=") || query.contains("token=") || query.contains("download")) return true
+        if (!isKnownLockerHost(url) && (query.contains("download_token=") || query.contains("media_token=") || query.contains("direct_download=1"))) return true
         // R2 / S3 / Object Storage signed links: the query string contains
         // AWS-style signing parameters and/or response-content-disposition.
         // These are resolver outputs (the direct cracked media stream) serving
@@ -162,8 +162,8 @@ object LinkResolver {
     ): String? {
         fun accept(out: String?): Boolean {
             if (out.isNullOrBlank()) return false
-            if (out != permUrl) return true
-            return !isKnownLockerHost(out)
+            if (isKnownLockerHost(out)) return false
+            return out != permUrl
         }
 
         // 1. Try direct resolution via ResolverRegistry.

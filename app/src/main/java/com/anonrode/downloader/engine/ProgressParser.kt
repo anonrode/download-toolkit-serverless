@@ -239,6 +239,7 @@ internal fun parseByteString(str: String): Long {
         clean.endsWith("MIB") || clean.endsWith("MB") -> (numPart * 1024 * 1024).toLong()
         clean.endsWith("KIB") || clean.endsWith("KB") -> (numPart * 1024).toLong()
         clean.endsWith("B") -> numPart.toLong()
+        clean.all { it.isDigit() } -> numPart.toLong()
         else -> (numPart * 1024 * 1024).toLong()
     }
 }

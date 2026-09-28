@@ -174,10 +174,11 @@ object NaijaPreyProvider : SiteProvider {
         // directUrl — that "downloads" the HTML page itself.
         val finalUrl = direct ?: ""
 
+        val isHls = finalUrl.contains(".m3u8", ignoreCase = true) || finalUrl.contains("manifest", ignoreCase = true)
         return DownloadRecipe(
             directUrl = finalUrl,
             filename = finalUrl.substringAfterLast('/').substringBefore('?').ifEmpty { "media.mp4" },
-            backend = "aria2c",
+            backend = if (isHls) "yt-dlp" else "aria2c",
             parallelSockets = 16
         )
     }

@@ -452,13 +452,13 @@ object InstagramPhotoMuxer {
                 val concatFile = File(work, "slides.txt")
                 val sb = StringBuilder()
                 for (sf in slideFiles) {
-                    sb.append("file '").append(sf.absolutePath.replace("'", "'\\''")).append("'\n")
+                    sb.append("file '").append(sf.absolutePath.replace("\\", "\\\\").replace("'", "'\\''")).append("'\n")
                     sb.append("duration ").append("%.3f".format(perSlideSec)).append("\n")
                 }
                 // concat demuxer needs the last file repeated without duration to
                 // prevent a black frame at the end
                 if (slideFiles.isNotEmpty()) {
-                    sb.append("file '").append(slideFiles.last().absolutePath.replace("'", "'\\''")).append("'\n")
+                    sb.append("file '").append(slideFiles.last().absolutePath.replace("\\", "\\\\").replace("'", "'\\''")).append("'\n")
                 }
                 concatFile.writeText(sb.toString())
                 DebugLog.backend("task=$taskId ig-mux slideshow: ${slideFiles.size} slides, ${perSlideSec}s each")

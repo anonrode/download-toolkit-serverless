@@ -205,10 +205,11 @@ object DramaKeyProvider : SiteProvider {
         // The compiled registry stays the untouched fallback.
         val direct = RulesPipeline.runResolveForSite(name, episodeUrl, quality)
             ?: ResolverRegistry.resolve(episodeUrl, quality) ?: ""
+        val isHls = direct.contains(".m3u8", ignoreCase = true) || direct.contains("manifest", ignoreCase = true)
         return DownloadRecipe(
             directUrl = direct,
             filename = direct.substringAfterLast('/').substringBefore('?').ifEmpty { "episode.mp4" },
-            backend = "aria2c",
+            backend = if (isHls) "yt-dlp" else "aria2c",
             parallelSockets = 16
         )
     }

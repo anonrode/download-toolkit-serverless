@@ -187,9 +187,17 @@ object HttpClient {
                 val answers = json.optJSONArray("Answer") ?: throw java.net.UnknownHostException(hostname)
                 val addrs = mutableListOf<java.net.InetAddress>()
                 for (i in 0 until answers.length()) {
-                    val data = answers.getJSONObject(i).optString("data")
-                    if (data.isNotBlank() && !data.contains(":")) {
-                        addrs.add(java.net.InetAddress.getByName(data))
+                    val ans = answers.getJSONObject(i)
+                    val type = ans.optInt("type")
+                    val data = ans.optString("data")
+                    // type 1 = A (IPv4): parse literal octets directly to prevent getByName
+                    // from triggering native getaddrinfo on CNAME domain names when ISP DNS is dead.
+                    if (type == 1 && data.isNotBlank() && !data.contains(":")) {
+                        val parts = data.split('.').mapNotNull { it.toIntOrNull() }
+                        if (parts.size == 4 && parts.all { it in 0..255 }) {
+                            val bytes = ByteArray(4) { parts[it].toByte() }
+                            addrs.add(java.net.InetAddress.getByAddress(hostname, bytes))
+                        }
                     }
                 }
                 if (addrs.isEmpty()) throw java.net.UnknownHostException(hostname)
@@ -1056,6 +1064,8 @@ internal fun isBlockedAddress(addr: java.net.InetAddress): Boolean {
         return false
     }
     if (b.size == 16) {
+        val b0 = b[0].toInt() and 0xFF
+        if ((b0 and 0xFE) == 0xFC) return true // RFC 4193 Unique Local Address fc00::/7 (private IPv6)
         // ::ffff:a.b.c.d (mapped) and the obsolete ::a.b.c.d (compat): unwrap to
         // the v4 rules OURSELVES — whether getByName hands us an Inet4Address
         // or an Inet6Address for those texts is a JDK text-format detail we

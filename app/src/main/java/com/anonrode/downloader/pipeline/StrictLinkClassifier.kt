@@ -126,15 +126,15 @@ object StrictLinkClassifier {
                 return LinkClass.KnownLocker(bareLocker)
             }
         }
-        if (HostHealth.hasProvenLocker(cleanHost)) {
-            return LinkClass.KnownLocker(cleanHost)
-        }
-
-        // 5. Direct media extension check
+        // 5. Direct media extension check (for hosts not explicitly in known lockers list)
         val ext = clean.substringBefore('?').substringAfterLast('.', "").lowercase()
         if (ext in DIRECT_EXTENSIONS) {
             val isHls = ext == "m3u8"
             return LinkClass.DirectMedia(ext, isHls)
+        }
+
+        if (HostHealth.hasProvenLocker(cleanHost)) {
+            return LinkClass.KnownLocker(cleanHost)
         }
 
         // 6. Navigation junk filtering
