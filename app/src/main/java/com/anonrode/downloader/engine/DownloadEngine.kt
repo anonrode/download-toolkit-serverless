@@ -928,9 +928,13 @@ class DownloadEngine(
                     }
 
                     // Candidate must have matching (origSeason, origEpNum)
+                    val isSingleMovie = details.episodes.size == 1 && origEpNum <= 1 && origSeason == 1
                     val matchingEp = details.episodes.firstOrNull { candEp ->
-                        val (candS, candE) = parseCandidateSeasonAndEpisode(card, candEp)
-                        candS == origSeason && candE == origEpNum
+                        if (isSingleMovie) true
+                        else {
+                            val (candS, candE) = parseCandidateSeasonAndEpisode(card, candEp)
+                            candS == origSeason && candE == origEpNum
+                        }
                     }
                     if (matchingEp == null) {
                         com.anonrode.downloader.util.DebugLog.resolve(

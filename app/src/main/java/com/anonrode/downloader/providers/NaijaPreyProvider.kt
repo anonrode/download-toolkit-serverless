@@ -208,7 +208,7 @@ object NaijaPreyProvider : SiteProvider {
 
         if (next == url) return null
         if (next.contains("wildshare.net") || next.contains("np-downloader.com")) {
-            ResolverRegistry.resolve(next, 0)?.let { return it }
+            ResolverRegistry.resolve(next)?.let { return it }
         }
         return extractFileLink(next, depth + 1)
     }
