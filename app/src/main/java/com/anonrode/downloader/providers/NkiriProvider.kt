@@ -266,13 +266,16 @@ object NkiriProvider : SiteProvider {
         // OTA resolve recipe (a playbook can carry the wrapper-unwrap + locker
         // crack) wins when present; compiled registry otherwise.
         val direct = RulesPipeline.runResolveForSite(name, episodeUrl, quality)
-            ?: ResolverRegistry.resolve(effective, quality) ?: effective
-        val isSingleSocket = effective.contains("nkiserv.com") || episodeUrl.contains("nkiserv.com") || direct.contains(".m3u8")
-        val isHls = direct.contains(".m3u8") || direct.contains("manifest")
+            ?: ResolverRegistry.resolve(effective, quality)
+        val target = if (!direct.isNullOrBlank()) direct else {
+            if (com.anonrode.downloader.pipeline.StrictLinkClassifier.isDirectMedia(effective)) effective else ""
+        }
+        val isSingleSocket = effective.contains("nkiserv.com") || episodeUrl.contains("nkiserv.com") || target.contains(".m3u8")
+        val isHls = target.contains(".m3u8") || target.contains("manifest")
 
         return DownloadRecipe(
-            directUrl = direct,
-            filename = direct.substringAfterLast('/').substringBefore('?').ifEmpty { "movie.mkv" },
+            directUrl = target,
+            filename = target.substringAfterLast('/').substringBefore('?').ifEmpty { "movie.mkv" },
             backend = if (isHls) "yt-dlp" else "aria2c",
             parallelSockets = 16
         )
