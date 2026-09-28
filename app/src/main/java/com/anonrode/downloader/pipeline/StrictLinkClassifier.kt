@@ -33,11 +33,11 @@ object StrictLinkClassifier {
     )
 
     private val DEFAULT_LOCKER_HOSTS = listOf(
-        "streamsss.net", "streamwish.com", "streamtape.com", "doodstream.com",
-        "dood.", "vidhide.com", "mixdrop.co", "mp4upload.com", "hglink.tv",
+        "streamsss.net", "streamwish.com", "streamwish.to", "streamtape.com", "doodstream.com",
+        "dood.", "dood.to", "dood.so", "dood.re", "vidhide.com", "mixdrop.co", "mp4upload.com", "hglink.tv",
         "loadedfiles.net", "loadedfiles.com", "downloadwella.com", "wetafiles.com",
-        "vikingfile.com", "lulacloud.com", "waffi", "pixeldrain.com",
-        "filevault", "kissorgrab.com", "wildshare", "gtoddl", "wapkizfile",
+        "vikingfile.com", "lulacloud.com", "waffi", "waffi.cloud", "pixeldrain.com",
+        "filevault", "filevault.com.ng", "kissorgrab.com", "wildshare", "wildshare.net", "gtoddl", "gtoddl.com", "wapkizfile",
         "fastupload.io", "gofile.io", "krakenfiles.com", "swish"
     )
 
@@ -119,8 +119,11 @@ object StrictLinkClassifier {
         // or redirectors requiring cracking, not direct media files.
         val allLockers = (DynamicRulesManager.getLockerHosts() + DEFAULT_LOCKER_HOSTS).distinct()
         for (locker in allLockers) {
-            if (cleanHost == locker || cleanHost.endsWith(".$locker")) {
-                return LinkClass.KnownLocker(locker)
+            val bareLocker = locker.trimEnd('.')
+            if (cleanHost == bareLocker || cleanHost.endsWith(".$bareLocker") ||
+                (!bareLocker.contains('.') && (cleanHost.startsWith("$bareLocker.") || cleanHost.contains(".$bareLocker.") || cleanHost.endsWith(".$bareLocker") || cleanHost == bareLocker))
+            ) {
+                return LinkClass.KnownLocker(bareLocker)
             }
         }
         if (HostHealth.hasProvenLocker(cleanHost)) {
