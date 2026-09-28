@@ -180,10 +180,6 @@ object InstagramPhotoMuxer {
             ?: carouselPhotos.firstOrNull()
             ?: return null
         val audio = musicAssetInfo(m)
-        // Carousels are gallery posts — the mux only makes sense when there is
-        // music on the post object. A carousel without music is just a gallery;
-        // let yt-dlp (or a future gallery handler) deal with it.
-        if (isCarousel && audio == null) return null
         val audioUrl = audio?.optString("progressive_download_url")?.takeIf { it.isNotBlank() } ?: ""
         val durationMs = audio?.optLong("duration_in_ms", 0L)?.coerceAtLeast(0L) ?: 0L
         val title = audio?.optString("title")?.takeIf { it.isNotBlank() }
