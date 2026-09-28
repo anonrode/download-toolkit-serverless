@@ -204,7 +204,7 @@ object RocksProvider : SiteProvider {
                                 EpisodeItem(
                                     title = "Server ${mirrorMark.groupValues[1]}$qualitySuffix",
                                     url = href,
-                                    episodeNum = if (isSeries) itemSeason * 100 + 1 else (mirrorMark.groupValues[1].toIntOrNull() ?: count),
+                                    episodeNum = if (isSeries) itemSeason * 100 + (mirrorMark.groupValues[1].toIntOrNull() ?: 1) else (mirrorMark.groupValues[1].toIntOrNull() ?: count),
                                     site = name
                                 )
                             )
@@ -284,10 +284,11 @@ object RocksProvider : SiteProvider {
         val target = if (!direct.isNullOrBlank()) direct else {
             if (com.anonrode.downloader.pipeline.StrictLinkClassifier.isDirectMedia(episodeUrl)) episodeUrl else ""
         }
+        val isHls = target.contains(".m3u8", ignoreCase = true) || target.contains("manifest", ignoreCase = true)
         return DownloadRecipe(
             directUrl = target,
             filename = target.substringAfterLast('/').substringBefore('?').ifEmpty { "movie.mp4" },
-            backend = "aria2c",
+            backend = if (isHls) "yt-dlp" else "aria2c",
             parallelSockets = 16
         )
     }

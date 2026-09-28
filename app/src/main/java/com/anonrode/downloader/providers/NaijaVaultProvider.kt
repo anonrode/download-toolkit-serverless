@@ -373,10 +373,11 @@ object NaijaVaultProvider : SiteProvider {
             }
         }
         val finalUrl = direct ?: ""
+        val isHls = finalUrl.contains(".m3u8", ignoreCase = true) || finalUrl.contains("manifest", ignoreCase = true)
         return DownloadRecipe(
             directUrl = finalUrl,
             filename = finalUrl.substringAfterLast('/').substringBefore('?').ifEmpty { "movie.mp4" },
-            backend = "aria2c",
+            backend = if (isHls) "yt-dlp" else "aria2c",
             parallelSockets = 16
         )
     }

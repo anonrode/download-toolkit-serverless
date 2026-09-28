@@ -84,7 +84,9 @@ class Aria2Control(
                 pos += pBfLen
             }
 
-            val pieceCount = ((totalLength + pieceLength - 1) / pieceLength).toInt()
+            val rawPieceCount = (totalLength + pieceLength - 1) / pieceLength
+            if (rawPieceCount <= 0L || rawPieceCount > 65536L) return null
+            val pieceCount = rawPieceCount.toInt()
             val pieces = ArrayList<TurboChunk>(pieceCount)
             for (i in 0 until pieceCount) {
                 val start = i.toLong() * pieceLength

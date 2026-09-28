@@ -4,6 +4,7 @@ import com.anonrode.downloader.data.net.HttpClient
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Segment-Sampling Estimator (SSE): predict an HLS download's final size by
@@ -82,10 +83,12 @@ object HlsSizeEstimator {
                 .map { (segmentCount * it / 100).coerceIn(0, segmentCount - 1) }
                 .distinct()
             if (indices.any { it >= segments.size }) return null
-            val samples = coroutineScope {
-                indices.map { idx -> async { probeSegmentSize(segments[idx], referer) } }
-                    .map { it.await() }
-            }
+            val samples = withTimeoutOrNull(8_000L) {
+                coroutineScope {
+                    indices.map { idx -> async { probeSegmentSize(segments[idx], referer) } }
+                        .map { it.await() }
+                }
+            } ?: return null
             if (samples.any { it == null }) return null
             val fmp4 = isFmp4(segments)
             var total = estimateFromSamples(samples.filterNotNull(), segmentCount, fmp4)

@@ -236,6 +236,9 @@ object ResolverRegistry {
                             if (deeper is ResolverOutcome.Failure) return deeper
                         }
                     }
+                    if (depth >= RESOLVE_DEPTH_LIMIT && !isDirectMediaUrl(direct) && !com.anonrode.downloader.pipeline.LinkResolver.isProvablyDirectFile(direct)) {
+                        return ResolverOutcome.Failure("Resolve depth limit ($RESOLVE_DEPTH_LIMIT) reached without producing direct media: $direct")
+                    }
                     return ResolverOutcome.Success(direct)
                 }
                 val failureDetail = (outcome as? ResolverOutcome.Failure)?.reason
@@ -1353,16 +1356,18 @@ object NpDownloaderGatewayResolver : BaseResolver {
                 val href = sdmAnchor.attr("abs:href").takeIf { it.isNotBlank() }
                 if (href != null && href != url) {
                     return if (depth < ResolverRegistry.RESOLVE_DEPTH_LIMIT) {
-                        ResolverRegistry.resolve(href, quality, depth + 1) ?: href
-                    } else href
+                        ResolverRegistry.resolve(href, quality, depth + 1)
+                            ?: if (isDirectMediaUrl(href) || LinkResolver.isProvablyDirectFile(href)) href else null
+                    } else if (isDirectMediaUrl(href) || LinkResolver.isProvablyDirectFile(href)) href else null
                 }
             }
             val anyLocker = soup.select("a[href]").map { it.attr("abs:href") }
                 .firstOrNull { LinkResolver.isKnownLockerHost(it) && it != url }
             if (!anyLocker.isNullOrBlank()) {
                 return if (depth < ResolverRegistry.RESOLVE_DEPTH_LIMIT) {
-                    ResolverRegistry.resolve(anyLocker, quality, depth + 1) ?: anyLocker
-                } else anyLocker
+                    ResolverRegistry.resolve(anyLocker, quality, depth + 1)
+                        ?: if (isDirectMediaUrl(anyLocker) || LinkResolver.isProvablyDirectFile(anyLocker)) anyLocker else null
+                } else if (isDirectMediaUrl(anyLocker) || LinkResolver.isProvablyDirectFile(anyLocker)) anyLocker else null
             }
             findDirectMediaUrl(html)?.let { return it }
             lastFailure = "NpDownloader: no target anchor found in HTML (len=${html.length})"
@@ -1460,7 +1465,9 @@ object PlutoMoviesResolver : BaseResolver {
                         val nested = resolve(href, quality, depth + 1)
                         if (!nested.isNullOrBlank()) return nested
                     }
-                    return href
+                    if (isDirectMediaUrl(href) || LinkResolver.isProvablyDirectFile(href)) return href
+                    lastFailure = "PlutoMovies: intermediate page did not resolve to direct media: $href"
+                    return null
                 }
             }
             val btn = soup.selectFirst("a[href*='kissorgrab.com'], a[href*='/download/'], a.download-btn, a[href*='download'], a[href*='.mp4'], a[href*='.mkv']")
@@ -1488,7 +1495,12 @@ object PlutoMoviesResolver : BaseResolver {
                 val seasonish = children.firstOrNull { child ->
                     child.contains(Regex("""season-\d{1,2}""", RegexOption.IGNORE_CASE))
                 }
-                return episodeish ?: seasonish ?: children.first()
+                val targetChild = episodeish ?: seasonish ?: children.first()
+                if (depth < ResolverRegistry.RESOLVE_DEPTH_LIMIT) {
+                    return resolve(targetChild, quality, depth + 1)
+                }
+                lastFailure = "PlutoMovies: recursion depth limit reached descending series directory: $targetChild"
+                return null
             }
             lastFailure = "PlutoMovies: no dl anchor or direct media found in HTML (len=${html.length})"
         } catch (cancelled: CancellationException) {

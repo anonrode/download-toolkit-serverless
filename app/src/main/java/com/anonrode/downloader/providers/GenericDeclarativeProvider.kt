@@ -155,11 +155,15 @@ class GenericDeclarativeProvider(
     }
 
     override suspend fun resolveEpisode(episodeUrl: String, quality: String): DownloadRecipe {
-        val direct = ResolverRegistry.resolve(episodeUrl, quality) ?: episodeUrl
+        val resolved = ResolverRegistry.resolve(episodeUrl, quality)
+        val direct = if (!resolved.isNullOrBlank()) resolved else {
+            if (com.anonrode.downloader.pipeline.StrictLinkClassifier.isDirectMedia(episodeUrl)) episodeUrl else ""
+        }
+        val isHls = direct.contains(".m3u8", ignoreCase = true) || direct.contains("manifest", ignoreCase = true)
         return DownloadRecipe(
             directUrl = direct,
             filename = direct.substringAfterLast('/').substringBefore('?').ifEmpty { "media.mp4" },
-            backend = "aria2c",
+            backend = if (isHls) "yt-dlp" else "aria2c",
             parallelSockets = 16
         )
     }
