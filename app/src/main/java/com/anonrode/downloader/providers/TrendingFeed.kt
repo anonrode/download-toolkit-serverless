@@ -224,7 +224,7 @@ object TrendingFeed {
                 if (title.isNotBlank() && link.isNotBlank()) {
                     out.add(
                         RestPost(
-                            card = ShowCard(title = cleanCardTitle(title), url = link, posterUrl = poster, site = site),
+                            card = ShowCard(title = cleanCardTitle(title), url = link, posterUrl = poster, site = site, tags = terms),
                             body = item.optJSONObject("content")?.optString("rendered") ?: "",
                             terms = terms
                         )
@@ -245,7 +245,7 @@ object TrendingFeed {
         filterExplicit: Boolean = true
     ): List<ShowCard> {
         val safePosts = if (filterExplicit) {
-            posts.filterNot { com.anonrode.downloader.util.ExplicitContentFilter.isExplicit(it.card.title, it.terms) }
+            posts.filterNot { com.anonrode.downloader.util.ExplicitContentFilter.isExplicit(it.card) }
         } else {
             posts
         }
@@ -300,10 +300,9 @@ object TrendingFeed {
                 val desc = item.selectFirst("content|encoded")?.text()
                     ?: item.selectFirst("description")?.text() ?: ""
                 val cats = item.select("category").map { it.text().trim() }.filter { it.isNotBlank() }
-                // Explicit filter keeps reading the RAW title + raw categories —
-                // cleanCardTitle strips decoration words, and a filter that only
-                // sees the cleaned string would miss a term the site decorated.
-                if (filterExplicit && com.anonrode.downloader.util.ExplicitContentFilter.isExplicit(rawTitle, cats)) {
+                // Explicit filter checks URL, raw title, and taxonomy categories
+                val tempCard = ShowCard(title = rawTitle, url = link, site = site, tags = cats)
+                if (filterExplicit && com.anonrode.downloader.util.ExplicitContentFilter.isExplicit(tempCard)) {
                     continue
                 }
                 // First <img> = the _Poster.jpg, and it STAYS that way on
@@ -318,7 +317,7 @@ object TrendingFeed {
                     RegexOption.IGNORE_CASE
                 ).find(desc)?.groupValues?.get(1) ?: ""
                 if (rawTitle.isNotBlank() && link.isNotBlank() && !NAV_GARBAGE.containsMatchIn(link)) {
-                    val card = ShowCard(title = cleanCardTitle(rawTitle), url = link, posterUrl = poster, site = site)
+                    val card = ShowCard(title = cleanCardTitle(rawTitle), url = link, posterUrl = poster, site = site, tags = cats)
                     if (DownloadLinkGate.hasDownloadLink(desc)) out.add(card to cats) else noLinks.add(card to cats)
                 }
             }
@@ -337,17 +336,40 @@ object TrendingFeed {
         s.lowercase().filter { it.isLetterOrDigit() }
 
     /** A card belongs to the genre when the SITE says so (any taxonomy term
-     *  normalizes to / contains a genre alias) or the TITLE says so. Terms
-     *  empty (API sites, RSS without <category>) leaves the title check —
-     *  which for the TMDB-style APIs IS the whole match (they search titles). */
+     *  matches a genre alias with word boundary) or the TITLE says so.
+     *  Word boundaries prevent false-positive substring collisions
+     *  (e.g. "satisfaction" or "behind the attraction" matching "action";
+     *  "cloverfield" or "beloved" matching "love").
+     *  Filters out sports betting spam and comedy skits.
+     */
     internal fun genreConfirmed(title: String, terms: List<String>, aliases: Set<String>): Boolean {
         if (aliases.isEmpty()) return true
-        val normTitle = normalizeGenre(title)
-        if (aliases.any { it.isNotBlank() && normTitle.contains(it) }) return true
-        return terms.any { term ->
-            val n = normalizeGenre(term)
-            n.isNotBlank() && aliases.any { n.contains(it) }
+        val lowerTitle = title.lowercase()
+
+        // Exclude sports betting spam and short YouTube skits from genre grids
+        if (lowerTitle.contains("1xbet") || lowerTitle.contains("battles for big wins") ||
+            lowerTitle.contains("comedy skit:") || lowerTitle.contains("download comedy skit")
+        ) {
+            return false
         }
+
+        // 1. Check title with word boundary regex
+        for (alias in aliases) {
+            if (alias.isBlank()) continue
+            val wordRegex = Regex("(?i)\\b" + Regex.escape(alias) + "\\b")
+            if (wordRegex.containsMatchIn(lowerTitle)) return true
+        }
+
+        // 2. Check taxonomy terms (wp:term or RSS <category>)
+        for (term in terms) {
+            val lowerTerm = term.lowercase().trim()
+            for (alias in aliases) {
+                if (alias.isBlank()) continue
+                val wordRegex = Regex("(?i)\\b" + Regex.escape(alias) + "\\b")
+                if (lowerTerm == alias.lowercase() || wordRegex.containsMatchIn(lowerTerm)) return true
+            }
+        }
+        return false
     }
 
     // ---- API-JSON genre sources (v3.1.6: nepu movies, asianc kdrama) -----

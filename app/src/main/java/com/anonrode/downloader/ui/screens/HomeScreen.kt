@@ -551,6 +551,11 @@ fun HomeScreen(
                         onOpen = { viewModel.openEpisodeDrawer(it) }
                     )
                     Spacer(modifier = Modifier.height(Spacing.lg))
+                    AsianDramaHeroSection(
+                        onOpenKdrama = { viewModel.openAsianDramaHub(com.anonrode.downloader.providers.DramaRegion.KDRAMA) },
+                        onOpenCdrama = { viewModel.openAsianDramaHub(com.anonrode.downloader.providers.DramaRegion.CDRAMA) }
+                    )
+                    Spacer(modifier = Modifier.height(Spacing.lg))
                     CategoryTilesGrid(
                         tiles = uiState.genreTiles,
                         showPosters = viewModel.engine.showPostersInResults,
@@ -611,7 +616,25 @@ fun HomeScreen(
                 onOpen = { viewModel.openEpisodeDrawer(it) }
             )
         }
-        if (uiState.catalogOpen && uiState.activeCategory == null) {
+        uiState.activeDramaRegion?.let { region ->
+            com.anonrode.downloader.ui.components.AsianDramaExplorer(
+                region = region,
+                era = uiState.activeDramaEra,
+                statusFilter = uiState.activeDramaStatus,
+                activeGenre = uiState.activeDramaGenre,
+                cards = uiState.dramaCards,
+                isLoading = uiState.isDramaLoading,
+                failed = uiState.dramaFailed,
+                showPosters = viewModel.engine.showPostersInResults,
+                onBack = { viewModel.closeAsianDramaHub() },
+                onSelectEra = { viewModel.selectDramaEra(it) },
+                onSelectStatus = { viewModel.selectDramaStatus(it) },
+                onSelectGenre = { viewModel.selectDramaGenre(it) },
+                onRefresh = { viewModel.refreshDramaFeed() },
+                onOpen = { viewModel.openEpisodeDrawer(it) }
+            )
+        }
+        if (uiState.catalogOpen && uiState.activeCategory == null && uiState.activeDramaRegion == null) {
             CatalogPage(
                 catalogRows = uiState.catalogRows,
                 showPosters = viewModel.engine.showPostersInResults,
@@ -1598,3 +1621,139 @@ private fun rightMetric(show: ShowCard): String = when (show.site.lowercase()) {
     "torrents" -> "P2P Magnet"
     else -> "Available"
 }
+
+@Composable
+private fun AsianDramaHeroSection(
+    onOpenKdrama: () -> Unit,
+    onOpenCdrama: () -> Unit
+) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "ASIAN DRAMAS",
+                fontSize = Type.sectionTitle.fontSize,
+                fontWeight = FontWeight.Bold,
+                color = TextPrimary
+            )
+            Text(
+                text = "Modern & Historical",
+                fontSize = 11.sp,
+                color = TextMuted
+            )
+        }
+        Spacer(modifier = Modifier.height(Spacing.sm))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(Spacing.sm)
+        ) {
+            // K-Drama Hero Card
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .height(96.dp)
+                    .clip(RoundedCornerShape(Radius.md))
+                    .background(
+                        Brush.linearGradient(
+                            listOf(Color(0xFF1E1B4B), Color(0xFF0F172A))
+                        )
+                    )
+                    .border(1.dp, BorderHairline, RoundedCornerShape(Radius.md))
+                    .clickable(onClick = onOpenKdrama)
+                    .padding(Spacing.md),
+                contentAlignment = Alignment.CenterStart
+            ) {
+                Column {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = "K-DRAMA",
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = Color(0xFF93C5FD)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(Color(0xFF3B82F6).copy(alpha = 0.25f))
+                                .padding(horizontal = 4.dp, vertical = 1.dp)
+                        ) {
+                            Text("HUB", fontSize = 9.sp, fontWeight = FontWeight.Bold, color = Color(0xFF93C5FD))
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(Spacing.xxs))
+                    Text(
+                        text = "Modern · Sageuk",
+                        fontSize = 11.sp,
+                        color = TextSecondary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(modifier = Modifier.height(Spacing.xs))
+                    Text(
+                        text = "Explore catalog →",
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = Color(0xFF60A5FA)
+                    )
+                }
+            }
+
+            // C-Drama Hero Card
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .height(96.dp)
+                    .clip(RoundedCornerShape(Radius.md))
+                    .background(
+                        Brush.linearGradient(
+                            listOf(Color(0xFF3B0714), Color(0xFF0F172A))
+                        )
+                    )
+                    .border(1.dp, BorderHairline, RoundedCornerShape(Radius.md))
+                    .clickable(onClick = onOpenCdrama)
+                    .padding(Spacing.md),
+                contentAlignment = Alignment.CenterStart
+            ) {
+                Column {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = "C-DRAMA",
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = Color(0xFFFCA5A5)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(Color(0xFFEF4444).copy(alpha = 0.25f))
+                                .padding(horizontal = 4.dp, vertical = 1.dp)
+                        ) {
+                            Text("HUB", fontSize = 9.sp, fontWeight = FontWeight.Bold, color = Color(0xFFFCA5A5))
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(Spacing.xxs))
+                    Text(
+                        text = "Modern · Wuxia",
+                        fontSize = 11.sp,
+                        color = TextSecondary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(modifier = Modifier.height(Spacing.xs))
+                    Text(
+                        text = "Explore catalog →",
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = Color(0xFFF87171)
+                    )
+                }
+            }
+        }
+    }
+}
+

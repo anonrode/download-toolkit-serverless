@@ -62,7 +62,16 @@ data class HomeUiState(
     // Search-verify oracle verdicts keyed by VerdictPolicy.keyFor(card.url).
     // HomeScreen renders through VerdictPolicy.visibleOrdered: proven-dead
     // hidden, LIVE first + captioned, everything else exactly as before.
-    val verdicts: Map<String, com.anonrode.downloader.pipeline.Verdict> = emptyMap()
+    val verdicts: Map<String, com.anonrode.downloader.pipeline.Verdict> = emptyMap(),
+    // Asian Drama Explorer state
+    val activeDramaRegion: com.anonrode.downloader.providers.DramaRegion? = null,
+    val activeDramaEra: com.anonrode.downloader.providers.DramaEra = com.anonrode.downloader.providers.DramaEra.MODERN,
+    val activeDramaStatus: com.anonrode.downloader.providers.DramaStatusFilter = com.anonrode.downloader.providers.DramaStatusFilter.ALL,
+    val activeDramaGenre: com.anonrode.downloader.providers.DramaGenre? = null,
+    val dramaRawCards: List<ShowCard> = emptyList(),
+    val dramaCards: List<ShowCard> = emptyList(),
+    val isDramaLoading: Boolean = false,
+    val dramaFailed: Boolean = false
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -518,6 +527,170 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
             } finally {
                 drainCatalogQueue()
+            }
+        }
+    }
+
+    // ---- Asian Drama Explorer (K-Drama / C-Drama) -------------------------
+    private var dramaJob: Job? = null
+
+    fun openAsianDramaHub(
+        region: com.anonrode.downloader.providers.DramaRegion,
+        era: com.anonrode.downloader.providers.DramaEra = com.anonrode.downloader.providers.DramaEra.MODERN
+    ) {
+        if (dramaJob?.isActive == true) dramaJob?.cancel()
+        _uiState.update {
+            it.copy(
+                activeDramaRegion = region,
+                activeDramaEra = era,
+                activeDramaStatus = com.anonrode.downloader.providers.DramaStatusFilter.ALL,
+                activeDramaGenre = null,
+                isDramaLoading = true,
+                dramaFailed = false
+            )
+        }
+        loadDramaFeed(region, era, force = false)
+    }
+
+    fun selectDramaEra(era: com.anonrode.downloader.providers.DramaEra) {
+        val region = _uiState.value.activeDramaRegion ?: return
+        if (_uiState.value.activeDramaEra == era && _uiState.value.dramaCards.isNotEmpty()) return
+        if (dramaJob?.isActive == true) dramaJob?.cancel()
+        _uiState.update {
+            it.copy(
+                activeDramaEra = era,
+                activeDramaStatus = com.anonrode.downloader.providers.DramaStatusFilter.ALL,
+                activeDramaGenre = null,
+                isDramaLoading = true,
+                dramaFailed = false
+            )
+        }
+        loadDramaFeed(region, era, force = false)
+    }
+
+    fun selectDramaStatus(status: com.anonrode.downloader.providers.DramaStatusFilter) {
+        _uiState.update {
+            val region = it.activeDramaRegion ?: com.anonrode.downloader.providers.DramaRegion.KDRAMA
+            val era = it.activeDramaEra
+            val filtered = it.dramaRawCards.filter { card ->
+                com.anonrode.downloader.providers.DramaTagClassifier.matchesFilter(
+                    card = card,
+                    region = region,
+                    era = era,
+                    statusFilter = status,
+                    genreFilter = it.activeDramaGenre
+                )
+            }
+            it.copy(activeDramaStatus = status, dramaCards = filtered)
+        }
+    }
+
+    fun selectDramaGenre(genre: com.anonrode.downloader.providers.DramaGenre?) {
+        _uiState.update {
+            val region = it.activeDramaRegion ?: com.anonrode.downloader.providers.DramaRegion.KDRAMA
+            val era = it.activeDramaEra
+            val filtered = it.dramaRawCards.filter { card ->
+                com.anonrode.downloader.providers.DramaTagClassifier.matchesFilter(
+                    card = card,
+                    region = region,
+                    era = era,
+                    statusFilter = it.activeDramaStatus,
+                    genreFilter = genre
+                )
+            }
+            it.copy(activeDramaGenre = genre, dramaCards = filtered)
+        }
+    }
+
+    fun closeAsianDramaHub() {
+        if (dramaJob?.isActive == true) dramaJob?.cancel()
+        _uiState.update {
+            it.copy(
+                activeDramaRegion = null,
+                dramaCards = emptyList(),
+                dramaRawCards = emptyList(),
+                isDramaLoading = false,
+                dramaFailed = false
+            )
+        }
+    }
+
+    fun refreshDramaFeed() {
+        val region = _uiState.value.activeDramaRegion ?: return
+        val era = _uiState.value.activeDramaEra
+        loadDramaFeed(region, era, force = true)
+    }
+
+    private fun loadDramaFeed(
+        region: com.anonrode.downloader.providers.DramaRegion,
+        era: com.anonrode.downloader.providers.DramaEra,
+        force: Boolean
+    ) {
+        val key = com.anonrode.downloader.providers.AsianDramaFeed.cacheKeyFor(region, era)
+        val cached = com.anonrode.downloader.providers.FeedCache.categoryCards(key)
+        if (cached.isNotEmpty()) {
+            val initialFiltered = cached.filter { card ->
+                com.anonrode.downloader.providers.DramaTagClassifier.matchesFilter(
+                    card, region, era, _uiState.value.activeDramaStatus, _uiState.value.activeDramaGenre
+                )
+            }
+            _uiState.update {
+                it.copy(
+                    dramaRawCards = cached,
+                    dramaCards = initialFiltered,
+                    isDramaLoading = !com.anonrode.downloader.providers.FeedCache.isCategoryFresh(key)
+                )
+            }
+            if (!force && com.anonrode.downloader.providers.FeedCache.isCategoryFresh(key)) {
+                return
+            }
+        }
+
+        dramaJob = viewModelScope.launch {
+            try {
+                val cards = com.anonrode.downloader.providers.AsianDramaFeed.fetch(
+                    region = region,
+                    era = era,
+                    forceRefresh = force,
+                    filterExplicit = engine.filterExplicitContent,
+                    onPartial = { partial ->
+                        if (_uiState.value.activeDramaRegion == region && _uiState.value.activeDramaEra == era) {
+                            val filtered = partial.filter { card ->
+                                com.anonrode.downloader.providers.DramaTagClassifier.matchesFilter(
+                                    card, region, era, _uiState.value.activeDramaStatus, _uiState.value.activeDramaGenre
+                                )
+                            }
+                            _uiState.update {
+                                it.copy(dramaRawCards = partial, dramaCards = filtered, isDramaLoading = false)
+                            }
+                        }
+                    }
+                )
+                if (_uiState.value.activeDramaRegion == region && _uiState.value.activeDramaEra == era) {
+                    val filtered = cards.filter { card ->
+                        com.anonrode.downloader.providers.DramaTagClassifier.matchesFilter(
+                            card, region, era, _uiState.value.activeDramaStatus, _uiState.value.activeDramaGenre
+                        )
+                    }
+                    _uiState.update {
+                        it.copy(
+                            dramaRawCards = cards,
+                            dramaCards = filtered,
+                            isDramaLoading = false,
+                            dramaFailed = cards.isEmpty() && it.dramaRawCards.isEmpty()
+                        )
+                    }
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                com.anonrode.downloader.util.DebugLog.error("dramaFeed: fetch failed ${e.message}")
+                _uiState.update {
+                    it.copy(
+                        isDramaLoading = false,
+                        dramaFailed = it.dramaRawCards.isEmpty()
+                    )
+                }
             }
         }
     }

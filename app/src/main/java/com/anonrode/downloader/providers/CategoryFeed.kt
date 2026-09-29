@@ -75,9 +75,8 @@ object CategoryFeed {
     val CATEGORIES: List<Category> = listOf(
         Category(
             "Action",
-            queryTerms = mapOf("nepu" to "fight"),
             sites = MOVIE_SITES,
-            aliases = setOf("action", "martialarts")
+            aliases = setOf("action", "martial arts", "martialarts")
         ),
         Category(
             "Comedy",
@@ -91,25 +90,36 @@ object CategoryFeed {
         ),
         Category(
             "Romance",
-            queryTerms = mapOf("nepu" to "love"),
             sites = ROMANCE_SITES,
-            aliases = setOf("romance", "romantic", "love")
+            aliases = setOf("romance", "romantic")
         ),
         Category(
             "Sci-Fi",
+            queryTerms = mapOf(
+                "nepu" to "sci-fi",
+                "nkiri" to "sci-fi",
+                "9jarocks" to "sci-fi",
+                "naijaprey" to "sci-fi",
+                "naijavault" to "sci-fi"
+            ),
             sites = MOVIE_SITES,
-            aliases = setOf("scifi", "sciencefiction")
+            aliases = setOf("scifi", "sci-fi", "sciencefiction", "science fiction")
         ),
         Category(
             "Thriller",
-            queryTerms = mapOf("nepu" to "revenge"),
             sites = MOVIE_SITES,
             aliases = setOf("thriller", "suspense")
+        ),
+        Category(
+            "Anime",
+            queryTerms = mapOf("nkiri" to "anime", "9jarocks" to "anime", "anitaku" to "anime"),
+            sites = listOf("anitaku", "nkiri", "9jarocks"),
+            aliases = setOf("anime", "animation")
         )
     )
 
     /** How a site serves genre listings. */
-    internal enum class FeedKind { RSS, WP_REST, API_JSON }
+    internal enum class FeedKind { RSS, WP_REST, API_JSON, ANIME_PROVIDER }
 
     /**
      * Feed kind + path template per site. The four WordPress sites were
@@ -126,7 +136,8 @@ object CategoryFeed {
         "naijaprey" to (FeedKind.RSS to "/search/%s/feed/rss2/"),
         "naijavault" to (FeedKind.WP_REST to ""),
         "nepu" to (FeedKind.API_JSON to ""),
-        "asianc" to (FeedKind.API_JSON to "")
+        "asianc" to (FeedKind.API_JSON to ""),
+        "anitaku" to (FeedKind.ANIME_PROVIDER to "")
     )
 
     /** Global default priority (candidates without an explicit list). */
@@ -186,8 +197,17 @@ object CategoryFeed {
                 filterExplicit = filterExplicit
             )
             FeedKind.API_JSON -> {
-                val cards = TrendingFeed.fetchApiSearch(site, term, PER_ROW_LIMIT)
-                if (filterExplicit) com.anonrode.downloader.util.ExplicitContentFilter.filterSafe(cards) else cards
+                val rawCards = TrendingFeed.fetchApiSearch(site, term, PER_ROW_LIMIT)
+                val safeCards = if (filterExplicit) com.anonrode.downloader.util.ExplicitContentFilter.filterSafe(rawCards) else rawCards
+                if (category.aliases.isNotEmpty() && site == "nepu") {
+                    safeCards.filter { TrendingFeed.genreConfirmed(it.title, it.tags, category.aliases) }
+                } else {
+                    safeCards
+                }
+            }
+            FeedKind.ANIME_PROVIDER -> {
+                val animeCards = AnitakuProvider.search(term).take(PER_ROW_LIMIT)
+                if (filterExplicit) com.anonrode.downloader.util.ExplicitContentFilter.filterSafe(animeCards) else animeCards
             }
         }
     }
@@ -253,6 +273,8 @@ object CategoryFeed {
                         filterExplicit = filterExplicit
                     ).firstOrNull { !filterExplicit || !com.anonrode.downloader.util.ExplicitContentFilter.isExplicit(it) }?.posterUrl.orEmpty()
                     FeedKind.API_JSON -> TrendingFeed.fetchApiSearch(site, term, 5)
+                        .firstOrNull { !filterExplicit || !com.anonrode.downloader.util.ExplicitContentFilter.isExplicit(it) }?.posterUrl.orEmpty()
+                    FeedKind.ANIME_PROVIDER -> AnitakuProvider.search(term)
                         .firstOrNull { !filterExplicit || !com.anonrode.downloader.util.ExplicitContentFilter.isExplicit(it) }?.posterUrl.orEmpty()
                 }
             }.orEmpty()
