@@ -108,14 +108,16 @@ object HttpClient {
 
     private val bootstrapDohClient by lazy {
         OkHttpClient.Builder()
-            .dns(okhttp3.Dns { hostname ->
-                if (hostname.equals("dns.google", ignoreCase = true)) {
-                    listOf(
-                        java.net.InetAddress.getByName("8.8.8.8"),
-                        java.net.InetAddress.getByName("8.8.4.4")
-                    )
-                } else {
-                    okhttp3.Dns.SYSTEM.lookup(hostname)
+            .dns(object : okhttp3.Dns {
+                override fun lookup(hostname: String): List<java.net.InetAddress> {
+                    return if (hostname.equals("dns.google", ignoreCase = true)) {
+                        listOf(
+                            java.net.InetAddress.getByName("8.8.8.8"),
+                            java.net.InetAddress.getByName("8.8.4.4")
+                        )
+                    } else {
+                        okhttp3.Dns.SYSTEM.lookup(hostname)
+                    }
                 }
             })
             .connectTimeout(4, TimeUnit.SECONDS)
