@@ -432,7 +432,7 @@ object YoutubeDlDownloader {
         var produced: File? = null
         var attempts = 0
 
-        fun attemptOnce(): File? {
+        suspend fun attemptOnce(): File? {
             var lastDl = 0L
             var lastTot = 0L
             var currentStreamDl = 0L
