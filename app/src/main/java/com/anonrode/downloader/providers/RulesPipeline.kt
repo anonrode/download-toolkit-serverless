@@ -1314,7 +1314,7 @@ object RulesPipeline {
                 matched = true
                 sb.append(template, cursor, m.range.first)
                 val value = resolve(m.groupValues[1])
-                if (value.isNullOrBlank() || value == "null") return null
+                if (value == null || value == "null") return null
                 sb.append(value)
                 cursor = m.range.last + 1
             }

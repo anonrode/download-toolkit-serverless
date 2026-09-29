@@ -7,8 +7,6 @@ import com.anonrode.downloader.data.models.ShowCard
 import com.anonrode.downloader.data.models.ShowDetails
 import com.anonrode.downloader.data.net.HttpClient
 import com.anonrode.downloader.resolvers.ResolverRegistry
-import okhttp3.FormBody
-import okhttp3.Request
 import org.json.JSONObject
 import org.jsoup.Jsoup
 import kotlinx.coroutines.Dispatchers
@@ -43,23 +41,15 @@ object AnitakuProvider : SiteProvider {
                 async(Dispatchers.IO) {
                     val batch = mutableListOf<ShowCard>()
                     try {
-                        val form = FormBody.Builder()
-                            .add("action", "ts_ac_do_search")
-                            .add("ts_ac_query", queryToUse)
-                            .build()
-
-                        val req = Request.Builder()
-                            .url(ajaxUrl)
-                            .header("User-Agent", HttpClient.DEFAULT_UA)
-                            .header("Referer", referer)
-                            .header("X-Requested-With", "XMLHttpRequest")
-                            .post(form)
-                            .build()
-
-                        HttpClient.shared.newCall(req).execute().use { res ->
-                            if (!res.isSuccessful) return@use
-                            val body = res.body?.string() ?: return@use
-                            val json = JSONObject(body)
+                        val form = mapOf("action" to "ts_ac_do_search", "ts_ac_query" to queryToUse)
+                        val body = HttpClient.postForm(
+                            url = ajaxUrl,
+                            form = form,
+                            referer = referer,
+                            headers = mapOf("X-Requested-With" to "XMLHttpRequest"),
+                            tag = "search"
+                        ) ?: return@async emptyList()
+                        val json = JSONObject(body)
 
                             val keys = json.keys()
                             while (keys.hasNext()) {
@@ -256,44 +246,38 @@ object AnitakuProvider : SiteProvider {
                         val host = HttpClient.safeHost(episodeUrl, "gogoanime.or.at")
                         val ajaxUrl = "https://$host/wp-admin/admin-ajax.php"
 
-                        val form = FormBody.Builder()
-                            .add("action", "fetch_download_links")
-                            .add("mal_id", malId)
-                            .add("ep", ep)
-                            .build()
-
-                        val req = Request.Builder()
-                            .url(ajaxUrl)
-                            .header("User-Agent", HttpClient.DEFAULT_UA)
-                            .header("Referer", episodeUrl)
-                            .header("X-Requested-With", "XMLHttpRequest")
-                            .post(form)
-                            .build()
-
-                        HttpClient.shared.newCall(req).execute().use { res ->
-                            if (res.isSuccessful) {
-                                val body = res.body?.string() ?: ""
-                                val dlHtml = JSONObject(body).optJSONObject("data")?.optString("result") ?: ""
-                                if (dlHtml.isNotBlank()) {
-                                    val dlDoc = Jsoup.parse(dlHtml, episodeUrl)
-                                    val dlMap = mutableMapOf<Int, String>()
-                                    for (a in dlDoc.select("a[href]")) {
-                                        val label = a.text().trim().lowercase()
-                                        val hVal = Regex("""(\d+)p?""").find(label)?.groupValues?.get(1)?.toIntOrNull() ?: 720
-                                        dlMap[hVal] = a.attr("href")
-                                    }
-                                    val reqHeight = quality.filter { it.isDigit() }.toIntOrNull() ?: 720
-                                    val sortedLinks = if (dlMap.isNotEmpty()) {
-                                        dlMap.entries
-                                            .sortedWith(compareBy({ (h, _) -> if (h <= reqHeight) 0 else 1 }, { (h, _) -> Math.abs(h - reqHeight) }))
-                                            .map { it.value }
-                                    } else {
-                                        dlDoc.select("a[href]").map { it.attr("href") }
-                                    }
-                                    val resolved = ResolverRegistry.resolveAny(sortedLinks, quality)
-                                    if (!resolved.isNullOrBlank()) {
-                                        direct = resolved
-                                    }
+                        val form = mapOf(
+                            "action" to "fetch_download_links",
+                            "mal_id" to malId,
+                            "ep" to ep
+                        )
+                        val body = HttpClient.postForm(
+                            url = ajaxUrl,
+                            form = form,
+                            referer = episodeUrl,
+                            headers = mapOf("X-Requested-With" to "XMLHttpRequest")
+                        )
+                        if (!body.isNullOrBlank()) {
+                            val dlHtml = JSONObject(body).optJSONObject("data")?.optString("result") ?: ""
+                            if (dlHtml.isNotBlank()) {
+                                val dlDoc = Jsoup.parse(dlHtml, episodeUrl)
+                                val dlList = mutableListOf<Pair<Int, String>>()
+                                for (a in dlDoc.select("a[href]")) {
+                                    val label = a.text().trim().lowercase()
+                                    val hVal = Regex("""(\d+)p?""").find(label)?.groupValues?.get(1)?.toIntOrNull() ?: 720
+                                    val link = a.attr("abs:href").ifBlank { a.attr("href") }
+                                    if (link.isNotBlank()) dlList.add(hVal to link)
+                                }
+                                val reqHeight = quality.filter { it.isDigit() }.toIntOrNull() ?: 720
+                                val sortedLinks = if (dlList.isNotEmpty()) {
+                                    dlList.sortedWith(compareBy({ (h, _) -> if (h <= reqHeight) 0 else 1 }, { (h, _) -> Math.abs(h - reqHeight) }))
+                                        .map { it.second }
+                                } else {
+                                    dlDoc.select("a[href]").map { it.attr("abs:href").ifBlank { it.attr("href") } }
+                                }
+                                val resolved = ResolverRegistry.resolveAny(sortedLinks, quality)
+                                if (!resolved.isNullOrBlank()) {
+                                    direct = resolved
                                 }
                             }
                         }

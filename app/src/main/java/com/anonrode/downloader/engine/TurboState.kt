@@ -139,8 +139,8 @@ class TurboState(private val file: File) {
         var prefix = 0L
         for (chunk in plan) {
             if (chunk.current <= chunk.end) {
-                if (chunk.start == 0L && chunk.current > 0L) {
-                    prefix = chunk.current
+                if (chunk.current > chunk.start) {
+                    prefix += (chunk.current - chunk.start)
                 }
                 break
             }

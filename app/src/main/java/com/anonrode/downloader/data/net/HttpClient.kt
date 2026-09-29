@@ -399,7 +399,7 @@ object HttpClient {
         if (url.isBlank()) return url
         val parts = url.split("?", limit = 2)
         val base = encodeBaseKeepingIpv6Literal(parts[0])
-        return if (parts.size > 1) "$base?${parts[1]}" else base
+        return if (parts.size > 1) "$base?${parts[1].replace(" ", "%20")}" else base
     }
 
     /** Encode stray `[`/`]` and spaces, but PRESERVE a well-formed IPv6 host
@@ -807,7 +807,7 @@ object HttpClient {
             try {
                 val response = try {
                     call.execute()
-                } catch (e: Exception) {
+                } catch (e: java.io.IOException) {
                     if (call.isCanceled()) {
                         throw kotlinx.coroutines.CancellationException("HTTP call canceled").apply { initCause(e) }
                     }

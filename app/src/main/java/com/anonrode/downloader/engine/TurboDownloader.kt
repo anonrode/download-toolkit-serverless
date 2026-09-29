@@ -102,6 +102,9 @@ object TurboDownloader {
         activeCalls.getOrPut(taskId) { CopyOnWriteArrayList() }.add(call)
     }
 
+    private fun canCommit(taskId: String): Boolean =
+        taskId.isEmpty() || !fullyCancelledTaskIds.contains(taskId)
+
     private fun untrackCall(taskId: String, call: Call) {
         if (taskId.isEmpty()) return
         activeCalls[taskId]?.remove(call)
@@ -495,7 +498,9 @@ object TurboDownloader {
                                     var bytesSinceLastCommit = 0L
                                     while (pos <= chunk.end && !failed.get()) {
                                         if (!coroutineContext.isActive) {
-                                            state.commit(plan, total, force = true)
+                                            if (canCommit(taskId)) {
+                                                state.commit(plan, total, force = true)
+                                            }
                                             return@use
                                         }
                                         val want = minOf(buf.size.toLong(), chunk.end - pos + 1).toInt()
@@ -528,11 +533,15 @@ object TurboDownloader {
 
                                         bytesSinceLastCommit += n
                                         if (bytesSinceLastCommit >= 2 * 1024 * 1024L || pos > chunk.end) {
-                                            state.commit(plan, total, force = false)
+                                            if (canCommit(taskId)) {
+                                                state.commit(plan, total, force = false)
+                                            }
                                             bytesSinceLastCommit = 0L
                                         }
                                     }
-                                    state.commit(plan, total, force = true)
+                                    if (canCommit(taskId)) {
+                                        state.commit(plan, total, force = true)
+                                    }
                                     completed = pos > chunk.end
                                 } else {
                                     failureStatus.compareAndSet(0, res.code)
@@ -559,7 +568,7 @@ object TurboDownloader {
                                 "Piece ${chunk.start}-${chunk.end} incomplete (attempt $attempt of $MAX_ATTEMPTS)"
                             )
                         } catch (_: CancellationException) {
-                            if (taskId.isEmpty() || !fullyCancelledTaskIds.contains(taskId)) {
+                            if (canCommit(taskId)) {
                                 state.commit(plan, total, force = true)
                             }
                             return false
@@ -568,7 +577,9 @@ object TurboDownloader {
                             failureMessage.compareAndSet(null, e.message ?: e.javaClass.simpleName)
                             // Persist the mid-piece position so a pause after this
                             // failure resumes from here instead of the piece start.
-                            state.commit(plan, total, force = true)
+                            if (canCommit(taskId)) {
+                                state.commit(plan, total, force = true)
+                            }
                         }
                         if (attempt < MAX_ATTEMPTS) delay(backoffMillis(attempt))
                     }
@@ -590,7 +601,7 @@ object TurboDownloader {
                                     if (!downloadPiece(plan[idx])) break
                                 }
                             } catch (_: CancellationException) {
-                                if (taskId.isEmpty() || !fullyCancelledTaskIds.contains(taskId)) {
+                                if (canCommit(taskId)) {
                                     state.commit(plan, total, force = true)
                                 }
                             }

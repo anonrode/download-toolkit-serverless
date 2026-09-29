@@ -141,7 +141,7 @@ object StrictLinkClassifier {
             return LinkClass.DirectMedia(ext, isHls)
         }
 
-        if (HostHealth.hasProvenLocker(cleanHost)) {
+        if (com.anonrode.downloader.resolvers.ResolverRegistry.canResolve(clean)) {
             return LinkClass.KnownLocker(cleanHost)
         }
 

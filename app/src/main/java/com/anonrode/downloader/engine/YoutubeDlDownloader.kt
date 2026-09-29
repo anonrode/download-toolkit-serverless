@@ -411,11 +411,16 @@ object YoutubeDlDownloader {
                     Regex("""https?://[^/]+""").find(r)?.value ?: ""
                 } ?: ""
             }
-            if (originToPass.isNotBlank()) addOption("--add-header", "Origin: $originToPass")
+            if (originToPass.isNotBlank()) {
+                val cleanOrig = originToPass.replace("\r", "").replace("\n", "").trim()
+                if (cleanOrig.isNotBlank()) addOption("--add-header", "Origin: $cleanOrig")
+            }
 
             for ((k, v) in customHeaders) {
-                if (k.isNotBlank() && v.isNotBlank()) {
-                    addOption("--add-header", "$k:$v")
+                val cleanK = k.replace("\r", "").replace("\n", "").trim()
+                val cleanV = v.replace("\r", "").replace("\n", "").trim()
+                if (cleanK.isNotBlank() && cleanV.isNotBlank()) {
+                    addOption("--add-header", "$cleanK:$cleanV")
                 }
             }
         }
