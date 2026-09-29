@@ -2396,6 +2396,7 @@ object DoodstreamResolver : BaseResolver {
                 if (!token.isNullOrBlank()) {
                     val tokenSlug = passPath.trimEnd('/').substringAfterLast('/')
                     val randomStr = (1..10).map { ('a'..'z').random() }.joinToString("")
+                    val expiry = System.currentTimeMillis()
                     // /pass_md5/ returns a stream URL or direct path prefix; the playable URL is
                     // <prefix><random>?token=<slug>&expiry=<ts>.
                     val rawPrefix = token.trim()
@@ -2605,7 +2606,7 @@ object DynamicLockerResolver : BaseResolver {
         return (resolveOutcome(url, quality, depth, emptySet()) as? ResolverOutcome.Success)?.url
     }
 
-    suspend fun resolveOutcome(
+    internal suspend fun resolveOutcome(
         url: String,
         quality: String,
         depth: Int,

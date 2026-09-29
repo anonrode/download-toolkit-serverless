@@ -205,7 +205,7 @@ fun AsianDramaExplorer(
                     Box(
                         modifier = Modifier
                             .clip(RoundedCornerShape(Radius.full))
-                            .background(if (isSelected) SurfaceCardHover else SurfaceElevated)
+                            .background(if (isSelected) SurfaceCard else SurfaceElevated)
                             .border(
                                 width = 1.dp,
                                 color = if (isSelected) AccentPrimary else BorderHairline,

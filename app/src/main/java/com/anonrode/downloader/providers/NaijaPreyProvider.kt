@@ -190,7 +190,7 @@ object NaijaPreyProvider : SiteProvider {
     // post body holds a single a.sdm_download anchor pointing at wildshare.net,
     // which serves the direct media file). Depth-capped at 2 => at most
     // 2 page fetches (data discipline).
-    private fun extractFileLink(url: String, depth: Int): String? {
+    private suspend fun extractFileLink(url: String, depth: Int): String? {
         if (depth >= 2) return null
         val html = HttpClient.getText(url) ?: return null
 
