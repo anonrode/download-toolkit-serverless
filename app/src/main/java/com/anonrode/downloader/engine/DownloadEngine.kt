@@ -2750,7 +2750,7 @@ class DownloadEngine(
                     // resets a CDN byte-quota throttle (the observed recovery).
                     // The re-resolved URL invalidates the old rewritten master —
                     // run its own preflight (probe + rewrite) on the retry.
-                    if (producedFile == null && coroutineContext.isActive) {
+                    if (producedFile == null && coroutineContext.isActive && !isSocial) {
                         val freshUrl = resolveStreamUrl(permUrl, task.site, task.quality ?: defaultQuality)
                         if (!freshUrl.isNullOrBlank() && freshUrl != streamUrl) {
                             android.util.Log.w("AnonDownload", "yt-dlp failed, re-resolving for a fresh URL")

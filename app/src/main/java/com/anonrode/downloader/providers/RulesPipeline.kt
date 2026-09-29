@@ -299,18 +299,27 @@ object RulesPipeline {
         site: String,
         episodeUrl: String,
         quality: String,
-        depth: Int = 0
+        depth: Int = 0,
+        visitedSites: Set<String> = emptySet()
     ): String? {
         if (depth > ResolverRegistry.RESOLVE_DEPTH_LIMIT) {
             DebugLog.resolve("$site pipeline resolve: depth limit reached at $depth — refusing")
             return null
         }
         if (episodeUrl.isBlank()) return null
+        val nextVisited = visitedSites + site.lowercase()
         val sp = DynamicRulesManager.getPipeline(site) ?: return null
         val term = sp.terminal ?: return null
         return try {
             runResolveInner(site, sp.resolve, term, episodeUrl, depth) { cand ->
-                ResolverRegistry.resolve(cand, quality, depth + 1)
+                ResolverRegistry.resolve(
+                    cand,
+                    quality,
+                    depth + 1,
+                    bypassHealth = false,
+                    recordHealth = true,
+                    visitedSites = nextVisited
+                )
             }
         } catch (cancelled: CancellationException) {
             throw cancelled

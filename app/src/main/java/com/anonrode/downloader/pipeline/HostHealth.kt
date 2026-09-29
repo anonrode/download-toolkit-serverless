@@ -78,6 +78,17 @@ object HostHealth {
         urlOrHost.lowercase().substringBefore('/')
     }
 
+    private val EXEMPT_HOST_SUFFIXES = listOf(
+        "x.com", "twitter.com", "instagram.com", "tiktok.com",
+        "youtube.com", "youtu.be", "facebook.com", "fb.watch",
+        "reddit.com", "googlevideo.com", "google.com"
+    )
+
+    private fun isExemptHost(host: String): Boolean {
+        val h = host.lowercase().removePrefix("www.")
+        return EXEMPT_HOST_SUFFIXES.any { h == it || h.endsWith(".$it") }
+    }
+
     /** Exponential backoff window after consecutive failures:
      *  30s, 1m, 2m — capped at 2m.
      *
@@ -130,7 +141,7 @@ object HostHealth {
 
     fun recordFail(hostOrUrl: String, rateLimited: Boolean = false, reason: String? = null) {
         val h = hostOf(hostOrUrl)
-        if (h.isBlank()) return
+        if (h.isBlank() || isExemptHost(h)) return
         // A USER-INITIATED cancellation (search typing, task pause) surfaces
         // as an IOException: Canceled. That is NOT a host failure — recording
         // it poisoned nepu.gd with a 60s backoff every time the user typed
@@ -178,8 +189,10 @@ object HostHealth {
     /** False when this URL's host is playbook-known-dead or currently inside
      *  its backoff window. Callers skip the host WITHOUT burning a request. */
     fun isUsable(urlOrHost: String): Boolean {
+        val h = hostOf(urlOrHost)
+        if (isExemptHost(h)) return true
         if (DynamicRulesManager.isKnownDead(urlOrHost)) return false
-        val r = records[hostOf(urlOrHost)] ?: return true
+        val r = records[h] ?: return true
         val sinceLastFail = System.currentTimeMillis() - r.lastFailMs
         val sinceLast429 = System.currentTimeMillis() - r.lastRate429Ms
         // If the host explicitly returned HTTP 429 (Rate Limited), honor a minimum
@@ -197,7 +210,9 @@ object HostHealth {
      *  usable or has no record. Powers the cooldown-parking message and its
      *  auto-retry loop (the engine parks a task while this is > 0). */
     fun remainingBackoffMs(urlOrHost: String): Long {
-        val r = records[hostOf(urlOrHost)] ?: return 0L
+        val h = hostOf(urlOrHost)
+        if (isExemptHost(h)) return 0L
+        val r = records[h] ?: return 0L
         val elapsed = System.currentTimeMillis() - r.lastFailMs
         val sinceLast429 = System.currentTimeMillis() - r.lastRate429Ms
         if (r.lastRate429Ms > 0L && sinceLast429 < 30_000L) {
