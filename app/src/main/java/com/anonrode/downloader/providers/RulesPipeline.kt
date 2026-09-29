@@ -263,7 +263,8 @@ object RulesPipeline {
         for (bind in step.bind) {
             val value: String? = when {
                 bind.regex.isNotBlank() -> {
-                    val m = try { Regex(bind.regex).find(outcome.body) } catch (_: Exception) { null }
+                    val target = if (outcome.body.length > 512 * 1024) outcome.body.take(512 * 1024) else outcome.body
+                    val m = try { Regex(bind.regex).find(target) } catch (_: Exception) { null }
                     m?.groupValues?.getOrNull(bind.group)
                 }
                 bind.jsonPath.isNotBlank() -> walkJson(outcome.json, bind.jsonPath).firstOrNull()?.let { jsonToString(it) }
