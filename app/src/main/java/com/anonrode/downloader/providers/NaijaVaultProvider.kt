@@ -280,11 +280,13 @@ object NaijaVaultProvider : SiteProvider {
                 if (isDownloadLink) {
                     seen.add(href)
                     val text = a.text().trim()
+                    val parsedNum = Regex("""(?i)\b(?:Episode|Ep|E)[- ]*(\d{1,4})\b""").find(text)?.groupValues?.get(1)?.toIntOrNull()
+                        ?: Regex("""(?i)\b(?:Episode|Ep|E)[- ]*(\d{1,4})\b""").find(href)?.groupValues?.get(1)?.toIntOrNull()
                     episodes.add(
                         EpisodeItem(
                             title = if (text.isNotBlank() && !text.equals("Download", ignoreCase = true)) text else "Download $count",
                             url = href,
-                            episodeNum = count++,
+                            episodeNum = parsedNum ?: count++,
                             site = name
                         )
                     )

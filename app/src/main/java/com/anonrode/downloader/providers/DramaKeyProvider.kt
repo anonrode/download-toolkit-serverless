@@ -177,16 +177,24 @@ object DramaKeyProvider : SiteProvider {
                 seen.add(href)
 
                 val filename = href.substringAfterLast('/').substringBefore('?').substringBefore('#')
-                val label = episodeRe.find(filename)?.let { m ->
+                val epMatch = episodeRe.find(filename)
+                val label = epMatch?.let { m ->
                     "S${m.groupValues[1]} E${m.groupValues[2]}"
                 } ?: DownloadLinkLabels.serverOrPart(a.text(), filename)
                     ?: "Episode $count"
 
+                val parsedNum = epMatch?.let { m ->
+                    val s = m.groupValues[1].toIntOrNull() ?: 1
+                    val e = m.groupValues[2].toIntOrNull() ?: 1
+                    s * 100 + e
+                } ?: Regex("""(?i)\b(?:Episode|Ep|E)[- ]*(\d{1,4})\b""").find(a.text())?.groupValues?.get(1)?.toIntOrNull()
+
+                val num = parsedNum ?: count++
                 episodes.add(
                     EpisodeItem(
                         title = label,
                         url = href,
-                        episodeNum = count++,
+                        episodeNum = num,
                         site = name
                     )
                 )
