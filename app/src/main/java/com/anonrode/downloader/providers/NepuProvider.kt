@@ -187,11 +187,13 @@ object NepuProvider : SiteProvider {
                 extractedSynopsis = doc.selectFirst("p.leading-relaxed")?.text()?.trim()
                     ?: doc.selectFirst("meta[property=og:description]")?.attr("content")?.trim()
 
-                // Check available seasons from select dropdown
-                val seasonOptions = doc.select("select option")
+                // Check available seasons from select dropdown, tabs, or buttons
+                val seasonOptions = doc.select("select option, a[href*='season-'], button[data-season], .season-tab")
                 val seasons = mutableSetOf<Int>()
                 for (opt in seasonOptions) {
                     val sVal = opt.attr("value").toIntOrNull()
+                        ?: opt.attr("data-season").toIntOrNull()
+                        ?: Regex("""season[- ]?(\d+)""", RegexOption.IGNORE_CASE).find(opt.attr("href") + " " + opt.text())?.groupValues?.get(1)?.toIntOrNull()
                     if (sVal != null && sVal > 0) {
                         seasons.add(sVal)
                     }

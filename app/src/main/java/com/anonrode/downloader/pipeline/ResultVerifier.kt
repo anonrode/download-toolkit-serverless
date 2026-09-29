@@ -18,6 +18,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.LinkedBlockingDeque
+import java.util.concurrent.TimeUnit
 
 /**
  * The background search-verify oracle (2026-09-14). Consumes ranked search
@@ -228,7 +229,7 @@ object ResultVerifier {
 
     private suspend fun worker() {
         while (true) {
-            val card = queue.poll() ?: return
+            val card = queue.poll(1500, TimeUnit.MILLISECONDS) ?: return
             val key = VerdictPolicy.keyFor(card.url)
             queuedKeys.remove(key)
             val verdict = try {

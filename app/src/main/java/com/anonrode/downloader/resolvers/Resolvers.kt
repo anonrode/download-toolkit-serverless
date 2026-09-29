@@ -167,12 +167,18 @@ object ResolverRegistry {
                 val reason = outcome.reason
                 com.anonrode.downloader.pipeline.HostHealth.recordFail(
                     host,
-                    rateLimited = reason?.contains("429") == true,
+                    rateLimited = reason?.contains("429") == true || HttpClient.remainingCooldownMs(url) > 0L,
                     reason = reason
                 )
             }
         }
         result
+    }
+
+    /** True if any registered resolver claims this URL. */
+    fun canResolve(url: String): Boolean {
+        val trimmed = url.trim()
+        return RESOLVERS.any { it.canResolve(trimmed) }
     }
 
     /** Try all usable candidates in a bounded window; first success cancels losers. */
@@ -941,11 +947,20 @@ object VidsrcResolver : BaseResolver {
                     // Encrypted: the key lives in a freshly-built wasm module
                     // that rotates every ~5 minutes, so fetch it and extract
                     // the key from its own instruction stream.
-                    val wasmUrl = root.optJSONObject("vs")?.optString("wasm_url") ?: return null
+                    val wasmUrl = root.optJSONObject("vs")?.optString("wasm_url") ?: run {
+                        lastFailure = "Vidsrc: missing wasm_url in vs"
+                        return null
+                    }
                     val wasm = HttpClient.get(wasmUrl, referer = "https://cloudorchestranova.com/").use { res ->
                         if (res.isSuccessful) HttpClient.cappedBytes(res) else null
-                    } ?: return null
-                    val key = VidsrcWasmCrypto.extractKey(wasm) ?: return null
+                    } ?: run {
+                        lastFailure = "Vidsrc: failed to fetch wasm binary"
+                        return null
+                    }
+                    val key = VidsrcWasmCrypto.extractKey(wasm) ?: run {
+                        lastFailure = "Vidsrc: failed to extract wasm key"
+                        return null
+                    }
                     VidsrcWasmCrypto.decrypt(su, key).firstOrNull()
                 }
                 else -> null
@@ -2537,7 +2552,7 @@ object PixelDrainResolver : BaseResolver {
 // 25. GenericLockerResolver
 // -------------------------------------------------------------
 object GenericLockerResolver : BaseResolver {
-    private val HOSTS = listOf("lulacloud.com")
+    private val HOSTS = listOf("lulacloud.com", "filemoon.sx", "streamhide.to", "filelions.to")
     @Volatile private var lastFailure: String? = null
 
     override fun lastResolveFailure(): String? = lastFailure

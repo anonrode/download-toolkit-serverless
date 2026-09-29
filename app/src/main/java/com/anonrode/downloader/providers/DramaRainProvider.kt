@@ -168,7 +168,9 @@ object DramaRainProvider : SiteProvider {
             val links = entryRoot.select("a[href]").filter { cand ->
                 val h = cand.attr("href").lowercase()
                 h.contains("download") || h.contains("episode") || h.contains("loadedfiles") ||
-                    h.contains("waffi") || h.contains(".mkv") || h.contains(".mp4")
+                    h.contains("waffi") || h.contains(".mkv") || h.contains(".mp4") ||
+                    com.anonrode.downloader.pipeline.StrictLinkClassifier.classify(h) is com.anonrode.downloader.pipeline.StrictLinkClassifier.LinkClass.KnownLocker ||
+                    com.anonrode.downloader.pipeline.StrictLinkClassifier.isDirectMedia(h)
             }
 
             var count = 1
