@@ -1241,6 +1241,7 @@ object RulesPipeline {
             val key = if (iterate) segment.removeSuffix("[]") else segment
             val next = mutableListOf<Any?>()
             for (node in current) {
+                if (next.size >= MAX_SEARCH_CONTEXTS) break
                 val focus: List<Any?> = if (node is JSONArray) {
                     (0 until node.length()).map { node.opt(it) }
                 } else listOf(node)
@@ -1249,7 +1250,10 @@ object RulesPipeline {
                     val targets: List<Any?> = if (key == "*") {
                         val ks = f.keys()
                         val acc = mutableListOf<Any?>()
-                        while (ks.hasNext()) acc.add(f.opt(ks.next()))
+                        while (ks.hasNext()) {
+                            acc.add(f.opt(ks.next()))
+                            if (acc.size >= MAX_SEARCH_CONTEXTS) break
+                        }
                         acc
                     } else {
                         listOf(f.opt(key))
@@ -1257,11 +1261,16 @@ object RulesPipeline {
                     for (t in targets) {
                         if (t == null || t == JSONObject.NULL) continue
                         if (iterate && t is JSONArray) {
-                            for (i in 0 until t.length()) next.add(t.opt(i))
+                            for (i in 0 until t.length()) {
+                                if (next.size >= MAX_SEARCH_CONTEXTS) break
+                                next.add(t.opt(i))
+                            }
                         } else {
-                            next.add(t)
+                            if (next.size < MAX_SEARCH_CONTEXTS) next.add(t)
                         }
+                        if (next.size >= MAX_SEARCH_CONTEXTS) break
                     }
+                    if (next.size >= MAX_SEARCH_CONTEXTS) break
                 }
             }
             current = next

@@ -753,7 +753,11 @@ object HttpClient {
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (e: Exception) {
-            val message = "${e.javaClass.simpleName}: ${e.message} for ${url.take(120)}"
+            val message = if (e is OriginCooldownException) {
+                "OriginCooldownException: HTTP 429/503 cooldown active for ${url.take(120)}"
+            } else {
+                "${e.javaClass.simpleName}: ${e.message} for ${url.take(120)}"
+            }
             lastFailure = message
             Log.w("HttpClient", message)
             onFailure?.onFailure(url, e)

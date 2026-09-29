@@ -113,6 +113,14 @@ object StrictLinkClassifier {
             return LinkClass.IntermediateGateway("download_gateway", null)
         }
 
+        // Provably direct file endpoints (cracked CDN tokens, R2/S3 signatures, kissorgrab /dl/, downloadwella /d/)
+        // must be classified as DirectMedia even if their domain matches a locker domain name.
+        if (LinkResolver.isProvablyDirectFile(clean)) {
+            val ext = clean.substringBefore('?').substringAfterLast('.', "").lowercase()
+            val effectiveExt = if (ext in DIRECT_EXTENSIONS) ext else "mp4"
+            return LinkClass.DirectMedia(effectiveExt, effectiveExt == "m3u8")
+        }
+
         // 4. Known locker hosts (dynamic OTA + defaults + HostHealth learned)
         // Checked BEFORE direct media extension: lockers like loadedfiles.net/.../ep.mkv
         // and vikingfile.com/d/.../ep.mkv embed media names in URL paths, but are HTML pages

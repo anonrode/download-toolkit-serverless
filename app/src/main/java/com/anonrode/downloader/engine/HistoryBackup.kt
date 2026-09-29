@@ -50,8 +50,18 @@ object HistoryBackup {
             } else {
                 resolver.insert(collection, values)
             } ?: return
-            resolver.openOutputStream(uri, "wt")?.use { out ->
-                out.write(encoded.toByteArray(Charsets.UTF_8))
+
+            try {
+                resolver.openOutputStream(uri, "wt")?.use { out ->
+                    out.write(encoded.toByteArray(Charsets.UTF_8))
+                }
+            } catch (_: SecurityException) {
+                // If an earlier app installation owns this file under Scoped Storage,
+                // insert a fresh record so history backup continues without error.
+                val freshUri = resolver.insert(collection, values) ?: return
+                resolver.openOutputStream(freshUri, "wt")?.use { out ->
+                    out.write(encoded.toByteArray(Charsets.UTF_8))
+                }
             }
         } catch (_: Throwable) {}
     }
