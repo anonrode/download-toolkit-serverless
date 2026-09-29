@@ -79,7 +79,6 @@ object AnitakuProvider : SiteProvider {
                                     }
                                 }
                             }
-                        }
                     } catch (_: Exception) {}
                     batch
                 }
