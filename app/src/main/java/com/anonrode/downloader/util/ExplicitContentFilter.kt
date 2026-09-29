@@ -6,10 +6,11 @@ import com.anonrode.downloader.data.models.ShowCard
  * Surgical explicit content filter.
  *
  * Designed to filter out hardcore porn, adult erotica, nude leaks, sex tapes,
- * JAV, hentai, and adult taxonomy posts from browse feeds (Trending, Genre
- * grids) while STRICTLY PRESERVING legitimate mainstream cinema and series that
- * carry 18+, R, TV-MA, or Unrated ratings (e.g. Deadpool, Game of Thrones,
- * The Boys, Fifty Shades of Grey, Sex Education, Adult Beginners, Saw X).
+ * JAV, hentai, 18+ adult OTT series (Ullu, Kooku, Vivamax), and adult taxonomy
+ * posts from browse feeds (Trending, Genre grids) while STRICTLY PRESERVING
+ * legitimate mainstream cinema and series that carry 18+, R, TV-MA, or Unrated
+ * ratings (e.g. Deadpool, Game of Thrones, The Boys, Fifty Shades of Grey,
+ * Sex Education, Adult Beginners, Saw X).
  *
  * Search queries bypass this filter completely per user requirement.
  */
@@ -20,7 +21,18 @@ object ExplicitContentFilter {
      * but are legitimate non-pornographic studio releases.
      */
     private val MAINSTREAM_WHITELIST = Regex(
-        """\bxxx(?::\s*|\s+)(?:return of\s+)?xander\s*cage\b|\bxxx(?::\s*|\s+)state of the union\b|\bxxx\s*\((?:19\d\d|2002)\)""",
+        """\bxxx(?::\s*|\s+)(?:return of\s+)?xander\s*cage\b|\bxxx(?::\s*|\s+)state of the union\b|\bxxx\s*\((?:19\d\d|2002)\)|\byoung\s*adult\b""",
+        RegexOption.IGNORE_CASE
+    )
+
+    /**
+     * URL patterns representing adult categories, 18+ sections, or adult OTT platforms.
+     */
+    private val EXPLICIT_URL_REGEX = Regex(
+        """/(?:18-section|18-plus|18plus|\+18|full-adult-video|adult-movies?|erotic(?:a|-stories)?|xxx|nsfw)/""" +
+            """|[-_](?:18|18plus|\+18|xxx)(?:-movie|-series|-video)?/?$""" +
+            """|[-_]adult-(?:movie|series|video)/?$""" +
+            """|/(?:ullu|kooku|voovi|primeplay|hotshots|cineprime|hunters|bigshots|moodx)/""",
         RegexOption.IGNORE_CASE
     )
 
@@ -33,7 +45,7 @@ object ExplicitContentFilter {
             """porn(?:o|ography|star)?|""" +
             """hentai|""" +
             """jav(?:hd)?|""" +
-            """erotica|""" +
+            """erotica?|""" +
             """x-?rated|""" +
             """brazzers|""" +
             """naughty\s*america|""" +
@@ -59,12 +71,36 @@ object ExplicitContentFilter {
             """camgirl|""" +
             """chaturbate|""" +
             """threesomes?|""" +
+            """ullu|""" +
+            """kooku|""" +
+            """voovi|""" +
+            """primeplay|""" +
+            """hotshots|""" +
+            """cineprime|""" +
+            """bigshots|""" +
+            """moodx|""" +
+            """hunters\s*(?:app|original)?|""" +
+            """charmsukh|""" +
+            """palang\s*tod|""" +
+            """siskiyaan|""" +
+            """kavita\s*bhabhi|""" +
+            """riti\s*riwaj|""" +
+            """jalebi\s*bai|""" +
+            """dunali|""" +
+            """hotwife|""" +
+            """cuckold|""" +
+            """swinger|""" +
+            """sensual\s*massage|""" +
+            """erotic\s*(?:story|stories|positions?)|""" +
+            """sex\s*positions?|""" +
+            """bedroom\s*positions?|""" +
             """18\+\s*(?:adult|porn|sex|erotic)|""" +
             """adult\s*18\+|""" +
             """adult\s*(?:film|movie|video|content)|""" +
             """(?:nude|sex)\s*(?:\w+\s+)?scenes?|""" +
             """(?:leaked\s+)?nudes?\s*(?:pack|collection|leak|tape|video|pics?)""" +
-        """)\b""",
+        """)\b|""" +
+        """(?:\[|\(|\b)(?:\+18|18\+|18\s*plus)(?:\]|\)|\b)""",
         RegexOption.IGNORE_CASE
     )
 
@@ -75,7 +111,7 @@ object ExplicitContentFilter {
     private val ADULT_NORMALIZED_TERMS = setOf(
         "porn", "pornography", "adult", "adults", "erotica", "erotic", "hentai",
         "jav", "javhd", "xxx", "nsfw", "softcore", "hardcore", "xrated", "fulladultvideo",
-        "18section", "18movies"
+        "18section", "18movies", "adultmovies", "eroticmovies", "18webseries", "18"
     )
 
     /**
@@ -89,9 +125,21 @@ object ExplicitContentFilter {
         if (!categories.isNullOrEmpty()) {
             for (cat in categories) {
                 val rawLower = cat.lowercase().trim()
-                if (rawLower.contains("[+18] section") || rawLower.contains("full adult video") ||
-                    rawLower.contains("18+ adult") || rawLower.contains("adult 18+") ||
-                    rawLower.contains("sex tape") || rawLower.contains("leaked nudes")
+                if (rawLower.contains("18+") || rawLower.contains("+18") ||
+                    rawLower.contains("18-plus") || rawLower.contains("18 plus") ||
+                    rawLower.contains("full adult video") || rawLower.contains("18-section") ||
+                    rawLower.contains("18 section") || rawLower.contains("sex tape") ||
+                    rawLower.contains("leaked nudes")
+                ) {
+                    return true
+                }
+                if (rawLower.contains("adult") && !rawLower.contains("young adult") && !rawLower.contains("adult beginner")) {
+                    return true
+                }
+                if (rawLower.contains("erotic") || rawLower.contains("porn") ||
+                    rawLower.contains("hentai") || rawLower.contains("jav") ||
+                    rawLower.contains("softcore") || rawLower.contains("hardcore") ||
+                    rawLower.contains("x-rated") || rawLower.contains("nsfw")
                 ) {
                     return true
                 }
@@ -105,16 +153,21 @@ object ExplicitContentFilter {
     }
 
     /**
-     * Checks if a [ShowCard] represents explicit content based on its title
-     * and category property.
+     * Checks if a [ShowCard] represents explicit content based on its URL,
+     * title, and associated taxonomy tags.
      */
     fun isExplicit(card: ShowCard): Boolean {
-        val cats = if (card.category.isNotBlank() && card.category != "Drama" && card.category != "Movies") {
-            listOf(card.category)
-        } else {
-            null
+        // Mainstream whitelist check takes precedence
+        if (MAINSTREAM_WHITELIST.containsMatchIn(card.title)) return false
+
+        // 1. Fast URL check (blocks 18-section, -18/ slugs, adult directories)
+        if (card.url.isNotBlank() && EXPLICIT_URL_REGEX.containsMatchIn(card.url)) return true
+
+        // 2. Aggregate tags: card.tags + card.category (if not generic Drama/Movies)
+        val allCats = (card.tags + listOf(card.category)).filter {
+            it.isNotBlank() && it != "Drama" && it != "Movies"
         }
-        return isExplicit(card.title, cats)
+        return isExplicit(card.title, if (allCats.isNotEmpty()) allCats else null)
     }
 
     /**
