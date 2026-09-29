@@ -446,7 +446,10 @@ object KissasianResolver : BaseResolver {
             }
             val m = Pattern.compile("""sourceUrl"\s*:\s*"([^"]+)""").matcher(html)
             if (m.find()) {
-                val apiPath = m.group(1) ?: return null
+                val apiPath = m.group(1) ?: run {
+                    lastFailure = "Kissasian: sourceUrl match group 1 is null"
+                    return null
+                }
                 val apiUrl = HttpClient.safeResolveUri(url, apiPath)
                 val apiJson = HttpClient.getText(apiUrl, referer = url) ?: run {
                     lastFailure = "Kissasian: API fetch failed for $apiUrl"
@@ -651,7 +654,10 @@ object BloggerResolver : BaseResolver {
                 lastFailure = "Blogger: FdrFJe sid token not found in HTML"
                 return null
             }
-            val fSid = fsidMatcher.group(1) ?: return null
+            val fSid = fsidMatcher.group(1) ?: run {
+                lastFailure = "Blogger: FdrFJe match group 1 is null"
+                return null
+            }
 
             val blMatcher = Pattern.compile("""boq_bloggeruiserver_[^'", ]+""").matcher(html)
             if (!blMatcher.find()) {
@@ -665,7 +671,10 @@ object BloggerResolver : BaseResolver {
                 lastFailure = "Blogger: token param not found in URL"
                 return null
             }
-            val token = tokenMatcher.group(1) ?: return null
+            val token = tokenMatcher.group(1) ?: run {
+                lastFailure = "Blogger: token match group 1 is null"
+                return null
+            }
 
             val rpcUrl = "https://www.blogger.com/_/BloggerVideoPlayerUi/data/batchexecute?rpcids=WcwnYd&source-path=%2Fvideo.g&f.sid=${URLEncoder.encode(fSid, "UTF-8")}&bl=${URLEncoder.encode(bl, "UTF-8")}&hl=en-US&rt=c"
             val fReq = """[[["WcwnYd","[\"$token\"]",null,"generic"]]]"""
@@ -1178,7 +1187,10 @@ object VikingFileResolver : BaseResolver {
                 }
                 val m = Pattern.compile("""(?:window\.location|location\.href)\s*=\s*["']([^"']+)["']""").matcher(html)
                 if (m.find()) {
-                    val loc = m.group(1) ?: return null
+                    val loc = m.group(1) ?: run {
+                        lastFailure = "VikingFile: location match group 1 is null at hop $hop"
+                        return null
+                    }
                     val lowLoc = loc.lowercase()
                     if (lowLoc.contains("r2.cloudflarestorage.com") ||
                         lowLoc.contains(".r2.dev/") ||
@@ -2369,12 +2381,17 @@ object DoodstreamResolver : BaseResolver {
                 if (!token.isNullOrBlank()) {
                     val tokenSlug = passPath.trimEnd('/').substringAfterLast('/')
                     val randomStr = (1..10).map { ('a'..'z').random() }.joinToString("")
-                    val expiry = System.currentTimeMillis()
-                    // /pass_md5/ returns a bare md5 token; the playable URL is
-                    // https://<host>/e/<md5><random>?token=<md5>&expiry=<ts>.
-                    // The scheme+host prefix is mandatory — a hostless string is
-                    // not a URL and every downloader rejects it.
-                    return "https://$activeHost/e/${token.trim()}$randomStr?token=$tokenSlug&expiry=$expiry"
+                    // /pass_md5/ returns a stream URL or direct path prefix; the playable URL is
+                    // <prefix><random>?token=<slug>&expiry=<ts>.
+                    val rawPrefix = token.trim()
+                    val streamPrefix = if (rawPrefix.startsWith("http://") || rawPrefix.startsWith("https://")) {
+                        rawPrefix
+                    } else if (rawPrefix.startsWith("/")) {
+                        "https://$activeHost$rawPrefix"
+                    } else {
+                        "https://$activeHost/$rawPrefix"
+                    }
+                    return "$streamPrefix$randomStr?token=$tokenSlug&expiry=$expiry"
                 }
                 lastFailure = "Doodstream: pass_md5 token fetch returned empty from $passUrl"
             } else {

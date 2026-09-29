@@ -90,7 +90,8 @@ object LinkResolver {
         if (host.contains("kissorgrab.com") && path.contains("/dl/")) return true
 
         val query = lower.substringAfter('?', "").substringBefore('#')
-        if (!isKnownLockerHost(url) && (query.contains("download_token=") || query.contains("media_token=") || query.contains("direct_download=1"))) return true
+        val isLockerHost = KNOWN_LOCKER_HOSTS.any { host.contains(it) }
+        if (!isLockerHost && (query.contains("download_token=") || query.contains("media_token=") || query.contains("direct_download=1"))) return true
         // R2 / S3 / Object Storage signed links: the query string contains
         // AWS-style signing parameters and/or response-content-disposition.
         // These are resolver outputs (the direct cracked media stream) serving

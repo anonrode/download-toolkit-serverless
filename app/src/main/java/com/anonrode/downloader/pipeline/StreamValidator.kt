@@ -149,7 +149,8 @@ object StreamValidator {
     /** Rejection reason for a file head, or null when plausibly media. */
     fun sniff(head: ByteArray): String? {
         if (head.size < 4) return null
-        val text = String(head, Charsets.US_ASCII).trimStart().lowercase()
+        val offset = if (head.size >= 3 && head[0] == 0xEF.toByte() && head[1] == 0xBB.toByte() && head[2] == 0xBF.toByte()) 3 else 0
+        val text = String(head, offset, head.size - offset, Charsets.UTF_8).trimStart().lowercase()
         if (text.startsWith("<!doctype html") || text.startsWith("<html") ||
             text.startsWith("<head") || text.startsWith("<body") ||
             text.startsWith("<script") || text.startsWith("<?xml") ||

@@ -135,6 +135,8 @@ object ResultVerifier {
         if (newQuery) {
             lastQueryId = queryId
             remainingBudget = MAX_CARDS_PER_QUERY
+            job?.cancel()
+            job = null
             while (true) {
                 val dropped = queue.poll() ?: break
                 queuedKeys.remove(VerdictPolicy.keyFor(dropped.url))
@@ -166,6 +168,15 @@ object ResultVerifier {
                 }
             }
         }
+    }
+
+    /** Cancel all active background verification probes and drain queue. */
+    fun cancel() {
+        job?.cancel()
+        job = null
+        queue.clear()
+        queuedKeys.clear()
+        HttpClient.cancelTagged(HTTP_TAG)
     }
 
     /**

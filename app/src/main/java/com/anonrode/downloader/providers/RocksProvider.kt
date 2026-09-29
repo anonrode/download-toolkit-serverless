@@ -204,7 +204,7 @@ object RocksProvider : SiteProvider {
                                 EpisodeItem(
                                     title = "Server ${mirrorMark.groupValues[1]}$qualitySuffix",
                                     url = href,
-                                    episodeNum = if (isSeries) itemSeason * 100 + (mirrorMark.groupValues[1].toIntOrNull() ?: 1) else (mirrorMark.groupValues[1].toIntOrNull() ?: count),
+                                    episodeNum = if (isSeries) itemSeason * 100 + count else (mirrorMark.groupValues[1].toIntOrNull() ?: count),
                                     site = name
                                 )
                             )
