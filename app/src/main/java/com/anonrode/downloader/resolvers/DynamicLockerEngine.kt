@@ -3,6 +3,7 @@ package com.anonrode.downloader.resolvers
 import com.anonrode.downloader.data.net.HttpClient
 import com.anonrode.downloader.data.rules.DynamicRulesManager
 import com.anonrode.downloader.providers.RulesPipeline
+import com.anonrode.downloader.util.DebugLog
 
 /**
  * DynamicLockerEngine (Layer 3 — Zero-APK OTA Locker Resolver).
@@ -24,11 +25,20 @@ object DynamicLockerEngine {
         return pipeline.resolve != null && pipeline.terminal != null
     }
 
-    suspend fun resolve(url: String, quality: String = "720p", depth: Int = 0): String? {
+    suspend fun resolve(
+        url: String,
+        quality: String = "720p",
+        depth: Int = 0,
+        visitedSites: Set<String> = emptySet()
+    ): String? {
         val host = HttpClient.parsedHost(url) ?: return null
         val clean = host.removePrefix("www.").lowercase()
         val siteKey = pipelineKeyForHost(clean) ?: return null
-        return RulesPipeline.runResolveForSite(siteKey, url, quality, depth)
+        if (siteKey in visitedSites) {
+            DebugLog.resolve("DynamicLockerEngine: cycle detected for siteKey '$siteKey' in $visitedSites — refusing")
+            return null
+        }
+        return RulesPipeline.runResolveForSite(siteKey, url, quality, depth, visitedSites + siteKey)
     }
 
     /** A provider/search-only pipeline is not a locker resolver. */

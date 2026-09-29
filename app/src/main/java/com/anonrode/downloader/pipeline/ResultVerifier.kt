@@ -71,7 +71,7 @@ object ResultVerifier {
         // first — the download path keeps its fresh-link semantic untouched.
         override suspend fun resolve(episodeUrl: String, site: String) =
             withContext(Dispatchers.IO) {
-                LinkResolver.resolveChain(episodeUrl, site, QUALITY, allowCacheHit = true)
+                LinkResolver.resolveChain(episodeUrl, site, QUALITY, allowCacheHit = true, recordHealth = false)
             }
 
         override suspend fun probe(direct: String, referer: String) =

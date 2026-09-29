@@ -158,7 +158,8 @@ object LinkResolver {
         site: String,
         defaultQual: String,
         bypassHealth: Boolean = false,
-        allowCacheHit: Boolean = false
+        allowCacheHit: Boolean = false,
+        recordHealth: Boolean = true
     ): String? {
         fun accept(out: String?): Boolean {
             if (out.isNullOrBlank()) return false
@@ -170,7 +171,9 @@ object LinkResolver {
         if (!allowCacheHit) {
             ResolveCache.invalidate(ResolveCache.keyFor(permUrl, defaultQual))
         }
-        var resolved = ResolverRegistry.resolve(permUrl, defaultQual, bypassHealth = bypassHealth)
+        var resolved = ResolverRegistry.resolve(
+            permUrl, defaultQual, bypassHealth = bypassHealth, recordHealth = recordHealth
+        )
         if (accept(resolved)) {
             return resolved
         }

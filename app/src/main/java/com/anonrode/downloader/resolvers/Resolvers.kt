@@ -120,7 +120,14 @@ object ResolverRegistry {
         GenericLockerResolver
     )
 
-    suspend fun resolve(url: String, quality: String = "720p", depth: Int = 0, bypassHealth: Boolean = false): String? = withContext(Dispatchers.IO) {
+    suspend fun resolve(
+        url: String,
+        quality: String = "720p",
+        depth: Int = 0,
+        bypassHealth: Boolean = false,
+        recordHealth: Boolean = true,
+        visitedSites: Set<String> = emptySet()
+    ): String? = withContext(Dispatchers.IO) {
         currentCoroutineContext().ensureActive()
         // Cache + health apply ONCE per user-facing resolve (depth==0); the
         // recursive descent below stays uncached so gateway chains work.
@@ -143,10 +150,10 @@ object ResolverRegistry {
                 return@withContext null
             }
         }
-        val outcome = resolveInternal(url, quality, depth)
+        val outcome = resolveInternal(url, quality, depth, visitedSites)
         currentCoroutineContext().ensureActive()
         val result = (outcome as? ResolverOutcome.Success)?.url
-        if (depth == 0) {
+        if (depth == 0 && recordHealth) {
             // Health must be keyed on the TRUE host (same source of truth as
             // hostClaim/the terminal gate): the old string-split host recorded
             // `vikingfile.com:443@evil.com` as a key for forged URLs, leaving
@@ -156,8 +163,8 @@ object ResolverRegistry {
             if (result != null) {
                 com.anonrode.downloader.pipeline.ResolveCache.put(cacheKey, result)
                 com.anonrode.downloader.pipeline.HostHealth.recordOk(host)
-            } else {
-                val reason = (outcome as? ResolverOutcome.Failure)?.reason
+            } else if (outcome is ResolverOutcome.Failure) {
+                val reason = outcome.reason
                 com.anonrode.downloader.pipeline.HostHealth.recordFail(
                     host,
                     rateLimited = reason?.contains("429") == true,
@@ -178,7 +185,12 @@ object ResolverRegistry {
         return boundedFirstSuccess(candidates, maxConcurrency) { resolve(it, quality) }
     }
 
-    private suspend fun resolveInternal(url: String, quality: String = "720p", depth: Int = 0): ResolverOutcome {
+    private suspend fun resolveInternal(
+        url: String,
+        quality: String = "720p",
+        depth: Int = 0,
+        visitedSites: Set<String> = emptySet()
+    ): ResolverOutcome {
         currentCoroutineContext().ensureActive()
         if (depth > RESOLVE_DEPTH_LIMIT) {
             com.anonrode.downloader.pipeline.PipelineJournal.hop(
@@ -193,7 +205,11 @@ object ResolverRegistry {
             currentCoroutineContext().ensureActive()
             if (resolver.canResolve(trimmed)) {
                 val start = System.currentTimeMillis()
-                val outcome = resolveWithRetry(resolver, trimmed, quality, depth)
+                val outcome = if (resolver === DynamicLockerResolver) {
+                    DynamicLockerResolver.resolveOutcome(trimmed, quality, depth, visitedSites)
+                } else {
+                    resolveWithRetry(resolver, trimmed, quality, depth)
+                }
                 val direct = (outcome as? ResolverOutcome.Success)?.url
                 val elapsed = System.currentTimeMillis() - start
                 if (!direct.isNullOrBlank()) {
@@ -223,7 +239,7 @@ object ResolverRegistry {
                         // guard now covers all future cross-provider handoffs).
                         if (!com.anonrode.downloader.pipeline.LinkResolver.isProvablyDirectFile(direct) &&
                             !(sameResolverReclaims && mediaPath)) {
-                            val deeper = resolveInternal(direct, quality, depth + 1)
+                            val deeper = resolveInternal(direct, quality, depth + 1, visitedSites)
                             if (deeper is ResolverOutcome.Success) return deeper
                             // Reference parity (resolvers.py:2473-2475): a failed
                             // deeper pass must NOT fall back to returning the
@@ -2554,12 +2570,24 @@ object DynamicLockerResolver : BaseResolver {
     override fun canResolve(url: String): Boolean = DynamicLockerEngine.canResolve(url)
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
+        return (resolveOutcome(url, quality, depth, emptySet()) as? ResolverOutcome.Success)?.url
+    }
+
+    suspend fun resolveOutcome(
+        url: String,
+        quality: String,
+        depth: Int,
+        visitedSites: Set<String>
+    ): ResolverOutcome {
         lastFailure = null
-        val result = DynamicLockerEngine.resolve(url, quality, depth)
-        if (result.isNullOrBlank()) {
-            lastFailure = "DynamicLocker: OTA pipeline yielded no stream for $url"
+        val result = DynamicLockerEngine.resolve(url, quality, depth, visitedSites)
+        return if (!result.isNullOrBlank()) {
+            ResolverOutcome.Success(result)
+        } else {
+            val fail = "DynamicLocker: OTA pipeline yielded no stream for $url"
+            lastFailure = fail
+            ResolverOutcome.Failure(fail)
         }
-        return result
     }
 }
 
