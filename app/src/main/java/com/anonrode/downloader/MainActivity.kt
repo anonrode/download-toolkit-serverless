@@ -236,7 +236,6 @@ class MainActivity : ComponentActivity() {
                 // on every chip tap — so no prop plumbing. Stepping
                 // re-reads the engine fresh.
                 val playingTaskId by viewModel.activePlayingTaskId.collectAsState()
-                val socialTarget by viewModel.activeSocialTarget.collectAsState()
                 fun openPlayer(task: DownloadTask) {
                     viewModel.activePlayingTaskId.value = task.id
                 }
