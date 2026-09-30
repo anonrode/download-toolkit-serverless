@@ -1220,7 +1220,7 @@ object YoutubeDlDownloader {
         return genericPlatformRegex.matches(clean)
     }
 
-    private fun findAria2Executable(context: Context): File? {
+    internal fun findAria2Executable(context: Context): File? {
         val libFile = File(context.applicationInfo.nativeLibraryDir, "libaria2c.so")
         if (libFile.exists()) {
             try { libFile.setExecutable(true) } catch (_: Exception) {}
