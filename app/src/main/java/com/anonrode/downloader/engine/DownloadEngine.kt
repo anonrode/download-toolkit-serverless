@@ -2410,6 +2410,7 @@ class DownloadEngine(
 
                 var producedFile: File? = null
                 var turboFailure: TurboDownloader.TurboResult.Failure? = null
+                var turboResult: TurboDownloader.TurboResult? = null
 
                 if (finalBackend == "aria2c" && !isMagnet) {
                     val hdrs = mutableMapOf("User-Agent" to HttpClient.DEFAULT_UA)
@@ -2510,7 +2511,7 @@ class DownloadEngine(
                         com.anonrode.downloader.util.DebugLog.engine(
                             "task=${task.id} turbo start sockets=$effectiveSockets url=${streamUrl.take(110)}"
                         )
-                        var turboResult: TurboDownloader.TurboResult = TurboDownloader.download(
+                        turboResult = TurboDownloader.download(
                             url = streamUrl,
                             dest = dest,
                             headers = hdrs,
