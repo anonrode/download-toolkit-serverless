@@ -2424,23 +2424,70 @@ class DownloadEngine(
                         updateServiceState(force = false)
                     }
 
-                    com.anonrode.downloader.util.DebugLog.engine(
-                        "task=${task.id} turbo start sockets=$effectiveSockets url=${streamUrl.take(110)}"
-                    )
-                    var turboResult: TurboDownloader.TurboResult = TurboDownloader.download(
-                        url = streamUrl,
-                        dest = dest,
-                        headers = hdrs,
-                        configuredSockets = effectiveSockets,
-                        onProgress = progressCb,
-                        taskId = task.id
-                    )
+                    val aria2Exec = YoutubeDlDownloader.findAria2Executable(context)
+                    if (aria2Exec != null) {
+                        com.anonrode.downloader.util.DebugLog.engine(
+                            "task=${task.id} aria2c start sockets=$effectiveSockets url=${streamUrl.take(110)}"
+                        )
+                        try {
+                            producedFile = YoutubeDlDownloader.download(
+                                context = context,
+                                taskId = task.id,
+                                sourceUrl = streamUrl,
+                                targetDir = targetFolder,
+                                preferredFilename = File(task.filePath).name,
+                                backend = "aria2c",
+                                referer = refererToPass,
+                                origin = if (refererToPass.isNotBlank() && refererToPass.contains("://")) {
+                                    refererToPass.substringBefore("://") + "://" + refererToPass.substringAfter("://").substringBefore('/')
+                                } else "",
+                                customHeaders = hdrs,
+                                ua = HttpClient.DEFAULT_UA,
+                                parallelSockets = effectiveSockets,
+                                quality = task.quality ?: defaultQuality,
+                                isExtractorTask = false,
+                                audioOnly = task.audioOnly,
+                                onProgress = { dl, tot, spd, eta ->
+                                    repository.updateProgress(
+                                        taskId = task.id,
+                                        downloaded = dl,
+                                        total = tot,
+                                        speed = spd,
+                                        eta = eta
+                                    )
+                                    updateServiceState(force = false)
+                                },
+                                magnetMaxAttempts = magnetMaxAttempts,
+                                ytdlpMaxAttempts = ytdlpMaxAttempts,
+                                hlsFragments = hlsFragmentConcurrency,
+                                speedLimitKbs = globalSpeedLimitKbs,
+                                torrentPeers = torrentPeers,
+                                privacyMode = torrentPrivacyMode
+                            )
+                        } catch (e: Exception) {
+                            if (e is CancellationException) throw e
+                            android.util.Log.w("AnonDownload", "aria2c direct run failed (${e.message}), attempting Turbo rescue")
+                        }
+                    }
 
-                    if (turboResult is TurboDownloader.TurboResult.Success) {
-                        producedFile = turboResult.file
-                    } else if (turboResult is TurboDownloader.TurboResult.Failure) {
-                        val failure = turboResult
-                        turboFailure = failure
+                    if (producedFile == null && coroutineContext.isActive) {
+                        com.anonrode.downloader.util.DebugLog.engine(
+                            "task=${task.id} turbo start sockets=$effectiveSockets url=${streamUrl.take(110)}"
+                        )
+                        var turboResult: TurboDownloader.TurboResult = TurboDownloader.download(
+                            url = streamUrl,
+                            dest = dest,
+                            headers = hdrs,
+                            configuredSockets = effectiveSockets,
+                            onProgress = progressCb,
+                            taskId = task.id
+                        )
+
+                        if (turboResult is TurboDownloader.TurboResult.Success) {
+                            producedFile = turboResult.file
+                        } else if (turboResult is TurboDownloader.TurboResult.Failure) {
+                            val failure = turboResult
+                            turboFailure = failure
 
                         // Self-healing token refresh: only re-scrape when the CDN rejected the
                         // link outright (expired/token-gated) or the probe proved it serves an
