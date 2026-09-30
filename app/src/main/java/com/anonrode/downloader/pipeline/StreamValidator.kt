@@ -101,8 +101,10 @@ object StreamValidator {
                     else
                         "probe network error, deferring to backend: ${e.message?.take(80)}")
                 if (!tls || tlsRetried) {
-                    // Network-class errors during probe are NOT proof of a bad
-                    // link; let the backend's retry machinery handle them.
+                    if (e is java.net.ConnectException || e is java.net.UnknownHostException) {
+                        return ValidationResult(reason = "Storage node unreachable: ${e.message?.take(60)}", refreshable = true)
+                    }
+                    // Transient network errors during probe defer to backend
                     return null
                 }
                 tlsRetried = true

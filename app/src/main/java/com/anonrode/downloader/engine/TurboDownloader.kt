@@ -124,6 +124,13 @@ object TurboDownloader {
      * fail→rescue→fail loop for those hosts.
      */
     fun socketsFor(url: String, configured: Int): Int {
+        val low = url.lowercase()
+        if (low.contains("kissorgrab.") || low.contains("dl.plutomovies.")) {
+            return 1
+        }
+        if (low.contains("wetafiles.") || low.contains("downloadwella.") || low.contains("loadedfiles.")) {
+            return minOf(4, configured.coerceAtLeast(1))
+        }
         return configured.coerceIn(1, 16)
     }
 
@@ -573,6 +580,12 @@ object TurboDownloader {
                             }
                             return false
                         } catch (e: Exception) {
+                            if (e is java.io.InterruptedIOException || e.message?.contains("Canceled", ignoreCase = true) == true || !coroutineContext.isActive) {
+                                if (canCommit(taskId)) {
+                                    state.commit(plan, total, force = true)
+                                }
+                                return false
+                            }
                             attempt++
                             failureMessage.compareAndSet(null, e.message ?: e.javaClass.simpleName)
                             // Persist the mid-piece position so a pause after this

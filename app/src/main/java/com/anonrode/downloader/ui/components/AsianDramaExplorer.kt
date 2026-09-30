@@ -316,6 +316,51 @@ fun AsianDramaExplorer(
 }
 
 @Composable
+private fun BoxScope.PosterScrim() {
+    Box(
+        modifier = Modifier
+            .matchParentSize()
+            .background(
+                Brush.verticalGradient(
+                    0f to Color.Transparent,
+                    0.62f to Color.Transparent,
+                    1f to Color.Black.copy(alpha = 0.45f)
+                )
+            )
+    )
+}
+
+@Composable
+private fun InitialGlyph(title: String) {
+    val glyphColor = if (AnonTheme.colors.isDark) Color.White.copy(alpha = 0.18f)
+        else Color.Black.copy(alpha = 0.20f)
+    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        Text(
+            text = title.trim().firstOrNull()?.uppercaseChar()?.toString() ?: "?",
+            color = glyphColor,
+            fontSize = Type.displayPoster.fontSize,
+            fontWeight = FontWeight.Black
+        )
+    }
+}
+
+private val TILE_COLORS_DARK = listOf(
+    Color(0xFF3A1C1C), Color(0xFF2A2A10), Color(0xFF20303A),
+    Color(0xFF241A33), Color(0xFF14301F), Color(0xFF33231A)
+)
+private val TILE_COLORS_LIGHT = listOf(
+    Color(0xFFF3E3E3), Color(0xFFF1EFDC), Color(0xFFDDE9F0),
+    Color(0xFFE7E0F2), Color(0xFFDDEBE1), Color(0xFFF2E5DC)
+)
+
+@Composable
+private fun tileColor(title: String): Color {
+    val palette = if (AnonTheme.colors.isDark) TILE_COLORS_DARK else TILE_COLORS_LIGHT
+    val idx = ((title.hashCode() % palette.size) + palette.size) % palette.size
+    return palette[idx]
+}
+
+@Composable
 private fun DramaCardItem(
     show: ShowCard,
     showPosters: Boolean,
@@ -329,10 +374,10 @@ private fun DramaCardItem(
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .aspectRatio(0.68f)
-                .clip(RoundedCornerShape(Radius.sm))
-                .background(SurfaceCard)
-                .border(1.dp, BorderHairline, RoundedCornerShape(Radius.sm))
+                .aspectRatio(2f / 3f)
+                .clip(RoundedCornerShape(Radius.md))
+                .background(tileColor(show.title))
+                .border(1.dp, BorderHairline, RoundedCornerShape(Radius.md))
         ) {
             if (showPosters && show.posterUrl.isNotBlank()) {
                 SubcomposeAsyncImage(
@@ -340,44 +385,13 @@ private fun DramaCardItem(
                     contentDescription = show.title,
                     contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxSize(),
-                    loading = {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .background(SurfaceElevated)
-                        )
-                    },
-                    error = {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .background(SurfaceElevated),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = show.title.take(1),
-                                fontSize = 24.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = TextMuted
-                            )
-                        }
-                    }
+                    loading = { InitialGlyph(show.title) },
+                    error = { InitialGlyph(show.title) }
                 )
             } else {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(SurfaceElevated),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = show.title.take(1),
-                        fontSize = 24.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = TextMuted
-                    )
-                }
+                InitialGlyph(show.title)
             }
+            PosterScrim()
 
             // Status badge on top-right if available
             val isComplete = show.title.contains("(Complete)", ignoreCase = true) ||
@@ -389,8 +403,8 @@ private fun DramaCardItem(
                 Box(
                     modifier = Modifier
                         .align(Alignment.TopEnd)
-                        .padding(4.dp)
-                        .clip(RoundedCornerShape(4.dp))
+                        .padding(Spacing.xs)
+                        .clip(RoundedCornerShape(Radius.xs))
                         .background(if (isComplete) Color(0xCC059669) else Color(0xCC0284C7))
                         .padding(horizontal = 5.dp, vertical = 2.dp)
                 ) {
@@ -408,12 +422,12 @@ private fun DramaCardItem(
 
         Text(
             text = show.title,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.Medium,
             color = TextPrimary,
+            fontSize = Type.body.fontSize,
+            fontWeight = FontWeight.SemiBold,
+            lineHeight = 17.sp,
             maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-            lineHeight = 15.sp
+            overflow = TextOverflow.Ellipsis
         )
     }
 }

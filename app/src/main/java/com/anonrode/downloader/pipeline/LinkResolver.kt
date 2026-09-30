@@ -76,6 +76,8 @@ object LinkResolver {
         val path = lower.substringAfter("://", "").substringBefore('?').substringBefore('#')
         val host = path.substringBefore('/')
         if (path.contains("/api/file/") || path.contains("/token/download/")) return true
+        if (path.endsWith(".m3u8") || path.endsWith(".mpd") || lower.contains(".m3u8?") || lower.contains(".mpd?")) return true
+        if ((host.startsWith("hls.") || host.startsWith("stream.")) && (host.contains("vidbasic.") || host.contains("vidb.top"))) return true
 
         // Direct CDN locker endpoints
         if ((host.contains("downloadwella.com") || host.contains("wetafiles.com")) && path.contains("/d/")) return true
@@ -166,8 +168,11 @@ object LinkResolver {
     ): String? {
         fun accept(out: String?): Boolean {
             if (out.isNullOrBlank()) return false
-            if (isKnownLockerHost(out)) return false
-            return out != permUrl
+            if (out == permUrl) return false
+            if (isProvablyDirectFile(out) || isDirectMediaUrl(out) || out.contains(".m3u8", ignoreCase = true) || out.contains(".mpd", ignoreCase = true)) {
+                return true
+            }
+            return !isKnownLockerHost(out)
         }
 
         // 1. Try direct resolution via ResolverRegistry.

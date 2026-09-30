@@ -276,21 +276,12 @@ fun HomeScreen(
                             onClick = { viewModel.onQueryChanged("") },
                             modifier = Modifier.size(48.dp)
                         ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(32.dp)
-                                    .clip(CircleShape)
-                                    .background(SurfaceElevated)
-                                    .border(1.dp, BorderHairline, CircleShape),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Clear,
-                                    contentDescription = "Clear",
-                                    tint = TextSecondary,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                            }
+                            Icon(
+                                imageVector = Icons.Default.Clear,
+                                contentDescription = "Clear",
+                                tint = TextSecondary,
+                                modifier = Modifier.size(20.dp)
+                            )
                         }
 
                         Spacer(modifier = Modifier.width(Spacing.xs))
@@ -334,21 +325,12 @@ fun HomeScreen(
                             },
                             modifier = Modifier.size(48.dp)
                         ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(36.dp)
-                                    .clip(CircleShape)
-                                    .background(SurfaceElevated)
-                                    .border(1.dp, BorderHairline, CircleShape),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Rounded.ContentPaste,
-                                    contentDescription = "Paste Link",
-                                    tint = AccentPrimary,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                            }
+                            Icon(
+                                imageVector = Icons.Rounded.ContentPaste,
+                                contentDescription = "Paste Link",
+                                tint = TextSecondary,
+                                modifier = Modifier.size(20.dp)
+                            )
                         }
                     }
                 }
@@ -1450,7 +1432,6 @@ fun ShowCardItem(
 
             Spacer(modifier = Modifier.height(Spacing.sm))
             Row(horizontalArrangement = Arrangement.spacedBy(Spacing.xs)) {
-                CardBadge(show.site.uppercase(), accent = true)
                 // A real oracle caption REPLACES the hardcoded "✓ 1080p"
                 // guess — the verified bytes are strictly more honest. With
                 // no verdict, the row is unchanged from before the oracle.
@@ -1602,7 +1583,7 @@ private fun specLine(show: ShowCard): String {
         }
         if (show.year.isNotBlank()) add(show.year)
     }
-    return if (parts.isEmpty()) "${show.site.uppercase()} Direct" else parts.joinToString(" · ")
+    return if (parts.isEmpty()) "Direct" else parts.joinToString(" · ")
 }
 
 private fun secondaryBadge(show: ShowCard): String? = when {

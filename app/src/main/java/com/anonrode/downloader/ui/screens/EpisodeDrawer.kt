@@ -693,21 +693,12 @@ fun EpisodeRow(
                 onClick = onDownloadSingle,
                 modifier = Modifier.size(48.dp)
             ) {
-                Box(
-                    modifier = Modifier
-                        .size(36.dp)
-                        .clip(CircleShape)
-                        .background(if (isSelected) AccentPrimary else SurfaceElevated)
-                        .border(1.dp, if (isSelected) AccentPrimary else BorderHairline, CircleShape),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.DownloadForOffline,
-                        contentDescription = "Download Single",
-                        tint = if (isSelected) BackgroundDark else AccentPrimary,
-                        modifier = Modifier.size(20.dp)
-                    )
-                }
+                Icon(
+                    imageVector = Icons.Rounded.DownloadForOffline,
+                    contentDescription = "Download Single",
+                    tint = if (isSelected) AccentPrimary else TextSecondary,
+                    modifier = Modifier.size(22.dp)
+                )
             }
         }
 
