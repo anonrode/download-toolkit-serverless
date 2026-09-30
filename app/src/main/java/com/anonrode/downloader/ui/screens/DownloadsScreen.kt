@@ -1058,62 +1058,36 @@ fun DownloadCard(
                                 onClick = onPause,
                                 modifier = Modifier.size(36.dp)
                             ) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(36.dp)
-                                        .clip(CircleShape)
-                                        .background(SurfaceElevated)
-                                        .border(1.dp, BorderHairline, CircleShape),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Rounded.Pause,
-                                        contentDescription = "Pause",
-                                        tint = TextPrimary,
-                                        modifier = Modifier.size(18.dp)
-                                    )
-                                }
+                                Icon(
+                                    imageVector = Icons.Rounded.Pause,
+                                    contentDescription = "Pause",
+                                    tint = TextPrimary,
+                                    modifier = Modifier.size(20.dp)
+                                )
                             }
                         } else if (isPaused || isFailed) {
                             IconButton(
                                 onClick = onRetry,
                                 modifier = Modifier.size(36.dp)
                             ) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(36.dp)
-                                        .clip(CircleShape)
-                                        .background(AccentPrimary),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Icon(
-                                        imageVector = if (isFailed) Icons.Rounded.Refresh else Icons.Rounded.PlayArrow,
-                                        contentDescription = if (isFailed) "Retry" else "Resume",
-                                        tint = BackgroundDark,
-                                        modifier = Modifier.size(18.dp)
-                                    )
-                                }
+                                Icon(
+                                    imageVector = if (isFailed) Icons.Rounded.Refresh else Icons.Rounded.PlayArrow,
+                                    contentDescription = if (isFailed) "Retry" else "Resume",
+                                    tint = if (isFailed) StatusError else AccentPrimary,
+                                    modifier = Modifier.size(20.dp)
+                                )
                             }
                         }
                         IconButton(
                             onClick = onCancel,
                             modifier = Modifier.size(36.dp)
                         ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(36.dp)
-                                    .clip(CircleShape)
-                                    .background(SurfaceElevated)
-                                    .border(1.dp, BorderHairline, CircleShape),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Rounded.Close,
-                                    contentDescription = "Cancel",
-                                    tint = if (isFailed) StatusError else TextSecondary,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                            }
+                            Icon(
+                                imageVector = Icons.Rounded.Close,
+                                contentDescription = "Cancel",
+                                tint = if (isFailed) StatusError else TextSecondary,
+                                modifier = Modifier.size(20.dp)
+                            )
                         }
                     }
                 }

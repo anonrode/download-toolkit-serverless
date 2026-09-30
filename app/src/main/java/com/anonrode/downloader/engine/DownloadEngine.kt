@@ -2270,6 +2270,10 @@ class DownloadEngine(
                                 // its partials instead of being failed; the
                                 // cooldown loop resumes it when the host heals.
                                 // Zero-byte tasks keep the loud failure.
+                                if (t.downloadedBytes == 0L && bytesLanded(t) == 0L && attemptCrossProviderFailover(t)) {
+                                    activeJobs[task.id]?.cancel()
+                                    break
+                                }
                                 if (!parkInsteadOfFail(t, stallMsg, forcePark = isRateLimitedError(stallMsg))) {
                                     repository.update(task.id) {
                                         it.copy(status = TaskStatus.FAILED, errorMessage = stallMsg)
@@ -2400,7 +2404,12 @@ class DownloadEngine(
                                 repository.update(task.id) { it.copy(directUrl = streamUrl) }
                             }
                         }
-                        rejection?.let { throw PipelineError.ValidationFailed(it.reason) }
+                        rejection?.let {
+                            if (task.downloadedBytes == 0L && bytesLanded(task) == 0L && attemptCrossProviderFailover(task)) {
+                                return@launch
+                            }
+                            throw PipelineError.ValidationFailed(it.reason)
+                        }
                     }
 
                     val progressCb: (Long, Long, Long) -> Unit = { got, tot, bps ->
@@ -2605,6 +2614,10 @@ class DownloadEngine(
                             preferredFilename = File(task.filePath).name,
                             backend = finalBackend,
                             referer = refererToPass,
+                            origin = if (refererToPass.isNotBlank() && refererToPass.contains("://")) {
+                                refererToPass.substringBefore("://") + "://" + refererToPass.substringAfter("://").substringBefore('/')
+                            } else "",
+                            customHeaders = hdrs,
                             ua = HttpClient.DEFAULT_UA,
                             parallelSockets = effectiveSockets,
                             quality = task.quality ?: defaultQuality,
@@ -3024,6 +3037,9 @@ class DownloadEngine(
                     // explicitly asked us to wait (StreamValidator's
                     // "HTTP 429" rejection throws into this catch).
                     val live = repository.find(task.id) ?: task
+                    if (live.downloadedBytes == 0L && bytesLanded(live) == 0L && attemptCrossProviderFailover(live)) {
+                        return@launch
+                    }
                     if (!parkInsteadOfFail(live, errMsg, forcePark = isRateLimitedError(errMsg))) {
                         repository.update(task.id) { it.copy(status = TaskStatus.FAILED, errorMessage = errMsg) }
                         com.anonrode.downloader.service.DownloadService.notifyFailed(context, task.id, task.episodeTitle, errMsg)
