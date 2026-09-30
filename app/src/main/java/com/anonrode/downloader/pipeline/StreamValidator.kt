@@ -156,7 +156,10 @@ object StreamValidator {
         if (text.startsWith("<!doctype html") || text.startsWith("<html") ||
             text.startsWith("<head") || text.startsWith("<body") ||
             text.startsWith("<script") || text.startsWith("<?xml") ||
-            text.startsWith("<!--") || text.startsWith("{\"")) {
+            text.startsWith("<!--") || text.startsWith("<meta") ||
+            text.startsWith("<iframe") || text.startsWith("<style") ||
+            text.startsWith("<form") || text.startsWith("<svg") ||
+            text.startsWith("{")) {
             return "URL serves an HTML/error page, not media"
         }
         if (head[0] == 0x50.toByte() && head[1] == 0x4b.toByte()) {

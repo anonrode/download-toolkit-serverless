@@ -757,7 +757,10 @@ object TurboDownloader {
         } finally {
             telemetryTicker.cancel()
             onProgress(if (dest.exists()) dest.length() else 0L, if (total > 0) total else 0L, speed.getSpeed())
-            if (taskId.isNotEmpty()) throttleDeadlines.remove(taskId)
+            if (taskId.isNotEmpty()) {
+                throttleDeadlines.remove(taskId)
+                fullyCancelledTaskIds.remove(taskId)
+            }
         }
         return@coroutineScope success
     }

@@ -477,7 +477,7 @@ fun HomeScreen(
                         }
                     }
                 }
-            } else if (visibleResults.isEmpty() && uiState.query.trim().isNotEmpty() && !uiState.isSearching) {
+            } else if (visibleResults.isEmpty() && uiState.query.trim().length >= 2 && !uiState.isSearching) {
                 // Note: keyed off visibleResults, not the raw crawl — when
                 // every returned card was proven dead, the honest message is
                 // "No matches", not a blank landing page under a live query.
@@ -992,7 +992,7 @@ private fun ViewMoreTileCard(
                     Icon(
                         imageVector = Icons.Rounded.Add,
                         contentDescription = null,
-                        tint = Color.Black,
+                        tint = if (AnonTheme.colors.isDark) Color.Black else Color.White,
                         modifier = Modifier.size(22.dp)
                     )
                 }

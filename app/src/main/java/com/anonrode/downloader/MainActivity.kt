@@ -63,7 +63,6 @@ import com.anonrode.downloader.viewmodel.MainViewModel
 class MainActivity : ComponentActivity() {
 
     private val viewModel: MainViewModel by viewModels()
-    private var activeSocialTarget = mutableStateOf<Pair<String, String>?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         try {
@@ -128,7 +127,7 @@ class MainActivity : ComponentActivity() {
             SideEffect { syncSystemBars(isDark) }
 
             AnonDownloaderTheme(themeMode = themeMode) {
-                val socialTarget by activeSocialTarget
+                val socialTarget by viewModel.activeSocialTarget.collectAsState()
 
                 // Request Notification Permission on Android 13+ (API 33+)
                 val permissionLauncher = rememberLauncherForActivityResult(
@@ -236,24 +235,27 @@ class MainActivity : ComponentActivity() {
                 // straight from disk — the same key DownloadsScreen writes
                 // on every chip tap — so no prop plumbing. Stepping
                 // re-reads the engine fresh.
-                var playerCtx by remember { mutableStateOf<MediaPlayerContext?>(null) }
+                val playingTaskId by viewModel.activePlayingTaskId.collectAsState()
                 fun openPlayer(task: DownloadTask) {
-                    val sortMode = getSharedPreferences("downloader_settings", android.content.Context.MODE_PRIVATE)
-                        .getString("pref_downloads_sort", com.anonrode.downloader.ui.components.DownloadsSorter.SORT_DATE)
-                        ?: com.anonrode.downloader.ui.components.DownloadsSorter.SORT_DATE
-                    playerCtx = MediaPlayerContext(
-                        filePath = task.filePath,
-                        title = task.episodeTitle,
-                        queuePeerPaths = com.anonrode.downloader.ui.components.DownloadsSorter
-                            .playQueueFor(viewModel.engine.tasks.value, sortMode, task),
-                        onPlayFile = { path ->
-                            // Freshest engine snapshot, never null on a miss
-                            // (a miss used to close the player mid-Next).
-                            viewModel.engine.tasks.value
-                                .firstOrNull { it.filePath == path }
-                                ?.let { openPlayer(it) }
-                        }
-                    )
+                    viewModel.activePlayingTaskId.value = task.id
+                }
+                val tasksSnapshot by viewModel.engine.tasks.collectAsState()
+                val playerCtx = remember(playingTaskId, tasksSnapshot) {
+                    val task = tasksSnapshot.firstOrNull { it.id == playingTaskId }
+                    task?.let { t ->
+                        val sortMode = getSharedPreferences("downloader_settings", android.content.Context.MODE_PRIVATE)
+                            .getString("pref_downloads_sort", com.anonrode.downloader.ui.components.DownloadsSorter.SORT_DATE)
+                            ?: com.anonrode.downloader.ui.components.DownloadsSorter.SORT_DATE
+                        MediaPlayerContext(
+                            filePath = t.filePath,
+                            title = t.episodeTitle,
+                            queuePeerPaths = com.anonrode.downloader.ui.components.DownloadsSorter
+                                .playQueueFor(tasksSnapshot, sortMode, t),
+                            onPlayFile = { path ->
+                                tasksSnapshot.firstOrNull { it.filePath == path }?.let { openPlayer(it) }
+                            }
+                        )
+                    }
                 }
 
                 MainScaffold(
@@ -261,27 +263,12 @@ class MainActivity : ComponentActivity() {
                     initialTab = initialTab,
                     themeMode = themeMode,
                     onThemeChanged = { newMode ->
-                        // Point the window background at the TARGET theme's
-                        // color BEFORE the Compose color swap. The swap is a
-                        // full-tree recomposition (the palette is a static
-                        // CompositionLocal and all three tabs stay composed),
-                        // which can drop frames on slow devices; landing the
-                        // background first means any pixel exposed mid-switch
-                        // (system-bar regions, a late content frame) is
-                        // already the color we are switching TO, so a flash
-                        // of the leaving theme is impossible. The content is
-                        // opaque and full-bleed, so the early background is
-                        // invisible until the content itself flips. Bar ICON
-                        // appearance deliberately still flips with the
-                        // content in the SideEffect below — early-flipping it
-                        // would hide the icons against the old theme for a
-                        // frame.
                         setWindowBackground(resolveIsDark(newMode))
                         themeMode = newMode
                         prefs.edit().putString("pref_theme_mode", newMode).apply()
                     },
                     onOpenSocial = { platform, url ->
-                        activeSocialTarget.value = Pair(platform, url)
+                        viewModel.activeSocialTarget.value = Pair(platform, url)
                     },
                     onWriteTabPref = { newTab ->
                         prefs.edit().putString("pref_last_tab", newTab).apply()
@@ -290,7 +277,7 @@ class MainActivity : ComponentActivity() {
                 )
 
                 playerCtx?.let { ctx ->
-                    MediaPlayerModal(ctx = ctx, onDismiss = { playerCtx = null })
+                    MediaPlayerModal(ctx = ctx, onDismiss = { viewModel.activePlayingTaskId.value = null })
                 }
 
                 socialTarget?.let { (platform, url) ->
@@ -298,7 +285,7 @@ class MainActivity : ComponentActivity() {
                         platform = platform,
                         url = url,
                         viewModel = viewModel,
-                        onDismiss = { activeSocialTarget.value = null }
+                        onDismiss = { viewModel.activeSocialTarget.value = null }
                     )
                 }
 

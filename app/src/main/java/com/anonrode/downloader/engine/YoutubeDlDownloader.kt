@@ -96,7 +96,7 @@ object YoutubeDlDownloader {
         isExtractorTask: Boolean = false,
         audioOnly: Boolean = false,
         onProgress: (downloaded: Long, total: Long, speed: Double, eta: Long) -> Unit,
-        onTorrentFiles: (suspend (List<TorrentSecurityShield.TorrentFileEntry>) -> List<Int>?)? = null,
+        onTorrentFiles: (suspend (List<TorrentSecurityShield.TorrentFileEntry>) -> com.anonrode.downloader.ui.screens.TorrentFilePicker.TorrentPickResult)? = null,
         // Tier-A settings (defaults = previous hardcoded behavior)
         magnetMaxAttempts: Int = 3,
         ytdlpMaxAttempts: Int = 3,
@@ -151,20 +151,29 @@ object YoutubeDlDownloader {
                 if (files != null) {
                     val safe = files.filter { it.isSafe }
                     when {
-                        safe.size > 1 -> selectIndexes = onTorrentFiles(files)
+                        safe.size > 1 -> {
+                            when (val res = onTorrentFiles(files)) {
+                                is com.anonrode.downloader.ui.screens.TorrentFilePicker.TorrentPickResult.Selected -> selectIndexes = res.indices
+                                com.anonrode.downloader.ui.screens.TorrentFilePicker.TorrentPickResult.Cancelled -> throw kotlinx.coroutines.CancellationException("User cancelled torrent selection")
+                            }
+                        }
                         safe.size == 1 -> selectIndexes = listOf(safe.first().index)
                         // Probe succeeded but EVERY file failed the shield:
                         // surface the picker's warning state and refuse the
                         // legacy fallback — a silent full download here would
                         // fetch exactly the flagged payload.
                         else -> {
-                            val picked = onTorrentFiles(files)
-                            if (picked.isNullOrEmpty()) {
-                                throw SecurityException(
-                                    "All ${files.size} file(s) blocked by security shield — download refused"
-                                )
+                            when (val res = onTorrentFiles(files)) {
+                                is com.anonrode.downloader.ui.screens.TorrentFilePicker.TorrentPickResult.Selected -> {
+                                    if (res.indices.isEmpty()) {
+                                        throw SecurityException(
+                                            "All ${files.size} file(s) blocked by security shield — download refused"
+                                        )
+                                    }
+                                    selectIndexes = res.indices
+                                }
+                                com.anonrode.downloader.ui.screens.TorrentFilePicker.TorrentPickResult.Cancelled -> throw kotlinx.coroutines.CancellationException("User cancelled torrent selection")
                             }
-                            selectIndexes = picked
                         }
                     }
                     if (safe.size != files.size) {
@@ -221,12 +230,18 @@ object YoutubeDlDownloader {
                     // If this is a direct media file (e.g. .mkv, .mp4, or locker CDN stream),
                     // yt-dlp will fail with "Unsupported URL" or time out trying to parse binary
                     // as HTML. Return null so the caller engine retry loop handles it.
-                    val isDirectMedia = sourceUrl.lowercase().let { u ->
-                        u.endsWith(".mp4") || u.endsWith(".mkv") || u.endsWith(".avi") ||
-                        u.endsWith(".webm") || u.contains(".static.") || u.contains("kissorgrab.com") ||
-                        u.contains("downloadwella.com") || u.contains("vikingfile.com")
-                    }
-                    if (isDirectMedia) {
+                    val cleanUrl = sourceUrl.substringBefore('?').substringBefore('#').lowercase()
+                    val isDirectMedia = cleanUrl.endsWith(".mp4") || cleanUrl.endsWith(".mkv") || cleanUrl.endsWith(".avi") ||
+                        cleanUrl.endsWith(".webm") || cleanUrl.endsWith(".flv") ||
+                        com.anonrode.downloader.pipeline.LinkResolver.isProvablyDirectFile(sourceUrl) ||
+                        com.anonrode.downloader.resolvers.isDirectMediaUrl(sourceUrl) ||
+                        sourceUrl.contains(".static.", ignoreCase = true) ||
+                        sourceUrl.contains("kissorgrab.com", ignoreCase = true) ||
+                        sourceUrl.contains("downloadwella.com", ignoreCase = true) ||
+                        sourceUrl.contains("vikingfile.com", ignoreCase = true) ||
+                        sourceUrl.contains("wetafiles.com", ignoreCase = true) ||
+                        sourceUrl.contains("loadedfiles", ignoreCase = true)
+                    if (isDirectMedia || backend == "aria2c") {
                         return null
                     }
                 }
@@ -323,11 +338,18 @@ object YoutubeDlDownloader {
                 // HLS m3u8 stream variant selection with multi-fragment parallel downloading
                 val stem = File(outDir, preferredFilename.substringBeforeLast('.')).absolutePath
                 val ext = File(preferredFilename).extension.ifBlank { "mp4" }
-                val safeExt = if (ext.equals("matroska", ignoreCase = true)) "mkv" else ext
-                addOption("-o", "$stem.$safeExt")
-                addOption("-f", "bestvideo[height<=$height]+bestaudio/best[height<=$height]/best")
-                addOption("-S", "height~$height,+size,+br")
-                addOption("--merge-output-format", "mp4")
+                if (audioOnly) {
+                    addOption("-o", "$stem.%(ext)s")
+                    addOption("-f", "bestaudio/best")
+                    addOption("--extract-audio")
+                    addOption("--audio-format", "mp3")
+                    addOption("--audio-quality", "0")
+                } else {
+                    addOption("-o", "$stem.$safeExt")
+                    addOption("-f", "bestvideo[height<=$height]+bestaudio/best[height<=$height]/best")
+                    addOption("-S", "height~$height,+size,+br")
+                    addOption("--merge-output-format", "mp4")
+                }
                 addOption("--no-playlist")
                 val frags = if (hlsFragments > 0) hlsFragments.coerceIn(1, 16) else parallelSockets.coerceIn(1, 16)
                 addOption("-N", "$frags")
@@ -418,6 +440,9 @@ object YoutubeDlDownloader {
             }
 
             for ((k, v) in customHeaders) {
+                if (k.equals("user-agent", ignoreCase = true) ||
+                    k.equals("referer", ignoreCase = true) ||
+                    k.equals("origin", ignoreCase = true)) continue
                 val cleanK = k.replace("\r", "").replace("\n", "").trim()
                 val cleanV = v.replace("\r", "").replace("\n", "").trim()
                 if (cleanK.isNotBlank() && cleanV.isNotBlank()) {
@@ -673,7 +698,10 @@ object YoutubeDlDownloader {
             try {
                 p.destroy()
                 if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-                    p.destroyForcibly()
+                    val exited = p.waitFor(350, java.util.concurrent.TimeUnit.MILLISECONDS)
+                    if (!exited) {
+                        p.destroyForcibly()
+                    }
                 }
             } catch (_: Exception) {}
         }
@@ -1079,7 +1107,7 @@ object YoutubeDlDownloader {
             "--connect-timeout=15",
             "--timeout=30",
             "--auto-file-renaming=false",
-            "--allow-overwrite=false",
+            "--allow-overwrite=true",
             "--console-log-level=error"
         )
 
@@ -1107,6 +1135,9 @@ object YoutubeDlDownloader {
             cmd += "--header=Origin: $cleanOrig"
         }
         for ((k, v) in customHeaders) {
+            if (k.equals("user-agent", ignoreCase = true) ||
+                k.equals("referer", ignoreCase = true) ||
+                k.equals("origin", ignoreCase = true)) continue
             val cleanK = k.replace("\r", "").replace("\n", "").trim()
             val cleanV = v.replace("\r", "").replace("\n", "").trim()
             if (cleanK.isNotBlank() && cleanV.isNotBlank()) {
