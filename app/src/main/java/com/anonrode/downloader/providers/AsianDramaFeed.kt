@@ -15,8 +15,8 @@ import org.jsoup.Jsoup
 object AsianDramaFeed {
 
     private const val TIMEOUT_MS = 8000L
-    private const val PER_SITE_LIMIT = 20
-    private const val MAX_FEED_CARDS = 48
+    private const val PER_SITE_LIMIT = 24
+    private const val MAX_FEED_CARDS = 60
 
     fun cacheKeyFor(region: DramaRegion, era: DramaEra): String =
         "drama_${region.tag}_${era.tag}"
@@ -43,8 +43,8 @@ object AsianDramaFeed {
         // 2. Fetch live across candidate providers concurrently
         return coroutineScope {
             val candidateSites = when (region) {
-                DramaRegion.KDRAMA -> listOf("dramakey", "asianc", "nepu", "nkiri", "9jarocks")
-                DramaRegion.CDRAMA -> listOf("dramarain", "dramakey", "asianc", "nepu", "nkiri")
+                DramaRegion.KDRAMA -> listOf("dramakey", "asianc", "dramarain", "nepu", "nkiri", "9jarocks")
+                DramaRegion.CDRAMA -> listOf("dramarain", "dramakey", "asianc", "nepu", "nkiri", "9jarocks")
             }
 
             val slots = arrayOfNulls<List<ShowCard>>(candidateSites.size)
@@ -105,17 +105,17 @@ object AsianDramaFeed {
     ): List<ShowCard> {
         val base = DynamicRulesManager.getBaseUrl("asianc").ifBlank { "https://asianc.id" }.trimEnd('/')
         val url = when {
-            region == DramaRegion.KDRAMA && era == DramaEra.HISTORICAL -> "$base/genre/historical"
-            region == DramaRegion.CDRAMA && era == DramaEra.HISTORICAL -> "$base/genre/wuxia"
-            region == DramaRegion.KDRAMA -> "$base/country/korean-drama"
-            else -> "$base/country/chinese-drama"
+            region == DramaRegion.KDRAMA && era == DramaEra.HISTORICAL -> "$base/search?type=drama&keyword=historical"
+            region == DramaRegion.CDRAMA && era == DramaEra.HISTORICAL -> "$base/search?type=drama&keyword=wuxia"
+            region == DramaRegion.KDRAMA -> "$base/search?type=drama&keyword=korean"
+            else -> "$base/search?type=drama&keyword=chinese"
         }
 
         val html = HttpClient.getText(url, referer = "$base/", tag = "browse") ?: return emptyList()
         val doc = Jsoup.parse(html, url)
         val cards = mutableListOf<ShowCard>()
 
-        for (item in doc.select("ul.listing.items li, .list-episode-item li, .video-block")) {
+        for (item in doc.select("ul.listing.items li, .list-episode-item li, .video-block, li.filter-item")) {
             val a = item.selectFirst("a[href*='/drama-detail/']") ?: item.selectFirst("a[href]") ?: continue
             val rawHref = a.attr("href")
             if (rawHref.isBlank()) continue
@@ -126,7 +126,11 @@ object AsianDramaFeed {
             if (rawTitle.isBlank()) continue
 
             val img = item.selectFirst("img")
-            val poster = img?.attr("abs:src")?.ifBlank { img.attr("src") }.orEmpty()
+            val poster = img?.attr("abs:data-original")?.ifBlank {
+                img.attr("data-original").ifBlank {
+                    img.attr("abs:src").ifBlank { img.attr("src") }
+                }
+            }.orEmpty()
 
             val clean = NameSanitizer.cleanTitle(rawTitle)
             val card = ShowCard(
@@ -162,16 +166,20 @@ object AsianDramaFeed {
         val doc = Jsoup.parse(html, url)
         val cards = mutableListOf<ShowCard>()
 
-        for (item in doc.select(".drama-card, .entry, article, .item")) {
-            val a = item.selectFirst("a[href*='/korean/'], a[href*='/chinese/'], a[href*='/drama/']") ?: continue
-            val href = a.attr("abs:href").ifBlank { a.attr("href") }
+        for (item in doc.select("a.series-card-link, .series-item, .drama-card, article.series-card, article, .item")) {
+            val a = (if (item.tagName() == "a") item else item.selectFirst("a.series-card-link") ?: item.selectFirst("a"))
+                ?: item.parent()?.takeIf { it.tagName() == "a" } ?: continue
+            val href = a.attr("abs:href").ifBlank {
+                val raw = a.attr("href")
+                if (raw.startsWith("/")) "$base$raw" else raw
+            }
             if (href.isBlank()) continue
 
-            val titleEl = item.selectFirst(".title, h2, h3, .entry-title") ?: a
-            val rawTitle = titleEl.text().trim()
+            val titleEl = item.selectFirst(".series-title, .title, h2, h3, .entry-title") ?: a
+            val rawTitle = titleEl.text().trim().ifBlank { a.attr("aria-label").removePrefix("View ").trim() }
             if (rawTitle.isBlank() || rawTitle.length < 2) continue
 
-            val img = item.selectFirst("img")
+            val img = item.selectFirst("img") ?: a.selectFirst("img")
             val poster = img?.attr("abs:src")?.ifBlank { img.attr("src") }.orEmpty()
 
             val clean = NameSanitizer.cleanTitle(rawTitle)
