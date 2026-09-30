@@ -286,45 +286,42 @@ fun DownloadsScreen(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(bottom = Spacing.xs),
-                    horizontalArrangement = Arrangement.End,
+                    horizontalArrangement = Arrangement.spacedBy(Spacing.xs, Alignment.End),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     if (hasPausable) {
                         BulkActionChip(
                             label = "Pause all",
                             icon = Icons.Rounded.Pause,
-                            accent = TextPrimary,
+                            iconTint = TextSecondary,
                             onClick = { viewModel.engine.pauseAll() }
                         )
-                        Spacer(modifier = Modifier.width(Spacing.sm))
                     }
                     if (hasPaused) {
                         BulkActionChip(
                             label = "Resume all",
                             icon = Icons.Rounded.PlayArrow,
-                            accent = StatusSuccess,
+                            iconTint = StatusSuccess,
                             onClick = { viewModel.engine.resumeAll() }
                         )
-                        Spacer(modifier = Modifier.width(Spacing.sm))
                     }
                     if (hasFailed) {
                         BulkActionChip(
                             label = "Retry failed",
                             icon = Icons.Rounded.Refresh,
-                            accent = StatusWarning,
+                            iconTint = StatusWarning,
                             onClick = {
                                 tasks.filter { it.status == TaskStatus.FAILED }.forEach {
                                     viewModel.engine.retry(it.id)
                                 }
                             }
                         )
-                        Spacer(modifier = Modifier.width(Spacing.sm))
                     }
                     if (hasCancellable) {
                         BulkActionChip(
                             label = "Cancel all",
                             icon = Icons.Rounded.Close,
-                            accent = StatusError,
+                            iconTint = StatusError,
                             onClick = { confirmCancelAll = true }
                         )
                     }
@@ -434,9 +431,9 @@ private fun DownloadsSortBar(
         modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(Radius.md))
-            .background(SurfaceElevated)
+            .background(SurfaceCard)
             .border(1.dp, BorderHairline, RoundedCornerShape(Radius.md))
-            .padding(4.dp),
+            .padding(3.dp),
         horizontalArrangement = Arrangement.spacedBy(4.dp)
     ) {
         modes.forEach { (mode, label, icon) ->
@@ -444,7 +441,7 @@ private fun DownloadsSortBar(
             Box(
                 modifier = Modifier
                     .weight(1f)
-                    .height(38.dp)
+                    .height(32.dp)
                     .clip(RoundedCornerShape(Radius.sm))
                     .background(if (isSelected) AccentPrimary else Color.Transparent)
                     .clickable { onSelectMode(mode) },
@@ -459,13 +456,13 @@ private fun DownloadsSortBar(
                         imageVector = icon,
                         contentDescription = null,
                         tint = if (isSelected) BackgroundDark else TextMuted,
-                        modifier = Modifier.size(16.dp)
+                        modifier = Modifier.size(14.dp)
                     )
                     Spacer(modifier = Modifier.width(4.dp))
                     Text(
                         text = label,
                         color = if (isSelected) BackgroundDark else TextSecondary,
-                        fontSize = Type.caption.fontSize,
+                        fontSize = 11.sp,
                         fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
@@ -611,33 +608,36 @@ private fun ShowFolderCard(
 }
 
 @Composable
-private fun BulkActionChip(label: String, icon: ImageVector, accent: Color = AccentPrimary, onClick: () -> Unit) {
+private fun BulkActionChip(
+    label: String,
+    icon: ImageVector,
+    iconTint: Color = TextSecondary,
+    onClick: () -> Unit
+) {
     Box(
         modifier = Modifier
-            .minimumInteractiveComponentSize()
             .clip(RoundedCornerShape(Radius.full))
-            .clickable(onClick = onClick),
+            .background(SurfaceElevated)
+            .border(1.dp, BorderHairline, RoundedCornerShape(Radius.full))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 6.dp),
         contentAlignment = Alignment.Center
     ) {
         Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier
-                .background(accent.copy(alpha = 0.12f), RoundedCornerShape(Radius.full))
-                .border(1.dp, accent.copy(alpha = 0.35f), RoundedCornerShape(Radius.full))
-                .padding(horizontal = Spacing.md, vertical = Spacing.xs)
+            verticalAlignment = Alignment.CenterVertically
         ) {
             Icon(
                 imageVector = icon,
                 contentDescription = null,
-                tint = accent,
-                modifier = Modifier.size(14.dp)
+                tint = iconTint,
+                modifier = Modifier.size(13.dp)
             )
-            Spacer(modifier = Modifier.width(Spacing.xs))
+            Spacer(modifier = Modifier.width(5.dp))
             Text(
                 text = label,
-                color = accent,
-                fontSize = Type.caption.fontSize,
-                fontWeight = FontWeight.Bold
+                color = TextPrimary,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.SemiBold
             )
         }
     }

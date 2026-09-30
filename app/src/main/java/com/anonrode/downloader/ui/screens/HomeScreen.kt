@@ -897,43 +897,49 @@ private fun CategoryTilesGrid(
             fontSize = Type.sectionTitle.fontSize,
             fontWeight = FontWeight.Bold
         )
-        Spacer(modifier = Modifier.height(Spacing.md))
-        CategoryFeed.CATEGORIES.chunked(3).forEach { rowCats ->
+        val allCategories = CategoryFeed.CATEGORIES
+        val morePoster = posters.values.reversed().firstOrNull { it.isNotBlank() }
+            ?: posters.values.firstOrNull { it.isNotBlank() }.orEmpty()
+        val totalSlots = allCategories.size + 1 // 7 categories + 1 View More = 8
+        val rows = (totalSlots + 2) / 3 // 3 rows
+
+        for (rowIndex in 0 until rows) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(Spacing.sm)
             ) {
-                rowCats.forEach { category ->
-                    Box(modifier = Modifier.weight(1f)) {
-                        GenreTileCard(
-                            label = category.label,
-                            posterUrl = posters[category.label] ?: "",
-                            showPosters = showPosters,
-                            onClick = { onOpen(category) },
-                            isLoading = isLoading
-                        )
+                for (colIndex in 0 until 3) {
+                    val itemIndex = rowIndex * 3 + colIndex
+                    if (itemIndex < allCategories.size) {
+                        val category = allCategories[itemIndex]
+                        Box(modifier = Modifier.weight(1f)) {
+                            GenreTileCard(
+                                label = category.label,
+                                posterUrl = posters[category.label] ?: "",
+                                showPosters = showPosters,
+                                onClick = { onOpen(category) },
+                                isLoading = isLoading
+                            )
+                        }
+                    } else if (itemIndex == allCategories.size) {
+                        // The "View More" tile: sits directly beside "Anime" on Row 3
+                        Box(modifier = Modifier.weight(1f)) {
+                            ViewMoreTileCard(
+                                posterUrl = morePoster,
+                                showPosters = showPosters,
+                                onClick = onMore,
+                                isLoading = isLoading
+                            )
+                        }
+                    } else {
+                        // Keep 3-column alignment for the remaining slot on the last row
+                        Spacer(modifier = Modifier.weight(1f))
                     }
                 }
-                // Keep columns aligned when the last row is partial.
-                repeat(3 - rowCats.size) { Spacer(modifier = Modifier.weight(1f)) }
             }
-            Spacer(modifier = Modifier.height(Spacing.md))
-        }
-        val morePoster = posters.values.reversed().firstOrNull { it.isNotBlank() }
-            ?: posters.values.firstOrNull { it.isNotBlank() }.orEmpty()
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(Spacing.sm)
-        ) {
-            Box(modifier = Modifier.weight(1f)) {
-                ViewMoreTileCard(
-                    posterUrl = morePoster,
-                    showPosters = showPosters,
-                    onClick = onMore,
-                    isLoading = isLoading
-                )
+            if (rowIndex < rows - 1) {
+                Spacer(modifier = Modifier.height(Spacing.md))
             }
-            repeat(2) { Spacer(modifier = Modifier.weight(1f)) }
         }
     }
 }
@@ -1656,11 +1662,7 @@ private fun AsianDramaHeroSection(
                     .weight(1f)
                     .height(96.dp)
                     .clip(RoundedCornerShape(Radius.md))
-                    .background(
-                        Brush.linearGradient(
-                            listOf(Color(0xFF1E1B4B), Color(0xFF0F172A))
-                        )
-                    )
+                    .background(SurfaceCard)
                     .border(1.dp, BorderHairline, RoundedCornerShape(Radius.md))
                     .clickable(onClick = onOpenKdrama)
                     .padding(Spacing.md),
@@ -1671,34 +1673,44 @@ private fun AsianDramaHeroSection(
                         Text(
                             text = "K-DRAMA",
                             fontSize = 15.sp,
-                            fontWeight = FontWeight.ExtraBold,
-                            color = Color(0xFF93C5FD)
+                            fontWeight = FontWeight.Bold,
+                            color = TextPrimary
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Box(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(4.dp))
-                                .background(Color(0xFF3B82F6).copy(alpha = 0.25f))
+                                .background(SurfaceElevated)
+                                .border(1.dp, BorderHairline, RoundedCornerShape(4.dp))
                                 .padding(horizontal = 4.dp, vertical = 1.dp)
                         ) {
-                            Text("HUB", fontSize = 9.sp, fontWeight = FontWeight.Bold, color = Color(0xFF93C5FD))
+                            Text("HUB", fontSize = 9.sp, fontWeight = FontWeight.Bold, color = TextSecondary)
                         }
                     }
                     Spacer(modifier = Modifier.height(Spacing.xxs))
                     Text(
                         text = "Modern · Sageuk",
                         fontSize = 11.sp,
-                        color = TextSecondary,
+                        color = TextMuted,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
                     Spacer(modifier = Modifier.height(Spacing.xs))
-                    Text(
-                        text = "Explore catalog →",
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = Color(0xFF60A5FA)
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = "Explore catalog",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = TextPrimary
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Icon(
+                            imageVector = Icons.Rounded.ArrowForward,
+                            contentDescription = null,
+                            tint = TextPrimary,
+                            modifier = Modifier.size(12.dp)
+                        )
+                    }
                 }
             }
 
@@ -1708,11 +1720,7 @@ private fun AsianDramaHeroSection(
                     .weight(1f)
                     .height(96.dp)
                     .clip(RoundedCornerShape(Radius.md))
-                    .background(
-                        Brush.linearGradient(
-                            listOf(Color(0xFF3B0714), Color(0xFF0F172A))
-                        )
-                    )
+                    .background(SurfaceCard)
                     .border(1.dp, BorderHairline, RoundedCornerShape(Radius.md))
                     .clickable(onClick = onOpenCdrama)
                     .padding(Spacing.md),
@@ -1723,34 +1731,44 @@ private fun AsianDramaHeroSection(
                         Text(
                             text = "C-DRAMA",
                             fontSize = 15.sp,
-                            fontWeight = FontWeight.ExtraBold,
-                            color = Color(0xFFFCA5A5)
+                            fontWeight = FontWeight.Bold,
+                            color = TextPrimary
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Box(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(4.dp))
-                                .background(Color(0xFFEF4444).copy(alpha = 0.25f))
+                                .background(SurfaceElevated)
+                                .border(1.dp, BorderHairline, RoundedCornerShape(4.dp))
                                 .padding(horizontal = 4.dp, vertical = 1.dp)
                         ) {
-                            Text("HUB", fontSize = 9.sp, fontWeight = FontWeight.Bold, color = Color(0xFFFCA5A5))
+                            Text("HUB", fontSize = 9.sp, fontWeight = FontWeight.Bold, color = TextSecondary)
                         }
                     }
                     Spacer(modifier = Modifier.height(Spacing.xxs))
                     Text(
-                        text = "Modern · Wuxia",
+                        text = "Modern · Costume",
                         fontSize = 11.sp,
-                        color = TextSecondary,
+                        color = TextMuted,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
                     Spacer(modifier = Modifier.height(Spacing.xs))
-                    Text(
-                        text = "Explore catalog →",
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = Color(0xFFF87171)
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = "Explore catalog",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = TextPrimary
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Icon(
+                            imageVector = Icons.Rounded.ArrowForward,
+                            contentDescription = null,
+                            tint = TextPrimary,
+                            modifier = Modifier.size(12.dp)
+                        )
+                    }
                 }
             }
         }

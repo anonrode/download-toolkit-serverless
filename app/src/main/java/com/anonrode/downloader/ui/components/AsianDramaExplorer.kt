@@ -177,7 +177,7 @@ fun AsianDramaExplorer(
                             text = eraLabel,
                             fontSize = 13.sp,
                             fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                            color = if (isSelected) Color.Black else TextSecondary
+                            color = if (isSelected) AnonTheme.colors.background else TextSecondary
                         )
                     }
                 }
@@ -219,42 +219,6 @@ fun AsianDramaExplorer(
                             fontSize = 11.sp,
                             fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
                             color = if (isSelected) TextPrimary else TextSecondary
-                        )
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(Spacing.sm))
-
-            // Horizontal Genre Chips Row
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState())
-                    .padding(horizontal = Spacing.md),
-                horizontalArrangement = Arrangement.spacedBy(Spacing.xs)
-            ) {
-                genres.forEach { genre ->
-                    val isSelected = (activeGenre == null && genre.id == "all") || (activeGenre?.id == genre.id)
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(Radius.full))
-                            .background(if (isSelected) AccentPrimary else SurfaceCard)
-                            .border(
-                                width = 1.dp,
-                                color = if (isSelected) AccentPrimary else BorderHairline,
-                                shape = RoundedCornerShape(Radius.full)
-                            )
-                            .clickable {
-                                onSelectGenre(if (genre.id == "all") null else genre)
-                            }
-                            .padding(horizontal = 12.dp, vertical = 6.dp)
-                    ) {
-                        Text(
-                            text = genre.label,
-                            fontSize = 12.sp,
-                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                            color = if (isSelected) Color.Black else TextSecondary
                         )
                     }
                 }
@@ -437,23 +401,6 @@ private fun DramaCardItem(
                         color = Color.White
                     )
                 }
-            }
-
-            // Site pill at bottom
-            Box(
-                modifier = Modifier
-                    .align(Alignment.BottomStart)
-                    .padding(4.dp)
-                    .clip(RoundedCornerShape(4.dp))
-                    .background(Color(0xB3000000))
-                    .padding(horizontal = 4.dp, vertical = 2.dp)
-            ) {
-                Text(
-                    text = show.site.uppercase(),
-                    fontSize = 9.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = Color.White
-                )
             }
         }
 

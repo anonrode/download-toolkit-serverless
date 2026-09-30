@@ -88,6 +88,8 @@ object LinkResolver {
         // are a real MKV file (live-verified 2026-09-19: HTTP 206,
         // Content-Disposition: attachment; filename=".mkv", MKV magic header).
         if (host.contains("kissorgrab.com") && path.contains("/dl/")) return true
+        // waffi.cloud direct CDN stream endpoints (japa.waffi.cloud, drip.waffi.cloud)
+        if (host.contains("waffi.cloud") && (path.contains("/c/") || path.endsWith(".mkv") || path.endsWith(".mp4"))) return true
 
         val query = lower.substringAfter('?', "").substringBefore('#')
         val isLockerHost = KNOWN_LOCKER_HOSTS.any { host.contains(it) }

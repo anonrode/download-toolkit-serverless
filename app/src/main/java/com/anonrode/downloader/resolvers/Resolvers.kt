@@ -313,8 +313,8 @@ object VidbasicResolver : BaseResolver {
     override fun lastResolveFailure(): String? = lastFailure
 
     override fun canResolve(url: String): Boolean {
-        val low = url.lowercase()
-        return hostClaim(url, HOSTS) && !low.endsWith(".m3u8") && !low.endsWith(".mp4")
+        val clean = url.substringBefore('?').substringBefore('#').lowercase()
+        return hostClaim(url, HOSTS) && !clean.endsWith(".m3u8") && !clean.endsWith(".mp4")
     }
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
