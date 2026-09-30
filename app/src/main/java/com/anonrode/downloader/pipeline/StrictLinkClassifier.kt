@@ -38,7 +38,7 @@ object StrictLinkClassifier {
         "loadedfiles.net", "loadedfiles.com", "downloadwella.com", "wetafiles.com",
         "vikingfile.com", "lulacloud.com", "waffi", "waffi.cloud", "pixeldrain.com",
         "filevault", "filevault.com.ng", "kissorgrab.com", "wildshare", "wildshare.net", "gtoddl", "gtoddl.com", "wapkizfile",
-        "fastupload.io", "gofile.io", "krakenfiles.com", "swish"
+        "fastupload.io", "gofile.io", "krakenfiles.com", "swish", "lightdl.cc", "5play.cc"
     )
 
     private val NAV_PATH_SEGMENTS = setOf(
