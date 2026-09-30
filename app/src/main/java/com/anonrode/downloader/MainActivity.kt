@@ -236,6 +236,7 @@ class MainActivity : ComponentActivity() {
                 // on every chip tap — so no prop plumbing. Stepping
                 // re-reads the engine fresh.
                 val playingTaskId by viewModel.activePlayingTaskId.collectAsState()
+                val socialTarget by viewModel.activeSocialTarget.collectAsState()
                 fun openPlayer(task: DownloadTask) {
                     viewModel.activePlayingTaskId.value = task.id
                 }
@@ -425,7 +426,7 @@ class MainActivity : ComponentActivity() {
                 ?: sharedText.trim()
             if (url.isNotBlank()) {
                 viewModel.handlePastedInput(url) { platform, u ->
-                    activeSocialTarget.value = Pair(platform, u)
+                    viewModel.activeSocialTarget.value = Pair(platform, u)
                 }
             }
         }

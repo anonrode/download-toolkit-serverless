@@ -933,7 +933,7 @@ class DownloadEngine(
                     val origIsExplicitSeries = origEpNum > 0 && (task.episodeTitle.contains("Episode", ignoreCase = true) ||
                         task.episodeTitle.contains("Ep", ignoreCase = true) ||
                         task.episodeTitle.contains("Season", ignoreCase = true) ||
-                        task.showUrl.isNotBlank())
+                        task.sourceUrl.isNotBlank())
                     val candIsMovie = card.category.equals("Movies", ignoreCase = true) || card.title.contains("Movie", ignoreCase = true)
                     if (origIsExplicitSeries && candIsMovie && details.episodes.size == 1) {
                         com.anonrode.downloader.util.DebugLog.resolve(
@@ -1209,6 +1209,15 @@ class DownloadEngine(
         } catch (_: Exception) {
             false
         }
+    }
+
+    private fun looksLikeHtml(text: String): Boolean {
+        val head = text.trimStart().lowercase()
+        return head.startsWith("<!doctype html") || head.startsWith("<html") || head.startsWith("<head") ||
+            head.startsWith("<body") || head.startsWith("<!--") || head.startsWith("<script") ||
+            head.startsWith("<svg") || head.startsWith("<?xml") || head.startsWith("<style") ||
+            head.startsWith("<iframe") || head.startsWith("<meta") || head.startsWith("<form") ||
+            head.startsWith("{")
     }
 
     /**
@@ -1656,12 +1665,14 @@ class DownloadEngine(
                     res.code == 401 || res.code == 403 -> staleToken = true
                     res.isSuccessful -> {
                         val text = HttpClient.cappedText(res)
-                        if (text.startsWith("#EXTM3U") || text.contains("#EXT-X-STREAM-INF") || text.contains("#EXTINF")) {
-                            playlist = text
-                        } else if (looksLikeHtml(text) || text.contains("<!doctype", ignoreCase = true) || text.contains("<html", ignoreCase = true)) {
-                            staleToken = true
-                        } else {
-                            playlist = text
+                        if (text != null) {
+                            if (text.startsWith("#EXTM3U") || text.contains("#EXT-X-STREAM-INF") || text.contains("#EXTINF")) {
+                                playlist = text
+                            } else if (looksLikeHtml(text) || text.contains("<!doctype", ignoreCase = true) || text.contains("<html", ignoreCase = true)) {
+                                staleToken = true
+                            } else {
+                                playlist = text
+                            }
                         }
                     }
                 }
@@ -2556,6 +2567,7 @@ class DownloadEngine(
                             }
                         }
                     }
+                }
 
                     // A zero-byte task may rotate to a different source URL on an
                     // explicit dead-source response. Once any bytes exist, switching
