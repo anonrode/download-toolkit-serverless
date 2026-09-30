@@ -136,7 +136,7 @@ class DownloadEngine(
      * whole torrent. Runs on the engine's IO dispatcher — the UI should
      * bridge it to the main thread (e.g. a Compose dialog).
      */
-    var onTorrentFileSelection: (suspend (List<TorrentSecurityShield.TorrentFileEntry>) -> List<Int>?)? = null
+    var onTorrentFileSelection: (suspend (List<TorrentSecurityShield.TorrentFileEntry>) -> com.anonrode.downloader.ui.screens.TorrentFilePicker.TorrentPickResult)? = null
 
     val tasks: StateFlow<List<DownloadTask>> = repository.tasks
 
@@ -679,7 +679,9 @@ class DownloadEngine(
         if (!hasOtherActiveWork(taskId)) HttpClient.cancelInFlight()
         com.anonrode.downloader.util.DebugLog.user("cancel $taskId")
         if (task != null) {
-            purgeTaskArtifacts(task)
+            engineScope.launch {
+                purgeTaskArtifacts(task)
+            }
         }
         repository.remove(taskId)
         updateServiceState(force = true)
@@ -928,7 +930,18 @@ class DownloadEngine(
                     }
 
                     // Candidate must have matching (origSeason, origEpNum)
-                    val isSingleMovie = details.episodes.size == 1 && origEpNum <= 1 && origSeason == 1
+                    val origIsExplicitSeries = origEpNum > 0 && (task.episodeTitle.contains("Episode", ignoreCase = true) ||
+                        task.episodeTitle.contains("Ep", ignoreCase = true) ||
+                        task.episodeTitle.contains("Season", ignoreCase = true) ||
+                        task.showUrl.isNotBlank())
+                    val candIsMovie = card.category.equals("Movies", ignoreCase = true) || card.title.contains("Movie", ignoreCase = true)
+                    if (origIsExplicitSeries && candIsMovie && details.episodes.size == 1) {
+                        com.anonrode.downloader.util.DebugLog.resolve(
+                            "task=${task.id} failover: rejected movie card \"${card.title}\" for series task S${origSeason}E${origEpNum}"
+                        )
+                        continue
+                    }
+                    val isSingleMovie = details.episodes.size == 1 && origEpNum <= 1 && origSeason == 1 && !origIsExplicitSeries
                     val matchingEp = details.episodes.firstOrNull { candEp ->
                         if (isSingleMovie) true
                         else {
@@ -993,6 +1006,7 @@ class DownloadEngine(
 
             // Safe to delete partial files ONLY after verifying task is actively continuing (not user paused)
             try {
+                File(task.filePath).delete()
                 File(task.filePath + ".part").delete()
                 File(task.filePath + ".ytdl").delete()
                 File(task.filePath + ".aria2").delete()
@@ -1640,7 +1654,16 @@ class DownloadEngine(
                     // persisted URL is dead — a stale link, not a dead server.
                     // The engine re-resolves from the source page for a fresh one.
                     res.code == 401 || res.code == 403 -> staleToken = true
-                    res.isSuccessful -> playlist = HttpClient.cappedText(res)
+                    res.isSuccessful -> {
+                        val text = HttpClient.cappedText(res)
+                        if (text.startsWith("#EXTM3U") || text.contains("#EXT-X-STREAM-INF") || text.contains("#EXTINF")) {
+                            playlist = text
+                        } else if (looksLikeHtml(text) || text.contains("<!doctype", ignoreCase = true) || text.contains("<html", ignoreCase = true)) {
+                            staleToken = true
+                        } else {
+                            playlist = text
+                        }
+                    }
                 }
             }
         } catch (_: Exception) {}
@@ -2424,7 +2447,9 @@ class DownloadEngine(
                         updateServiceState(force = false)
                     }
 
-                    val aria2Exec = YoutubeDlDownloader.findAria2Executable(context)
+                    val partFile = File(dest.absolutePath + ".part")
+                    val hasTurboPartial = partFile.exists() && partFile.length() > 0L
+                    val aria2Exec = if (!hasTurboPartial) YoutubeDlDownloader.findAria2Executable(context) else null
                     if (aria2Exec != null) {
                         com.anonrode.downloader.util.DebugLog.engine(
                             "task=${task.id} aria2c start sockets=$effectiveSockets url=${streamUrl.take(110)}"
@@ -2633,7 +2658,12 @@ class DownloadEngine(
                                     !File(handoffTarget.absolutePath + ".aria2").exists()
                                 ) {
                                     val partFile = File(dest.absolutePath + ".part")
-                                    val prefix = TurboState(File(dest.absolutePath + ".turbo")).contiguousPrefixBytes()
+                                    val turboFile = File(dest.absolutePath + ".turbo")
+                                    val prefix = if (turboFile.exists()) {
+                                        TurboState(turboFile).contiguousPrefixBytes()
+                                    } else if (partFile.exists() && partFile.length() > 0L) {
+                                        partFile.length()
+                                    } else null
                                     if (prefix != null && prefix > 0 && partFile.exists() && prefix <= partFile.length()) {
                                         // Rename FIRST, truncate the renamed file, then drop
                                         // the sidecar (engine-audit P1): truncating before the
@@ -2645,7 +2675,7 @@ class DownloadEngine(
                                         // untouched, and the next run resumes them correctly.
                                         if (partFile.renameTo(handoffTarget)) {
                                             RandomAccessFile(handoffTarget, "rw").use { it.setLength(prefix) }
-                                            TurboState(File(dest.absolutePath + ".turbo")).delete()
+                                            if (turboFile.exists()) TurboState(turboFile).delete()
                                             android.util.Log.w("AnonDownload", "Handed ${prefix / 1024 / 1024} MiB prefix to aria2c for resume as ${handoffTarget.name}")
                                         }
                                     }
@@ -2699,10 +2729,12 @@ class DownloadEngine(
                             // which can differ from the task's .mkv target name — look
                             // for resumable state under both names.
                             fun tryMakeResumable(base: File): Boolean {
-                                val turboState = TurboState(File(base.absolutePath + ".turbo"))
+                                val turboFile = File(base.absolutePath + ".turbo")
+                                val turboState = TurboState(turboFile)
                                 val partFile = File(base.absolutePath + ".part")
-                                if (partFile.exists() && partFile.length() > 0 &&
-                                    turboState.contiguousPrefixBytes() != null) {
+                                val hasTurboState = turboFile.exists() && turboState.contiguousPrefixBytes() != null
+                                val isSingleStreamPart = !turboFile.exists() && partFile.exists() && partFile.length() > 0
+                                if (partFile.exists() && partFile.length() > 0 && (hasTurboState || isSingleStreamPart)) {
                                     return true
                                 }
                                 val control = File(base.absolutePath + ".aria2")
@@ -3234,7 +3266,7 @@ class DownloadEngine(
             activeJobs[taskId]?.cancel()
             activeJobs.remove(taskId)
             YoutubeDlDownloader.killProcess(taskId)
-            TurboDownloader.cancelTask(taskId)
+            TurboDownloader.cancelTask(taskId, isFullCancel = true)
             com.anonrode.downloader.util.DebugLog.user("cancel $taskId")
             val live = repository.find(taskId)
             // Cancel only what is STILL cancellable (engine-audit P2): if the
@@ -3245,7 +3277,9 @@ class DownloadEngine(
                     live.status == TaskStatus.RESOLVING || live.status == TaskStatus.VALIDATING ||
                     live.status == TaskStatus.PAUSED)
             ) {
-                purgeTaskArtifacts(live)
+                engineScope.launch {
+                    purgeTaskArtifacts(live)
+                }
                 repository.remove(taskId)
             }
         }

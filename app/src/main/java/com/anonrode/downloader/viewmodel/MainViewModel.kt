@@ -96,6 +96,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val playlistState: StateFlow<PlaylistUiState> = _playlistState.asStateFlow()
     private var playlistJob: Job? = null
 
+    val activeSocialTarget = MutableStateFlow<Pair<String, String>?>(null)
+    val activePlayingTaskId = MutableStateFlow<String?>(null)
+
     /** Read a playlist's flat metadata. Cheap by design: ONE
      *  `yt-dlp -J --flat-playlist` dump (no per-video page loads — on a
      *  capped plan that's the difference between ~10 KB and hundreds). */

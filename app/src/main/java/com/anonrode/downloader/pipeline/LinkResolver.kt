@@ -3,6 +3,7 @@ package com.anonrode.downloader.pipeline
 import com.anonrode.downloader.data.net.HttpClient
 import com.anonrode.downloader.providers.ProviderRegistry
 import com.anonrode.downloader.resolvers.ResolverRegistry
+import com.anonrode.downloader.resolvers.isDirectMediaUrl
 
 /**
  * The link-cracking ladder — the single chain every caller uses to turn a

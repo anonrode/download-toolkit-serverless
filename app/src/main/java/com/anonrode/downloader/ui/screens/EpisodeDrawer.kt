@@ -62,22 +62,24 @@ fun EpisodeDrawer(
     // Keying by the show (rather than EpisodeItem equality or the full episode
     // list) keeps checks through harmless episode refreshes, while a different
     // show starts with a clean selection.
-    var selectedUrls by remember(show.url) { mutableStateOf(emptySet<String>()) }
+    var selectedUrlsList by rememberSaveable(key = show.url) { mutableStateOf(listOf<String>()) }
+    val selectedUrls = selectedUrlsList.toSet()
+    fun updateSelected(newSet: Set<String>) { selectedUrlsList = newSet.toList() }
     val selectedEpisodes = episodes.filter { it.url in selectedUrls }
-    var rangeText by remember { mutableStateOf("") }
+    var rangeText by rememberSaveable { mutableStateOf("") }
     var enqueued by remember { mutableStateOf(false) }
     var isEnqueuing by remember { mutableStateOf(false) }
-    var showBatchConfirmation by remember { mutableStateOf(false) }
+    var showBatchConfirmation by rememberSaveable { mutableStateOf(false) }
 
     // Parse range string (e.g. "1-5, 8, 10-12", "all", "none")
     fun applyRange(input: String) {
         val clean = input.trim()
         if (clean.isBlank() || clean.equals("none", ignoreCase = true) || clean.equals("clear", ignoreCase = true) || clean.equals("deselect", ignoreCase = true)) {
-            selectedUrls = emptySet()
+            updateSelected(emptySet())
             return
         }
         if (clean.equals("all", ignoreCase = true) || clean.equals("*", ignoreCase = true)) {
-            selectedUrls = episodes.map { it.url }.toSet()
+            updateSelected(episodes.map { it.url }.toSet())
             return
         }
         val targetNums = mutableSetOf<Int>()
@@ -103,7 +105,7 @@ fun EpisodeDrawer(
         // every keystroke. Only a parsed non-empty set re-marks the list
         // (clearing stays available via "none"/backspace-to-empty/above).
         if (targetNums.isEmpty()) return
-        selectedUrls = episodes.filter { it.episodeNum in targetNums }.map { it.url }.toSet()
+        updateSelected(episodes.filter { it.episodeNum in targetNums }.map { it.url }.toSet())
     }
 
     // Dynamic Season Grouping for 1-Tap Filter Chips
@@ -266,7 +268,7 @@ fun EpisodeDrawer(
                     FilterChip(
                         selected = isAllSelected,
                         onClick = {
-                            selectedUrls = if (isAllSelected) emptySet() else episodes.map { it.url }.toSet()
+                            updateSelected(if (isAllSelected) emptySet() else episodes.map { it.url }.toSet())
                         },
                         label = { Text("All (${episodes.size})", fontSize = Type.caption.fontSize, fontWeight = FontWeight.SemiBold) },
                         colors = FilterChipDefaults.filterChipColors(
@@ -291,11 +293,13 @@ fun EpisodeDrawer(
                                 selected = isSeasonSelected,
                                 onClick = {
                                     val seasonUrls = sEps.map { it.url }.toSet()
-                                    selectedUrls = if (isSeasonSelected) {
-                                        selectedUrls - seasonUrls
-                                    } else {
-                                        selectedUrls + seasonUrls
-                                    }
+                                    updateSelected(
+                                        if (isSeasonSelected) {
+                                            selectedUrls - seasonUrls
+                                        } else {
+                                            selectedUrls + seasonUrls
+                                        }
+                                    )
                                 },
                                 label = { Text("Season $sNum (${sEps.size})", fontSize = Type.caption.fontSize) },
                                 colors = FilterChipDefaults.filterChipColors(
@@ -318,7 +322,7 @@ fun EpisodeDrawer(
                     if (selectedEpisodes.isNotEmpty()) {
                         FilterChip(
                             selected = false,
-                            onClick = { selectedUrls = emptySet() },
+                            onClick = { updateSelected(emptySet()) },
                             leadingIcon = {
                                 Icon(
                                     imageVector = Icons.Rounded.Close,
@@ -474,7 +478,7 @@ fun EpisodeDrawer(
                             isSelected = isSelected,
                             onToggle = {
                                 hapticView.tick()
-                                selectedUrls = if (isSelected) selectedUrls - ep.url else selectedUrls + ep.url
+                                updateSelected(if (isSelected) selectedUrls - ep.url else selectedUrls + ep.url)
                             },
                             onDownloadSingle = {
                                 if (!enqueued && !isEnqueuing) {
@@ -587,6 +591,7 @@ fun EpisodeDrawer(
                     },
                     confirmButton = {
                         TextButton(
+                            enabled = !isEnqueuing && !enqueued,
                             onClick = {
                                 showBatchConfirmation = false
                                 enqueueSelected()

@@ -17,6 +17,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -34,14 +35,19 @@ import kotlinx.coroutines.flow.asStateFlow
  * Bridge between the engine's suspend picker callback (running on IO) and the
  * Compose UI. The engine calls [pick] on the IO thread; the main-thread dialog
  * observes [requestState] and completes the deferred with the user's choice.
- * Null selection (dismiss) means "download the whole torrent".
+ * Tapping outside / dismiss cancels the request so unshielded files are never downloaded.
  * The active request is held in a StateFlow so configuration changes (e.g. screen
  * rotation) do not drop the dialog.
  */
 object TorrentFilePicker {
+    sealed interface TorrentPickResult {
+        data class Selected(val indices: List<Int>) : TorrentPickResult
+        data object Cancelled : TorrentPickResult
+    }
+
     data class Request(
         val files: List<TorrentSecurityShield.TorrentFileEntry>,
-        val deferred: CompletableDeferred<List<Int>?>
+        val deferred: CompletableDeferred<TorrentPickResult>
     )
 
     private val _requestState = MutableStateFlow<Request?>(null)
@@ -51,38 +57,32 @@ object TorrentFilePicker {
         get() = _requestState.value
 
     /** How long the engine waits for the UI to show the picker before falling
-     *  back to downloading the whole torrent. Guards against the dialog never
-     *  being composed (e.g. a magnet enqueued from QuickShareActivity, or the
-     *  user leaving HomeScreen while a queued magnet starts). */
+     *  back to cancelling. Guards against the dialog never
+     *  being composed. */
     private const val PICK_TIMEOUT_MS = 60_000L
 
-    suspend fun pick(files: List<TorrentSecurityShield.TorrentFileEntry>): List<Int>? {
-        val deferred = CompletableDeferred<List<Int>?>()
+    suspend fun pick(files: List<TorrentSecurityShield.TorrentFileEntry>): TorrentPickResult {
+        val deferred = CompletableDeferred<TorrentPickResult>()
 
         // The bridge has a single slot: a second request arriving before the
         // host resolves the first would orphan the first deferred forever.
-        // Resolve it to "whole torrent" first so the engine never hangs.
         val previous = _requestState.value
         if (previous != null && !previous.deferred.isCompleted) {
-            previous.deferred.complete(null)
+            previous.deferred.complete(TorrentPickResult.Cancelled)
         }
 
         val req = Request(files, deferred)
         _requestState.value = req
 
-        // If no dialog appears within the timeout (host not composed, task
-        // paused while the dialog is open), fall back to whole-torrent instead
-        // of suspending the engine's IO thread forever.
         val result = try {
             kotlinx.coroutines.withTimeoutOrNull(PICK_TIMEOUT_MS) { deferred.await() }
+                ?: TorrentPickResult.Cancelled
         } catch (e: kotlinx.coroutines.CancellationException) {
-            // Caller (task job) cancelled: never leave the deferred pending —
-            // a later host would show a dialog that can never resolve.
-            deferred.complete(null)
+            deferred.complete(TorrentPickResult.Cancelled)
             throw e
         } finally {
             if (!deferred.isCompleted) {
-                deferred.complete(null)
+                deferred.complete(TorrentPickResult.Cancelled)
             }
             if (_requestState.value === req) {
                 _requestState.value = null
@@ -92,7 +92,7 @@ object TorrentFilePicker {
     }
 
     /** Completes the active request and clears the request state so the dialog dismisses. */
-    fun resolve(request: Request, selection: List<Int>?) {
+    fun resolve(request: Request, selection: TorrentPickResult) {
         request.deferred.complete(selection)
         if (_requestState.value === request) {
             _requestState.value = null
@@ -113,14 +113,15 @@ object TorrentFilePicker {
 @Composable
 fun TorrentFilePickerDialog(
     request: TorrentFilePicker.Request,
-    onDismiss: (List<Int>?) -> Unit
+    onDismiss: (TorrentFilePicker.TorrentPickResult) -> Unit
 ) {
     val safeFiles = request.files.filter { it.isSafe }
     val blockedFiles = request.files.filter { !it.isSafe }
-    var selected by remember { mutableStateOf(safeFiles.map { it.index }.toSet()) }
+    var selectedList by rememberSaveable { mutableStateOf(safeFiles.map { it.index }) }
+    val selected = selectedList.toSet()
 
     AlertDialog(
-        onDismissRequest = { onDismiss(null) },
+        onDismissRequest = { onDismiss(TorrentFilePicker.TorrentPickResult.Cancelled) },
         shape = RoundedCornerShape(Radius.lg),
         containerColor = SurfaceCard,
         titleContentColor = TextPrimary,
@@ -141,14 +142,14 @@ fun TorrentFilePickerDialog(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clickable {
-                                    selected = if (checked) selected - file.index
-                                    else selected + file.index
+                                    selectedList = if (checked) selectedList - file.index
+                                    else selectedList + file.index
                                 }
                                 .padding(vertical = Spacing.xs),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Checkbox(checked = checked, onCheckedChange = {
-                                selected = if (it) selected + file.index else selected - file.index
+                                selectedList = if (it) selectedList + file.index else selectedList - file.index
                             })
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(file.displayName, maxLines = 1, overflow = TextOverflow.Ellipsis, color = TextPrimary, fontSize = Type.body.fontSize)
@@ -166,10 +167,6 @@ fun TorrentFilePickerDialog(
                                 modifier = Modifier.padding(vertical = Spacing.xs),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                // Disabled on purpose: the shield refused this
-                                // file. A full-opacity enabled-looking checkbox
-                                // says "tap me, nothing will happen" — the M3
-                                // disabled signal is the alpha (design pass).
                                 Checkbox(
                                     checked = false,
                                     onCheckedChange = null,
@@ -204,23 +201,14 @@ fun TorrentFilePickerDialog(
         },
         confirmButton = {
             if (safeFiles.isEmpty()) {
-                // Nothing selectable: the only action is acknowledging the
-                // warning. The engine refuses the whole-torrent fallback when
-                // every file was flagged, so offering it here would lie.
-                TextButton(onClick = { onDismiss(null) }) {
+                TextButton(onClick = { onDismiss(TorrentFilePicker.TorrentPickResult.Cancelled) }) {
                     Text("Close", color = AccentPrimary)
                 }
             } else {
                 TextButton(
-                    // "Download (0)" used to submit an EMPTY selection,
-                    // which the bridge reads as null = "the whole torrent"
-                    // — including shield-blocked files. Un-checking
-                    // everything must not be the biggest download of the
-                    // list; the explicit "Whole torrent" opt-in beside this
-                    // button is the only null path.
                     enabled = selected.isNotEmpty(),
                     onClick = {
-                        onDismiss(selected.toList())
+                        onDismiss(TorrentFilePicker.TorrentPickResult.Selected(selected.toList()))
                     }
                 ) {
                     Text("Download (${selected.size})", color = AccentPrimary)
@@ -228,7 +216,13 @@ fun TorrentFilePickerDialog(
             }
         },
         dismissButton = if (safeFiles.isNotEmpty()) {
-            { TextButton(onClick = { onDismiss(null) }) { Text("Whole torrent", color = AccentPrimary) } }
+            {
+                TextButton(onClick = {
+                    onDismiss(TorrentFilePicker.TorrentPickResult.Selected(safeFiles.map { it.index }))
+                }) {
+                    Text("All Safe Files", color = AccentPrimary)
+                }
+            }
         } else null
     )
 }
