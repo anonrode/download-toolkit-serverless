@@ -337,7 +337,7 @@ object YoutubeDlDownloader {
             } else if (isM3u8) {
                 // HLS m3u8 stream variant selection with multi-fragment parallel downloading
                 val stem = File(outDir, preferredFilename.substringBeforeLast('.')).absolutePath
-                val ext = File(preferredFilename).extension.ifBlank { "mp4" }
+                val safeExt = File(preferredFilename).extension.ifBlank { "mp4" }
                 if (audioOnly) {
                     addOption("-o", "$stem.%(ext)s")
                     addOption("-f", "bestaudio/best")
