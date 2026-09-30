@@ -126,10 +126,10 @@ object TurboDownloader {
     fun socketsFor(url: String, configured: Int): Int {
         val low = url.lowercase()
         if (low.contains("kissorgrab.") || low.contains("dl.plutomovies.")) {
-            return 1
+            return minOf(4, configured.coerceAtLeast(2))
         }
         if (low.contains("wetafiles.") || low.contains("downloadwella.") || low.contains("loadedfiles.")) {
-            return minOf(4, configured.coerceAtLeast(1))
+            return minOf(4, configured.coerceAtLeast(2))
         }
         return configured.coerceIn(1, 16)
     }
