@@ -278,9 +278,10 @@ object YoutubeDlDownloader {
                     addOption("-f", "bestaudio/best")
                     addOption("--extract-audio")
                     addOption("--audio-format", "mp3")
+                    addOption("--audio-quality", "0")
                 } else {
-                    addOption("-f", "bestvideo[height<=$height][ext=mp4]+bestaudio[ext=m4a]/best[height<=$height][ext=mp4]/best[height<=$height]/best")
-                    addOption("-S", "height~$height,+size,+br")
+                    addOption("-f", "bestvideo[height<=$height]+bestaudio/best[height<=$height]/best")
+                    addOption("-S", "height~$height,+size,+br,abr")
                     addOption("--merge-output-format", "mp4")
                     if (downloadSubs) {
                         // Seal parity (2026-09-14): manual AND auto-generated
@@ -555,6 +556,12 @@ object YoutubeDlDownloader {
                 com.anonrode.downloader.util.DebugLog.backend("task=$taskId yt-dlp attempt $attempts produced ${produced.name} ($sizeLabel)")
             }
             if (produced == null && attempts < ytdlpMaxAttempts) {
+                if (InstagramPhotoMuxer.shortcodeFromUrl(sourceUrl) != null &&
+                    errors.contains("No video formats found")
+                ) {
+                    com.anonrode.downloader.util.DebugLog.backend("task=$taskId yt-dlp: Instagram photo post detected (no video formats) — skipping retry to run photo muxer immediately")
+                    break
+                }
                 cancellableRetryWait(2_000L * attempts)
             }
         }
