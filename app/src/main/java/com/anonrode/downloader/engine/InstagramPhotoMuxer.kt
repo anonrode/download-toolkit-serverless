@@ -46,7 +46,7 @@ object InstagramPhotoMuxer {
     internal const val GRAPHQL_URL = "https://www.instagram.com/api/graphql"
     internal const val DOC_ID = "27130156389949648"
     internal const val FRIENDLY = "PolarisLoggedOutDesktopWWWPostRootContentQuery"
-    private const val POST_BASE = "https://www.instagram.com/"
+    private const val POST_BASE = "https://www.instagram.com"
     // Hard cap for one ffmpeg encode of a still image + ≤32MB audio. A 90s
     // budget is generous on phone hardware for this workload; past it the
     // child is wedged and must not outlive the task.
@@ -404,6 +404,11 @@ object InstagramPhotoMuxer {
         isCancelled: () -> Boolean = { false }
     ): File? {
         val shortcode = shortcodeFromUrl(sourceUrl) ?: return null
+        val cookieFile = File(context.filesDir, "cookies.txt").takeIf { it.exists() && it.length() > 0 }
+            ?: File(context.getExternalFilesDir(null), "cookies.txt").takeIf { it.exists() && it.length() > 0 }
+        if (cookieFile != null) {
+            com.anonrode.downloader.data.net.HttpClient.loadCookiesFromFile(cookieFile)
+        }
         val parts = try {
             probeMedia(shortcode, isCancelled) ?: return null
         } catch (ce: CancellationException) {

@@ -71,6 +71,42 @@ object HttpClient {
     }
 
     /**
+     * Import Netscape-format cookies.txt file into the session cookie store.
+     */
+    fun loadCookiesFromFile(file: java.io.File) {
+        if (!file.exists() || !file.canRead()) return
+        try {
+            file.forEachLine { line ->
+                val trimmed = line.trim()
+                if (trimmed.isEmpty() || trimmed.startsWith("#")) return@forEachLine
+                val parts = trimmed.split("\t")
+                if (parts.size >= 7) {
+                    val domain = parts[0]
+                    val path = parts[2]
+                    val secure = parts[3].equals("TRUE", ignoreCase = true)
+                    val expiresAt = parts[4].toLongOrNull()?.let { it * 1000L } ?: (System.currentTimeMillis() + 86400000L)
+                    val name = parts[5]
+                    val value = parts[6]
+                    try {
+                        val cookie = Cookie.Builder()
+                            .name(name)
+                            .value(value)
+                            .domain(domain.removePrefix("."))
+                            .path(path)
+                            .expiresAt(expiresAt)
+                            .apply { if (secure) secure() }
+                            .build()
+                        synchronized(cookies) {
+                            cookies.removeAll { it.name == cookie.name && it.domain == cookie.domain && it.path == cookie.path }
+                            cookies.add(cookie)
+                        }
+                    } catch (_: Exception) {}
+                }
+            }
+        } catch (_: Exception) {}
+    }
+
+    /**
      * Value of a stored session cookie by name (most-recent match wins), for
      * callers that must echo it in a header (Instagram's logged-out GraphQL
      * rejects a POST whose X-CSRFToken does not equal the csrftoken cookie the

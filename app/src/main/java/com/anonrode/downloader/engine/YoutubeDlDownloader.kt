@@ -405,6 +405,14 @@ object YoutubeDlDownloader {
             // -o/-f and silently break the output path (monolith parity).
             addOption("--ignore-config")
 
+            // Cookies support: if user has provided cookies.txt in app storage,
+            // forward to yt-dlp so authenticated platforms (Instagram, etc.) succeed.
+            val cookieFile = File(context.filesDir, "cookies.txt").takeIf { it.exists() && it.length() > 0 }
+                ?: File(context.getExternalFilesDir(null), "cookies.txt").takeIf { it.exists() && it.length() > 0 }
+            if (cookieFile != null) {
+                addOption("--cookies", cookieFile.absolutePath)
+            }
+
             // --progress-template: emit one templated progress line per tick,
             // parsed by ProgressParser's YTDL_TEMPLATE_REGEX.  Two templates
             // are emitted (yt-dlp allows multiple) — the first mirrors
@@ -599,10 +607,12 @@ object YoutubeDlDownloader {
                 com.anonrode.downloader.util.DebugLog.backend("task=$taskId yt-dlp attempt $attempts produced ${produced.name} ($sizeLabel)")
             }
             if (produced == null && attempts < ytdlpMaxAttempts) {
-                if (InstagramPhotoMuxer.shortcodeFromUrl(sourceUrl) != null &&
-                    errors.contains("No video formats found")
-                ) {
-                    com.anonrode.downloader.util.DebugLog.backend("task=$taskId yt-dlp: Instagram photo post detected (no video formats) — skipping retry to run photo muxer immediately")
+                val isInstagramPhotoError = InstagramPhotoMuxer.shortcodeFromUrl(sourceUrl) != null && (
+                    errors.contains("No video formats found", ignoreCase = true) ||
+                    errors.contains("There is no video in this post", ignoreCase = true)
+                )
+                if (isInstagramPhotoError) {
+                    com.anonrode.downloader.util.DebugLog.backend("task=$taskId yt-dlp: Instagram photo post detected (no video in post) — skipping retry to run photo muxer immediately")
                     break
                 }
                 cancellableRetryWait(2_000L * attempts)
@@ -632,8 +642,17 @@ object YoutubeDlDownloader {
             )
         }
         if (produced == null && errors.isNotBlank()) {
-            com.anonrode.downloader.util.DebugLog.error("task=$taskId yt-dlp failed after $attempts attempt(s): ${errors.toString().take(300)}")
-            throw Exception("yt-dlp failed after $attempts attempt(s): ${errors.toString().trim()}")
+            val isIgPhoto = InstagramPhotoMuxer.shortcodeFromUrl(sourceUrl) != null && (
+                errors.contains("No video formats found", ignoreCase = true) ||
+                errors.contains("There is no video in this post", ignoreCase = true)
+            )
+            val friendlyError = if (isIgPhoto) {
+                "This Instagram post contains only still photos (no video). Instagram requires an authenticated session to download still photo posts. Reels and video posts download directly."
+            } else {
+                "yt-dlp failed after $attempts attempt(s): ${errors.toString().trim()}"
+            }
+            com.anonrode.downloader.util.DebugLog.error("task=$taskId $friendlyError")
+            throw Exception(friendlyError)
         }
         // Move the artifact out of the private workdir into the user-visible
         // target folder. renameTo within the same volume is free; copy+delete
