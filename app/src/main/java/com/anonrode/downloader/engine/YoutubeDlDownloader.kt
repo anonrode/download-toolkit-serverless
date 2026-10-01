@@ -297,6 +297,9 @@ object YoutubeDlDownloader {
                     addOption("--extract-audio")
                     addOption("--audio-format", "mp3")
                     addOption("--audio-quality", "0")
+                    addOption("--embed-thumbnail")
+                    addOption("--embed-metadata")
+                    addOption("--convert-thumbnails", "jpg")
                 } else {
                     addOption("-f", "bestvideo[height<=$height]+bestaudio/best[height<=$height]/best")
                     addOption("-S", "height~$height,+size,+br,abr")
@@ -347,6 +350,9 @@ object YoutubeDlDownloader {
                     addOption("--extract-audio")
                     addOption("--audio-format", "mp3")
                     addOption("--audio-quality", "0")
+                    addOption("--embed-thumbnail")
+                    addOption("--embed-metadata")
+                    addOption("--convert-thumbnails", "jpg")
                 } else {
                     addOption("-o", "$stem.$safeExt")
                     addOption("-f", "bestvideo[height<=$height]+bestaudio/best[height<=$height]/best")
@@ -370,8 +376,17 @@ object YoutubeDlDownloader {
                 // Direct CDN HTTP fallback via yt-dlp native chunked engine
                 val stem = File(outDir, preferredFilename.substringBeforeLast('.')).absolutePath
                 val ext = File(preferredFilename).extension.ifBlank { "mp4" }
-                val safeExt = if (ext.equals("matroska", ignoreCase = true)) "mkv" else ext
+                val safeExt = if (audioOnly) "mp3" else if (ext.equals("matroska", ignoreCase = true)) "mkv" else ext
                 addOption("-o", "$stem.$safeExt")
+                if (audioOnly) {
+                    addOption("-f", "bestaudio/best")
+                    addOption("--extract-audio")
+                    addOption("--audio-format", "mp3")
+                    addOption("--audio-quality", "0")
+                    addOption("--embed-thumbnail")
+                    addOption("--embed-metadata")
+                    addOption("--convert-thumbnails", "jpg")
+                }
                 val conns = parallelSockets.coerceIn(1, 16)
                 addOption("-N", "$conns")
                 addOption("--concurrent-fragments", "$conns")
