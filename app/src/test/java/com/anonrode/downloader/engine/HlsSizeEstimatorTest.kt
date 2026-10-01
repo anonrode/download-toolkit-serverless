@@ -152,4 +152,28 @@ class HlsSizeEstimatorTest {
         assertEquals(perSegment * 2L, doubleSegments)
         assertTrue(perSegment > 0L)
     }
+
+    @Test
+    fun parseByteRangeTotalCalculatesSumCorrectly() {
+        val playlistWithByteRange = """
+            #EXTM3U
+            #EXT-X-VERSION:5
+            #EXTINF:8.12,
+            #EXT-X-BYTERANGE:500000@0
+            0.html
+            #EXTINF:5.0,
+            #EXT-X-BYTERANGE:200000@500000
+            0.html
+            #EXTINF:4.8,
+            #EXT-X-BYTERANGE:300000
+            0.html
+            #EXT-X-ENDLIST
+        """.trimIndent()
+        assertEquals(1000000L, HlsSizeEstimator.parseByteRangeTotal(playlistWithByteRange))
+    }
+
+    @Test
+    fun parseByteRangeTotalReturnsNullWhenNoByteRange() {
+        assertEquals(null, HlsSizeEstimator.parseByteRangeTotal(mediaPlaylist))
+    }
 }

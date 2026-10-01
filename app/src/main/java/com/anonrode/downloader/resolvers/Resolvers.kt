@@ -976,7 +976,11 @@ object VidsrcResolver : BaseResolver {
             if (streamUrl.contains("token=")) return streamUrl
             val om = ORIGIN_PATTERN.matcher(streamUrl)
             val origin = if (om.find()) om.group() else return null
-            val token = HttpClient.getText("$origin/generate.php")?.trim().orEmpty()
+            val token = HttpClient.getText(
+                "$origin/generate.php",
+                referer = "$origin/",
+                headers = mapOf("Origin" to origin)
+            )?.trim().orEmpty()
             // Empty means generate.php refused us (rate-limit/window) — the
             // tokenless master is a guaranteed CDN 401, so fail this candidate
             // outright and let another mirror win instead of handing the player
@@ -1304,18 +1308,27 @@ object DramaGatewayResolver : BaseResolver {
             val m = Pattern.compile("""(?:window\.location(?:\.href)?|location\.href)\s*=\s*["']([^"']+)["']""").matcher(html)
             if (m.find()) {
                 val dest = m.group(1)
-                if (!dest.isNullOrBlank()) return dest
+                if (!dest.isNullOrBlank()) {
+                    val clean = if (dest.contains("?preview")) dest.substringBefore("?preview") else dest
+                    return clean
+                }
             }
 
             val doc = Jsoup.parse(html, url)
             val btn = doc.selectFirst("a.download-btn, a[href*='waffi'], a[href*='download'], a[href*='stream']")
             if (btn != null) {
                 val href = btn.attr("abs:href")
-                if (href.isNotBlank() && href != url) return href
+                if (href.isNotBlank() && href != url) {
+                    val clean = if (href.contains("?preview")) href.substringBefore("?preview") else href
+                    return clean
+                }
             }
             val lockerAnchor = doc.select("a[href]").map { it.attr("abs:href") }
                 .firstOrNull { LinkResolver.isKnownLockerHost(it) && it != url }
-            if (!lockerAnchor.isNullOrBlank()) return lockerAnchor
+            if (!lockerAnchor.isNullOrBlank()) {
+                val clean = if (lockerAnchor.contains("?preview")) lockerAnchor.substringBefore("?preview") else lockerAnchor
+                return clean
+            }
 
             lastFailure = "DramaGateway: no window.location or download link found in HTML (len=${html.length})"
         } catch (cancelled: CancellationException) {
@@ -1851,25 +1864,15 @@ object LoadedfilesResolver : BaseResolver {
             val workingHost = HttpClient.parsedHost(currUrl!!)
             val cookieMap = mutableMapOf<String, String>()
             var ptHops = 0
+            var lastFetchedUrl: String? = null
             for (step in 1..8) {
                 currentCoroutineContext().ensureActive()
-                // No-progress guard: a step that ends on the SAME url (200 body
-                // with no downloadUrl and no media) would otherwise be re-fetched
-                // up to 8 times -- the server is rotating tokens in the page, so
-                // re-reading the identical URL cannot advance the chain. End the
-                // walk the first time nothing moved.
                 val pageBeforeStep = currUrl
-                // Wait-page chain: the second ?pt= hop only redirects to the CDN
-                // when sent WITHOUT a Referer -- any Referer makes the server
-                // rotate tokens forever (monolith parity: resolvers.py
-                // LoadedfilesResolver). Plain redirect chains keep the old
-                // self-referer behavior; the first wait page gets the host root.
                 val referer = when {
-                    ptHops >= 1 && currUrl!!.contains("?pt=") -> null
-                    currUrl!!.contains("?pt=") ->
-                        workingHost?.let { "https://$it/" } ?: "https://my9jarocks.bz/"
+                    lastFetchedUrl != null -> lastFetchedUrl
                     step == 1 -> "https://my9jarocks.bz/"
-                    else -> currUrl
+                    workingHost != null -> "https://$workingHost/"
+                    else -> "https://loadedfiles.net/"
                 }
                 val cookieHeader = if (cookieMap.isNotEmpty()) {
                     cookieMap.entries.joinToString("; ") { "${it.key}=${it.value}" }
@@ -1885,6 +1888,7 @@ object LoadedfilesResolver : BaseResolver {
 
                 var waitSecs = 0
                 HttpClient.executeCancellable(noRedirectClient, req) use@{ res ->
+                    lastFetchedUrl = currUrl
                     val setCookies = res.headers("Set-Cookie")
                     for (sc in setCookies) {
                         val cookiePart = sc.substringBefore(";").trim()
@@ -1962,6 +1966,18 @@ object LoadedfilesResolver : BaseResolver {
                             }
                         }
                         if (next == null) {
+                            val mLink = Pattern.compile(
+                                """link\s*:\s*['"]([^'"]+)['"]""",
+                                Pattern.CASE_INSENSITIVE
+                            ).matcher(body)
+                            if (mLink.find()) {
+                                val raw = mLink.group(1)
+                                if (!raw.isNullOrBlank()) {
+                                    next = unescapeJsUrl(raw)
+                                }
+                            }
+                        }
+                        if (next == null) {
                             val cfg = DynamicRulesManager.getResolverConfig("loadedfiles")
                             val customRegex = cfg?.optString("tokenRegex")
                                 ?.takeIf { it.isNotBlank() && it.length <= 600 }
@@ -1981,11 +1997,14 @@ object LoadedfilesResolver : BaseResolver {
                         if (next == null) {
                             try {
                                 val doc = Jsoup.parse(body, currUrl!!)
-                                val btn = doc.selectFirst("a[href*='/d/'], a[href*='/token/download/'], a[href*='?pt='], a.download-btn, a.btn-download")
+                                val btn = doc.selectFirst("a[href*='/d/'], a[href*='/token/download/'], a[href*='?pt='], a.download-btn, a.btn-download, a.nv-btn--primary")
                                 if (btn != null) {
                                     val href = btn.attr("abs:href")
                                     if (href.isNotBlank() && href != currUrl) {
                                         next = href
+                                        if (href.contains("?pt=")) {
+                                            waitSecs = 5
+                                        }
                                     }
                                 }
                             } catch (_: Exception) {}
@@ -1997,8 +2016,8 @@ object LoadedfilesResolver : BaseResolver {
                     }
                 }
                 if (waitSecs > 0) {
-                    android.util.Log.d("AnonDownload", "Loadedfiles dlTimer: waiting ${waitSecs + 1}s")
-                    delay((waitSecs.coerceIn(1, 15) + 1) * 1000L)
+                    android.util.Log.d("AnonDownload", "Loadedfiles waiting ${waitSecs}s for cooldown/timer")
+                    delay(waitSecs * 1000L)
                 }
                 if (currUrl == pageBeforeStep) {
                     onFailure(ResolverOutcome.Failure("Loadedfiles token chain stalled on step $step ($currUrl) — neither dlTimer nor downloadUrl found"))
@@ -2603,7 +2622,9 @@ object DynamicLockerResolver : BaseResolver {
     override fun canResolve(url: String): Boolean = DynamicLockerEngine.canResolve(url)
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
-        return (resolveOutcome(url, quality, depth, emptySet()) as? ResolverOutcome.Success)?.url
+        val host = HttpClient.parsedHost(url)?.removePrefix("www.")?.lowercase()
+        val visited = if (host != null) setOf(host) else emptySet()
+        return (resolveOutcome(url, quality, depth, visited) as? ResolverOutcome.Success)?.url
     }
 
     internal suspend fun resolveOutcome(
@@ -2655,6 +2676,8 @@ private fun extractMp4FromHtml(html: String): String? {
 
 fun isDirectMediaUrl(url: String): Boolean {
     if (url.isBlank()) return false
+    val query = url.substringAfter('?', "").lowercase()
+    if (query.contains("preview")) return false
     val clean = url.substringBefore('?').substringBefore('#').lowercase()
     val exts = com.anonrode.downloader.data.rules.DynamicRulesManager.getDirectMediaExtensions()
     if (exts.any { clean.endsWith(it) }) return true

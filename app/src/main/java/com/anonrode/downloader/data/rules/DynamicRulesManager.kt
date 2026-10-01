@@ -84,6 +84,8 @@ object DynamicRulesManager {
         HostPolicyRule("vidb.", "exact:https://vidb.top/"),
         HostPolicyRule("jisooido", "exact:https://vidb.top/"),
         HostPolicyRule("exoidol", "exact:https://vidb.top/"),
+        HostPolicyRule("premilkyway", "exact:https://vidb.top/"),
+        HostPolicyRule("waffi.cloud", "none"),
         HostPolicyRule("tamilembed", "exact:https://anitaku.com.ro/"),
         HostPolicyRule("animesama", "exact:https://anitaku.com.ro/"),
         HostPolicyRule("kickassanime", "exact:https://anitaku.com.ro/"),

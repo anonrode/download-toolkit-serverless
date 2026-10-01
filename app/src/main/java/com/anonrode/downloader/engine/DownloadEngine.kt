@@ -1288,6 +1288,15 @@ class DownloadEngine(
             if (sidecar.exists()) {
                 return TurboState(sidecar).writtenBytes() ?: 0L
             }
+            // Aria2 control file: aria2c pre-allocates the destination file to full
+            // size (sparse or falloc) before bytes land. When a .aria2 control file
+            // exists, parse the bitfield to get exact committed bytes instead of
+            // reading the pre-allocated destFile.length().
+            val aria2File = File(dir, "$base.aria2")
+            if (aria2File.exists()) {
+                val ctrl = Aria2Control.parse(aria2File)
+                return ctrl?.pieces?.sumOf { it.current - it.start } ?: 0L
+            }
             // Non-turbo transfers: use strict single-file priority. Summing multiple
             // files starting with base doubled bytes (e.g. .part + destFile -> 148MB
             // on 78MB) and caused the progress bar to stick at 100% early.
@@ -1941,10 +1950,13 @@ class DownloadEngine(
         val job = engineScope.launch {
             try {
                 if (!isActive) return@launch
-                var streamUrl = task.directUrl
+                var streamUrl = if (task.directUrl.contains("?preview", ignoreCase = true)) task.directUrl.substringBefore("?preview") else task.directUrl
                 val isMagnet = streamUrl.startsWith("magnet:", ignoreCase = true)
                 val isSocial = task.showTitle.startsWith("Social/", ignoreCase = true) || task.backend.contains("yt-dlp")
                 var permUrl = task.selectedMirrorUrl.ifBlank { task.sourceUrl }.ifBlank { streamUrl }
+                if (permUrl.contains("?preview", ignoreCase = true)) {
+                    permUrl = permUrl.substringBefore("?preview")
+                }
 
                 // A manual retry tap grants ONE bypass of the HostHealth gate
                 // for this start's FIRST resolution attempt (consume-on-use;
@@ -2003,7 +2015,7 @@ class DownloadEngine(
                         parkedAtStamp.remove(task.id)
                         failoverSites.remove(task.id)
                         requeueNotBefore.remove(task.id)
-                        streamUrl = resolved
+                        streamUrl = if (resolved.contains("?preview", ignoreCase = true)) resolved.substringBefore("?preview") else resolved
                     } else if (isKnownLockerHost(streamUrl) || !isDirectMediaUrl(streamUrl)) {
                         if (task.site.isNotBlank()) {
                             // A locker page whose cracking failed. yt-dlp cannot

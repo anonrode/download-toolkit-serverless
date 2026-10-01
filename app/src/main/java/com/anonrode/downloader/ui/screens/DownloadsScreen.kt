@@ -753,11 +753,9 @@ fun DownloadCard(
             val isDownloadingNow = task.status == TaskStatus.DOWNLOADING
 
             val maxInFlightProgress = if (isCompleted) 1f else 0.99f
-            val targetProgress = when {
-                totalKnown -> (task.downloadedBytes.toFloat() / task.totalBytes.toFloat()).coerceIn(0f, maxInFlightProgress)
-                task.downloadedBytes in 1..100 -> (task.downloadedBytes.toFloat() / 100f).coerceIn(0f, maxInFlightProgress)
-                else -> 0f
-            }
+            val targetProgress = if (totalKnown) {
+                (task.downloadedBytes.toFloat() / task.totalBytes.toFloat()).coerceIn(0f, maxInFlightProgress)
+            } else 0f
             val animatedProgress by animateFloatAsState(
                 targetValue = targetProgress,
                 animationSpec = tween(durationMillis = 300),

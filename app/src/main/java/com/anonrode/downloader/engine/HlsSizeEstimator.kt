@@ -66,6 +66,26 @@ object HlsSizeEstimator {
      * [referer] the same referer the real download uses. Returns the
      * predicted final file size in bytes, or null when no estimate is
      * possible. Never throws (except coroutine cancellation).
+    /**
+     * Parse total byte length from #EXT-X-BYTERANGE lines when present.
+     * When segments are byte ranges of a combined file, summing the lengths
+     * gives the exact total file size without making external network probes.
+     */
+    fun parseByteRangeTotal(playlistText: String): Long? {
+        if (!playlistText.contains("#EXT-X-BYTERANGE")) return null
+        val matches = Regex("""#EXT-X-BYTERANGE:\s*(\d+)""").findAll(playlistText).toList()
+        if (matches.isEmpty()) return null
+        val sum = matches.sumOf { it.groupValues[1].toLongOrNull() ?: 0L }
+        return if (sum > 0L) sum else null
+    }
+
+    /**
+     * Full size-estimation pipeline. [masterText] is the already-fetched
+     * master playlist, [masterUrl] its URL (base for relative audio URIs),
+     * [variantUrl] the media playlist the real download will consume, and
+     * [referer] the same referer the real download uses. Returns the
+     * predicted final file size in bytes, or null when no estimate is
+     * possible. Never throws (except coroutine cancellation).
      */
     suspend fun estimate(masterText: String, masterUrl: String, variantUrl: String, referer: String?): Long? {
         try {
@@ -77,6 +97,16 @@ object HlsSizeEstimator {
             if (segmentCount <= 0) return null
             val segments = segmentUrls(variantText, variantUrl)
             if (segments.isEmpty()) return null
+            val fmp4 = isFmp4(segments)
+
+            // Byte-range optimization: when playlist carries #EXT-X-BYTERANGE,
+            // calculate exact total directly from range lengths without probing.
+            val byteRangeTotal = parseByteRangeTotal(variantText)
+            if (byteRangeTotal != null) {
+                val factor = if (fmp4) 0.99 else 0.93
+                val total = (byteRangeTotal * factor).toLong()
+                return if (total in 1L..15_000_000_000L) total else null
+            }
 
             // Probe k=4 segments at spread-out positions, concurrently.
             val indices = PROBE_POSITIONS
@@ -89,10 +119,12 @@ object HlsSizeEstimator {
                         .map { it.await() }
                 }
             } ?: return null
-            if (samples.any { it == null }) return null
-            val fmp4 = isFmp4(segments)
+            // Reject null or suspiciously huge samples (>= 25MB). A single HLS segment is
+            // typically 1-5MB. If a probe returns >= 25MB, the CDN returned the whole file's
+            // Content-Range rather than a segment slice.
+            if (samples.any { it == null || it >= 25 * 1024 * 1024L }) return null
             var total = estimateFromSamples(samples.filterNotNull(), segmentCount, fmp4)
-            if (total <= 0L) return null
+            if (total <= 0L || total > 15_000_000_000L) return null // Cap estimate at 15GB
 
             // Optional audio rendition: probe ONE audio segment and add its
             // projected size (sample * audio segment count) to the total.
@@ -111,10 +143,11 @@ object HlsSizeEstimator {
                         audioSegments[(audioCount / 2).coerceIn(0, audioSegments.size - 1)],
                         referer
                     ) ?: return null
+                    if (audioSample >= 15 * 1024 * 1024L) return null
                     total += estimateFromSamples(listOf(audioSample), audioCount, fmp4)
                 }
             }
-            return total
+            return if (total in 1L..15_000_000_000L) total else null
         } catch (e: CancellationException) {
             throw e
         } catch (_: Exception) {
