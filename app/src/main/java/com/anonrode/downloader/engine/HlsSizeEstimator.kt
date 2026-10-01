@@ -58,14 +58,6 @@ object HlsSizeEstimator {
         val factor = if (isFmp4) 0.99 else 0.93
         return (mean * segmentCount * factor).toLong()
     }
-
-    /**
-     * Full size-estimation pipeline. [masterText] is the already-fetched
-     * master playlist, [masterUrl] its URL (base for relative audio URIs),
-     * [variantUrl] the media playlist the real download will consume, and
-     * [referer] the same referer the real download uses. Returns the
-     * predicted final file size in bytes, or null when no estimate is
-     * possible. Never throws (except coroutine cancellation).
     /**
      * Parse total byte length from #EXT-X-BYTERANGE lines when present.
      * When segments are byte ranges of a combined file, summing the lengths
