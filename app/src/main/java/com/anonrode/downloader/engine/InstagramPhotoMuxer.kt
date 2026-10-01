@@ -63,7 +63,7 @@ object InstagramPhotoMuxer {
         """<script\b[^>]*\bid="__eqmc"[^>]*>(\{.*?\})</script>""",
         RegexOption.DOT_MATCHES_ALL
     )
-    private val LSD_TOKEN = Regex("""\["LSD",\[\],\{"token":"([^"]+)"""")
+    private val LSD_TOKEN = Regex("\\[\"LSD\",\\[\\],\\{\"token\":\"([^\"]+)\"")
     // RelayPrefetched media blob lives in `<script data-sjs>{...}</script>`.
     private val SJS = Regex(
         """<script\b[^>]+\bdata-sjs>(\{.+?\})</script>""",

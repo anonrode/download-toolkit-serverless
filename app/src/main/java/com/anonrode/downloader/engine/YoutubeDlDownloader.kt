@@ -115,7 +115,8 @@ object YoutubeDlDownloader {
         // generated), convert them to SRT and EMBED them in the merged MP4 —
         // one artifact, subs visible in this player and any external one.
         downloadSubs: Boolean = false,
-        subLang: String = "en"
+        subLang: String = "en",
+        estimatedTotal: Long = 0L
     ): File? {
         if (!targetDir.exists()) targetDir.mkdirs()
 
@@ -193,7 +194,8 @@ object YoutubeDlDownloader {
                 peersOverride = torrentPeers,
                 speedLimitKbs = speedLimitKbs,
                 privacyMode = privacyMode,
-                isActiveCheck = { coroutineContext.isActive }
+                isActiveCheck = { coroutineContext.isActive },
+                estimatedTotal = estimatedTotal
             )
         }
 
@@ -218,7 +220,8 @@ object YoutubeDlDownloader {
                         speedLimitKbs = speedLimitKbs,
                         maxAttempts = ytdlpMaxAttempts,
                         onProgress = onProgress,
-                        isActiveCheck = { coroutineContext.isActive }
+                        isActiveCheck = { coroutineContext.isActive },
+                        estimatedTotal = estimatedTotal
                     )
                     if (file != null) return file
                 } catch (ce: CancellationException) {
@@ -460,11 +463,13 @@ object YoutubeDlDownloader {
 
         suspend fun attemptOnce(): File? {
             var lastDl = 0L
-            var lastTot = 0L
+            var lastTot = estimatedTotal
             var currentStreamDl = 0L
-            var currentStreamTot = 0L
+            var currentStreamTot = estimatedTotal
             var bankedDl = 0L
             var bankedTot = 0L
+            var hlsReconciler: HlsMonotonicProgressReconciler? = null
+            val etaCalc = FlickerFreeEtaCalculator()
 
             try {
                 YoutubeDL.getInstance().execute(request, taskId) { progress, etaInSeconds, line ->
@@ -477,21 +482,36 @@ object YoutubeDlDownloader {
                                 bankedTot += if (currentStreamTot > 0L) currentStreamTot else currentStreamDl
                                 currentStreamDl = 0L
                                 currentStreamTot = 0L
+                                hlsReconciler = null
                             }
                         }
                     }
 
                     // Parse progress against current stream
                     val tick = parseProgressTick(line, progress, currentStreamDl, currentStreamTot)
-                    if (tick.downloadedBytes > 0L || tick.totalBytes > 0L) {
-                        currentStreamDl = tick.downloadedBytes
+                    if (tick.fragmentIndex != null && tick.fragmentCount != null && tick.fragmentCount > 0) {
+                        val fi = tick.fragmentIndex
+                        val fc = tick.fragmentCount
+                        val rec = hlsReconciler ?: HlsMonotonicProgressReconciler(
+                            estimatedTotal = if (estimatedTotal > 0L) estimatedTotal else (tick.totalBytes.takeIf { it > 0L } ?: 0L),
+                            segmentCount = fc
+                        ).also { hlsReconciler = it }
+
+                        val dl = if (tick.downloadedBytes > 0L) tick.downloadedBytes else currentStreamDl
+                        val (recDl, recTot, _) = rec.update(fi, dl)
+                        currentStreamDl = recDl
+                        currentStreamTot = recTot
+                    } else if (tick.downloadedBytes > 0L || tick.totalBytes > 0L) {
+                        if (tick.downloadedBytes > 0L) {
+                            currentStreamDl = maxOf(currentStreamDl, tick.downloadedBytes)
+                        }
                         if (tick.totalBytes > 0L) {
-                            currentStreamTot = tick.totalBytes
+                            currentStreamTot = maxOf(currentStreamTot, tick.totalBytes)
                         }
                     }
 
-                    var effectiveDl = bankedDl + currentStreamDl
-                    var effectiveTot = bankedTot + currentStreamTot
+                    var effectiveDl = maxOf(lastDl, bankedDl + currentStreamDl)
+                    var effectiveTot = maxOf(lastTot, bankedTot + currentStreamTot)
 
                     if (line != null && (line.contains("[Merger]") || line.contains("Merging formats"))) {
                         if (effectiveTot > effectiveDl) {
@@ -507,9 +527,7 @@ object YoutubeDlDownloader {
                         val eta = when {
                             tick.etaSeconds > 0 -> tick.etaSeconds
                             etaInSeconds > 0 -> etaInSeconds
-                            tick.speedBytesPerSec > 0.0 && lastTot > lastDl ->
-                                ((lastTot - lastDl) / tick.speedBytesPerSec).toLong()
-                            else -> 0L
+                            else -> etaCalc.update(lastDl, lastTot, tick.speedBytesPerSec)
                         }
                         onProgress(lastDl, lastTot, tick.speedBytesPerSec, eta)
                     }
@@ -858,7 +876,8 @@ object YoutubeDlDownloader {
         maxAttempts: Int = 3,
         peersOverride: Int = -1,
         speedLimitKbs: Int = 0,
-        privacyMode: Boolean = false
+        privacyMode: Boolean = false,
+        estimatedTotal: Long = 0L
     ): File? {
         val before = targetDir.listFiles()?.map { it.absolutePath }?.toSet() ?: emptySet()
 
@@ -962,8 +981,10 @@ object YoutubeDlDownloader {
 
             activeNativeProcesses[taskId] = process
 
-            // aria2c summary lines put sizes before the percentage: [#d5f4b1 45MiB/65MiB(69%) CN:8 DL:3.8MiB ETA:5s]
-            val progressRegex = Regex("""([\d.]+[KMGT]?i?B)/([\d.]+[KMGT]?i?B)\([\d.]+%\).*?DL:\s*([\d.]+[KMGT]?i?B(?:/s)?)""", RegexOption.IGNORE_CASE)
+            // aria2c stdout stream: parse with parseProgressTick and smooth ETA
+            var lastDl = 0L
+            var lastTot = estimatedTotal
+            val etaCalc = FlickerFreeEtaCalculator()
             val fallbackRegex = Regex("""\((\d+)%\).*?DL:\s*([\d.]+[KMGT]?i?B)""", RegexOption.IGNORE_CASE)
             val reader = process.inputStream.bufferedReader()
             val logBuffer = mutableListOf<String>()
@@ -978,27 +999,16 @@ object YoutubeDlDownloader {
                         logBuffer.removeAt(0)
                         logBuffer.add(line)
                     }
-                    val match = progressRegex.find(line)
-                    if (match != null) {
-                        val dl = parseByteString(match.groupValues[1])
-                        val tot = parseByteString(match.groupValues[2])
-                        val spd = parseSpeedString(match.groupValues[3])
-                        val eta = if (spd > 0 && tot > dl) ((tot - dl) / spd).toLong() else 0L
-                        onProgress(dl, tot, spd, eta)
+                    val tick = parseProgressTick(line, 0f, lastDl, lastTot)
+                    if (tick.downloadedBytes > 0L || tick.totalBytes > 0L || tick.speedBytesPerSec > 0.0) {
+                        lastDl = maxOf(lastDl, tick.downloadedBytes)
+                        lastTot = maxOf(lastTot, tick.totalBytes)
+                        val eta = if (tick.etaSeconds > 0L) tick.etaSeconds else etaCalc.update(lastDl, lastTot, tick.speedBytesPerSec)
+                        onProgress(lastDl, lastTot, tick.speedBytesPerSec, eta)
                     } else {
                         val fb = fallbackRegex.find(line)
                         if (fb != null) {
                             val spd = parseSpeedString(fb.groupValues[2])
-                            // total=0 AND downloaded=0 on purpose: a percentage
-                            // carries no byte information. Passing pct in the
-                            // downloaded slot used to stamp "50 bytes" into the
-                            // task (and flipped RESOLVING->DOWNLOADING off a
-                            // number that never counted anything);
-                            // repository.updateProgress already ignores zeros,
-                            // so this line contributes SPEED only. A synthetic
-                            // total likewise overwrote the real multi-GB total
-                            // and made the "transfer complete" check
-                            // (fileSize >= totalBytes) vacuously true.
                             onProgress(0L, 0L, spd, 0L)
                         }
                     }
@@ -1081,7 +1091,8 @@ object YoutubeDlDownloader {
         speedLimitKbs: Int = 0,
         maxAttempts: Int = 3,
         onProgress: (downloaded: Long, total: Long, speed: Double, eta: Long) -> Unit,
-        isActiveCheck: suspend () -> Boolean = { true }
+        isActiveCheck: suspend () -> Boolean = { true },
+        estimatedTotal: Long = 0L
     ): File? {
         val before = targetDir.listFiles()?.map { it.absolutePath }?.toSet() ?: emptySet()
         val aria2Exec = findAria2Executable(context)
@@ -1167,7 +1178,10 @@ object YoutubeDlDownloader {
 
             activeNativeProcesses[taskId] = process
 
-            val progressRegex = Regex("""([\d.]+[KMGT]?i?B)/([\d.]+[KMGT]?i?B)\([\d.]+%\).*?DL:\s*([\d.]+[KMGT]?i?B(?:/s)?)""", RegexOption.IGNORE_CASE)
+            // aria2c stdout stream: parse with parseProgressTick and smooth ETA
+            var lastDl = 0L
+            var lastTot = estimatedTotal
+            val etaCalc = FlickerFreeEtaCalculator()
             val fallbackRegex = Regex("""\((\d+)%\).*?DL:\s*([\d.]+[KMGT]?i?B)""", RegexOption.IGNORE_CASE)
             val reader = process.inputStream.bufferedReader()
             val logBuffer = mutableListOf<String>()
@@ -1182,13 +1196,12 @@ object YoutubeDlDownloader {
                         logBuffer.removeAt(0)
                         logBuffer.add(line)
                     }
-                    val match = progressRegex.find(line)
-                    if (match != null) {
-                        val dl = parseByteString(match.groupValues[1])
-                        val tot = parseByteString(match.groupValues[2])
-                        val spd = parseSpeedString(match.groupValues[3])
-                        val eta = if (spd > 0 && tot > dl) ((tot - dl) / spd).toLong() else 0L
-                        onProgress(dl, tot, spd, eta)
+                    val tick = parseProgressTick(line, 0f, lastDl, lastTot)
+                    if (tick.downloadedBytes > 0L || tick.totalBytes > 0L || tick.speedBytesPerSec > 0.0) {
+                        lastDl = maxOf(lastDl, tick.downloadedBytes)
+                        lastTot = maxOf(lastTot, tick.totalBytes)
+                        val eta = if (tick.etaSeconds > 0L) tick.etaSeconds else etaCalc.update(lastDl, lastTot, tick.speedBytesPerSec)
+                        onProgress(lastDl, lastTot, tick.speedBytesPerSec, eta)
                     } else {
                         val fb = fallbackRegex.find(line)
                         if (fb != null) {

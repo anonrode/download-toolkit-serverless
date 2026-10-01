@@ -32,7 +32,7 @@ object HlsSizeEstimator {
     /** Playlist percentiles the segment probes land on. */
     private val PROBE_POSITIONS = listOf(5, 35, 65, 95)
 
-    private val URI_VALUE = Regex("""URI="([^"]+)"""")
+    private val URI_VALUE = Regex("URI=\"([^\"]+)\"")
 
     /**
      * Count media segments in an HLS playlist: every #EXTINF line is exactly
@@ -165,6 +165,10 @@ object HlsSizeEstimator {
                 headers = mapOf("Range" to "bytes=0-1024", "Accept-Encoding" to "identity"),
                 tag = "hls-estimate"
             ).use { res ->
+                val ct = res.header("Content-Type")?.lowercase() ?: ""
+                if (ct.contains("text/html") || ct.contains("application/xhtml")) {
+                    return null
+                }
                 when (res.code) {
                     206 -> res.header("Content-Range")?.substringAfter('/')?.trim()?.toLongOrNull()
                     200 -> res.header("Content-Length")?.toLongOrNull()

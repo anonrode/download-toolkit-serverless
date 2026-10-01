@@ -112,7 +112,8 @@ data class PipelineStep(
     val mode: String = "single",
     val asFormat: String = "html",
     val bind: List<PipelineBind> = emptyList(),
-    val items: JSONObject? = null
+    val items: JSONObject? = null,
+    val delayMs: Long = 0L
 )
 
 /** Pre-step binding from a pipeline VARIABLE (the resolve stage binds names
@@ -151,7 +152,8 @@ data class PipelineTerminal(
     /** "probe": validate the terminal with HttpClient.probeTerminal before
      *  returning it; "handoff": feed it back to the compiled ResolverRegistry. */
     val mode: String,
-    val referer: String = ""
+    val referer: String = "",
+    val stripQueryParams: List<String> = emptyList()
 )
 
 data class SitePipeline(
@@ -225,7 +227,8 @@ private fun parseTerminal(obj: JSONObject): PipelineTerminal? {
         spec = spec,
         hosts = hosts,
         mode = mode,
-        referer = obj.optString("referer")
+        referer = obj.optString("referer"),
+        stripQueryParams = jsonStringList(obj.optJSONArray("stripQueryParams"))
     )
 }
 
@@ -316,7 +319,8 @@ private fun parseStep(obj: JSONObject): PipelineStep? {
         mode = mode,
         asFormat = asFormat,
         bind = binds,
-        items = obj.optJSONObject("items")
+        items = obj.optJSONObject("items"),
+        delayMs = obj.optLong("delayMs", 0L).coerceIn(0L, 15_000L)
     )
 }
 

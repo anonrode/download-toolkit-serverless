@@ -46,7 +46,9 @@ object AsianCProvider : SiteProvider {
                             url = fullUrl,
                             posterUrl = cover,
                             site = name,
-                            category = "Asian Drama"
+                            category = "Asian Drama",
+                            tags = listOf("Asian Drama"),
+                            genres = listOf("Asian Drama")
                         )
                     )
                 }

@@ -104,9 +104,9 @@ class CategoryFeedTest {
     // -- probe-verified genre data --------------------------------------------
 
     @Test
-    fun categories_areSixProbeVerifiedGenres() {
+    fun categories_areProbeVerifiedGenres() {
         assertEquals(
-            listOf("Action", "Comedy", "Horror", "Romance", "Sci-Fi", "Thriller"),
+            listOf("Action", "Comedy", "Horror", "Romance", "Sci-Fi", "Thriller", "Anime"),
             CategoryFeed.CATEGORIES.map { it.label }
         )
         assertEquals(CategoryFeed.CATEGORIES.size, CategoryFeed.CATEGORIES.map { it.label }.toSet().size)

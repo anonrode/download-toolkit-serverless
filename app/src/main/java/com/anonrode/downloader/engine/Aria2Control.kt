@@ -8,8 +8,14 @@ import java.io.File
  */
 class Aria2Control(
     val fileLength: Long,
-    val pieces: List<TurboChunk>
+    val pieces: List<TurboChunk>,
+    val inFlightBytes: Long = 0L
 ) {
+    fun verifiedLandedBytes(): Long {
+        val completedBytes = pieces.sumOf { (it.current - it.start).coerceAtLeast(0L) }
+        return minOf(fileLength, completedBytes + inFlightBytes)
+    }
+
     companion object {
         /**
          * Parse an aria2c control file into piece coverage. The format is
@@ -69,21 +75,6 @@ class Aria2Control(
             if (pos.toLong() + bitfieldLength + 4 > data.size) return null
             val bitfield = data.copyOfRange(pos, pos + bitfieldLength); pos += bitfieldLength
 
-            // In-flight piece records carry 16 KiB block maps; Turbo restarts
-            // a partial piece from its start offset, so only the whole-piece
-            // bitfield matters. Walk (not skip) them to validate lengths — a
-            // truncated file must be rejected, not misparsed.
-            val numInFlight = be32(data, pos); pos += 4
-            if (numInFlight < 0) return null
-            repeat(numInFlight) {
-                if (pos + 12 > data.size) return null
-                val pBfLen = be32(data, pos + 8)
-                if (pBfLen < 0) return null
-                pos += 12
-                if (pos.toLong() + pBfLen > data.size) return null
-                pos += pBfLen
-            }
-
             val rawPieceCount = (totalLength + pieceLength - 1) / pieceLength
             if (rawPieceCount <= 0L || rawPieceCount > 65536L) return null
             val pieceCount = rawPieceCount.toInt()
@@ -96,7 +87,33 @@ class Aria2Control(
                     ((bitfield[i / 8].toInt() and (0x80 ushr (i % 8))) != 0)
                 pieces.add(TurboChunk(start, end, if (complete) end + 1 else start))
             }
-            return Aria2Control(totalLength, pieces)
+
+            // In-flight piece records carry 16 KiB block maps.
+            val numInFlight = be32(data, pos); pos += 4
+            if (numInFlight < 0) return null
+            var inFlightBytes = 0L
+            repeat(numInFlight) {
+                if (pos + 12 > data.size) return null
+                val pIdx = be32(data, pos)
+                val pLen = be32(data, pos + 4)
+                val pBfLen = be32(data, pos + 8)
+                if (pBfLen < 0) return null
+                pos += 12
+                if (pos.toLong() + pBfLen > data.size) return null
+                val isComplete = pIdx in 0 until pieceCount &&
+                    pIdx < bitfield.size * 8 &&
+                    ((bitfield[pIdx / 8].toInt() and (0x80 ushr (pIdx % 8))) != 0)
+                if (!isComplete) {
+                    var verifiedBlocks = 0
+                    for (b in 0 until pBfLen) {
+                        verifiedBlocks += java.lang.Integer.bitCount(data[pos + b].toInt() and 0xFF)
+                    }
+                    inFlightBytes += verifiedBlocks * 16384L
+                }
+                pos += pBfLen
+            }
+
+            return Aria2Control(totalLength, pieces, inFlightBytes)
         }
 
         private fun be32(data: ByteArray, pos: Int): Int =
