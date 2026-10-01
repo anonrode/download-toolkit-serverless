@@ -1763,8 +1763,8 @@ object LoadedfilesResolver : BaseResolver {
         val m = HOST_RE.matcher(url.lowercase())
         val urlHost = if (m.find()) m.group() else null
         val hosts = LinkedHashSet<String>()
-        lastWorkingHost?.let { hosts.add(it) }
         urlHost?.let { hosts.add(it) }
+        lastWorkingHost?.let { hosts.add(it) }
         FALLBACK_TLDS.forEach { hosts.add("loadedfiles.$it") }
         return hosts.toList()
     }
@@ -1790,18 +1790,18 @@ object LoadedfilesResolver : BaseResolver {
         try {
             // The token chain needs the shared client's longer read timeout (a
             // slow wait page must not abort the hop), but the host-candidate
-            // probe is pure liveness: a dead host should fail in 5s instead of
+            // probe is pure liveness: a dead host should fail in 6s instead of
             // burning the shared 15s per candidate before the next TLD is tried.
             val noRedirectClient = HttpClient.shared.newBuilder().followRedirects(false).build()
             val probeClient = HttpClient.shared.newBuilder()
                 .followRedirects(false)
-                .connectTimeout(4, TimeUnit.SECONDS)
-                .readTimeout(5, TimeUnit.SECONDS)
+                .connectTimeout(6, TimeUnit.SECONDS)
+                .readTimeout(8, TimeUnit.SECONDS)
                 .build()
             val slowProbeClient = HttpClient.shared.newBuilder()
                 .followRedirects(false)
-                .connectTimeout(6, TimeUnit.SECONDS)
-                .readTimeout(10, TimeUnit.SECONDS)
+                .connectTimeout(8, TimeUnit.SECONDS)
+                .readTimeout(12, TimeUnit.SECONDS)
                 .build()
 
             // Find a host that actually answers, then run the token chain on it.
@@ -1865,12 +1865,12 @@ object LoadedfilesResolver : BaseResolver {
             val cookieMap = mutableMapOf<String, String>()
             var ptHops = 0
             var lastFetchedUrl: String? = null
-            for (step in 1..8) {
+            for (step in 1..10) {
                 currentCoroutineContext().ensureActive()
                 val pageBeforeStep = currUrl
                 val referer = when {
                     lastFetchedUrl != null -> lastFetchedUrl
-                    step == 1 -> "https://my9jarocks.bz/"
+                    step == 1 -> "https://9jarocks.net/"
                     workingHost != null -> "https://$workingHost/"
                     else -> "https://loadedfiles.net/"
                 }
@@ -1908,13 +1908,9 @@ object LoadedfilesResolver : BaseResolver {
                         // Second-or-later ?pt= hop: the Location IS the answer
                         // (monolith parity, resolvers.py hop-3:
                         // `return r3.headers.get('location')`) -- no gating.
-                        if (ptHops >= 1) {
-                            android.util.Log.d("AnonDownload", "Loadedfiles cracked redirect URL: $safeLoc")
-                            return safeLoc
-                        }
-                        if (isDirectMediaUrl(safeLoc) || safeLoc.contains("/token/download/") || safeLoc.contains("/d/")) {
+                        if (ptHops >= 1 || safeLoc.contains("gfrdaseazzs.com") || isDirectMediaUrl(safeLoc) || safeLoc.contains("/token/download/") || safeLoc.contains("/d/")) {
                             if (!safeLoc.contains("?pt=")) {
-                                android.util.Log.d("AnonDownload", "Loadedfiles cracked direct URL: $safeLoc")
+                                android.util.Log.d("AnonDownload", "Loadedfiles cracked redirect URL: $safeLoc")
                                 return safeLoc
                             }
                         }
@@ -1997,13 +1993,28 @@ object LoadedfilesResolver : BaseResolver {
                         if (next == null) {
                             try {
                                 val doc = Jsoup.parse(body, currUrl!!)
-                                val btn = doc.selectFirst("a[href*='/d/'], a[href*='/token/download/'], a[href*='?pt='], a.download-btn, a.btn-download, a.nv-btn--primary")
+                                val btn = doc.selectFirst(
+                                    "a[href*='/d/'], a[href*='/token/download/'], a[href*='?pt='], a.download-btn, a.btn-download, a.nv-btn--primary, button.nv-btn--primary, [class*='nv-btn--primary']"
+                                )
                                 if (btn != null) {
-                                    val href = btn.attr("abs:href")
+                                    val href = btn.attr("abs:href").ifBlank { btn.attr("href") }
                                     if (href.isNotBlank() && href != currUrl) {
-                                        next = href
+                                        next = HttpClient.safeResolveUri(currUrl!!, href)
                                         if (href.contains("?pt=")) {
                                             waitSecs = 5
+                                        }
+                                    }
+                                }
+                                if (next == null) {
+                                    val xDataEl = doc.selectFirst("[x-data*='link']")
+                                    if (xDataEl != null) {
+                                        val xData = xDataEl.attr("x-data")
+                                        val m = Pattern.compile("""link\s*:\s*['"]([^'"]+)['"]""", Pattern.CASE_INSENSITIVE).matcher(xData)
+                                        if (m.find()) {
+                                            val raw = m.group(1)
+                                            if (!raw.isNullOrBlank()) {
+                                                next = HttpClient.safeResolveUri(currUrl!!, unescapeJsUrl(raw))
+                                            }
                                         }
                                     }
                                 }
@@ -2027,6 +2038,9 @@ object LoadedfilesResolver : BaseResolver {
                     android.util.Log.w("AnonDownload", "Loadedfiles token chain stalled (no progress) on $currUrl")
                     break
                 }
+            }
+            if (currUrl != null && !currUrl.contains("/token/download/") && !currUrl.contains("gfrdaseazzs.com")) {
+                onFailure(ResolverOutcome.Failure("Loadedfiles token chain exhausted on $currUrl"))
             }
             // The token chain failed on the reachable-first host (it answered
             // the probe but the chain dead-ended). reachable-first would pin
