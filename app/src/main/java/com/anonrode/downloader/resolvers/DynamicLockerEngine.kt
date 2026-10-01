@@ -31,14 +31,18 @@ object DynamicLockerEngine {
         depth: Int = 0,
         visitedSites: Set<String> = emptySet()
     ): String? {
+        if (depth >= ResolverRegistry.RESOLVE_DEPTH_LIMIT) {
+            DebugLog.resolve("DynamicLockerEngine: depth limit ($depth) reached for $url — refusing")
+            return null
+        }
         val host = HttpClient.parsedHost(url) ?: return null
         val clean = host.removePrefix("www.").lowercase()
         val siteKey = pipelineKeyForHost(clean) ?: return null
-        if (siteKey in visitedSites) {
-            DebugLog.resolve("DynamicLockerEngine: cycle detected for siteKey '$siteKey' in $visitedSites — refusing")
+        if (siteKey in visitedSites || clean in visitedSites) {
+            DebugLog.resolve("DynamicLockerEngine: cycle detected for siteKey '$siteKey' / host '$clean' in $visitedSites — refusing")
             return null
         }
-        return RulesPipeline.runResolveForSite(siteKey, url, quality, depth, visitedSites + siteKey)
+        return RulesPipeline.runResolveForSite(siteKey, url, quality, depth + 1, visitedSites + siteKey + clean)
     }
 
     /** A provider/search-only pipeline is not a locker resolver. */

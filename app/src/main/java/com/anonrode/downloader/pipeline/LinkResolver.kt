@@ -74,12 +74,17 @@ object LinkResolver {
     fun isProvablyDirectFile(url: String): Boolean {
         if (url.isBlank()) return false
         val lower = url.lowercase()
+        val query = lower.substringAfter('?', "").substringBefore('#')
+        // Universal guard: URLs carrying ?preview / &preview serve an in-browser
+        // HTML landing page / player, NEVER raw video bytes.
+        if (query.contains("preview")) return false
         val path = lower.substringAfter("://", "").substringBefore('?').substringBefore('#')
         val host = path.substringBefore('/')
         if (path.contains("/api/file/") || path.contains("/api/download/") || path.contains("/token/download/")) return true
         if (host.contains("lightdl.cc") && (path.contains("/api/download/") || path.contains("/api/files/"))) return true
         if (path.endsWith(".m3u8") || path.endsWith(".mpd") || lower.contains(".m3u8?") || lower.contains(".mpd?")) return true
         if ((host.startsWith("hls.") || host.startsWith("stream.")) && (host.contains("vidbasic.") || host.contains("vidb.top"))) return true
+        if (host.contains("lisaido.top") || host.contains("premilkyway.com")) return true
 
         // Direct CDN locker endpoints
         if ((host.contains("downloadwella.com") || host.contains("wetafiles.com")) && path.contains("/d/")) return true
@@ -93,7 +98,11 @@ object LinkResolver {
         // Content-Disposition: attachment; filename=".mkv", MKV magic header).
         if (host.contains("kissorgrab.com") && path.contains("/dl/")) return true
         // waffi.cloud direct CDN stream endpoints (japa.waffi.cloud, drip.waffi.cloud)
-        if (host.contains("waffi.cloud") && (path.contains("/c/") || path.endsWith(".mkv") || path.endsWith(".mp4"))) return true
+        // Never treat ?preview as direct file: ?preview serves an HTML landing page!
+        if (host.contains("waffi.cloud")) {
+            if (lower.contains("preview")) return false
+            if (path.contains("/c/") || path.endsWith(".mkv") || path.endsWith(".mp4")) return true
+        }
 
         val query = lower.substringAfter('?', "").substringBefore('#')
         val isLockerHost = KNOWN_LOCKER_HOSTS.any { host.contains(it) }

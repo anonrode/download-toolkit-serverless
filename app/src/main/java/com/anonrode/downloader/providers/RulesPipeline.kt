@@ -303,7 +303,7 @@ object RulesPipeline {
         depth: Int = 0,
         visitedSites: Set<String> = emptySet()
     ): String? {
-        if (depth > ResolverRegistry.RESOLVE_DEPTH_LIMIT) {
+        if (depth >= ResolverRegistry.RESOLVE_DEPTH_LIMIT) {
             DebugLog.resolve("$site pipeline resolve: depth limit reached at $depth — refusing")
             return null
         }
@@ -438,6 +438,10 @@ object RulesPipeline {
             }
             DebugLog.resolve("$site pipeline resolve: terminal validated (${tp.totalBytes}B) ${candidate.take(140)}")
             return HttpClient.safeUrl(candidate)
+        }
+        if (candidate == episodeUrl) {
+            DebugLog.resolve("$site pipeline resolve: handoff candidate identical to entry URL — refusing self-loop")
+            return null
         }
         val out = handoff(candidate)
         DebugLog.resolve("$site pipeline resolve: handoff ${candidate.take(120)} -> ${out?.take(120) ?: "null"}")
