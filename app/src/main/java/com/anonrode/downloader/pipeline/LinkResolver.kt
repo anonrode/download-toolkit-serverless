@@ -102,9 +102,6 @@ object LinkResolver {
         if (host.contains("waffi.cloud")) {
             if (lower.contains("preview")) return false
             if (path.contains("/c/") || path.endsWith(".mkv") || path.endsWith(".mp4")) return true
-        }
-
-        val query = lower.substringAfter('?', "").substringBefore('#')
         val isLockerHost = KNOWN_LOCKER_HOSTS.any { host.contains(it) }
         if (!isLockerHost && (query.contains("download_token=") || query.contains("media_token=") || query.contains("direct_download=1"))) return true
         // R2 / S3 / Object Storage signed links: the query string contains

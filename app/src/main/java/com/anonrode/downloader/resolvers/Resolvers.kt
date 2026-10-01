@@ -2681,7 +2681,6 @@ fun isDirectMediaUrl(url: String): Boolean {
     val clean = url.substringBefore('?').substringBefore('#').lowercase()
     val exts = com.anonrode.downloader.data.rules.DynamicRulesManager.getDirectMediaExtensions()
     if (exts.any { clean.endsWith(it) }) return true
-    val query = url.substringAfter('?', "").lowercase()
     if (query.contains("response-content-disposition=") ||
         query.contains("filename=") ||
         query.contains("filename*=") ||
