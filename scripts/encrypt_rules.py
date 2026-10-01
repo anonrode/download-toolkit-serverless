@@ -415,6 +415,11 @@ def _validate_pipeline(where, pl, problems):
                             or not any(k in bv for k in ("regex", "json", "selector"))):
                         problems.append(f"{w}.bind.{bk}: needs regex|json|selector")
 
+        if "delayMs" in step:
+            d = step["delayMs"]
+            if not isinstance(d, int) or not 0 <= d <= 15000:
+                problems.append(f"{w}.delayMs: must be an int 0..15000")
+
         if "items" in step:
             _validate_pipeline_items(f"{w}.items", step["items"], problems)
 
@@ -458,6 +463,10 @@ def _validate_terminal(where, t, problems):
         v = t.get(key)
         if v is not None and (not isinstance(v, str) or len(v) > MAX_SELECTOR_LEN):
             problems.append(f"{where}.{key}: string <= {MAX_SELECTOR_LEN}")
+    sqp = t.get("stripQueryParams")
+    if sqp is not None:
+        if not isinstance(sqp, list) or not all(isinstance(x, str) and len(x) <= 100 for x in sqp):
+            problems.append(f"{where}.stripQueryParams: list of strings <= 100")
 
 
 def validate_pipelines(obj) -> list:

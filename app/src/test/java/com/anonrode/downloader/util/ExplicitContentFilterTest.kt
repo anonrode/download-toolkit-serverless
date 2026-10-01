@@ -47,7 +47,9 @@ class ExplicitContentFilterTest {
             "xXx: State of the Union (2005)",
             "The Sex Lives of College Girls S02",
             "Nude Tuesday (2022)",
-            "18+ Journey of Love (2023)"
+            "18+ Journey of Love (2023)",
+            "Action Hero (2026)",
+            "Love Story (1970)"
         )
 
         for (title in safeTitles) {
@@ -75,7 +77,13 @@ class ExplicitContentFilterTest {
             "Blowjob & Deepthroat Special",
             "Nude Sex Scenes Collection 18+",
             "How We Fuck In The Shadows XXX (2024) [+18]",
-            "BBC Threesomes 5 (2025) [+18]"
+            "BBC Threesomes 5 (2025) [+18]",
+            "Sinful Desires (2025) Uncut",
+            "Ullu Web Series: Charmsukh",
+            "Primeplay & Hunters Erotic Drama",
+            "Voovi Softcore S01",
+            "Scandal Queen Season 2",
+            "Lust Stories 18+"
         )
 
         for (title in adultTitles) {
@@ -124,6 +132,19 @@ class ExplicitContentFilterTest {
                 listOf("Adult")
             )
         )
+    }
+
+    @Test
+    fun urlPathsAndGenres_mustBeBlocked() {
+        assertTrue(ExplicitContentFilter.isExplicit(ShowCard(title = "Safe Title", url = "https://example.com/18-plus/movie", site = "test")))
+        assertTrue(ExplicitContentFilter.isExplicit(ShowCard(title = "Safe Title", url = "https://example.com/adult/video", site = "test")))
+        assertTrue(ExplicitContentFilter.isExplicit(ShowCard(title = "Safe Title", url = "https://example.com/erotic/clip", site = "test")))
+        assertTrue(ExplicitContentFilter.isExplicit(ShowCard(title = "Safe Title", url = "https://example.com/uncut/film", site = "test")))
+        assertTrue(ExplicitContentFilter.isExplicit(ShowCard(title = "Safe Title", url = "https://example.com/movie", site = "test", genres = listOf("adult"))))
+        assertTrue(ExplicitContentFilter.isExplicit(ShowCard(title = "Safe Title", url = "https://example.com/movie", site = "test", genres = listOf("scandal"))))
+        assertTrue(ExplicitContentFilter.isExplicit(ShowCard(title = "Safe Title", url = "https://example.com/movie", site = "test", tags = listOf("uncut"))))
+        assertFalse(ExplicitContentFilter.isExplicit(ShowCard(title = "Action Hero (2026)", url = "https://example.com/movie", site = "test", genres = listOf("Action"))))
+        assertFalse(ExplicitContentFilter.isExplicit(ShowCard(title = "Love Story (1970)", url = "https://example.com/movie", site = "test", genres = listOf("Romance"))))
     }
 
     @Test

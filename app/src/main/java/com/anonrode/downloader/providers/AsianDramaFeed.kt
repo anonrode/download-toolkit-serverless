@@ -139,7 +139,8 @@ object AsianDramaFeed {
                 posterUrl = poster,
                 site = "asianc",
                 category = if (region == DramaRegion.KDRAMA) "K-Drama" else "C-Drama",
-                tags = listOf(region.label, era.label)
+                tags = listOf(region.label, era.label),
+                genres = listOf(region.label, era.label)
             )
 
             if (!filterExplicit || !ExplicitContentFilter.isExplicit(card)) {
@@ -189,7 +190,8 @@ object AsianDramaFeed {
                 posterUrl = poster,
                 site = "dramakey",
                 category = if (region == DramaRegion.KDRAMA) "K-Drama" else "C-Drama",
-                tags = listOf(region.label, era.label)
+                tags = listOf(region.label, era.label),
+                genres = listOf(region.label, era.label)
             )
 
             if (!filterExplicit || !ExplicitContentFilter.isExplicit(card)) {
@@ -227,13 +229,15 @@ object AsianDramaFeed {
             val poster = img?.attr("abs:src")?.ifBlank { img.attr("src") }.orEmpty()
 
             val clean = NameSanitizer.cleanTitle(rawTitle)
+            val dramaTags = listOf(region.label, era.label, if (rawTitle.contains("(Complete)")) "Completed" else "Ongoing")
             val card = ShowCard(
                 title = clean.ifBlank { rawTitle },
                 url = href,
                 posterUrl = poster,
                 site = "dramarain",
                 category = if (region == DramaRegion.KDRAMA) "K-Drama" else "C-Drama",
-                tags = listOf(region.label, era.label, if (rawTitle.contains("(Complete)")) "Completed" else "Ongoing")
+                tags = dramaTags,
+                genres = dramaTags
             )
 
             if (!filterExplicit || !ExplicitContentFilter.isExplicit(card)) {

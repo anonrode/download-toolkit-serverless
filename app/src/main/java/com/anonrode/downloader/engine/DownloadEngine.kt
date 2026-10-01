@@ -727,6 +727,43 @@ class DownloadEngine(
             }
             target.parentFile?.let { parent ->
                 File(parent, ".work-${task.id}").deleteRecursively()
+
+                // When a download is cancelled or deleted, if the enclosing show folder
+                // is left empty (e.g. 1-episode series, standalone movie, or last remaining episode),
+                // delete the folder so empty directory trees do not clutter user storage.
+                //
+                // Safety guards:
+                // 1. Strictly verify the folder is a subfolder inside Downloads/Anon, NEVER Anon itself or Downloads root.
+                // 2. Verify no other task in repository (active, paused, completed) targets this folder.
+                // 3. File.delete() is atomic and POSIX-safe: it strictly succeeds ONLY if the folder is completely empty.
+                try {
+                    val rootAnon = File(
+                        android.os.Environment.getExternalStoragePublicDirectory(
+                            android.os.Environment.DIRECTORY_DOWNLOADS
+                        ),
+                        "Anon"
+                    )
+                    val parentCanon = parent.canonicalFile
+                    val anonCanon = rootAnon.canonicalFile
+                    val isSubdirOfAnon = parentCanon.absolutePath != anonCanon.absolutePath &&
+                        parentCanon.absolutePath.startsWith(anonCanon.absolutePath + File.separator)
+
+                    if (isSubdirOfAnon) {
+                        val otherTasksInFolder = repository.tasks.value.any { other ->
+                            other.id != task.id && try {
+                                File(other.filePath).canonicalFile.parentFile?.absolutePath == parentCanon.absolutePath
+                            } catch (_: Throwable) {
+                                File(other.filePath).parentFile?.absolutePath == parent.absolutePath
+                            }
+                        }
+                        if (!otherTasksInFolder) {
+                            parentCanon.listFiles()?.filter { it.isDirectory && it.name.startsWith(".work-") }?.forEach {
+                                try { it.deleteRecursively() } catch (_: Throwable) {}
+                            }
+                            parentCanon.delete()
+                        }
+                    }
+                } catch (_: Throwable) {}
             }
         } catch (_: Throwable) {}
     }
@@ -1292,20 +1329,33 @@ class DownloadEngine(
             // size (sparse or falloc) before bytes land. When a .aria2 control file
             // exists, parse the bitfield to get exact committed bytes instead of
             // reading the pre-allocated destFile.length().
-            val aria2File = File(dir, "$base.aria2")
+            val aria2File = File(dir, "$base.aria2").let { if (it.exists()) it else File(dir, "$base.part.aria2") }
             if (aria2File.exists()) {
                 val ctrl = Aria2Control.parse(aria2File)
-                return ctrl?.pieces?.sumOf { it.current - it.start } ?: 0L
+                return ctrl?.verifiedLandedBytes() ?: ctrl?.pieces?.sumOf { it.current - it.start } ?: 0L
             }
-            // Non-turbo transfers: use strict single-file priority. Summing multiple
-            // files starting with base doubled bytes (e.g. .part + destFile -> 148MB
-            // on 78MB) and caused the progress bar to stick at 100% early.
+            // Non-turbo transfers: use strict single-file priority.
+            // Guard against unverified pre-allocated files: if the task is actively downloading
+            // and the raw file length equals the expected totalBytes, do NOT trust the unverified
+            // preallocation without a validating sidecar/control file.
             val partFile = File(dir, "$base.part")
-            if (partFile.exists()) return partFile.length()
+            if (partFile.exists()) {
+                val len = partFile.length()
+                if (task.status == TaskStatus.DOWNLOADING && task.totalBytes > 0L && len >= task.totalBytes && task.downloadedBytes < task.totalBytes) {
+                    return task.downloadedBytes
+                }
+                return len
+            }
             val ytdlFile = File(dir, "$base.ytdl")
             if (ytdlFile.exists()) return ytdlFile.length()
             val destFile = File(dir, base)
-            if (destFile.exists()) return destFile.length()
+            if (destFile.exists()) {
+                val len = destFile.length()
+                if (task.status == TaskStatus.DOWNLOADING && task.totalBytes > 0L && len >= task.totalBytes && task.downloadedBytes < task.totalBytes) {
+                    return task.downloadedBytes
+                }
+                return len
+            }
             0L
         } catch (_: Exception) {
             0L
@@ -1438,7 +1488,7 @@ class DownloadEngine(
         // URI="..." inside HLS tags (EXT-X-KEY, EXT-X-MAP, EXT-X-MEDIA) — the
         // URI value may be scheme-relative or relative and needs the same
         // absolute-https rewrite as segment URIs.
-        private val URI_VALUE = Pattern.compile("""URI="([^"]+)"""")
+        private val URI_VALUE = Pattern.compile("URI=\"([^\"]+)\"")
 
         private val STREAMING_QUERY_PATTERN = Regex("""[?&][^=&]*=(?:mpd|dash|hls)(?:&|$)""")
 
@@ -2233,15 +2283,22 @@ class DownloadEngine(
                         // Feed the UI from the filesystem when the backend reports
                         // nothing (fragment downloads, hung output parsing).
                         if (disk > t.downloadedBytes) {
-                            val speed = if (t.speedBytesPerSec > 0.0) t.speedBytesPerSec
-                            else diskDelta.coerceAtLeast(0L) * 1000.0 / 2000.0
-                            repository.updateProgress(
-                                taskId = task.id,
-                                downloaded = disk,
-                                total = t.totalBytes,
-                                speed = speed,
-                                eta = 0L
-                            )
+                            val safeDisk = if (t.totalBytes > 0L && t.status == TaskStatus.DOWNLOADING && disk >= t.totalBytes) {
+                                t.downloadedBytes
+                            } else {
+                                disk
+                            }
+                            if (safeDisk > t.downloadedBytes) {
+                                val speed = if (t.speedBytesPerSec > 0.0) t.speedBytesPerSec
+                                else diskDelta.coerceAtLeast(0L) * 1000.0 / 2000.0
+                                repository.updateProgress(
+                                    taskId = task.id,
+                                    downloaded = safeDisk,
+                                    total = t.totalBytes,
+                                    speed = speed,
+                                    eta = 0L
+                                )
+                            }
                         }
                         // Window progress: healthy downloads blow through the floor
                         // in seconds; a crawl never reaches it.
@@ -2511,7 +2568,8 @@ class DownloadEngine(
                                 hlsFragments = hlsFragmentConcurrency,
                                 speedLimitKbs = globalSpeedLimitKbs,
                                 torrentPeers = torrentPeers,
-                                privacyMode = torrentPrivacyMode
+                                privacyMode = torrentPrivacyMode,
+                                estimatedTotal = task.totalBytes
                             )
                         } catch (e: Exception) {
                             if (e is CancellationException) throw e
@@ -2740,7 +2798,8 @@ class DownloadEngine(
                             hlsFragments = hlsFragmentConcurrency,
                             speedLimitKbs = globalSpeedLimitKbs,
                             torrentPeers = torrentPeers,
-                            privacyMode = torrentPrivacyMode
+                            privacyMode = torrentPrivacyMode,
+                            estimatedTotal = task.totalBytes
                         )
                     }
 
@@ -2844,7 +2903,8 @@ class DownloadEngine(
                         privacyMode = torrentPrivacyMode,
                         downloadSubs = downloadSubtitles && isExtractor,
                         subLang = subtitleLanguage,
-                        hlsMasterFile = masterFile?.absolutePath
+                        hlsMasterFile = masterFile?.absolutePath,
+                        estimatedTotal = if (hlsSizeEstimate[0] > 0L) hlsSizeEstimate[0] else task.totalBytes
                     )
 
                     // YoutubeDlDownloader.download throws on final failure (after

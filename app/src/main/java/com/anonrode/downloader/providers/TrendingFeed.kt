@@ -224,7 +224,14 @@ object TrendingFeed {
                 if (title.isNotBlank() && link.isNotBlank()) {
                     out.add(
                         RestPost(
-                            card = ShowCard(title = cleanCardTitle(title), url = link, posterUrl = poster, site = site, tags = terms),
+                            card = ShowCard(
+                                title = cleanCardTitle(title),
+                                url = link,
+                                posterUrl = poster,
+                                site = site,
+                                tags = terms,
+                                genres = terms
+                            ),
                             body = item.optJSONObject("content")?.optString("rendered") ?: "",
                             terms = terms
                         )
@@ -301,7 +308,7 @@ object TrendingFeed {
                     ?: item.selectFirst("description")?.text() ?: ""
                 val cats = item.select("category").map { it.text().trim() }.filter { it.isNotBlank() }
                 // Explicit filter checks URL, raw title, and taxonomy categories
-                val tempCard = ShowCard(title = rawTitle, url = link, site = site, tags = cats)
+                val tempCard = ShowCard(title = rawTitle, url = link, site = site, tags = cats, genres = cats)
                 if (filterExplicit && com.anonrode.downloader.util.ExplicitContentFilter.isExplicit(tempCard)) {
                     continue
                 }
@@ -317,7 +324,7 @@ object TrendingFeed {
                     RegexOption.IGNORE_CASE
                 ).find(desc)?.groupValues?.get(1) ?: ""
                 if (rawTitle.isNotBlank() && link.isNotBlank() && !NAV_GARBAGE.containsMatchIn(link)) {
-                    val card = ShowCard(title = cleanCardTitle(rawTitle), url = link, posterUrl = poster, site = site, tags = cats)
+                    val card = ShowCard(title = cleanCardTitle(rawTitle), url = link, posterUrl = poster, site = site, tags = cats, genres = cats)
                     if (DownloadLinkGate.hasDownloadLink(desc)) out.add(card to cats) else noLinks.add(card to cats)
                 }
             }
@@ -353,22 +360,39 @@ object TrendingFeed {
             return false
         }
 
-        // 1. Check title with word boundary regex
-        for (alias in aliases) {
-            if (alias.isBlank()) continue
-            val wordRegex = Regex("(?i)\\b" + Regex.escape(alias) + "\\b")
-            if (wordRegex.containsMatchIn(lowerTitle)) return true
-        }
+        val normalizedAliases = aliases.map { normalizeGenre(it) }.filter { it.isNotBlank() }.toSet()
 
-        // 2. Check taxonomy terms (wp:term or RSS <category>)
+        // 1. Check taxonomy terms (wp:term or RSS <category>)
         for (term in terms) {
             val lowerTerm = term.lowercase().trim()
+            val normTerm = normalizeGenre(term)
+            if (normTerm.isNotBlank() && normTerm in normalizedAliases) return true
             for (alias in aliases) {
                 if (alias.isBlank()) continue
-                val wordRegex = Regex("(?i)\\b" + Regex.escape(alias) + "\\b")
-                if (lowerTerm == alias.lowercase() || wordRegex.containsMatchIn(lowerTerm)) return true
+                val cleanAlias = alias.lowercase().trim()
+                if (lowerTerm == cleanAlias) return true
+                val wordRegex = Regex("(?i)\\b" + Regex.escape(cleanAlias) + "\\b")
+                if (wordRegex.containsMatchIn(lowerTerm)) return true
             }
         }
+
+        // 2. Check title with word boundary regex
+        val titleNoHyphen = lowerTitle.replace("-", "")
+        val titlePhrased = lowerTitle
+            .replace(Regex("""\bmartial\s+arts\b""", RegexOption.IGNORE_CASE), "martialarts")
+            .replace(Regex("""\bscience\s+fiction\b""", RegexOption.IGNORE_CASE), "sciencefiction")
+
+        for (alias in aliases) {
+            if (alias.isBlank()) continue
+            val wordRegex = Regex("(?i)\\b" + Regex.escape(alias.trim()) + "\\b")
+            if (wordRegex.containsMatchIn(lowerTitle) ||
+                wordRegex.containsMatchIn(titleNoHyphen) ||
+                wordRegex.containsMatchIn(titlePhrased)
+            ) {
+                return true
+            }
+        }
+
         return false
     }
 
@@ -433,7 +457,9 @@ object TrendingFeed {
                         url = if (rawUrl.startsWith("/")) "$base$rawUrl" else rawUrl,
                         posterUrl = cover,
                         site = site,
-                        category = "Asian Drama"
+                        category = "Asian Drama",
+                        tags = listOf("Asian Drama"),
+                        genres = listOf("Asian Drama")
                     )
                 )
             }

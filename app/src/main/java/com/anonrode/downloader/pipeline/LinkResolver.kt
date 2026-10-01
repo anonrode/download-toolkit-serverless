@@ -102,7 +102,10 @@ object LinkResolver {
         if (host.contains("waffi.cloud")) {
             if (lower.contains("preview")) return false
             if (path.contains("/c/") || path.endsWith(".mkv") || path.endsWith(".mp4")) return true
-        val isLockerHost = KNOWN_LOCKER_HOSTS.any { host.contains(it) }
+        }
+
+        val otaLockers = com.anonrode.downloader.data.rules.DynamicRulesManager.getLockerHosts()
+        val isLockerHost = (KNOWN_LOCKER_HOSTS + otaLockers).any { host.contains(it) }
         if (!isLockerHost && (query.contains("download_token=") || query.contains("media_token=") || query.contains("direct_download=1"))) return true
         // R2 / S3 / Object Storage signed links: the query string contains
         // AWS-style signing parameters and/or response-content-disposition.
@@ -134,7 +137,9 @@ object LinkResolver {
         // must NOT exempt them from resolution — the host decides whether a URL
         // is a page to crack or a direct file.
         val host = lower.substringAfter("://", "").substringBefore('/').substringBefore(':')
-        return KNOWN_LOCKER_HOSTS.any { host.contains(it) }
+        if (KNOWN_LOCKER_HOSTS.any { host.contains(it) }) return true
+        val otaLockers = com.anonrode.downloader.data.rules.DynamicRulesManager.getLockerHosts()
+        return otaLockers.any { host.contains(it) }
     }
 
     /**

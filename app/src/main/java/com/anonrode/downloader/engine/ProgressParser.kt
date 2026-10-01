@@ -11,7 +11,9 @@ data class ProgressTick(
     // has none — the caller then falls back to the library's eta or derives
     // one from speed. yt-dlp's own ETA is more accurate than the derived one
     // for HLS (it accounts for segment counts, not just current speed).
-    val etaSeconds: Long = -1
+    val etaSeconds: Long = -1,
+    val fragmentIndex: Int? = null,
+    val fragmentCount: Int? = null
 )
 
 // aria2c with a known total: [#123456 45MiB/65MiB(69%) CN:4 DL:3.8MiB ETA:5s]
@@ -71,6 +73,8 @@ internal fun parseProgressTick(line: String?, libraryProgress: Float, lastDl: Lo
     var spdBps = 0.0
     var etaSecs = -1L
     var parsed = false
+    var parsedFragIdx: Int? = null
+    var parsedFragCnt: Int? = null
 
     if (!line.isNullOrBlank()) {
         val ariaMatch = ARIA_TOTAL_REGEX.find(line)
@@ -79,6 +83,9 @@ internal fun parseProgressTick(line: String?, libraryProgress: Float, lastDl: Lo
             dlBytes = parseByteString(ariaMatch.groupValues[1])
             totBytes = parseByteString(ariaMatch.groupValues[2])
             spdBps = parseSpeedString(ariaMatch.groupValues[3])
+            Regex("""ETA:\s*([0-9a-zA-Z:]+)""", RegexOption.IGNORE_CASE).find(line)?.let {
+                etaSecs = parseEtaString(it.groupValues[1])
+            }
         } else {
             val ariaNoTotal = ARIA_NO_TOTAL_REGEX.find(line)
             if (ariaNoTotal != null) {
@@ -149,6 +156,8 @@ internal fun parseProgressTick(line: String?, libraryProgress: Float, lastDl: Lo
                         }
                         val fi = fiStr.toIntOrNull()
                         val fc = fcStr.toIntOrNull()
+                        parsedFragIdx = fi
+                        parsedFragCnt = fc
                         val pct = pctStr.removeSuffix("%").toDoubleOrNull()
                         when {
                             dlFromStr > 0L -> {
@@ -205,26 +214,47 @@ internal fun parseProgressTick(line: String?, libraryProgress: Float, lastDl: Lo
             else -> 0.0
         }
         if (libPct > 0.0 && libPct <= 100.0) {
-            dlBytes = (lastTot * libPct / 100.0).toLong()
+            // Guard against startup item count leaps (e.g. library reporting 50% for item 1/2 before bytes land):
+            // Only use library percent if bytes have already begun moving (lastDl > 0) or if the percent is tiny (<= 5%).
+            if (lastDl > 0 || libPct <= 5.0) {
+                dlBytes = (lastTot * libPct / 100.0).toLong()
+            }
         }
     }
 
     val safeTot = if (totBytes > 0) max(lastTot, totBytes) else lastTot
     val safeDl = max(lastDl, dlBytes)
-    return ProgressTick(safeDl, safeTot, spdBps, etaSecs)
+    return ProgressTick(safeDl, safeTot, spdBps, etaSecs, parsedFragIdx, parsedFragCnt)
 }
 
-/** "MM:SS" / "H:MM:SS" -> seconds; -1 for "Unknown", "NA", "" or garbage. */
+/** "MM:SS", "H:MM:SS", or "1h24m10s", "43s" -> seconds; -1 for "Unknown", "NA", "" or garbage. */
 internal fun parseEtaString(str: String): Long {
     val clean = str.trim()
-    if (clean.isEmpty() || clean.equals("NA", ignoreCase = true) || clean.equals("Unknown", ignoreCase = true)) return -1L
-    var seconds = 0L
-    for (part in clean.split(':')) {
-        val v = part.trim().toLongOrNull() ?: return -1L
-        if (v < 0) return -1L
-        seconds = seconds * 60 + v
+    if (clean.isEmpty() || clean.equals("NA", ignoreCase = true) || clean.equals("Unknown", ignoreCase = true) || clean == "-" || clean == "--") return -1L
+    if (clean.contains(':')) {
+        var seconds = 0L
+        for (part in clean.split(':')) {
+            val v = part.trim().toLongOrNull() ?: return -1L
+            if (v < 0) return -1L
+            seconds = seconds * 60 + v
+        }
+        return seconds
     }
-    return seconds
+    var totalSecs = 0L
+    var matched = false
+    Regex("""(\d+)\s*h""", RegexOption.IGNORE_CASE).find(clean)?.let {
+        totalSecs += it.groupValues[1].toLong() * 3600L
+        matched = true
+    }
+    Regex("""(\d+)\s*m""", RegexOption.IGNORE_CASE).find(clean)?.let {
+        totalSecs += it.groupValues[1].toLong() * 60L
+        matched = true
+    }
+    Regex("""(\d+)\s*s""", RegexOption.IGNORE_CASE).find(clean)?.let {
+        totalSecs += it.groupValues[1].toLong()
+        matched = true
+    }
+    return if (matched) totalSecs else -1L
 }
 
 internal fun parseByteString(str: String): Long {

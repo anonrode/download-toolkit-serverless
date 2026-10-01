@@ -22,7 +22,8 @@ data class ShowCard(
     val category: String = "Drama",
     val year: String = "",
     val totalEpisodes: Int = 0,
-    val tags: List<String> = emptyList()
+    val tags: List<String> = emptyList(),
+    val genres: List<String> = emptyList()
 )
 
 @Serializable

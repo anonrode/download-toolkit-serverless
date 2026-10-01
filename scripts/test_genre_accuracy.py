@@ -1,5 +1,8 @@
 import re
 
+def normalize_genre(s):
+    return "".join(c for c in s.lower() if c.isalnum())
+
 def genre_confirmed(title, terms, aliases):
     if not aliases:
         return True
@@ -9,23 +12,35 @@ def genre_confirmed(title, terms, aliases):
     if any(k in lower_title for k in ["1xbet", "battles for big wins", "comedy skit:", "download comedy skit"]):
         return False
 
-    # 1. Check title with word boundaries
-    for alias in aliases:
-        if not alias.strip():
-            continue
-        pattern = re.compile(rf'(?i)\b{re.escape(alias.strip())}\b')
-        if pattern.search(lower_title):
-            return True
+    normalized_aliases = {normalize_genre(a) for a in aliases if normalize_genre(a)}
 
-    # 2. Check taxonomy terms
+    # 1. Check taxonomy terms
     for term in terms:
         lower_term = term.lower().strip()
+        norm_term = normalize_genre(term)
+        if norm_term and norm_term in normalized_aliases:
+            return True
         for alias in aliases:
             if not alias.strip():
                 continue
-            pattern = re.compile(rf'(?i)\b{re.escape(alias.strip())}\b')
-            if lower_term == alias.lower() or pattern.search(lower_term):
+            clean_alias = alias.lower().strip()
+            if lower_term == clean_alias:
                 return True
+            pattern = re.compile(rf'(?i)\b{re.escape(clean_alias)}\b')
+            if pattern.search(lower_term):
+                return True
+
+    # 2. Check title with word boundaries
+    title_no_hyphen = lower_title.replace("-", "")
+    title_phrased = re.sub(r'\bmartial\s+arts\b', 'martialarts', lower_title, flags=re.I)
+    title_phrased = re.sub(r'\bscience\s+fiction\b', 'sciencefiction', title_phrased, flags=re.I)
+    for alias in aliases:
+        if not alias.strip():
+            continue
+        clean_alias = alias.lower().strip()
+        pattern = re.compile(rf'(?i)\b{re.escape(clean_alias)}\b')
+        if pattern.search(lower_title) or pattern.search(title_no_hyphen) or pattern.search(title_phrased):
+            return True
 
     return False
 
@@ -44,7 +59,7 @@ assert genre_confirmed("Action Point (2018)", ["Comedy"], action_aliases), "Acti
 assert genre_confirmed("Ip Man: Martial Arts Legend", [], action_aliases), "Martial Arts rejected from Action!"
 
 # 2. Romance tests
-romance_aliases = {"romance", "romantic"}
+romance_aliases = {"romance", "romantic", "love"}
 
 # False positives (MUST BE REJECTED -> False)
 assert not genre_confirmed("Cloverfield (2008)", ["Sci-Fi", "Horror"], romance_aliases), "Cloverfield leaked into Romance!"
@@ -60,5 +75,24 @@ comedy_aliases = {"comedy", "sitcom"}
 assert not genre_confirmed("COMEDY SKIT: Mark Angel Comedy – Bike Man Part 2", ["Comedy"], comedy_aliases), "Comedy skit leaked into Comedy!"
 assert not genre_confirmed("DOWNLOAD COMEDY SKIT: THE AUDITION", ["Entertainment"], comedy_aliases), "Comedy skit leaked into Comedy!"
 assert genre_confirmed("Superbad (2007)", ["Comedy"], comedy_aliases), "Superbad rejected from Comedy!"
+
+# 4. Sci-Fi tests
+scifi_aliases = {"scifi", "sciencefiction"}
+assert genre_confirmed("Alien Wave", ["Sci-Fi"], scifi_aliases), "Sci-Fi with hyphen rejected!"
+assert genre_confirmed("Dune Prophecy", ["Science Fiction"], scifi_aliases), "Science Fiction with space rejected!"
+assert genre_confirmed("Sci-Fi Slaughter", [], scifi_aliases), "Sci-Fi title rejected!"
+assert not genre_confirmed("Jujutsu Kaisen 03", ["Anime"], scifi_aliases), "Jujutsu Kaisen leaked into Sci-Fi!"
+
+# 5. Horror tests
+horror_aliases = {"horror"}
+assert genre_confirmed("American Horror Story", [], horror_aliases), "American Horror Story rejected!"
+assert genre_confirmed("Terrifier 3", ["Horror", "Slasher"], horror_aliases), "Terrifier 3 rejected!"
+assert not genre_confirmed("The Scaredy Cat", ["Comedy"], horror_aliases), "Scaredy Cat leaked into Horror!"
+
+# 6. Thriller tests
+thriller_aliases = {"thriller", "suspense"}
+assert genre_confirmed("Thriller", [], thriller_aliases), "Thriller rejected!"
+assert genre_confirmed("Nightcrawler", ["Suspense", "Drama"], thriller_aliases), "Nightcrawler rejected!"
+assert not genre_confirmed("Singing in the Rain", ["Musical"], thriller_aliases), "Musical leaked into Thriller!"
 
 print("ALL GENRE ACCURACY TESTS PASSED 100%!")

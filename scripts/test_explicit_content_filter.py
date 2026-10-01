@@ -1,13 +1,13 @@
 import re
 
 MAINSTREAM_WHITELIST = re.compile(
-    r'\bxxx(?::\s*|\s+)(?:return of\s+)?xander\s*cage\b|\bxxx(?::\s*|\s+)state of the union\b|\bxxx\s*\((?:19\d\d|2002)\)|\byoung\s*adult\b',
+    r'\bxxx(?::\s*|\s+)(?:return of\s+)?xander\s*cage\b|\bxxx(?::\s*|\s+)state of the union\b|\bxxx\s*\((?:19\d\d|2002)\)|\byoung\s*adult\b|\badult\s*beginners?\b|\bthe\s*adults\b|\bgame\s*of\s*thrones\b|\bthe\s*boys\b|\bsaw\s*x\b|\bjourney\s*of\s*love\b|\baction\s*hero\b|\blove\s*story\b',
     re.IGNORECASE
 )
 
 EXPLICIT_URL_REGEX = re.compile(
-    r'/(?:18-section|18-plus|18plus|\+18|full-adult-video|adult-movies?|erotic(?:a|-stories)?|xxx|nsfw)/'
-    r'|[-_](?:18|18plus|\+18|xxx)(?:-movie|-series|-video)?/?$'
+    r'/(?:18-section|18-plus|18plus|\+18|full-adult-video|adult|adult-movies?|erotic|erotica|erotic-stories|uncut|xxx|nsfw)/'
+    r'|[-_](?:18|18plus|\+18|xxx|uncut|adult)(?:-movie|-series|-video)?/?$'
     r'|[-_]adult-(?:movie|series|video)/?$'
     r'|/(?:ullu|kooku|voovi|primeplay|hotshots|cineprime|hunters|bigshots|moodx)/',
     re.IGNORECASE
@@ -20,12 +20,20 @@ EXPLICIT_TITLE_REGEX = re.compile(
     r'hentai|'
     r'jav(?:hd)?|'
     r'erotica?|'
+    r'adults?|'
+    r'uncut|'
+    r'softcore|'
+    r'nsfw|'
+    r'lust(?:ful)?|'
+    r'sinful|'
+    r'desires?|'
+    r'scandals?|'
     r'x-?rated|'
     r'brazzers|naughty\s*america|bangbros|reality\s*kings|blacked|tushy|vixen|'
     r'onlyfans\s*leak\w*|leaked\s*nudes?|nude\s*leaks?|celebrity\s*nudes?|'
     r'sex\s*tape|sextape|hardcore\s*sex|uncensored\s*hentai|'
     r'gangbang|blowjob|creampie|deepthroat|masturbat\w*|dildo|camgirl|chaturbate|threesomes?|'
-    r'ullu|kooku|voovi|primeplay|hotshots|cineprime|bigshots|moodx|hunters\s*(?:app|original)?|'
+    r'ullu|kooku|voovi|primeplay|hotshots|cineprime|bigshots|moodx|hunters|'
     r'charmsukh|palang\s*tod|siskiyaan|kavita\s*bhabhi|riti\s*riwaj|jalebi\s*bai|dunali|'
     r'hotwife|cuckold|swinger|sensual\s*massage|erotic\s*(?:story|stories|positions?)|'
     r'sex\s*positions?|bedroom\s*positions?|'
@@ -42,7 +50,9 @@ EXPLICIT_TITLE_REGEX = re.compile(
 ADULT_NORMALIZED_TERMS = {
     "porn", "pornography", "adult", "adults", "erotica", "erotic", "hentai",
     "jav", "javhd", "xxx", "nsfw", "softcore", "hardcore", "xrated", "fulladultvideo",
-    "18section", "18movies", "adultmovies", "eroticmovies", "18webseries", "18"
+    "18section", "18movies", "adultmovies", "eroticmovies", "18webseries", "18",
+    "ullu", "kooku", "voovi", "primeplay", "hotshots", "hunters", "uncut",
+    "lust", "sinful", "desire", "scandal"
 }
 
 def is_explicit(title, url="", categories=None):
@@ -59,7 +69,7 @@ def is_explicit(title, url="", categories=None):
                 return True
             if "adult" in raw_lower and not any(k in raw_lower for k in ["young adult", "adult beginner"]):
                 return True
-            if any(k in raw_lower for k in ["erotic", "porn", "hentai", "jav", "softcore", "hardcore", "x-rated", "nsfw"]):
+            if any(k in raw_lower for k in ["erotic", "porn", "hentai", "jav", "softcore", "hardcore", "x-rated", "nsfw", "uncut", "ullu", "kooku", "voovi", "primeplay", "hotshots", "hunters", "sinful", "desire", "scandal", "lust"]):
                 return True
             clean = "".join(c for c in raw_lower if c.isalnum())
             if clean in ADULT_NORMALIZED_TERMS:
@@ -80,7 +90,20 @@ leak_cases = [
     ("Erotic Story: The girl I met on the beach (part 2)", "https://9jarocks.net/erotic-story-the-girl/", []),
     ("Charmsukh: Chawl House (2023) S03", "https://9jarocks.net/charmsukh-chawl-house/", []),
     ("Palang Tod: Siskiyaan (2024)", "https://9jarocks.net/palang-tod-siskiyaan/", []),
-    ("Sensual Massage: 5 techniques that set the mood", "https://9jarocks.net/sensual-massage/", [])
+    ("Sensual Massage: 5 techniques that set the mood", "https://9jarocks.net/sensual-massage/", []),
+    ("Sinful Desires (2025) Uncut", "https://example.com/sinful-desires/", []),
+    ("Ullu Web Series: Charmsukh", "https://example.com/ullu-series/", []),
+    ("Primeplay & Hunters Erotic Drama", "https://example.com/primeplay-drama/", []),
+    ("Voovi Softcore S01", "https://example.com/voovi-softcore/", []),
+    ("Scandal Queen Season 2", "https://example.com/scandal-queen/", []),
+    ("Lust Stories 18+", "https://example.com/lust-stories/", []),
+    ("Safe Title", "https://example.com/adult/movie/", []),
+    ("Safe Title", "https://example.com/erotic/story/", []),
+    ("Safe Title", "https://example.com/uncut/film/", []),
+    ("Safe Title", "https://example.com/18-plus/film/", []),
+    ("Innocent Video", "https://example.com/video/", ["uncut"]),
+    ("Innocent Video", "https://example.com/video/", ["scandal"]),
+    ("Innocent Video", "https://example.com/video/", ["lust"])
 ]
 
 failed_leaks = []
@@ -99,12 +122,18 @@ if failed_leaks:
 mainstream_cases = [
     ("Deadpool & Wolverine (2024)", "https://thenkiri.com/deadpool-wolverine/", ["Action", "Comedy"]),
     ("The Boys Season 4 (2024)", "https://thenkiri.com/the-boys-season-4/", ["Action", "Sci-Fi"]),
+    ("The Boys S03 18+", "https://thenkiri.com/the-boys-s03/", ["Action"]),
     ("Game of Thrones Season 8 (Complete)", "https://9jarocks.net/game-of-thrones/", ["Drama"]),
+    ("Game of Thrones S01 (18+)", "https://9jarocks.net/game-of-thrones-s01/", ["Drama"]),
     ("Sex Education Season 4 (Complete)", "https://thenkiri.com/sex-education-season-4/", ["Comedy", "Drama"]),
     ("Fifty Shades of Grey (2015)", "https://thenkiri.com/fifty-shades-of-grey/", ["Romance", "Drama"]),
     ("xXx: Return of Xander Cage (2017)", "https://thenkiri.com/xxx-return-of-xander-cage/", ["Action"]),
     ("Adult Beginners (2015)", "https://thenkiri.com/adult-beginners/", ["Comedy"]),
-    ("Young Adult (2011)", "https://thenkiri.com/young-adult/", ["Comedy", "Drama"])
+    ("Young Adult (2011)", "https://thenkiri.com/young-adult/", ["Comedy", "Drama"]),
+    ("The Adults (2023)", "https://thenkiri.com/the-adults/", ["Comedy"]),
+    ("Saw X (2023) 18+", "https://thenkiri.com/saw-x/", ["Horror"]),
+    ("Action Hero (2026)", "https://example.com/action-hero/", ["Action"]),
+    ("Love Story (1970)", "https://example.com/love-story/", ["Romance"])
 ]
 
 false_positives = []

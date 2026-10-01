@@ -75,8 +75,9 @@ object CategoryFeed {
     val CATEGORIES: List<Category> = listOf(
         Category(
             "Action",
+            queryTerms = mapOf("nepu" to "fight"),
             sites = MOVIE_SITES,
-            aliases = setOf("action", "martial arts", "martialarts")
+            aliases = setOf("action", "martialarts")
         ),
         Category(
             "Comedy",
@@ -90,8 +91,9 @@ object CategoryFeed {
         ),
         Category(
             "Romance",
+            queryTerms = mapOf("nepu" to "love"),
             sites = ROMANCE_SITES,
-            aliases = setOf("romance", "romantic")
+            aliases = setOf("romance", "romantic", "love")
         ),
         Category(
             "Sci-Fi",
@@ -103,10 +105,11 @@ object CategoryFeed {
                 "naijavault" to "sci-fi"
             ),
             sites = MOVIE_SITES,
-            aliases = setOf("scifi", "sci-fi", "sciencefiction", "science fiction")
+            aliases = setOf("scifi", "sciencefiction")
         ),
         Category(
             "Thriller",
+            queryTerms = mapOf("nepu" to "revenge"),
             sites = MOVIE_SITES,
             aliases = setOf("thriller", "suspense")
         ),
@@ -200,7 +203,7 @@ object CategoryFeed {
                 val rawCards = TrendingFeed.fetchApiSearch(site, term, PER_ROW_LIMIT)
                 val safeCards = if (filterExplicit) com.anonrode.downloader.util.ExplicitContentFilter.filterSafe(rawCards) else rawCards
                 if (category.aliases.isNotEmpty() && site == "nepu") {
-                    safeCards.filter { TrendingFeed.genreConfirmed(it.title, it.tags, category.aliases) }
+                    safeCards.filter { TrendingFeed.genreConfirmed(it.title, it.genres.ifEmpty { it.tags }, category.aliases) }
                 } else {
                     safeCards
                 }

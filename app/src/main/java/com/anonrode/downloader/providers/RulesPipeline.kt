@@ -364,6 +364,9 @@ object RulesPipeline {
         var consumed = 0L
 
         pipeline?.steps?.forEachIndexed { idx, step ->
+            if (step.delayMs > 0L) {
+                kotlinx.coroutines.delay(step.delayMs.coerceAtMost(15_000L))
+            }
             var bound = false
             for ((source, sourceVars) in expandSources(site, step, vars)) {
                 val url = renderTemplate(source.url, sourceVars) { name -> sourceVars[name] }
@@ -418,7 +421,12 @@ object RulesPipeline {
             }
         }
 
-        val candidate = resolveCandidate(terminal, episodeUrl, vars) ?: return null
+        var candidate = resolveCandidate(terminal, episodeUrl, vars) ?: return null
+        if (terminal.stripQueryParams.isNotEmpty()) {
+            for (param in terminal.stripQueryParams) {
+                candidate = stripQueryParam(candidate, param)
+            }
+        }
         // Gate on parsedHost — HttpUrl's own view of the host, identical to
         // what the fetch will connect to. safeHost's string-split lets
         // userinfo/backslash forgeries through (see HttpClient.parsedHost).
@@ -486,6 +494,21 @@ object RulesPipeline {
             val ee = e.removePrefix("www.")
             h == ee || h.endsWith(".$ee")
         }
+    }
+
+    internal fun stripQueryParam(url: String, param: String): String {
+        val qIdx = url.indexOf('?')
+        if (qIdx == -1) return url
+        val base = url.substring(0, qIdx)
+        val tail = url.substring(qIdx + 1)
+        val hIdx = tail.indexOf('#')
+        val query = if (hIdx != -1) tail.substring(0, hIdx) else tail
+        val hash = if (hIdx != -1) tail.substring(hIdx) else ""
+        val kept = query.split('&').filter {
+            val key = it.substringBefore('=')
+            !key.equals(param, ignoreCase = true) && it.isNotBlank()
+        }.joinToString("&")
+        return if (kept.isBlank()) "$base$hash" else "$base?$kept$hash"
     }
 
     // -------------------------------------------------------- query transform

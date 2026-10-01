@@ -648,14 +648,16 @@ object TurboDownloader {
         client: OkHttpClient,
         taskId: String = ""
     ): Boolean = coroutineScope {
-        val speed = SpeedMeter(0L)
-        onProgress(0L, if (total > 0) total else 0L, 0L)
+        val initialBytes = if (dest.exists()) dest.length() else 0L
+        val done = AtomicLong(initialBytes)
+        val speed = SpeedMeter(initialBytes)
+        onProgress(initialBytes, if (total > 0) total else 0L, 0L)
 
         // Decoupled Telemetry Dispatcher: Ticks every 250ms
         val telemetryTicker = launch(Dispatchers.Default) {
             while (isActive) {
                 delay(250)
-                val currentDone = if (dest.exists()) dest.length() else 0L
+                val currentDone = done.get()
                 val currentSpeed = speed.sample(currentDone)
                 onProgress(currentDone, if (total > 0) total else 0L, currentSpeed)
             }
@@ -694,6 +696,7 @@ object TurboDownloader {
                                 return false
                             }
                             val startAt = if (resuming) resumeAt else 0L
+                            done.set(startAt)
                             RandomAccessFile(dest, "rw").use { raf ->
                                 if (!resuming || raf.length() < startAt) raf.setLength(startAt)
                                 raf.seek(startAt)
@@ -705,6 +708,7 @@ object TurboDownloader {
                                     if (n == -1) break
                                     raf.write(buf, 0, n)
                                     written += n
+                                    done.set(written)
                                 }
                                 if (total > 0 && written != total) return false
                             }
@@ -756,7 +760,8 @@ object TurboDownloader {
             failureMessage.compareAndSet(null, e.message ?: e.javaClass.simpleName)
         } finally {
             telemetryTicker.cancel()
-            onProgress(if (dest.exists()) dest.length() else 0L, if (total > 0) total else 0L, speed.getSpeed())
+            val finalDone = done.get()
+            onProgress(finalDone, if (total > 0) total else 0L, speed.getSpeed())
             if (taskId.isNotEmpty()) {
                 throttleDeadlines.remove(taskId)
                 fullyCancelledTaskIds.remove(taskId)

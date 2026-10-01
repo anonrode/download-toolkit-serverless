@@ -21,7 +21,7 @@ object ExplicitContentFilter {
      * but are legitimate non-pornographic studio releases.
      */
     private val MAINSTREAM_WHITELIST = Regex(
-        """\bxxx(?::\s*|\s+)(?:return of\s+)?xander\s*cage\b|\bxxx(?::\s*|\s+)state of the union\b|\bxxx\s*\((?:19\d\d|2002)\)|\byoung\s*adult\b""",
+        """\bxxx(?::\s*|\s+)(?:return of\s+)?xander\s*cage\b|\bxxx(?::\s*|\s+)state of the union\b|\bxxx\s*\((?:19\d\d|2002)\)|\byoung\s*adult\b|\badult\s*beginners?\b|\bthe\s*adults\b|\bgame\s*of\s*thrones\b|\bthe\s*boys\b|\bsaw\s*x\b|\bjourney\s*of\s*love\b|\baction\s*hero\b|\blove\s*story\b|\b(?:the\s+)?scandal\b|\bsungkyunkwan\s*scandal\b|\b(?:a\s+)?streetcar\s*named\s*desire\b""",
         RegexOption.IGNORE_CASE
     )
 
@@ -29,8 +29,8 @@ object ExplicitContentFilter {
      * URL patterns representing adult categories, 18+ sections, or adult OTT platforms.
      */
     private val EXPLICIT_URL_REGEX = Regex(
-        """/(?:18-section|18-plus|18plus|\+18|full-adult-video|adult-movies?|erotic(?:a|-stories)?|xxx|nsfw)/""" +
-            """|[-_](?:18|18plus|\+18|xxx)(?:-movie|-series|-video)?/?$""" +
+        """/(?:18-section|18-plus|18plus|\+18|full-adult-video|adult|adult-movies?|erotic|erotica|erotic-stories|uncut|xxx|nsfw)/""" +
+            """|[-_](?:18|18plus|\+18|xxx|uncut|adult)(?:-movie|-series|-video)?/?$""" +
             """|[-_]adult-(?:movie|series|video)/?$""" +
             """|/(?:ullu|kooku|voovi|primeplay|hotshots|cineprime|hunters|bigshots|moodx)/""",
         RegexOption.IGNORE_CASE
@@ -46,6 +46,14 @@ object ExplicitContentFilter {
             """hentai|""" +
             """jav(?:hd)?|""" +
             """erotica?|""" +
+            """adults?|""" +
+            """uncut|""" +
+            """softcore|""" +
+            """nsfw|""" +
+            """lust(?:ful)?|""" +
+            """sinful|""" +
+            """desires?|""" +
+            """scandals?|""" +
             """x-?rated|""" +
             """brazzers|""" +
             """naughty\s*america|""" +
@@ -79,7 +87,7 @@ object ExplicitContentFilter {
             """cineprime|""" +
             """bigshots|""" +
             """moodx|""" +
-            """hunters\s*(?:app|original)?|""" +
+            """hunters|""" +
             """charmsukh|""" +
             """palang\s*tod|""" +
             """siskiyaan|""" +
@@ -111,7 +119,9 @@ object ExplicitContentFilter {
     private val ADULT_NORMALIZED_TERMS = setOf(
         "porn", "pornography", "adult", "adults", "erotica", "erotic", "hentai",
         "jav", "javhd", "xxx", "nsfw", "softcore", "hardcore", "xrated", "fulladultvideo",
-        "18section", "18movies", "adultmovies", "eroticmovies", "18webseries", "18"
+        "18section", "18movies", "adultmovies", "eroticmovies", "18webseries", "18",
+        "ullu", "kooku", "voovi", "primeplay", "hotshots", "hunters", "uncut",
+        "lust", "sinful", "desire", "scandal"
     )
 
     /**
@@ -139,7 +149,13 @@ object ExplicitContentFilter {
                 if (rawLower.contains("erotic") || rawLower.contains("porn") ||
                     rawLower.contains("hentai") || rawLower.contains("jav") ||
                     rawLower.contains("softcore") || rawLower.contains("hardcore") ||
-                    rawLower.contains("x-rated") || rawLower.contains("nsfw")
+                    rawLower.contains("x-rated") || rawLower.contains("nsfw") ||
+                    rawLower.contains("uncut") || rawLower.contains("ullu") ||
+                    rawLower.contains("kooku") || rawLower.contains("voovi") ||
+                    rawLower.contains("primeplay") || rawLower.contains("hotshots") ||
+                    rawLower.contains("hunters") || rawLower.contains("sinful") ||
+                    rawLower.contains("desire") || rawLower.contains("scandal") ||
+                    rawLower.contains("lust")
                 ) {
                     return true
                 }
@@ -160,11 +176,11 @@ object ExplicitContentFilter {
         // Mainstream whitelist check takes precedence
         if (MAINSTREAM_WHITELIST.containsMatchIn(card.title)) return false
 
-        // 1. Fast URL check (blocks 18-section, -18/ slugs, adult directories)
+        // 1. Fast URL check (blocks 18-section, -18/ slugs, adult directories, /adult/, /erotic/, /uncut/)
         if (card.url.isNotBlank() && EXPLICIT_URL_REGEX.containsMatchIn(card.url)) return true
 
-        // 2. Aggregate tags: card.tags + card.category (if not generic Drama/Movies)
-        val allCats = (card.tags + listOf(card.category)).filter {
+        // 2. Aggregate tags: card.genres + card.tags + card.category (if not generic Drama/Movies)
+        val allCats = (card.genres + card.tags + listOf(card.category)).filter {
             it.isNotBlank() && it != "Drama" && it != "Movies"
         }
         return isExplicit(card.title, if (allCats.isNotEmpty()) allCats else null)
