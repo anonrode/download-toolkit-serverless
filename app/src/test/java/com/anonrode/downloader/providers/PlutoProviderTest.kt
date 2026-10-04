@@ -106,4 +106,15 @@ class PlutoProviderTest {
         assertEquals(null, PlutoProvider.parseEpisodeKey("show-s105-e01"))
         assertEquals(9 to 105, PlutoProvider.parseEpisodeKey("x-S09_E105-y"))
     }
+
+    @Test
+    fun episodeKey_titleAndTextShapes() {
+        assertEquals(1 to 24, PlutoProvider.parseEpisodeKey("The Seven Deadly Sins Four Knights of the Apocalypse S01 E24"))
+        assertEquals(2 to 12, PlutoProvider.parseEpisodeKey("The Seven Deadly Sins Four Knights of the Apocalypse S02 E12"))
+        assertEquals(1 to 13, PlutoProvider.parseEpisodeKey("Sofia The First Royal Magic S01 E13"))
+        assertEquals(2 to 15, PlutoProvider.parseEpisodeKey("The Pitt S02 E15"))
+        assertEquals(null, PlutoProvider.parseEpisodeKey("The Seven Deadly Sins Four Knights of the Apocalypse Season 1"))
+        assertEquals(1, PlutoProvider.parseSeasonNumber("The Seven Deadly Sins Four Knights of the Apocalypse Season 1"))
+        assertEquals(2, PlutoProvider.parseSeasonNumber("The Seven Deadly Sins Four Knights of the Apocalypse Season 2"))
+    }
 }

@@ -13,6 +13,7 @@ object MediaPlayerPrefs {
 
     private const val KEY_PLAYBACK_SPEED = "pref_playback_speed"
     private const val KEY_MEDIA_VOLUME = "pref_media_volume"
+    private const val KEY_ALLOW_VOLUME_BOOST = "pref_allow_volume_boost"
     private const val KEY_WINDOW_BRIGHTNESS = "pref_window_brightness"
     private const val KEY_SUBTITLE_TRACK = "pref_subtitle_track"
 
@@ -33,6 +34,16 @@ object MediaPlayerPrefs {
     fun setMediaVolume(context: Context, volume: Float) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putFloat(KEY_MEDIA_VOLUME, volume.coerceIn(0f, 1f))
+            .apply()
+    }
+
+    fun getAllowVolumeBoost(context: Context): Boolean =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getBoolean(KEY_ALLOW_VOLUME_BOOST, true)
+
+    fun setAllowVolumeBoost(context: Context, allow: Boolean) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putBoolean(KEY_ALLOW_VOLUME_BOOST, allow)
             .apply()
     }
 

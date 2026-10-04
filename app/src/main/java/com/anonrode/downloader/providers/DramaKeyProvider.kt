@@ -1,6 +1,7 @@
 package com.anonrode.downloader.providers
 
 import com.anonrode.downloader.util.DownloadLinkLabels
+import com.anonrode.downloader.util.PostContentSanitizer
 import com.anonrode.downloader.data.models.DownloadRecipe
 import com.anonrode.downloader.data.models.EpisodeItem
 import com.anonrode.downloader.data.models.ShowCard
@@ -156,17 +157,21 @@ object DramaKeyProvider : SiteProvider {
             // comes from the filename in the URL (The.Road...S01E01...mkv).
             val episodes = mutableListOf<EpisodeItem>()
             val seen = mutableSetOf<String>()
-            val episodeRe = Regex("""(?i)S(\d+)E(\d+)""")
-            val links = (doc.selectFirst(".entry-content, .post-content, article") ?: doc).select("a[href]").filter { a ->
+            val container = doc.selectFirst(".entry-content, .post-content, article") ?: doc.body() ?: doc
+            PostContentSanitizer.clean(container)
+            val links = container.select("a[href]").filter { a ->
                 val h = a.attr("abs:href").ifBlank { a.attr("href") }
-                h.contains("downloadwella.com") || h.contains("wetafiles.com") ||
+                !PostContentSanitizer.isSameSitePostPermalink(h, "dramakey.com") &&
+                    !PostContentSanitizer.isSiblingPostAnchorText(a.text()) &&
+                    (h.contains("downloadwella.com") || h.contains("wetafiles.com") ||
                     h.contains("loadedfiles.") || h.contains("dood.") ||
                     h.contains("mega.") || h.contains("/download/") || h.contains("?download") ||
                     h.contains("vikingfile") || h.contains("kissorgrab") ||
                     h.contains("wildshare") || h.contains("waffi") ||
-                    com.anonrode.downloader.pipeline.StrictLinkClassifier.isKnownLocker(h)
+                    com.anonrode.downloader.pipeline.StrictLinkClassifier.isKnownLocker(h))
             }
 
+            val episodeRe = Regex("""(?i)S(\d+)E(\d+)""")
             var count = 1
             for (a in links) {
                 val rawHref = a.attr("href")
@@ -174,6 +179,7 @@ object DramaKeyProvider : SiteProvider {
                     HttpClient.safeResolveUri(showUrl, rawHref)
                 }
                 if (href.isBlank() || href in seen || href.contains("/category/") || href.contains("/tag/")) continue
+                if (PostContentSanitizer.isSameSitePostPermalink(href, "dramakey.com") || PostContentSanitizer.isSiblingPostAnchorText(a.text())) continue
                 seen.add(href)
 
                 val filename = href.substringAfterLast('/').substringBefore('?').substringBefore('#')

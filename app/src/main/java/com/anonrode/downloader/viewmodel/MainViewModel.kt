@@ -52,8 +52,15 @@ data class HomeUiState(
     val categoryCards: List<ShowCard> = emptyList(),
     val isCategoryLoading: Boolean = false,
     val categoryFailed: Boolean = false,
+    val categoryPage: Int = 1,
+    val isCategoryLoadingMore: Boolean = false,
+    val categoryHasMore: Boolean = true,
     val catalogOpen: Boolean = false,
     val catalogRows: Map<String, List<ShowCard>> = emptyMap(),
+    // Trending pagination
+    val trendingPage: Int = 1,
+    val isTrendingLoadingMore: Boolean = false,
+    val trendingHasMore: Boolean = true,
     // Home genre tiles: each category's current top-post poster, fetched once
     // per process alongside the trending row. An empty list (or an empty
     // posterUrl) renders the colored name-tile fallback — the row must never
@@ -71,7 +78,10 @@ data class HomeUiState(
     val dramaRawCards: List<ShowCard> = emptyList(),
     val dramaCards: List<ShowCard> = emptyList(),
     val isDramaLoading: Boolean = false,
-    val dramaFailed: Boolean = false
+    val dramaFailed: Boolean = false,
+    val dramaPage: Int = 1,
+    val isDramaLoadingMore: Boolean = false,
+    val dramaHasMore: Boolean = true
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -323,6 +333,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      *  ZERO network this launch. Stale → refetch SILENTLY behind the painted
      *  cards (spinner only when there is nothing to show); success rewrites
      *  memory + disk. force=true (the header Refresh tap) always crawls. */
+    private var trendingMoreJob: Job? = null
+
+    /** v3.1.6 cache-first: a disk-fresh row (<=30 min) painted at init means
+     *  ZERO network this launch. Stale → refetch SILENTLY behind the painted
+     *  cards (spinner only when there is nothing to show); success rewrites
+     *  memory + disk. force=true (the header Refresh tap) always crawls. */
     fun loadTrending(force: Boolean = false) {
         if (trendingJob?.isActive == true) return
         if (!force && _uiState.value.trending.isNotEmpty() &&
@@ -330,7 +346,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         ) return
         trendingJob = viewModelScope.launch {
             val showSpinner = _uiState.value.trending.isEmpty()
-            if (showSpinner) _uiState.update { it.copy(isTrendingLoading = true, trendingFailed = false) }
+            if (showSpinner) _uiState.update { it.copy(isTrendingLoading = true, trendingFailed = false, trendingPage = 1, trendingHasMore = true) }
             com.anonrode.downloader.util.DebugLog.user("trending: fetch started")
             try {
                 val items = withContext(Dispatchers.IO) {
@@ -338,6 +354,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     // round-robin merge the moment it lands, so the row fills
                     // while a laggard (9jarocks' RSS) is still crawling.
                     com.anonrode.downloader.providers.TrendingFeed.fetch(
+                        page = 1,
                         filterExplicit = engine.filterExplicitContent,
                         onPartial = { partial ->
                             if (partial.isNotEmpty()) {
@@ -348,7 +365,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 if (items.isNotEmpty()) {
                     _uiState.update {
-                        it.copy(trending = items, isTrendingLoading = false, trendingFailed = false)
+                        it.copy(trending = items, isTrendingLoading = false, trendingFailed = false, trendingPage = 1, trendingHasMore = true)
                     }
                     com.anonrode.downloader.providers.FeedCache.saveTrending(items)
                 } else {
@@ -369,6 +386,51 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun loadMoreTrending() {
+        val state = _uiState.value
+        if (state.isTrendingLoading || state.isTrendingLoadingMore || !state.trendingHasMore) return
+        if (trendingMoreJob?.isActive == true) return
+
+        val nextPage = state.trendingPage + 1
+        _uiState.update { it.copy(isTrendingLoadingMore = true) }
+
+        trendingMoreJob = viewModelScope.launch {
+            try {
+                val newCards = withContext(Dispatchers.IO) {
+                    com.anonrode.downloader.providers.TrendingFeed.fetch(
+                        page = nextPage,
+                        filterExplicit = engine.filterExplicitContent
+                    )
+                }
+                _uiState.update { current ->
+                    val existingUrls = current.trending.map { it.url }.toSet()
+                    val existingTitles = current.trending.map { it.title.lowercase().filter(Char::isLetterOrDigit) }.toSet()
+
+                    val distinctNew = newCards.filter { card ->
+                        card.url.isNotBlank() &&
+                        card.url !in existingUrls &&
+                        card.title.lowercase().filter(Char::isLetterOrDigit) !in existingTitles
+                    }
+
+                    current.copy(
+                        trending = current.trending + distinctNew,
+                        trendingPage = nextPage,
+                        isTrendingLoadingMore = false,
+                        trendingHasMore = distinctNew.isNotEmpty()
+                    )
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                com.anonrode.downloader.util.DebugLog.error("loadMoreTrending failed: ${e.message}")
+                _uiState.update { it.copy(isTrendingLoadingMore = false) }
+            }
+        }
+    }
+
+    private var categoryMoreJob: Job? = null
+    private val categoryPages = mutableMapOf<String, Int>()
+
     /** Open a genre's MIXED grid page. Disk/memory cards render instantly
      *  (no blank, no flash); a stale or missing group refetches silently in
      *  the background, streaming its growing mix into the open page. A
@@ -378,16 +440,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (categoryJob?.isActive == true && _uiState.value.activeCategory?.label != category.label) {
             categoryJob?.cancel()
         }
+        categoryMoreJob?.cancel()
         val cached = categoryCache[category.label]
             ?.ifEmpty { com.anonrode.downloader.providers.FeedCache.categoryCards(category.label) }
             ?: com.anonrode.downloader.providers.FeedCache.categoryCards(category.label)
         if (cached.isNotEmpty()) categoryCache[category.label] = cached
+        val page = categoryPages[category.label] ?: 1
         _uiState.update {
             it.copy(
                 activeCategory = category,
                 categoryCards = cached,
                 isCategoryLoading = cached.isEmpty(),
-                categoryFailed = false
+                categoryFailed = false,
+                categoryPage = page,
+                isCategoryLoadingMore = false,
+                categoryHasMore = true
             )
         }
         if (cached.isNotEmpty() && com.anonrode.downloader.providers.FeedCache.isCategoryFresh(category.label)) return
@@ -411,12 +478,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun closeCategory() {
         categoryJob?.cancel()
         categoryJob = null
+        categoryMoreJob?.cancel()
+        categoryMoreJob = null
         _uiState.update {
             it.copy(
                 activeCategory = null,
                 categoryCards = emptyList(),
                 isCategoryLoading = false,
-                categoryFailed = false
+                categoryFailed = false,
+                categoryPage = 1,
+                isCategoryLoadingMore = false,
+                categoryHasMore = true
             )
         }
     }
@@ -461,6 +533,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         force: Boolean = false
     ) {
         if (categoryJob?.isActive == true) return
+        categoryMoreJob?.cancel()
         val cached = categoryCache[category.label]
             ?: com.anonrode.downloader.providers.FeedCache.categoryCards(category.label)
         if (!force && cached.isNotEmpty() &&
@@ -470,14 +543,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 it.copy(
                     categoryCards = if (it.activeCategory?.label == category.label) cached else it.categoryCards,
                     catalogRows = it.catalogRows + (category.label to cached),
-                    isCategoryLoading = false
+                    isCategoryLoading = false,
+                    categoryPage = 1,
+                    categoryHasMore = true
                 )
             }
             return
         }
         categoryJob = viewModelScope.launch {
             if (cached.isEmpty() && _uiState.value.activeCategory?.label == category.label) {
-                _uiState.update { it.copy(isCategoryLoading = true, categoryFailed = false) }
+                _uiState.update { it.copy(isCategoryLoading = true, categoryFailed = false, categoryPage = 1, categoryHasMore = true) }
             }
             com.anonrode.downloader.util.DebugLog.user("category '${category.label}': fetch started")
             try {
@@ -488,6 +563,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     // already left must never bleed into the open page.
                     com.anonrode.downloader.providers.CategoryFeed.fetch(
                         category,
+                        page = 1,
                         filterExplicit = engine.filterExplicitContent
                     ) { partial ->
                         if (partial.isNotEmpty()) {
@@ -502,13 +578,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 if (cards.isNotEmpty()) {
                     categoryCache[category.label] = cards
+                    categoryPages[category.label] = 1
                     com.anonrode.downloader.providers.FeedCache.saveCategory(category.label, cards)
                     _uiState.update {
                         it.copy(
                             categoryCards = if (it.activeCategory?.label == category.label) cards else it.categoryCards,
                             catalogRows = it.catalogRows + (category.label to cards),
                             isCategoryLoading = false,
-                            categoryFailed = false
+                            categoryFailed = false,
+                            categoryPage = 1,
+                            categoryHasMore = true
                         )
                     }
                 } else {
@@ -534,14 +613,65 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun loadMoreCategory() {
+        val category = _uiState.value.activeCategory ?: return
+        val state = _uiState.value
+        if (state.isCategoryLoading || state.isCategoryLoadingMore || !state.categoryHasMore) return
+        if (categoryMoreJob?.isActive == true) return
+
+        val nextPage = state.categoryPage + 1
+        _uiState.update { it.copy(isCategoryLoadingMore = true) }
+
+        categoryMoreJob = viewModelScope.launch {
+            try {
+                val newCards = withContext(Dispatchers.IO) {
+                    com.anonrode.downloader.providers.CategoryFeed.fetch(
+                        category = category,
+                        page = nextPage,
+                        filterExplicit = engine.filterExplicitContent
+                    )
+                }
+                _uiState.update { current ->
+                    if (current.activeCategory?.label != category.label) return@update current
+                    val existingUrls = current.categoryCards.map { it.url }.toSet()
+                    val existingTitles = current.categoryCards.map { it.title.lowercase().filter(Char::isLetterOrDigit) }.toSet()
+
+                    val distinctNew = newCards.filter { card ->
+                        card.url.isNotBlank() &&
+                        card.url !in existingUrls &&
+                        card.title.lowercase().filter(Char::isLetterOrDigit) !in existingTitles
+                    }
+
+                    val updated = current.categoryCards + distinctNew
+                    categoryCache[category.label] = updated
+                    categoryPages[category.label] = nextPage
+                    current.copy(
+                        categoryCards = updated,
+                        catalogRows = current.catalogRows + (category.label to updated),
+                        categoryPage = nextPage,
+                        isCategoryLoadingMore = false,
+                        categoryHasMore = distinctNew.isNotEmpty()
+                    )
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                com.anonrode.downloader.util.DebugLog.error("loadMoreCategory '${category.label}': failed ${e.message}")
+                _uiState.update { it.copy(isCategoryLoadingMore = false) }
+            }
+        }
+    }
+
     // ---- Asian Drama Explorer (K-Drama / C-Drama) -------------------------
     private var dramaJob: Job? = null
+    private var dramaMoreJob: Job? = null
 
     fun openAsianDramaHub(
         region: com.anonrode.downloader.providers.DramaRegion,
         era: com.anonrode.downloader.providers.DramaEra = com.anonrode.downloader.providers.DramaEra.MODERN
     ) {
         if (dramaJob?.isActive == true) dramaJob?.cancel()
+        if (dramaMoreJob?.isActive == true) dramaMoreJob?.cancel()
         _uiState.update {
             it.copy(
                 activeDramaRegion = region,
@@ -549,7 +679,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 activeDramaStatus = com.anonrode.downloader.providers.DramaStatusFilter.ALL,
                 activeDramaGenre = null,
                 isDramaLoading = true,
-                dramaFailed = false
+                dramaFailed = false,
+                dramaPage = 1,
+                isDramaLoadingMore = false,
+                dramaHasMore = true
             )
         }
         loadDramaFeed(region, era, force = false)
@@ -559,13 +692,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val region = _uiState.value.activeDramaRegion ?: return
         if (_uiState.value.activeDramaEra == era && _uiState.value.dramaCards.isNotEmpty()) return
         if (dramaJob?.isActive == true) dramaJob?.cancel()
+        if (dramaMoreJob?.isActive == true) dramaMoreJob?.cancel()
         _uiState.update {
             it.copy(
                 activeDramaEra = era,
                 activeDramaStatus = com.anonrode.downloader.providers.DramaStatusFilter.ALL,
                 activeDramaGenre = null,
                 isDramaLoading = true,
-                dramaFailed = false
+                dramaFailed = false,
+                dramaPage = 1,
+                isDramaLoadingMore = false,
+                dramaHasMore = true
             )
         }
         loadDramaFeed(region, era, force = false)
@@ -607,13 +744,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun closeAsianDramaHub() {
         if (dramaJob?.isActive == true) dramaJob?.cancel()
+        if (dramaMoreJob?.isActive == true) dramaMoreJob?.cancel()
         _uiState.update {
             it.copy(
                 activeDramaRegion = null,
                 dramaCards = emptyList(),
                 dramaRawCards = emptyList(),
                 isDramaLoading = false,
-                dramaFailed = false
+                dramaFailed = false,
+                dramaPage = 1,
+                isDramaLoadingMore = false,
+                dramaHasMore = true
             )
         }
     }
@@ -621,6 +762,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun refreshDramaFeed() {
         val region = _uiState.value.activeDramaRegion ?: return
         val era = _uiState.value.activeDramaEra
+        if (dramaJob?.isActive == true) dramaJob?.cancel()
+        if (dramaMoreJob?.isActive == true) dramaMoreJob?.cancel()
+        _uiState.update {
+            it.copy(
+                dramaPage = 1,
+                isDramaLoadingMore = false,
+                dramaHasMore = true
+            )
+        }
         loadDramaFeed(region, era, force = true)
     }
 
@@ -641,7 +791,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 it.copy(
                     dramaRawCards = cached,
                     dramaCards = initialFiltered,
-                    isDramaLoading = !com.anonrode.downloader.providers.FeedCache.isCategoryFresh(key)
+                    isDramaLoading = !com.anonrode.downloader.providers.FeedCache.isCategoryFresh(key),
+                    dramaPage = 1,
+                    isDramaLoadingMore = false,
+                    dramaHasMore = true
                 )
             }
             if (!force && com.anonrode.downloader.providers.FeedCache.isCategoryFresh(key)) {
@@ -654,6 +807,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val cards = com.anonrode.downloader.providers.AsianDramaFeed.fetch(
                     region = region,
                     era = era,
+                    page = 1,
                     forceRefresh = force,
                     filterExplicit = engine.filterExplicitContent,
                     onPartial = { partial ->
@@ -680,7 +834,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             dramaRawCards = cards,
                             dramaCards = filtered,
                             isDramaLoading = false,
-                            dramaFailed = cards.isEmpty() && it.dramaRawCards.isEmpty()
+                            dramaFailed = cards.isEmpty() && it.dramaRawCards.isEmpty(),
+                            dramaPage = 1,
+                            isDramaLoadingMore = false,
+                            dramaHasMore = cards.isNotEmpty()
                         )
                     }
                 }
@@ -694,6 +851,67 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         dramaFailed = it.dramaRawCards.isEmpty()
                     )
                 }
+            }
+        }
+    }
+
+    fun loadMoreDrama() {
+        val region = _uiState.value.activeDramaRegion ?: return
+        val era = _uiState.value.activeDramaEra
+        val state = _uiState.value
+        if (state.isDramaLoading || state.isDramaLoadingMore || !state.dramaHasMore) return
+        if (dramaMoreJob?.isActive == true) return
+
+        val nextPage = state.dramaPage + 1
+        _uiState.update { it.copy(isDramaLoadingMore = true) }
+
+        dramaMoreJob = viewModelScope.launch {
+            try {
+                val newCards = withContext(Dispatchers.IO) {
+                    com.anonrode.downloader.providers.AsianDramaFeed.fetch(
+                        region = region,
+                        era = era,
+                        page = nextPage,
+                        forceRefresh = false,
+                        filterExplicit = engine.filterExplicitContent
+                    )
+                }
+
+                _uiState.update { current ->
+                    if (current.activeDramaRegion != region || current.activeDramaEra != era) return@update current
+                    val existingUrls = current.dramaRawCards.map { it.url }.toSet()
+                    val existingTitles = current.dramaRawCards.map { it.title.lowercase().filter(Char::isLetterOrDigit) }.toSet()
+
+                    val distinctNew = newCards.filter { card ->
+                        card.url.isNotBlank() &&
+                        card.url !in existingUrls &&
+                        card.title.lowercase().filter(Char::isLetterOrDigit) !in existingTitles
+                    }
+
+                    val updatedRaw = current.dramaRawCards + distinctNew
+                    val filtered = updatedRaw.filter { card ->
+                        com.anonrode.downloader.providers.DramaTagClassifier.matchesFilter(
+                            card = card,
+                            region = region,
+                            era = era,
+                            statusFilter = current.activeDramaStatus,
+                            genreFilter = current.activeDramaGenre
+                        )
+                    }
+
+                    current.copy(
+                        dramaRawCards = updatedRaw,
+                        dramaCards = filtered,
+                        dramaPage = nextPage,
+                        isDramaLoadingMore = false,
+                        dramaHasMore = distinctNew.isNotEmpty()
+                    )
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                com.anonrode.downloader.util.DebugLog.error("loadMoreDrama $region $era: failed ${e.message}")
+                _uiState.update { it.copy(isDramaLoadingMore = false) }
             }
         }
     }

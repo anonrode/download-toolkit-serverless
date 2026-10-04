@@ -95,16 +95,36 @@ data class PipelineSource(
     val url: String,
     val method: String = "GET",
     val headers: Map<String, String> = emptyMap(),
-    val form: Map<String, String> = emptyMap()
+    val form: Map<String, String> = emptyMap(),
+    val json: Any? = null,
+    val body: String = "",
+    val queryParams: Map<String, String> = emptyMap(),
+    val followRedirects: Boolean = true,
+    val permissiveSsl: Boolean = false,
+    val timeoutMs: Long = 0L
+)
+
+data class PipelinePow(
+    val seed: String = "{seed}",
+    val bits: String = "{bits}",
+    val format: String = "{seed}:{nonce}",
+    val maxIterations: Int = 1_000_000,
+    val algorithm: String = "sha256"
 )
 
 data class PipelineBind(
     val name: String,
+    val sourceVar: String = "",
     val regex: String = "",
     val group: Int = 0,
     val jsonPath: String = "",
     val selector: String = "",
-    val attr: String = ""
+    val attr: String = "",
+    val header: String = "",
+    val cookie: String = "",
+    val unpackJs: Boolean = false,
+    val transforms: List<String> = emptyList(),
+    val powSha256: PipelinePow? = null
 )
 
 data class PipelineStep(
@@ -113,7 +133,10 @@ data class PipelineStep(
     val asFormat: String = "html",
     val bind: List<PipelineBind> = emptyList(),
     val items: JSONObject? = null,
-    val delayMs: Long = 0L
+    val delayMs: Long = 0L,
+    val delayVar: String = "",
+    val maxBytes: Long = 0L,
+    val deadPatterns: List<String> = emptyList()
 )
 
 /** Pre-step binding from a pipeline VARIABLE (the resolve stage binds names
@@ -279,20 +302,26 @@ private fun parseStep(obj: JSONObject): PipelineStep? {
         val url = s.optString("url")
         if (url.isBlank()) return null
         val method = s.optString("method", "GET").uppercase()
-        if (method != "GET" && method != "POST") return null
+        if (method != "GET" && method != "POST" && method != "HEAD") return null
         sources.add(
             PipelineSource(
                 url = url,
                 method = method,
                 headers = stringMap(s.optJSONObject("headers")),
-                form = stringMap(s.optJSONObject("form"))
+                form = stringMap(s.optJSONObject("form")),
+                json = s.opt("json"),
+                body = s.optString("body"),
+                queryParams = stringMap(s.optJSONObject("queryParams")),
+                followRedirects = s.optBoolean("followRedirects", true),
+                permissiveSsl = s.optBoolean("permissiveSsl", false),
+                timeoutMs = s.optLong("timeoutMs", 0L).coerceIn(0L, 30_000L)
             )
         )
     }
     val mode = obj.optString("mode", "single").lowercase()
     if (mode != "single" && mode != "failover" && mode != "merge") return null
     val asFormat = obj.optString("as", "html").lowercase()
-    if (asFormat != "html" && asFormat != "json" && asFormat != "rss") return null
+    if (asFormat != "html" && asFormat != "json" && asFormat != "rss" && asFormat != "packed_js") return null
 
     val binds = mutableListOf<PipelineBind>()
     val bindObj = obj.optJSONObject("bind")
@@ -301,14 +330,30 @@ private fun parseStep(obj: JSONObject): PipelineStep? {
         while (keys.hasNext()) {
             val name = keys.next()
             val spec = bindObj.optJSONObject(name) ?: continue
+            val powObj = spec.optJSONObject("pow") ?: spec.optJSONObject("pow_sha256")
+            val pow = if (powObj != null || spec.optBoolean("pow_sha256", false)) {
+                PipelinePow(
+                    seed = powObj?.optString("seed")?.ifBlank { "{seed}" } ?: "{seed}",
+                    bits = powObj?.optString("bits")?.ifBlank { "{bits}" } ?: "{bits}",
+                    format = powObj?.optString("format")?.ifBlank { "{seed}:{nonce}" } ?: "{seed}:{nonce}",
+                    maxIterations = (powObj?.optInt("maxIterations", 1_000_000) ?: 1_000_000).coerceIn(1, 2_000_000),
+                    algorithm = powObj?.optString("algorithm", "sha256")?.lowercase() ?: "sha256"
+                )
+            } else null
             binds.add(
                 PipelineBind(
                     name = name,
+                    sourceVar = spec.optString("sourceVar"),
                     regex = spec.optString("regex"),
                     group = spec.optInt("group", 0),
                     jsonPath = spec.optString("json"),
                     selector = spec.optString("selector"),
-                    attr = spec.optString("attr")
+                    attr = spec.optString("attr"),
+                    header = spec.optString("header"),
+                    cookie = spec.optString("cookie"),
+                    unpackJs = spec.optBoolean("unpackJs", false),
+                    transforms = jsonStringList(spec.optJSONArray("transforms")),
+                    powSha256 = pow
                 )
             )
         }
@@ -320,7 +365,10 @@ private fun parseStep(obj: JSONObject): PipelineStep? {
         asFormat = asFormat,
         bind = binds,
         items = obj.optJSONObject("items"),
-        delayMs = obj.optLong("delayMs", 0L).coerceIn(0L, 15_000L)
+        delayMs = obj.optLong("delayMs", 0L).coerceIn(0L, 60_000L),
+        delayVar = obj.optString("delayVar"),
+        maxBytes = obj.optLong("maxBytes", 0L).coerceIn(0L, 3_000_000L),
+        deadPatterns = jsonStringList(obj.optJSONArray("deadPatterns"))
     )
 }
 

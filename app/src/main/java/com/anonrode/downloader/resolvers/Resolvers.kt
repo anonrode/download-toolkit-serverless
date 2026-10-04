@@ -1350,7 +1350,7 @@ object NaijaVaultGatewayResolver : BaseResolver {
 
     override fun canResolve(url: String): Boolean {
         val low = url.lowercase()
-        return hostClaim(url, listOf("naijavault.com")) && (low.contains("/dl-") || low.contains("/temp/"))
+        return hostClaim(url, listOf("naijavault.com")) && (low.contains("/dl-") || low.contains("/temp/") || low.contains("/sdm_downloads/"))
     }
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
@@ -1361,14 +1361,30 @@ object NaijaVaultGatewayResolver : BaseResolver {
                 return null
             }
             val soup = Jsoup.parse(html, url)
-            val btn = soup.selectFirst("a.download-btn, a.btn-download, a[href*='vikingfile'], a[href*='lulacloud'], a[href*='loadedfiles'], a[href*='downloadwella'], a[href*='wetafiles'], a[href*='pixeldrain']")
+            val btn = soup.selectFirst("a.download-btn, a.btn-download, a.sdm_download, a[href*='sdm_process_download'], a[href*='vikingfile'], a[href*='lulacloud'], a[href*='loadedfiles'], a[href*='downloadwella'], a[href*='wetafiles'], a[href*='pixeldrain'], a[href*='wildshare']")
             if (btn != null) {
-                val href = btn.attr("abs:href")
-                if (href.isNotBlank()) return href
+                val href = btn.attr("abs:href").ifBlank { btn.attr("href") }
+                if (href.isNotBlank()) {
+                    if (href.contains("sdm_process_download") || href.contains("/sdm_downloads/")) {
+                        val redirected = HttpClient.probeTerminal(href, referer = url)?.url ?: href
+                        if (redirected != href && redirected.isNotBlank()) {
+                            val cracked = ResolverRegistry.resolve(redirected, quality) ?: redirected
+                            return cracked
+                        }
+                    }
+                    val cracked = ResolverRegistry.resolve(href, quality) ?: href
+                    return cracked
+                }
             }
-            val lockerAnchor = soup.select("a[href]").map { it.attr("abs:href") }
+            val lockerAnchor = soup.select("a[href]").map { it.attr("abs:href").ifBlank { it.attr("href") } }
                 .firstOrNull { LinkResolver.isKnownLockerHost(it) && it != url }
-            if (!lockerAnchor.isNullOrBlank()) return lockerAnchor
+            if (!lockerAnchor.isNullOrBlank()) {
+                return ResolverRegistry.resolve(lockerAnchor, quality) ?: lockerAnchor
+            }
+
+            val directMedia = soup.select("a[href]").map { it.attr("abs:href").ifBlank { it.attr("href") } }
+                .firstOrNull { isDirectMediaUrl(it) }
+            if (!directMedia.isNullOrBlank()) return directMedia
 
             val m = Pattern.compile("""var\s+downloadURL\s*=\s*["']([^"']+)["']""").matcher(html)
             if (m.find()) {
@@ -1395,6 +1411,9 @@ object NpDownloaderGatewayResolver : BaseResolver {
 
     override fun canResolve(url: String): Boolean {
         val low = url.lowercase()
+        val isDirectFile = low.contains("/file/") || low.contains("/d/") ||
+            low.endsWith(".mkv") || low.endsWith(".mp4") || low.endsWith(".avi")
+        if (isDirectFile) return false
         return (hostClaim(url, listOf("np-downloader.com", "vdl.np-downloader.com"))) ||
                (low.contains("np-downloader.com") && low.contains("/sdm_downloads/"))
     }

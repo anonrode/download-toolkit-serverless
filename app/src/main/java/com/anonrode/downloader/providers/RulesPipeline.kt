@@ -11,6 +11,7 @@ import com.anonrode.downloader.data.rules.PipelineStep
 import com.anonrode.downloader.data.rules.PipelineTerminal
 import com.anonrode.downloader.data.rules.PipelineVarBind
 import com.anonrode.downloader.data.rules.jsonStringList
+import com.anonrode.downloader.resolvers.JsUnpacker
 import com.anonrode.downloader.resolvers.ResolverRegistry
 import com.anonrode.downloader.util.DebugLog
 import org.json.JSONArray
@@ -59,9 +60,15 @@ object RulesPipeline {
 
     // ---------------------------------------------------------------- search
 
-    suspend fun runSearch(site: String, pipeline: Pipeline, query: String): List<ShowCard> {
+    suspend fun runSearch(
+        site: String,
+        pipeline: Pipeline,
+        query: String,
+        page: Int = 1,
+        pageSize: Int = 20
+    ): List<ShowCard> {
         return try {
-            runSearchInner(site, pipeline, query)
+            runSearchInner(site, pipeline, query, page, pageSize)
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (e: Exception) {
@@ -70,18 +77,35 @@ object RulesPipeline {
         }
     }
 
-    private suspend fun runSearchInner(site: String, pipeline: Pipeline, query: String): List<ShowCard> {
+    private suspend fun runSearchInner(
+        site: String,
+        pipeline: Pipeline,
+        query: String,
+        page: Int = 1,
+        pageSize: Int = 20
+    ): List<ShowCard> {
         val bases = DynamicRulesManager.getBaseUrls(site)
         val base = (bases.firstOrNull { it.isNotBlank() } ?: "").trimEnd('/')
 
         val effectiveQuery = applyQueryTransform(query, firstItems(pipeline)?.optJSONObject("queryTransform"))
+        val pageStr = page.coerceAtLeast(1).toString()
+        val offsetStr = ((page.coerceAtLeast(1) - 1) * pageSize).toString()
+        val nowMs = System.currentTimeMillis()
         val vars = mutableMapOf(
             "base" to base,
+            "origin" to base,
             "url" to "",
+            "path" to "",
+            "host" to (HttpClient.parsedHost(base) ?: ""),
             "query" to URLEncoder.encode(effectiveQuery, "UTF-8"),
             // Unencoded form for POST bodies: FormBody percent-encodes its
             // values itself, so feeding it {query} would double-encode.
-            "queryRaw" to effectiveQuery
+            "queryRaw" to effectiveQuery,
+            "page" to pageStr,
+            "offset" to offsetStr,
+            "timestamp" to nowMs.toString(),
+            "timeSec" to (nowMs / 1000L).toString(),
+            "random" to (1..10).map { ('a'..'z').random() }.joinToString("")
         )
 
         var cards = emptyList<ShowCard>()
@@ -115,10 +139,22 @@ object RulesPipeline {
 
     private suspend fun runEpisodesInner(site: String, pipeline: Pipeline, showUrl: String): PipelineEpisodes? {
         val bases = DynamicRulesManager.getBaseUrls(site)
+        val u = okhttp3.HttpUrl.parse(showUrl)
+        val origin = if (u != null) "${u.scheme()}://${u.host()}" else ""
+        val base = (bases.firstOrNull { it.isNotBlank() } ?: origin).trimEnd('/')
+        val nowMs = System.currentTimeMillis()
         val vars = mutableMapOf(
-            "base" to (bases.firstOrNull { it.isNotBlank() } ?: "").trimEnd('/'),
+            "base" to base,
+            "origin" to origin,
             "url" to showUrl,
-            "query" to ""
+            "path" to (u?.encodedPath() ?: ""),
+            "host" to (u?.host() ?: ""),
+            "query" to "",
+            "page" to "1",
+            "offset" to "0",
+            "timestamp" to nowMs.toString(),
+            "timeSec" to (nowMs / 1000L).toString(),
+            "random" to (1..10).map { ('a'..'z').random() }.joinToString("")
         )
 
         var result: PipelineEpisodes? = null
@@ -141,10 +177,29 @@ object RulesPipeline {
 
     // -------------------------------------------------------- step execution
 
-    internal class StepOutcome(val body: String, val doc: Document?, val json: Any?, val baseUrl: String)
+    internal class StepOutcome(
+        val body: String,
+        val doc: Document?,
+        val json: Any?,
+        val baseUrl: String,
+        val headers: Map<String, String> = emptyMap(),
+        val statusCode: Int = 200
+    )
 
     private fun firstItems(pipeline: Pipeline): JSONObject? =
         pipeline.steps.firstNotNullOfOrNull { it.items }
+
+    private val DEAD_FILE_MARKERS = listOf(
+        "file is no longer available", "file was deleted", "file deleted",
+        "file not found", "video not found", "this file was deleted",
+        "has been removed", "no longer exists"
+    )
+
+    internal fun isDeadPage(body: String, customPatterns: List<String> = emptyList()): Boolean {
+        val low = body.lowercase()
+        if (customPatterns.any { it.isNotBlank() && low.contains(it.lowercase()) }) return true
+        return DEAD_FILE_MARKERS.any { low.contains(it) }
+    }
 
     /** Runs one step's source list according to its mode, returning the
      *  extracted items of the winning source(s). */
@@ -156,6 +211,15 @@ object RulesPipeline {
         tag: String?,
         extract: (StepOutcome) -> List<T>
     ): List<T> {
+        val dynamicDelayMs = if (step.delayVar.isNotBlank()) {
+            val raw = vars[step.delayVar]?.trim().orEmpty()
+            val num = Regex("""\d+""").find(raw)?.value?.toLongOrNull() ?: 0L
+            if (num in 1..60) num * 1000L else num.coerceIn(0L, 60_000L)
+        } else 0L
+        val totalDelayMs = maxOf(step.delayMs, dynamicDelayMs).coerceIn(0L, 60_000L)
+        if (totalDelayMs > 0L) {
+            kotlinx.coroutines.delay(totalDelayMs)
+        }
         val expanded = expandSources(site, step, vars)
         val merged = mutableListOf<T>()
         var lastItems = emptyList<T>()
@@ -211,16 +275,29 @@ object RulesPipeline {
         step: PipelineStep,
         source: PipelineSource,
         vars: Map<String, String>,
-        tag: String?
+        tag: String?,
+        customMaxBytes: Long? = null
     ): StepOutcome? {
-        val url = renderTemplate(source.url, vars) { name -> vars[name] }
-        if (url.isNullOrBlank() || !url.startsWith("http")) {
+        var resolvedUrl = renderTemplate(source.url, vars) { name -> vars[name] }
+        if (resolvedUrl.isNullOrBlank() || !resolvedUrl.startsWith("http")) {
             // Expected when a site has no base configured (empty {base}) or a
             // step template references a var this stage never receives — every
             // search for such sites would otherwise spam ERROR.
             DebugLog.trace("$site pipeline $stage: unresolvable source url \"${source.url}\"")
             return null
         }
+        if (source.queryParams.isNotEmpty()) {
+            val parsed = okhttp3.HttpUrl.parse(resolvedUrl)
+            if (parsed != null) {
+                val builder = parsed.newBuilder()
+                for ((k, v) in source.queryParams) {
+                    val renderedVal = renderTemplate(v, vars) { vars[it] } ?: ""
+                    builder.setQueryParameter(k, renderedVal)
+                }
+                resolvedUrl = builder.build().toString()
+            }
+        }
+        val url = resolvedUrl
         val referer = source.headers.entries
             .firstOrNull { it.key.equals("Referer", ignoreCase = true) }
             ?.value?.let { renderTemplate(it, vars) { n -> vars[n] } }
@@ -228,31 +305,110 @@ object RulesPipeline {
             .filterKeys { !it.equals("Referer", ignoreCase = true) }
             .mapValues { renderTemplate(it.value, vars) { n -> vars[n] } ?: "" }
 
-        val body = if (source.method == "POST") {
-            val form = source.form.mapValues { renderTemplate(it.value, vars) { n -> vars[n] } ?: "" }
-            HttpClient.postForm(url, form, referer, headers, tag)
+        val client = if (!source.followRedirects) {
+            if (source.permissiveSsl) HttpClient.noRedirectPermissiveClient else HttpClient.noRedirectClient
         } else {
-            HttpClient.getText(url, referer, headers, tag = tag)
+            if (source.permissiveSsl) HttpClient.permissiveClient else HttpClient.shared
         }
-        if (body.isNullOrBlank()) {
+        val byteCap = customMaxBytes ?: (if (step.maxBytes > 0L) step.maxBytes.coerceIn(50_000L, 3_000_000L) else HttpClient.MAX_TEXT_BYTES)
+
+        var responseHeaders = emptyMap<String, String>()
+        var statusCode = 200
+
+        val body: String? = if (!source.followRedirects || source.method == "HEAD") {
+            val bodyPayload = if (source.method == "POST") {
+                when {
+                    source.json != null -> {
+                        val jsonStr = renderTemplate(source.json.toString(), vars) { vars[it] } ?: ""
+                        okhttp3.RequestBody.create(okhttp3.MediaType.parse("application/json; charset=utf-8"), jsonStr)
+                    }
+                    source.body.isNotBlank() -> {
+                        val renderedBody = renderTemplate(source.body, vars) { vars[it] } ?: ""
+                        val mediaType = if (headers.any { it.key.equals("Content-Type", true) && it.value.contains("json") }) {
+                            okhttp3.MediaType.parse("application/json; charset=utf-8")
+                        } else okhttp3.MediaType.parse("text/plain; charset=utf-8")
+                        okhttp3.RequestBody.create(mediaType, renderedBody)
+                    }
+                    else -> {
+                        var formBroken = false
+                        val form = source.form.entries.associate { (k, v) ->
+                            val r = renderTemplate(v, vars) { n -> vars[n] }
+                            if (r == null) { formBroken = true; k to "" } else k to r
+                        }
+                        if (formBroken) return null
+                        val fb = okhttp3.FormBody.Builder()
+                        form.forEach { (k, v) -> fb.add(k, v) }
+                        fb.build()
+                    }
+                }
+            } else null
+            val rawResult = HttpClient.executeRawWithClient(
+                client = client,
+                url = url,
+                method = source.method,
+                bodyPayload = bodyPayload,
+                referer = referer,
+                headers = headers,
+                maxBytes = byteCap,
+                timeoutMs = source.timeoutMs,
+                tag = tag
+            ) ?: return null
+            statusCode = rawResult.code
+            responseHeaders = rawResult.headers.toMultimap().mapValues { it.value.joinToString(", ") }
+            rawResult.body ?: ""
+        } else if (source.method == "POST") {
+            when {
+                source.json != null -> {
+                    val jsonStr = renderTemplate(source.json.toString(), vars) { vars[it] } ?: ""
+                    HttpClient.postJsonWithClient(client, url, jsonStr, referer, headers, tag, byteCap)
+                }
+                source.body.isNotBlank() -> {
+                    val renderedBody = renderTemplate(source.body, vars) { vars[it] } ?: ""
+                    HttpClient.postJsonWithClient(client, url, renderedBody, referer, headers, tag, byteCap)
+                }
+                else -> {
+                    var formBroken = false
+                    val form = source.form.entries.associate { (k, v) ->
+                        val r = renderTemplate(v, vars) { n -> vars[n] }
+                        if (r == null) { formBroken = true; k to "" } else k to r
+                    }
+                    if (formBroken) return null
+                    HttpClient.postFormWithClient(client, url, form, referer, headers, tag, byteCap)
+                }
+            }
+        } else {
+            HttpClient.getTextWithClient(client, url, referer, headers, tag = tag, maxBytes = byteCap)
+        }
+
+        if (body == null) {
             DebugLog.error("$site pipeline $stage: no body from ${source.method} $url")
             return null
         }
 
+        if (step.deadPatterns.isNotEmpty() && isDeadPage(body, step.deadPatterns)) {
+            DebugLog.resolve("$site pipeline $stage: page matches dead pattern — aborting")
+            return null
+        }
+
+        val effectiveBody = if (step.asFormat == "packed_js" && body.isNotBlank()) {
+            val unpacked = JsUnpacker.unpack(body)
+            if (unpacked.isNotBlank()) unpacked else body
+        } else body
+
         return when (step.asFormat) {
             "json" -> {
                 val parsed: Any? = try {
-                    JSONObject(body)
+                    JSONObject(effectiveBody)
                 } catch (_: Exception) {
-                    try { JSONArray(body) } catch (_: Exception) { null }
+                    try { JSONArray(effectiveBody) } catch (_: Exception) { null }
                 }
                 if (parsed == null) {
                     DebugLog.error("$site pipeline $stage: invalid JSON from $url")
                     null
-                } else StepOutcome(body, null, parsed, url)
+                } else StepOutcome(effectiveBody, null, parsed, url, responseHeaders, statusCode)
             }
-            "rss" -> StepOutcome(body, JsoupXml(body), null, url)
-            else -> StepOutcome(body, org.jsoup.Jsoup.parse(body, url), null, url)
+            "rss" -> StepOutcome(effectiveBody, JsoupXml(effectiveBody), null, url, responseHeaders, statusCode)
+            else -> StepOutcome(effectiveBody, org.jsoup.Jsoup.parse(effectiveBody, url), null, url, responseHeaders, statusCode)
         }
     }
 
@@ -260,22 +416,152 @@ object RulesPipeline {
         org.jsoup.Jsoup.parse(body, "", org.jsoup.parser.Parser.xmlParser())
 
     private fun applyBinds(step: PipelineStep, outcome: StepOutcome, vars: MutableMap<String, String>) {
-        for (bind in step.bind) {
-            val value: String? = when {
+        val (powBinds, regularBinds) = step.bind.partition { it.powSha256 != null }
+        for (bind in regularBinds) {
+            val sourceContent = when {
+                bind.sourceVar.isNotBlank() -> vars[bind.sourceVar] ?: ""
+                bind.header.isNotBlank() -> {
+                    outcome.headers.entries.firstOrNull { it.key.equals(bind.header, ignoreCase = true) }?.value ?: ""
+                }
+                bind.cookie.isNotBlank() -> HttpClient.cookieValue(bind.cookie) ?: ""
+                else -> outcome.body
+            }
+
+            val targetText = if (bind.unpackJs && sourceContent.isNotBlank()) {
+                val unpacked = JsUnpacker.unpack(sourceContent)
+                if (unpacked.isNotBlank()) unpacked else sourceContent
+            } else sourceContent
+
+            var value: String? = when {
+                bind.header.isNotBlank() -> targetText.takeIf { it.isNotBlank() }
+                bind.cookie.isNotBlank() -> targetText.takeIf { it.isNotBlank() }
                 bind.regex.isNotBlank() -> {
-                    val target = if (outcome.body.length > 512 * 1024) outcome.body.take(512 * 1024) else outcome.body
+                    val target = if (targetText.length > 1024 * 1024) targetText.take(1024 * 1024) else targetText
                     val m = try { Regex(bind.regex).find(target) } catch (_: Exception) { null }
                     m?.groupValues?.getOrNull(bind.group)
                 }
                 bind.jsonPath.isNotBlank() -> walkJson(outcome.json, bind.jsonPath).firstOrNull()?.let { jsonToString(it) }
                 bind.selector.isNotBlank() -> outcome.doc?.selectFirst(bind.selector)?.let { el ->
-                    if (bind.attr.isNotBlank()) el.attr(bind.attr) else el.text()
+                    when {
+                        bind.attr.equals("html", true) -> el.html()
+                        bind.attr.equals("outerHtml", true) -> el.outerHtml()
+                        bind.attr.equals("abs:href", true) || bind.attr.equals("href", true) -> {
+                            val rawHref = el.attr("href")
+                            el.attr("abs:href").ifBlank { HttpClient.safeResolveUri(outcome.baseUrl, rawHref) }
+                        }
+                        bind.attr.equals("abs:src", true) || bind.attr.equals("src", true) -> {
+                            val rawSrc = el.attr("src")
+                            el.attr("abs:src").ifBlank { HttpClient.safeResolveUri(outcome.baseUrl, rawSrc) }
+                        }
+                        bind.attr.isNotBlank() -> el.attr(bind.attr)
+                        else -> el.text()
+                    }
                 }
-                else -> null
+                else -> targetText.takeIf { it.isNotBlank() }
             }
+
+            if (value != null && bind.transforms.isNotEmpty()) {
+                value = applyTransforms(value, bind.transforms)
+            }
+
+            if (!value.isNullOrBlank()) vars[bind.name] = value.trim()
+        }
+        for (bind in powBinds) {
+            val pow = bind.powSha256 ?: continue
+            val seed = renderTemplate(pow.seed, vars) { vars[it] } ?: ""
+            val bitsStr = renderTemplate(pow.bits, vars) { vars[it] } ?: ""
+            val value = if (seed.isNotBlank() && bitsStr.isNotBlank()) {
+                solvePow(seed, bitsStr, pow.format, pow.maxIterations, pow.algorithm)
+            } else null
             if (!value.isNullOrBlank()) vars[bind.name] = value.trim()
         }
     }
+
+    internal fun applyTransforms(input: String, transforms: List<String>): String {
+        var curr = input
+        for (t in transforms) {
+            curr = when (t.lowercase()) {
+                "base64decode" -> {
+                    try {
+                        val clean = curr.trim().replace('-', '+').replace('_', '/')
+                        val padded = clean + "=".repeat((4 - clean.length % 4) % 4)
+                        String(java.util.Base64.getDecoder().decode(padded), Charsets.UTF_8)
+                    } catch (_: Exception) { curr }
+                }
+                "base64encode" -> {
+                    try {
+                        java.util.Base64.getEncoder().encodeToString(curr.toByteArray(Charsets.UTF_8))
+                    } catch (_: Exception) { curr }
+                }
+                "hexdecode" -> {
+                    try {
+                        val clean = curr.trim().removePrefix("0x").replace(" ", "")
+                        val bytes = ByteArray(clean.length / 2) { i ->
+                            clean.substring(i * 2, i * 2 + 2).toInt(16).toByte()
+                        }
+                        String(bytes, Charsets.UTF_8)
+                    } catch (_: Exception) { curr }
+                }
+                "rot13" -> {
+                    curr.map { c ->
+                        when (c) {
+                            in 'a'..'m' -> c + 13
+                            in 'n'..'z' -> c - 13
+                            in 'A'..'M' -> c + 13
+                            in 'N'..'Z' -> c - 13
+                            else -> c
+                        }
+                    }.joinToString("")
+                }
+                "urldecode" -> {
+                    try { java.net.URLDecoder.decode(curr, "UTF-8") } catch (_: Exception) { curr }
+                }
+                "urlencode" -> {
+                    try { java.net.URLEncoder.encode(curr, "UTF-8") } catch (_: Exception) { curr }
+                }
+                "trim" -> curr.trim()
+                "lowercase" -> curr.lowercase()
+                "uppercase" -> curr.uppercase()
+                "reverse" -> curr.reversed()
+                else -> curr
+            }
+        }
+        return curr
+    }
+
+    internal fun solvePow(seed: String, bitsStr: String, format: String, maxIterations: Int, algorithm: String = "sha256"): String? {
+        val digestAlg = when (algorithm.lowercase()) {
+            "md5" -> "MD5"
+            "sha1" -> "SHA-1"
+            else -> "SHA-256"
+        }
+        val md = try { java.security.MessageDigest.getInstance(digestAlg) } catch (_: Exception) { return null }
+        val isPrefix = bitsStr.startsWith("prefix:")
+        val prefix = if (isPrefix) bitsStr.substringAfter("prefix:").lowercase() else ""
+        val bits = if (!isPrefix) bitsStr.toIntOrNull() ?: 0 else 0
+        val target = if (bits in 1..31) Math.pow(2.0, (32 - bits).toDouble()).toLong() else 0L
+        val boundedMax = maxIterations.coerceIn(1, 2_000_000)
+
+        for (n in 1..boundedMax) {
+            val input = format.replace("{seed}", seed).replace("{nonce}", n.toString())
+            val digest = md.digest(input.toByteArray(Charsets.UTF_8))
+            md.reset()
+            if (isPrefix) {
+                val hex = digest.joinToString("") { "%02x".format(it) }
+                if (hex.startsWith(prefix)) return n.toString()
+            } else if (bits in 1..31) {
+                val first4 = (((digest[0].toLong() and 0xFF) shl 24) or
+                              ((digest[1].toLong() and 0xFF) shl 16) or
+                              ((digest[2].toLong() and 0xFF) shl 8) or
+                              (digest[3].toLong() and 0xFF)) and 0xFFFFFFFFL
+                if (first4 < target) return n.toString()
+            }
+        }
+        return null
+    }
+
+    internal fun solvePowSha256(seed: String, bits: Int, format: String, maxIterations: Int): String? =
+        solvePow(seed, bits.toString(), format, maxIterations, "sha256")
 
     // -------------------------------------------------------------- resolve
 
@@ -358,59 +644,45 @@ object RulesPipeline {
         handoff: suspend (String) -> String?
     ): String? {
         val bases = DynamicRulesManager.getBaseUrls(site)
-        val base = (bases.firstOrNull { it.isNotBlank() } ?: "").trimEnd('/')
-        val vars = mutableMapOf("base" to base, "url" to episodeUrl, "query" to "")
+        val u = okhttp3.HttpUrl.parse(episodeUrl)
+        val fallbackOrigin = if (u != null) "${u.scheme()}://${u.host()}" else ""
+        val base = (bases.firstOrNull { it.isNotBlank() } ?: fallbackOrigin).trimEnd('/')
+        val nowMs = System.currentTimeMillis()
+        val vars = mutableMapOf(
+            "base" to base,
+            "origin" to fallbackOrigin,
+            "url" to episodeUrl,
+            "path" to (u?.encodedPath() ?: ""),
+            "host" to (u?.host() ?: ""),
+            "query" to "",
+            "page" to "1",
+            "offset" to "0",
+            "timestamp" to nowMs.toString(),
+            "timeSec" to (nowMs / 1000L).toString(),
+            "random" to (1..10).map { ('a'..'z').random() }.joinToString("")
+        )
         applyUrlBinds(pipeline?.urlBinds ?: emptyList(), vars)
         var consumed = 0L
 
         pipeline?.steps?.forEachIndexed { idx, step ->
-            if (step.delayMs > 0L) {
-                kotlinx.coroutines.delay(step.delayMs.coerceAtMost(15_000L))
+            val dynamicDelayMs = if (step.delayVar.isNotBlank()) {
+                val raw = vars[step.delayVar]?.trim().orEmpty()
+                val num = Regex("""\d+""").find(raw)?.value?.toLongOrNull() ?: 0L
+                if (num in 1..60) num * 1000L else num.coerceIn(0L, 60_000L)
+            } else 0L
+            val totalDelayMs = maxOf(step.delayMs, dynamicDelayMs).coerceIn(0L, 60_000L)
+            if (totalDelayMs > 0L) {
+                kotlinx.coroutines.delay(totalDelayMs)
             }
             var bound = false
+            val stepMaxBytes = if (step.maxBytes > 0L) step.maxBytes.coerceIn(50_000L, 3_000_000L) else RESOLVE_FETCH_MAX_BYTES
             for ((source, sourceVars) in expandSources(site, step, vars)) {
-                val url = renderTemplate(source.url, sourceVars) { name -> sourceVars[name] }
-                if (url.isNullOrBlank() || !url.startsWith("http")) continue
-                val referer = source.headers.entries
-                    .firstOrNull { it.key.equals("Referer", ignoreCase = true) }
-                    ?.value?.let { renderTemplate(it, sourceVars) { n -> sourceVars[n] } }
-                val headers = source.headers
-                    .filterKeys { !it.equals("Referer", ignoreCase = true) }
-                    .mapValues { renderTemplate(it.value, sourceVars) { n -> sourceVars[n] } ?: "" }
-                val body = if (source.method == "POST") {
-                    // A form value whose template references an unbound var is
-                    // a BROKEN source — POSTing it empty is the junk-request
-                    // bug the compiled resolvers guard (fileId.isNullOrBlank()
-                    // return null). Skip this source; another may resolve.
-                    var formBroken = false
-                    val form = source.form.entries.associate { (k, v) ->
-                        val r = renderTemplate(v, sourceVars) { n -> sourceVars[n] }
-                        if (r == null) { formBroken = true; k to "" } else k to r
-                    }
-                    if (formBroken) continue
-                    HttpClient.postForm(url, form, referer, headers, tag = null, maxBytes = RESOLVE_FETCH_MAX_BYTES)
-                } else {
-                    HttpClient.getText(url, referer, headers, tag = null, maxBytes = RESOLVE_FETCH_MAX_BYTES)
-                }
-                if (body.isNullOrEmpty()) continue
-                consumed += body.length
+                val outcome = fetchSource(site, "resolve", step, source, sourceVars, tag = null, customMaxBytes = stepMaxBytes) ?: continue
+                consumed += outcome.body.length
                 if (consumed > RESOLVE_TOTAL_MAX_BYTES) {
                     DebugLog.resolve("$site pipeline resolve: byte budget exceeded (${consumed}B) at step $idx — refusing")
                     return null
                 }
-                val body2 = body
-                val doc = if (step.asFormat == "json") null
-                    else if (step.asFormat == "rss") JsoupXml(body2)
-                    else org.jsoup.Jsoup.parse(body2, url)
-                val json: Any? = if (step.asFormat == "json") {
-                    try {
-                        JSONObject(body2)
-                    } catch (_: Exception) {
-                        // array-rooted API responses bind like search's
-                        try { JSONArray(body2) } catch (_: Exception) { null }
-                    }
-                } else null
-                val outcome = StepOutcome(body2, doc, json, url)
                 applyBinds(step, outcome, vars)
                 bound = true
                 if (step.mode != "merge") break

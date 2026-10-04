@@ -237,15 +237,28 @@ object NaijaVaultProvider : SiteProvider {
             // bare homepage and cycled resolver backoff forever. Host is
             // derived from the page itself so OTA base-url swaps keep it
             // working; cross-host lockers are untouched.
+            val explicitButtons = doc.select("a#download-button, a[class*='button'], a.download-btn, a.btn-download")
+            val explicitEpAnchors = doc.select("a[href]").filter { a ->
+                val t = a.text().trim()
+                val h = a.attr("href")
+                Regex("""(?i)\b(?:Episode|Ep|E)[- ]*\d{1,4}\b""").containsMatchIn(t) ||
+                    h.contains("/sdm_downloads/") ||
+                    h.contains("/dl-")
+            }
             val links: List<org.jsoup.nodes.Element> = if (otaSel != null) {
                 val ota = doc.select(otaSel)
                 val knownElsewhere = doc.select("a[href]").filter { a ->
                     val h = a.attr("abs:href").ifBlank { a.attr("href") }
-                    !isJunkSameSite(h, siteHost) && com.anonrode.downloader.resolvers.LockerRegistry.isKnownMedia(h)
+                    !isJunkSameSite(h, siteHost) && (
+                        com.anonrode.downloader.resolvers.LockerRegistry.isKnownMedia(h) ||
+                        h.contains("/sdm_downloads/") ||
+                        h.contains("/dl-")
+                    )
                 }
-                (ota + knownElsewhere).distinctBy { it.attr("abs:href").ifBlank { it.attr("href") } }
+                (ota + explicitButtons + explicitEpAnchors + knownElsewhere)
+                    .distinctBy { it.attr("abs:href").ifBlank { it.attr("href") } }
             } else {
-                doc.select("a[href]")
+                (doc.select("a[href]") + explicitButtons).distinctBy { it.attr("abs:href").ifBlank { it.attr("href") } }
             }
 
             var count = 1
@@ -265,16 +278,20 @@ object NaijaVaultProvider : SiteProvider {
                 // cycled backoff forever).
                 if (isJunkSameSite(href, siteHost)) continue
 
+                val isExplicitEpisodeAnchor = Regex("""(?i)\b(?:Episode|Ep|E)[- ]*(\d{1,4})\b""").containsMatchIn(a.text()) ||
+                    Regex("""(?i)\b(?:Episode|Ep|E)[- ]*(\d{1,4})\b""").containsMatchIn(href) ||
+                    a.id() == "download-button" || a.className().contains("elementor-button")
+
                 // Direct-media detection: the site rotates download hosts
                 // (filevault, streamsss, streamwish, downloadwella, ...).
                 // The stable signal is the FILE ITSELF: any href ending in a
                 // media/archive extension or carrying a CDN marker. Using
                 // LockerRegistry.classify instead of a hardcoded host list
-                // means an unknown host works on first contact (no APK update
-                // needed — live-verified: The Blood of Youth's 40 streamsss
-                // episodes were silently dropped before this fix).
+                // means an unknown host works on first contact.
                 val isDownloadLink = lowerHref.contains("/dl-") ||
                     lowerHref.contains("/cdn/") ||
+                    lowerHref.contains("/sdm_downloads/") ||
+                    isExplicitEpisodeAnchor ||
                     (com.anonrode.downloader.resolvers.LockerRegistry.classify(href) != com.anonrode.downloader.resolvers.LockerRegistry.MediaKind.None)
 
                 if (isDownloadLink) {
@@ -293,6 +310,67 @@ object NaijaVaultProvider : SiteProvider {
                 }
             }
 
+            // ── Sequential Episode Gap-Detection & Targeted Recovery Sweep ──
+            val existingNums = episodes.map { it.episodeNum }.toSet()
+            if (existingNums.isNotEmpty()) {
+                val minEp = existingNums.minOrNull() ?: 1
+                val effectiveMin = if (minEp == 2) 1 else minEp
+                val maxEp = existingNums.maxOrNull() ?: 1
+                val missingNums = (effectiveMin..maxEp).filter { it !in existingNums }
+
+                if (missingNums.isNotEmpty()) {
+                    com.anonrode.downloader.util.DebugLog.resolve(
+                        "naijavault: detected missing episode gaps $missingNums in range [$effectiveMin..$maxEp], running targeted recovery"
+                    )
+                    val allDocAnchors = doc.select("a[href]")
+                    for (missing in missingNums) {
+                        val targetPattern = Regex("""(?i)\b(?:Episode|Ep|E)[- ]*0*${missing}\b""")
+                        val candidateAnchor = allDocAnchors.firstOrNull { a ->
+                            val aText = a.text().trim()
+                            val aHref = a.attr("abs:href").ifBlank { HttpClient.safeResolveUri(showUrl, a.attr("href")) }
+                            val lowH = aHref.lowercase()
+                            val pText = a.parent()?.text()?.trim().orEmpty()
+
+                            val matchesNumber = targetPattern.containsMatchIn(aText) ||
+                                targetPattern.containsMatchIn(pText) ||
+                                targetPattern.containsMatchIn(aHref)
+
+                            val isNotJunk = aHref.isNotBlank() &&
+                                aHref !in seen &&
+                                !lowH.contains("telegram") &&
+                                !lowH.contains("facebook") &&
+                                !lowH.contains("twitter") &&
+                                !lowH.contains("whatsapp") &&
+                                !isJunkSameSite(aHref, siteHost)
+
+                            val isGatewayOrLockerOrDirect = lowH.contains("/sdm_downloads/") ||
+                                lowH.contains("/dl-") ||
+                                lowH.contains("/cdn/") ||
+                                a.id() == "download-button" ||
+                                (com.anonrode.downloader.resolvers.LockerRegistry.classify(aHref) != com.anonrode.downloader.resolvers.LockerRegistry.MediaKind.None)
+
+                            matchesNumber && isNotJunk && isGatewayOrLockerOrDirect
+                        }
+                        if (candidateAnchor != null) {
+                            val rawHref = candidateAnchor.attr("href")
+                            val href = candidateAnchor.attr("abs:href").ifBlank { HttpClient.safeResolveUri(showUrl, rawHref) }
+                            seen.add(href)
+                            val text = candidateAnchor.text().trim()
+                            val epTitle = if (text.isNotBlank() && !text.equals("Download", ignoreCase = true)) text else "Episode %02d".format(missing)
+                            episodes.add(
+                                EpisodeItem(
+                                    title = epTitle,
+                                    url = href,
+                                    episodeNum = missing,
+                                    site = name
+                                )
+                            )
+                            com.anonrode.downloader.util.DebugLog.resolve("naijavault: gap-fill recovered episode $missing -> $href")
+                        }
+                    }
+                }
+            }
+
             // Monolith parity (naijavault.py line 295): if the DOM yielded zero
             // download links, regex the raw HTML — the filevault links sometimes
             // live in script-rendered sections that Jsoup's DOM builder misses
@@ -307,7 +385,7 @@ object NaijaVaultProvider : SiteProvider {
                     "naijavault: 0 links from DOM, page starts: ${stripped.take(200).replace("\n", " ")}"
                 )
                 val rawHrefs = Pattern.compile(
-                    """https?://[^\s"\'<>]*(?:filevault|downloadwella|wetafiles|loadedfiles|nkiserv|vikingfile|lulacloud|pixeldrain|waffi|gtoddl|wapkizfile|/cdn/)[^\s"\'<>]*|https?://[^\s"\'<>]+\.(?:mkv|mp4|webm|avi|zip|rar)[^\s"\'<>]*""",
+                    """https?://[^\s"\'<>]*(?:filevault|downloadwella|wetafiles|loadedfiles|nkiserv|vikingfile|lulacloud|pixeldrain|waffi|gtoddl|wapkizfile|/cdn/|/sdm_downloads/)[^\s"\'<>]*|https?://[^\s"\'<>]+\.(?:mkv|mp4|webm|avi|zip|rar)[^\s"\'<>]*""",
                     Pattern.CASE_INSENSITIVE
                 ).matcher(html)
                 val rawSeen = mutableSetOf<String>()
@@ -330,6 +408,9 @@ object NaijaVaultProvider : SiteProvider {
                 }
             }
 
+            // Enforce strict ascending order
+            episodes.sortWith(compareBy({ it.episodeNum }, { it.title }))
+
             val card = ShowCard(title = title, url = showUrl, posterUrl = poster, site = name)
             com.anonrode.downloader.util.DebugLog.resolve("naijavault loadEpisodes: found ${episodes.size} episodes")
             return ShowDetails(show = card, synopsis = synopsis, episodes = episodes)
@@ -343,9 +424,9 @@ object NaijaVaultProvider : SiteProvider {
         // registry + /dl- page scan below stay the untouched fallback.
         var direct = RulesPipeline.runResolveForSite(name, episodeUrl, quality)
             ?: ResolverRegistry.resolve(episodeUrl, quality)
-        if (direct == null && episodeUrl.contains("/dl-")) {
+        if (direct == null && (episodeUrl.contains("/dl-") || episodeUrl.contains("/sdm_downloads/"))) {
             try {
-                val html = HttpClient.getText(episodeUrl) ?: ""
+                val html = HttpClient.getText(episodeUrl, referer = "https://www.naijavault.com/") ?: ""
                 val duMatch = Regex("var\\s+downloadURL\\s*=\\s*\"([^\"]+)\"").find(html)
                 if (duMatch != null) {
                     val cdnUrl = duMatch.groupValues.getOrNull(1) ?: ""
@@ -353,21 +434,26 @@ object NaijaVaultProvider : SiteProvider {
                         direct = ResolverRegistry.resolve(cdnUrl, quality) ?: cdnUrl
                     }
                 } else {
-                    // Fallback to scanning HTML for locker hosts. NaijaVault
-                    // uses a wide variety of lockers (streamsss, streamwish,
-                    // streamtape, doodstream, vidhide, mixdrop, mp4upload,
-                    // vikingfile, lulacloud, waffi, etc.) — race ALL of them
-                    // concurrently so dead lockers cost nothing (the sequential
-                    // walk used to wait out every corpse). Missing any one means
-                    // a show silently drops to "0 episodes" (live-verified: The
-                    // Blood of Youth had 40 episodes on streamsss, all ignored).
-                    val lockerMatches = Regex(
-                        """https?://(?:www\.)?(?:streamsss|streamwish|streamtape|doodstream|dood\.|vidhide|mixdrop|mp4upload|vikingfile|lulacloud|waffi)\.[a-z0-9-]+/[^\s"'<>]+""",
-                        RegexOption.IGNORE_CASE
-                    ).findAll(html).map { it.groupValues.getOrNull(0) ?: "" }
-                        .filter { it.isNotBlank() }.toList()
-                    if (lockerMatches.isNotEmpty()) {
-                        direct = ResolverRegistry.resolveAny(lockerMatches, quality)
+                    val sdmDoc = Jsoup.parse(html, episodeUrl)
+                    val sdmBtn = sdmDoc.selectFirst("a.sdm_download, a[href*='sdm_process_download'], a.download-btn, a.btn-download")
+                    val sdmHref = sdmBtn?.attr("abs:href")?.ifBlank { sdmBtn.attr("href") }
+                    if (!sdmHref.isNullOrBlank()) {
+                        if (sdmHref.contains("sdm_process_download") || sdmHref.contains("/sdm_downloads/")) {
+                            val redirected = HttpClient.probeTerminal(sdmHref, referer = episodeUrl)?.url ?: sdmHref
+                            direct = ResolverRegistry.resolve(redirected, quality) ?: redirected
+                        } else {
+                            direct = ResolverRegistry.resolve(sdmHref, quality) ?: sdmHref
+                        }
+                    }
+                    if (direct == null) {
+                        val lockerMatches = Regex(
+                            """https?://(?:www\.)?(?:streamsss|streamwish|streamtape|doodstream|dood\.|vidhide|mixdrop|mp4upload|vikingfile|lulacloud|waffi|downloadwella|loadedfiles|wetafiles|wildshare)\.[a-z0-9-]+/[^\s"'<>]+""",
+                            RegexOption.IGNORE_CASE
+                        ).findAll(html).map { it.groupValues.getOrNull(0) ?: "" }
+                            .filter { it.isNotBlank() }.toList()
+                        if (lockerMatches.isNotEmpty()) {
+                            direct = ResolverRegistry.resolveAny(lockerMatches, quality)
+                        }
                     }
                 }
             } catch (e: Exception) {

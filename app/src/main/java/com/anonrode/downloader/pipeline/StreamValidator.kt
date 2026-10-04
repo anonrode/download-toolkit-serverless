@@ -71,7 +71,11 @@ object StreamValidator {
         var tlsRetried = false
         while (true) {
             try {
-                val client = if (tlsRetried) HttpClient.permissiveClient else HttpClient.shared.newBuilder().build()
+                val client = (if (tlsRetried) HttpClient.permissiveClient else HttpClient.shared)
+                    .newBuilder()
+                    .connectTimeout(2500, java.util.concurrent.TimeUnit.MILLISECONDS)
+                    .readTimeout(3000, java.util.concurrent.TimeUnit.MILLISECONDS)
+                    .build()
                 HttpClient.executeRegistered(client.newCall(req)).use { res ->
                     status = res.code
                     if (status in 200..299 || status == 416) {

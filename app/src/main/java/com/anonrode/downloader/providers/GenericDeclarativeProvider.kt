@@ -33,6 +33,11 @@ class GenericDeclarativeProvider(
     override val mainUrl: String get() = config.baseUrl
 
     override suspend fun search(query: String): List<ShowCard> {
+        val pipeline = com.anonrode.downloader.data.rules.DynamicRulesManager.getPipeline(name)
+        if (pipeline?.search != null) {
+            val cards = RulesPipeline.runSearch(name, pipeline.search, query)
+            if (cards.isNotEmpty()) return cards
+        }
         val results = mutableListOf<ShowCard>()
         try {
             val encoded = URLEncoder.encode(query, "UTF-8")
@@ -112,6 +117,19 @@ class GenericDeclarativeProvider(
     }
 
     override suspend fun loadEpisodes(showUrl: String): ShowDetails {
+        val pipeline = com.anonrode.downloader.data.rules.DynamicRulesManager.getPipeline(name)
+        if (pipeline?.episodes != null) {
+            val res = RulesPipeline.runEpisodes(name, pipeline.episodes, showUrl)
+            if (res != null && res.episodes.isNotEmpty()) {
+                val card = ShowCard(
+                    title = res.title.ifBlank { config.displayName },
+                    url = showUrl,
+                    posterUrl = res.posterUrl,
+                    site = name
+                )
+                return ShowDetails(show = card, synopsis = res.synopsis, episodes = res.episodes)
+            }
+        }
         val show = ShowCard(title = config.displayName, url = showUrl, site = name)
         try {
             val html = HttpClient.getText(showUrl, referer = "$mainUrl/") ?: return ShowDetails(show = show)
@@ -155,6 +173,19 @@ class GenericDeclarativeProvider(
     }
 
     override suspend fun resolveEpisode(episodeUrl: String, quality: String): DownloadRecipe {
+        val pipeline = com.anonrode.downloader.data.rules.DynamicRulesManager.getPipeline(name)
+        if (pipeline != null && (pipeline.resolve != null || pipeline.terminal != null)) {
+            val resolved = RulesPipeline.runResolveForSite(name, episodeUrl, quality)
+            if (!resolved.isNullOrBlank()) {
+                val isHls = resolved.contains(".m3u8", ignoreCase = true) || resolved.contains("manifest", ignoreCase = true)
+                return DownloadRecipe(
+                    directUrl = resolved,
+                    filename = resolved.substringAfterLast('/').substringBefore('?').ifEmpty { "media.mp4" },
+                    backend = if (isHls) "yt-dlp" else "aria2c",
+                    parallelSockets = 16
+                )
+            }
+        }
         val resolved = ResolverRegistry.resolve(episodeUrl, quality)
         val direct = if (!resolved.isNullOrBlank()) resolved else {
             if (com.anonrode.downloader.pipeline.StrictLinkClassifier.isDirectMedia(episodeUrl)) episodeUrl else ""

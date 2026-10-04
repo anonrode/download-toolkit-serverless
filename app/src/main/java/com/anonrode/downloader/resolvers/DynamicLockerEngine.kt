@@ -20,9 +20,9 @@ object DynamicLockerEngine {
         val clean = host.removePrefix("www.").lowercase()
         val key = pipelineKeyForHost(clean) ?: return false
         val pipeline = DynamicRulesManager.getPipeline(key) ?: return false
-        // Must have an explicit multi-step resolution pipeline to avoid hijacking
-        // entry-only provider gateways into infinite handoff loops.
-        return pipeline.resolve != null && pipeline.terminal != null
+        val hasMultiStep = pipeline.resolve != null && pipeline.terminal != null
+        val hasProbedEntry = pipeline.resolve == null && pipeline.terminal?.source == "entry" && pipeline.terminal?.mode == "probe"
+        return hasMultiStep || hasProbedEntry
     }
 
     suspend fun resolve(
@@ -52,6 +52,18 @@ object DynamicLockerEngine {
         for (start in 0 until parts.size) {
             val suffix = parts.drop(start).joinToString(".")
             if (DynamicRulesManager.getPipeline(suffix) != null) return suffix
+        }
+        val found = DynamicRulesManager.findPipelineKey(host)
+        if (found != null) return found
+        if (parts.isNotEmpty()) {
+            val sld = parts[0]
+            if (DynamicRulesManager.getPipeline(sld) != null) return sld
+            for (key in DynamicRulesManager.getLockerHosts()) {
+                if (key.startsWith("$sld.") || host.startsWith("$key.") || host.contains(".$key.")) {
+                    val pKey = DynamicRulesManager.findPipelineKey(key) ?: key
+                    if (DynamicRulesManager.getPipeline(pKey) != null) return pKey
+                }
+            }
         }
         return null
     }

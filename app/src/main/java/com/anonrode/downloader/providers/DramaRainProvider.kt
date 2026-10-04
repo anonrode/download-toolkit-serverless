@@ -1,6 +1,7 @@
 package com.anonrode.downloader.providers
 
 import com.anonrode.downloader.util.DownloadLinkLabels
+import com.anonrode.downloader.util.PostContentSanitizer
 import com.anonrode.downloader.data.rules.DynamicRulesManager
 import com.anonrode.downloader.data.models.DownloadRecipe
 import com.anonrode.downloader.data.models.EpisodeItem
@@ -164,13 +165,16 @@ object DramaRainProvider : SiteProvider {
             // Content-rooted sweep with the SAME host/shape allowlist the
             // loose union used — the old `.entry-content a` catch-all made
             // every synopsis/trailer link an "episode".
-            val entryRoot = doc.selectFirst(".entry-content") ?: doc.body()
+            val entryRoot = doc.selectFirst(".entry-content, article") ?: doc.body() ?: doc
+            PostContentSanitizer.clean(entryRoot)
             val links = entryRoot.select("a[href]").filter { cand ->
                 val h = cand.attr("href").lowercase()
-                h.contains("download") || h.contains("episode") || h.contains("loadedfiles") ||
+                !PostContentSanitizer.isSameSitePostPermalink(cand.attr("href"), "dramarain.com") &&
+                    !PostContentSanitizer.isSiblingPostAnchorText(cand.text()) &&
+                    (h.contains("download") || h.contains("episode") || h.contains("loadedfiles") ||
                     h.contains("waffi") || h.contains(".mkv") || h.contains(".mp4") ||
                     com.anonrode.downloader.pipeline.StrictLinkClassifier.classify(h) is com.anonrode.downloader.pipeline.StrictLinkClassifier.LinkClass.KnownLocker ||
-                    com.anonrode.downloader.pipeline.StrictLinkClassifier.isDirectMedia(h)
+                    com.anonrode.downloader.pipeline.StrictLinkClassifier.isDirectMedia(h))
             }
 
             var count = 1
@@ -180,7 +184,11 @@ object DramaRainProvider : SiteProvider {
                     HttpClient.safeResolveUri(showUrl, rawHref)
                 }
                 val text = a.text().trim()
-                if (href.isNotBlank() && href !in seen && !com.anonrode.downloader.pipeline.StrictLinkClassifier.isNavigationJunk(href)) {
+                if (href.isNotBlank() && href !in seen &&
+                    !com.anonrode.downloader.pipeline.StrictLinkClassifier.isNavigationJunk(href) &&
+                    !PostContentSanitizer.isSameSitePostPermalink(href, "dramarain.com") &&
+                    !PostContentSanitizer.isSiblingPostAnchorText(text)
+                ) {
                     seen.add(href)
                     episodes.add(
                         EpisodeItem(

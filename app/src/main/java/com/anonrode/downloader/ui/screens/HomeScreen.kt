@@ -15,9 +15,12 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items as gridItems
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -528,6 +531,9 @@ fun HomeScreen(
                         isLoading = uiState.isTrendingLoading,
                         failed = uiState.trendingFailed,
                         showPosters = viewModel.engine.showPostersInResults,
+                        isLoadingMore = uiState.isTrendingLoadingMore,
+                        hasMore = uiState.trendingHasMore,
+                        onLoadMore = { viewModel.loadMoreTrending() },
                         onRefresh = { viewModel.loadTrending(force = true) },
                         onRetry = { viewModel.loadTrending(force = true) },
                         onOpen = { viewModel.openEpisodeDrawer(it) }
@@ -593,6 +599,9 @@ fun HomeScreen(
                 isLoading = uiState.isCategoryLoading,
                 failed = uiState.categoryFailed,
                 showPosters = viewModel.engine.showPostersInResults,
+                isLoadingMore = uiState.isCategoryLoadingMore,
+                hasMore = uiState.categoryHasMore,
+                onLoadMore = { viewModel.loadMoreCategory() },
                 onBack = { viewModel.closeCategory() },
                 onRefresh = { viewModel.loadCategory(category, force = true) },
                 onOpen = { viewModel.openEpisodeDrawer(it) }
@@ -608,6 +617,9 @@ fun HomeScreen(
                 isLoading = uiState.isDramaLoading,
                 failed = uiState.dramaFailed,
                 showPosters = viewModel.engine.showPostersInResults,
+                isLoadingMore = uiState.isDramaLoadingMore,
+                hasMore = uiState.dramaHasMore,
+                onLoadMore = { viewModel.loadMoreDrama() },
                 onBack = { viewModel.closeAsianDramaHub() },
                 onSelectEra = { viewModel.selectDramaEra(it) },
                 onSelectStatus = { viewModel.selectDramaStatus(it) },
@@ -680,10 +692,31 @@ private fun TrendingSection(
     isLoading: Boolean,
     failed: Boolean,
     showPosters: Boolean,
+    isLoadingMore: Boolean = false,
+    hasMore: Boolean = true,
+    onLoadMore: () -> Unit = {},
     onRefresh: () -> Unit,
     onRetry: () -> Unit,
     onOpen: (ShowCard) -> Unit
 ) {
+    val rowState = rememberLazyListState()
+
+    val shouldLoadMore by remember(items.size, isLoading, isLoadingMore, hasMore) {
+        derivedStateOf {
+            if (!hasMore || isLoading || isLoadingMore || items.isEmpty()) return@derivedStateOf false
+            val layoutInfo = rowState.layoutInfo
+            val totalItems = layoutInfo.totalItemsCount
+            val lastVisible = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+            totalItems > 0 && lastVisible >= totalItems - 3
+        }
+    }
+
+    LaunchedEffect(shouldLoadMore) {
+        if (shouldLoadMore) {
+            onLoadMore()
+        }
+    }
+
     Column(
         modifier = modifier.fillMaxWidth()
     ) {
@@ -759,6 +792,7 @@ private fun TrendingSection(
             else -> {
                 // Horizontal carousel: LazyRow scrolls left↔right by design.
                 LazyRow(
+                    state = rowState,
                     horizontalArrangement = Arrangement.spacedBy(Spacing.md),
                     contentPadding = PaddingValues(end = Spacing.lg),
                     modifier = Modifier.fillMaxWidth()
@@ -780,6 +814,22 @@ private fun TrendingSection(
                                 fadeOutSpec = tween(Motion.DurationFast)
                             )
                         )
+                    }
+                    if (isLoadingMore) {
+                        item {
+                            Box(
+                                modifier = Modifier
+                                    .width(60.dp)
+                                    .height(TRENDING_ROW_H),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                CircularProgressIndicator(
+                                    color = AccentPrimary,
+                                    strokeWidth = 2.dp,
+                                    modifier = Modifier.size(24.dp)
+                                )
+                            }
+                        }
                     }
                 }
                 Spacer(modifier = Modifier.height(Spacing.lg))
@@ -1088,11 +1138,32 @@ private fun CategoryPage(
     isLoading: Boolean,
     failed: Boolean,
     showPosters: Boolean,
+    isLoadingMore: Boolean = false,
+    hasMore: Boolean = true,
+    onLoadMore: () -> Unit = {},
     onBack: () -> Unit,
     onRefresh: () -> Unit,
     onOpen: (ShowCard) -> Unit
 ) {
     BackHandler(onBack = onBack)
+
+    val gridState = rememberLazyGridState()
+
+    val shouldLoadMore by remember(cards.size, isLoading, isLoadingMore, hasMore) {
+        derivedStateOf {
+            if (!hasMore || isLoading || isLoadingMore || cards.isEmpty()) return@derivedStateOf false
+            val layoutInfo = gridState.layoutInfo
+            val totalItems = layoutInfo.totalItemsCount
+            val lastVisible = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+            totalItems > 0 && lastVisible >= totalItems - 6
+        }
+    }
+
+    LaunchedEffect(shouldLoadMore) {
+        if (shouldLoadMore) {
+            onLoadMore()
+        }
+    }
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -1182,6 +1253,7 @@ private fun CategoryPage(
                 }
             }
             else -> LazyVerticalGrid(
+                state = gridState,
                 columns = GridCells.Fixed(3),
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(
@@ -1207,6 +1279,22 @@ private fun CategoryPage(
                             fadeOutSpec = tween(Motion.DurationFast)
                         )
                     )
+                }
+                if (isLoadingMore) {
+                    item(span = { GridItemSpan(maxLineSpan) }) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = Spacing.md),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            CircularProgressIndicator(
+                                color = AccentPrimary,
+                                strokeWidth = 2.dp,
+                                modifier = Modifier.size(24.dp)
+                            )
+                        }
+                    }
                 }
             }
         }

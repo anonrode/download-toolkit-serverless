@@ -3,6 +3,7 @@ package com.anonrode.downloader.providers
 import com.anonrode.downloader.data.models.DownloadRecipe
 import com.anonrode.downloader.data.models.EpisodeItem
 import com.anonrode.downloader.util.DownloadLinkLabels
+import com.anonrode.downloader.util.PostContentSanitizer
 import com.anonrode.downloader.data.models.ShowCard
 import com.anonrode.downloader.data.models.ShowDetails
 import com.anonrode.downloader.data.net.HttpClient
@@ -86,6 +87,7 @@ object AsianCProvider : SiteProvider {
             // Container selectors FIRST; the page-wide `-episode-` tail is a
             // sidebar magnet (related-episode widgets share the slug shape),
             // so it only rescues an otherwise-empty drawer.
+            PostContentSanitizer.clean(doc)
             var epLinks = doc.select("ul.list-episode-item-2 li a, .all-episodes li a, .list-episode a, .list-episode-item a")
             if (epLinks.isEmpty()) epLinks = doc.select("a[href*='-episode-']")
 
@@ -95,9 +97,10 @@ object AsianCProvider : SiteProvider {
                     HttpClient.safeResolveUri(showUrl, rawHref)
                 }
                 if (href.isBlank() || href in seen) continue
-                seen.add(href)
 
                 val epRaw = link.selectFirst(".title, h3")?.text()?.trim() ?: link.text().trim()
+                if (PostContentSanitizer.isSiblingPostAnchorText(epRaw)) continue
+                seen.add(href)
                 val epNum = Regex("""(?:Episode|Ep|E)\s*(\d+)""", RegexOption.IGNORE_CASE)
                     .find(epRaw)?.groupValues?.get(1)?.toIntOrNull()
                     ?: Regex("""episode-(\d+)""", RegexOption.IGNORE_CASE).find(href)?.groupValues?.get(1)?.toIntOrNull()
@@ -105,22 +108,35 @@ object AsianCProvider : SiteProvider {
 
                 // Mirror-server / part rows must not be relabeled "Episode N"
                 // (2026-09-13 drawer bug class, shared with Rocks).
+                val partMatch = Regex("""\b(?:Part|Pt)\.?\s*(\d+)\b""", RegexOption.IGNORE_CASE).find(epRaw)
+                    ?: Regex("""\b(?:Part|Pt)\.?\s*(\d+)\b""", RegexOption.IGNORE_CASE).find(href)
+                val partNum = partMatch?.groupValues?.get(1)?.toIntOrNull()
+
                 val mirrorLabel = DownloadLinkLabels.serverOrPart(epRaw, href)
                 val cleanTitle = when {
                     mirrorLabel != null -> mirrorLabel
+                    partNum != null -> "Episode $epNum Part $partNum" + if (epRaw.contains("RAW", ignoreCase = true)) " (RAW)" else ""
                     epRaw.contains("Episode", ignoreCase = true) ->
                         "Episode $epNum" + if (epRaw.contains("RAW", ignoreCase = true)) " (RAW)" else ""
                     else -> "Episode $epNum"
                 }
 
-                episodes.add(
-                    EpisodeItem(
-                        title = cleanTitle,
-                        url = href,
-                        episodeNum = epNum,
-                        site = name
+                val existing = episodes.firstOrNull { it.episodeNum == epNum && it.title == cleanTitle }
+                if (existing != null) {
+                    if (href != existing.url && href !in existing.mirrorUrls) {
+                        val idx = episodes.indexOf(existing)
+                        episodes[idx] = existing.copy(mirrorUrls = existing.mirrorUrls + href)
+                    }
+                } else {
+                    episodes.add(
+                        EpisodeItem(
+                            title = cleanTitle,
+                            url = href,
+                            episodeNum = epNum,
+                            site = name
+                        )
                     )
-                )
+                }
             }
 
             // SINGLE-FILM shape used to yield an empty drawer (the site has
@@ -134,7 +150,7 @@ object AsianCProvider : SiteProvider {
             }
 
             val card = ShowCard(title = title, url = showUrl, posterUrl = poster, site = name)
-            return ShowDetails(show = card, synopsis = synopsis, episodes = episodes.sortedBy { it.episodeNum })
+            return ShowDetails(show = card, synopsis = synopsis, episodes = episodes.sortedWith(compareBy({ it.episodeNum }, { it.title })))
         } catch (_: Exception) {
             return ShowDetails(show = show)
         }

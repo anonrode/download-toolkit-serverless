@@ -8,6 +8,7 @@ import com.anonrode.downloader.data.models.ShowCard
 import com.anonrode.downloader.data.models.ShowDetails
 import com.anonrode.downloader.data.net.HttpClient
 import com.anonrode.downloader.resolvers.ResolverRegistry
+import com.anonrode.downloader.util.PostContentSanitizer
 import org.jsoup.Jsoup
 import java.net.URLEncoder
 
@@ -100,6 +101,7 @@ object RocksProvider : SiteProvider {
             val episodes = mutableListOf<EpisodeItem>()
             val seen = mutableSetOf<String>()
             val entry = doc.selectFirst(".entry-content") ?: doc.body()
+            PostContentSanitizer.clean(entry)
 
             var currentSeason = 1
             val slugMatch = Regex("""season-(\d{1,2})""", RegexOption.IGNORE_CASE).find(showUrl)
@@ -134,6 +136,7 @@ object RocksProvider : SiteProvider {
                     val lowerHref = href.lowercase()
 
                     if (href.isBlank() || href in seen || href.contains("error?e=", ignoreCase = true) || href.contains("errore=", ignoreCase = true)) continue
+                    if (PostContentSanitizer.isSameSitePostPermalink(href, "my9jarocks.bz") || PostContentSanitizer.isSiblingPostAnchorText(elem.text())) continue
                     val isLocker = lowerHref.contains("loadedfiles") ||
                             lowerHref.contains("downloadwella") ||
                             lowerHref.contains("wetafiles") ||
@@ -143,12 +146,25 @@ object RocksProvider : SiteProvider {
                             lowerHref.contains("kissorgrab") ||
                             lowerHref.contains("wildshare") ||
                             lowerHref.contains("pixeldrain") ||
-                            com.anonrode.downloader.pipeline.StrictLinkClassifier.isKnownLocker(href)
+                            com.anonrode.downloader.pipeline.StrictLinkClassifier.isKnownLocker(href) ||
+                            com.anonrode.downloader.pipeline.StrictLinkClassifier.isDirectMedia(href)
 
                     if (isLocker) {
                         seen.add(href)
                         val text = elem.text().trim()
                         val parentText = elem.parent()?.text()?.trim() ?: ""
+                        val parentLinks = elem.parent()?.select("a[href]")?.size ?: 1
+                        val safeParentText = if (parentLinks <= 1) parentText else {
+                            var prev = elem.previousSibling()
+                            var s = ""
+                            while (prev != null && s.length < 60) {
+                                if (prev is org.jsoup.nodes.Element && prev.tagName() == "a") break
+                                if (prev is org.jsoup.nodes.TextNode) s = prev.text() + s
+                                else if (prev is org.jsoup.nodes.Element) s = prev.text() + s
+                                prev = prev.previousSibling()
+                            }
+                            s.trim()
+                        }
 
                         // Season ZIP detection
                         val zipMatch = Regex("""\b(?:SEASON|S)\s*(\d{1,2})\b.*\bZIP\b""", RegexOption.IGNORE_CASE).find(parentText)
@@ -168,15 +184,15 @@ object RocksProvider : SiteProvider {
                         }
 
                         val explicitSm = Regex("""\bS(\d{1,2})E(\d{1,3})\b""", RegexOption.IGNORE_CASE).find(text)
-                            ?: Regex("""\bS(\d{1,2})E(\d{1,3})\b""", RegexOption.IGNORE_CASE).find(parentText)
+                            ?: Regex("""\bS(\d{1,2})E(\d{1,3})\b""", RegexOption.IGNORE_CASE).findAll(safeParentText).lastOrNull()
                             ?: Regex("""\bS(\d{1,2})E(\d{1,3})\b""", RegexOption.IGNORE_CASE).find(href)
 
                         val epMatch = Regex("""\b(?:EPISODE|EP|E)\s*(\d{1,3})\b""", RegexOption.IGNORE_CASE).find(text)
-                            ?: Regex("""\b(?:EPISODE|EP|E)\s*(\d{1,3})\b""", RegexOption.IGNORE_CASE).find(parentText)
+                            ?: Regex("""\b(?:EPISODE|EP|E)\s*(\d{1,3})\b""", RegexOption.IGNORE_CASE).findAll(safeParentText).lastOrNull()
 
                         val itemSeason = explicitSm?.groupValues?.getOrNull(1)?.toIntOrNull() ?: currentSeason
                         val qMatch = Regex("""\b(\d{3,4}p)\b""", RegexOption.IGNORE_CASE).find(text)
-                            ?: Regex("""\b(\d{3,4}p)\b""", RegexOption.IGNORE_CASE).find(parentText)
+                            ?: Regex("""\b(\d{3,4}p)\b""", RegexOption.IGNORE_CASE).findAll(safeParentText).lastOrNull()
                         val qualitySuffix = qMatch?.groupValues?.getOrNull(1)?.let { " [$it]" } ?: ""
 
                         // Server-mirror / part detection for marker-free links.
@@ -188,11 +204,11 @@ object RocksProvider : SiteProvider {
                         // the user is actually tapping.
                         val mirrorMark = if (explicitSm == null && epMatch == null) {
                             Regex("""\b(?:video\s+)?server\s*(\d+)\b""", RegexOption.IGNORE_CASE).find(text)
-                                ?: Regex("""\b(?:video\s+)?server\s*(\d+)\b""", RegexOption.IGNORE_CASE).find(parentText)
+                                ?: Regex("""\b(?:video\s+)?server\s*(\d+)\b""", RegexOption.IGNORE_CASE).find(safeParentText)
                         } else null
                         val partMark = if (mirrorMark == null && explicitSm == null && epMatch == null) {
                             Regex("""\b(?:file\s+)?part\s*(\d{1,2})\b""", RegexOption.IGNORE_CASE).find(text)
-                                ?: Regex("""\b(?:file\s+)?part\s*(\d{1,2})\b""", RegexOption.IGNORE_CASE).find(parentText)
+                                ?: Regex("""\b(?:file\s+)?part\s*(\d{1,2})\b""", RegexOption.IGNORE_CASE).find(safeParentText)
                         } else null
 
                         val isSeries = isExplicitSingleSeasonPage || showUrl.contains("/series/") ||
@@ -270,7 +286,7 @@ object RocksProvider : SiteProvider {
             }
 
             val card = ShowCard(title = title, url = showUrl, posterUrl = poster, site = name)
-            return ShowDetails(show = card, synopsis = synopsis, episodes = episodes.sortedBy { it.episodeNum })
+            return ShowDetails(show = card, synopsis = synopsis, episodes = episodes.sortedWith(compareBy({ it.episodeNum }, { it.title })))
         } catch (_: Exception) {
             return ShowDetails(show = show)
         }

@@ -109,21 +109,6 @@ object PlutoProvider : SiteProvider {
                 val stem = slugStem(showSlug)
                 val seasonLinkRegex = Regex("""-season-\d+""", RegexOption.IGNORE_CASE)
 
-                // Collect this show's season hubs and pagination pages.
-                val pagesToScan = mutableListOf(showUrl)
-                val isSpecificSeason = seasonLinkRegex.containsMatchIn(showUrl)
-                for (a in doc.select("a[href]")) {
-                    val href = a.attr("abs:href").ifBlank { HttpClient.safeResolveUri(showUrl, a.attr("href")) }
-                    if (href.isBlank() || href == showUrl || href in pagesToScan) continue
-                    if (!isSpecificSeason && seasonLinkRegex.containsMatchIn(href) &&
-                        sameSlugStem(stem, slugStem(href.substringAfterLast('/').substringBefore('?')))
-                    ) {
-                        pagesToScan.add(href)
-                    } else if (href.contains("/page/") && href.startsWith(showUrl.substringBefore('?'))) {
-                        pagesToScan.add(href)
-                    }
-                }
-
                 val seenUrls = mutableSetOf<String>()
                 val seenEpKeys = mutableSetOf<String>()
                 fun addEpisode(href: String, epTitle: String, epNum: Int, key: String) {
@@ -194,61 +179,149 @@ object PlutoProvider : SiteProvider {
                     }
                 }
 
-                // 3. Episode links across this show's pages: season hubs list
-                //    every episode, pagination continues the list. The stem
-                //    filter rejects the unrelated-show sidebar links that also
-                //    use /series/ URLs.
-                // Fetch extra pages (season hubs / pagination) concurrently with
-                // Dispatchers.IO so an 8-season hub completes in parallel instead of
-                // crawling sequentially for 40+ seconds.
-                val otherPages = pagesToScan.distinct().filter { it != showUrl }
-                val extraDocs = if (otherPages.isNotEmpty()) {
-                    coroutineScope {
-                        otherPages.map { pUrl ->
-                            async(Dispatchers.IO) {
-                                val pHtml = try {
-                                    HttpClient.getText(pUrl, referer = "$mainUrl/")
-                                } catch (_: Exception) { null }
-                                if (!pHtml.isNullOrBlank()) Jsoup.parse(pHtml, pUrl) else null
-                            }
-                        }.awaitAll().filterNotNull()
+                // 3. Inspect main panel for season hubs or direct episode items.
+                // The main post content is inside .file-info-panel, isolating it
+                // from the sidebar "Top 10 Monthly Trending" items.
+                val mainPanel = doc.selectFirst(".file-info-panel") ?: doc
+                val rawItems = mainPanel.select(".kontent .flist-item")
+                val detectedSeasonHubs = mutableListOf<Pair<Int, String>>()
+                for (it in rawItems) {
+                    val a = it.selectFirst(".title a") ?: it.selectFirst("a[href]") ?: continue
+                    val href = a.attr("abs:href").ifBlank { HttpClient.safeResolveUri(showUrl, a.attr("href")) }.substringBefore('#')
+                    if (href.isBlank() || href == showUrl) continue
+                    val titleAttr = a.attr("title")
+                    val text = a.text().trim()
+                    val combined = "$titleAttr $text $href"
+                    val epKey = parseEpisodeKey(combined)
+                    val sNum = parseSeasonNumber(combined)
+                    if (epKey == null && sNum != null) {
+                        detectedSeasonHubs.add(sNum to href)
                     }
-                } else emptyList()
+                }
 
-                val allDocs = listOf(doc) + extraDocs
-                for (pageDoc in allDocs) {
-                    val pageUrl = pageDoc.baseUri().ifBlank { showUrl }
-                    for (a in pageDoc.select("a[href]")) {
+                if (detectedSeasonHubs.isNotEmpty()) {
+                    val distinctHubs = mutableListOf<Pair<Int, String>>()
+                    val seenHubUrls = mutableSetOf<String>()
+                    for ((sNum, hUrl) in detectedSeasonHubs) {
+                        if (seenHubUrls.add(hUrl)) {
+                            distinctHubs.add(sNum to hUrl)
+                        }
+                    }
+                    coroutineScope {
+                        distinctHubs.map { (sNum, sUrl) ->
+                            async(Dispatchers.IO) {
+                                val sHtml = try {
+                                    HttpClient.getText(sUrl, referer = "$mainUrl/")
+                                } catch (_: Exception) { null }
+                                if (!sHtml.isNullOrBlank()) {
+                                    val sDoc = Jsoup.parse(sHtml, sUrl)
+                                    val sPanel = sDoc.selectFirst(".file-info-panel") ?: sDoc
+                                    val pagPages = mutableListOf(sUrl)
+                                    for (pa in sPanel.select(".pagination-list a[href], a[href*='/page/']")) {
+                                        val pHref = pa.attr("abs:href").ifBlank { HttpClient.safeResolveUri(sUrl, pa.attr("href")) }.substringBefore('#')
+                                        if (pHref.isNotBlank() && pHref !in pagPages && pHref.startsWith(sUrl.substringBefore('?'))) {
+                                            pagPages.add(pHref)
+                                        }
+                                    }
+                                    val extraPagDocs = if (pagPages.size > 1) {
+                                        pagPages.filter { it != sUrl }.map { pUrl ->
+                                            async(Dispatchers.IO) {
+                                                val pHtml = try { HttpClient.getText(pUrl, referer = "$mainUrl/") } catch (_: Exception) { null }
+                                                if (!pHtml.isNullOrBlank()) Jsoup.parse(pHtml, pUrl) else null
+                                            }
+                                        }.awaitAll().filterNotNull()
+                                    } else emptyList()
+
+                                    val allSeasonDocs = listOf(sDoc) + extraPagDocs
+                                    for (docItem in allSeasonDocs) {
+                                        val panelItem = docItem.selectFirst(".file-info-panel") ?: docItem
+                                        val base = docItem.baseUri().ifBlank { sUrl }
+                                        for (it in panelItem.select(".kontent .flist-item")) {
+                                            val a = it.selectFirst(".title a") ?: it.selectFirst("a[href]") ?: continue
+                                            val href = a.attr("abs:href").ifBlank { HttpClient.safeResolveUri(base, a.attr("href")) }.substringBefore('#')
+                                            if (href.isBlank()) continue
+                                            val titleAttr = a.attr("title")
+                                            val text = a.text().trim()
+                                            val combined = "$titleAttr $text $href"
+                                            val epKey = parseEpisodeKey(combined) ?: parseEpisodeKey(href)
+                                            val epNum = epKey?.second ?: EP_TEXT_REGEX.find(combined)?.groupValues?.get(1)?.toIntOrNull()
+                                            val epSeason = epKey?.first ?: sNum
+                                            if (epNum != null) {
+                                                val epCode = epSeason * 100 + epNum
+                                                val epTitle = "S%02dE%02d".format(epSeason, epNum)
+                                                synchronized(episodes) {
+                                                    addEpisode(href, epTitle, epCode, "s${epSeason}e${epNum}")
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }.awaitAll()
+                    }
+                } else {
+                    val currentSeasonNum = parseSeasonNumber(title) ?: parseSeasonNumber(showSlug) ?: 1
+                    val pagPages = mutableListOf(showUrl)
+                    for (pa in mainPanel.select(".pagination-list a[href], a[href*='/page/']")) {
+                        val pHref = pa.attr("abs:href").ifBlank { HttpClient.safeResolveUri(showUrl, pa.attr("href")) }.substringBefore('#')
+                        if (pHref.isNotBlank() && pHref !in pagPages && pHref.startsWith(showUrl.substringBefore('?'))) {
+                            pagPages.add(pHref)
+                        }
+                    }
+                    val extraDocs = if (pagPages.size > 1) {
+                        coroutineScope {
+                            pagPages.filter { it != showUrl }.map { pUrl ->
+                                async(Dispatchers.IO) {
+                                    val pHtml = try { HttpClient.getText(pUrl, referer = "$mainUrl/") } catch (_: Exception) { null }
+                                    if (!pHtml.isNullOrBlank()) Jsoup.parse(pHtml, pUrl) else null
+                                }
+                            }.awaitAll().filterNotNull()
+                        }
+                    } else emptyList()
+
+                    val allCurrentDocs = listOf(doc) + extraDocs
+                    for (pageDoc in allCurrentDocs) {
+                        val pPanel = pageDoc.selectFirst(".file-info-panel") ?: pageDoc
+                        val base = pageDoc.baseUri().ifBlank { showUrl }
+                        for (it in pPanel.select(".kontent .flist-item")) {
+                            val a = it.selectFirst(".title a") ?: it.selectFirst("a[href]") ?: continue
+                            val href = a.attr("abs:href").ifBlank { HttpClient.safeResolveUri(base, a.attr("href")) }.substringBefore('#')
+                            if (href.isBlank()) continue
+                            val titleAttr = a.attr("title")
+                            val text = a.text().trim()
+                            val combined = "$titleAttr $text $href"
+                            val epKey = parseEpisodeKey(combined) ?: parseEpisodeKey(href)
+                            val epNum = epKey?.second ?: EP_TEXT_REGEX.find(combined)?.groupValues?.get(1)?.toIntOrNull()
+                            val epSeason = epKey?.first ?: currentSeasonNum
+                            if (epNum != null) {
+                                val epCode = epSeason * 100 + epNum
+                                val epTitle = "S%02dE%02d".format(epSeason, epNum)
+                                addEpisode(href, epTitle, epCode, "s${epSeason}e${epNum}")
+                            }
+                        }
+                    }
+                }
+
+                // 4. Fallback legacy scan if episodes are still empty
+                if (episodes.isEmpty()) {
+                    for (a in doc.select("a[href]")) {
                         val href = a.attr("abs:href").ifBlank {
-                            HttpClient.safeResolveUri(pageUrl, a.attr("href"))
+                            HttpClient.safeResolveUri(showUrl, a.attr("href"))
                         }.substringBefore('#')
-                        if (href.isBlank() || href == pageUrl || seasonLinkRegex.containsMatchIn(href)) continue
+                        if (href.isBlank() || href == showUrl || seasonLinkRegex.containsMatchIn(href)) continue
                         val key = parseEpisodeKey(href)
                         if (key == null && !href.contains("/episodes/")) continue
                         if (!sameSlugStem(stem, slugStem(href.substringAfterLast('/').substringBefore('?')))) continue
                         val label = a.text().trim()
                             .replace(Regex("""^(previous|next)\s+episode\b\s*""", RegexOption.IGNORE_CASE), "")
                             .trim()
-                        val epCode = if (key != null) {
-                            key.first * 100 + key.second
-                        } else {
-                            episodes.size + 1
-                        }
+                        val epCode = if (key != null) key.first * 100 + key.second else (episodes.size + 1)
                         val epTitle = if (key != null) {
-                            if (label.isBlank() || Regex("""^(episode\s*\d+|\d+)$""", RegexOption.IGNORE_CASE).matches(label)) {
-                                "S%02dE%02d".format(key.first, key.second)
-                            } else {
-                                "S%02dE%02d - $label".format(key.first, key.second)
-                            }
+                            "S%02dE%02d".format(key.first, key.second)
                         } else {
                             label.ifBlank { "Episode $epCode" }
                         }
-                        addEpisode(
-                            href,
-                            epTitle,
-                            epCode,
-                            key?.let { "s${it.first}e${it.second}" } ?: href
-                        )
+                        addEpisode(href, epTitle, epCode, key?.let { "s${it.first}e${it.second}" } ?: href)
                     }
                 }
 
@@ -286,18 +359,44 @@ object PlutoProvider : SiteProvider {
         }
     }
 
+    internal val SEASON_TEXT_REGEX = Regex("""\bseason\s*(\d{1,2})\b""", RegexOption.IGNORE_CASE)
+    internal val EP_CODE_REGEX = Regex("""\bs(\d{1,2})\s*[-_]?\s*e(\d{1,3})(?!\d)""", RegexOption.IGNORE_CASE)
+    internal val EP_TEXT_REGEX = Regex("""\b(?:episode|ep)\.?\s*(\d{1,3})(?!\d)""", RegexOption.IGNORE_CASE)
+
     /** Episode slug pattern: both -s01-e01 (dash) and -s01e01 (compact) occur live.
      *  Episode digits go to 3 (long runners: -e105); the `(?!\d)` guards stop a
      *  3-digit episode from being read as 2 (E105 -> E10 silently dropped E105
      *  into addEpisode's key-dedupe). internal: pinned by PlutoProviderTest. */
     internal val EP_SLUG_REGEX = Regex("""-s\d{1,2}[-_]?e\d{1,3}(?!\d)""", RegexOption.IGNORE_CASE)
 
-    /** (season, episode) parsed from a slug or URL, tolerant of both slug shapes. */
-    internal fun parseEpisodeKey(href: String): Pair<Int, Int>? {
-        val m = Regex("""-s(\d{1,2})(?!\d)[-_]?e(\d{1,3})(?!\d)""", RegexOption.IGNORE_CASE).find(href) ?: return null
-        val s = m.groupValues[1].toIntOrNull() ?: return null
-        val e = m.groupValues[2].toIntOrNull() ?: return null
-        return s to e
+    /** (season, episode) parsed from a slug, label, or URL, tolerant of multiple shapes. */
+    internal fun parseEpisodeKey(str: String): Pair<Int, Int>? {
+        val mSlug = Regex("""(?:^|[-_])s(\d{1,2})(?!\d)[-_]?e(\d{1,3})(?!\d)""", RegexOption.IGNORE_CASE).find(str)
+        if (mSlug != null) {
+            val s = mSlug.groupValues[1].toIntOrNull() ?: return null
+            val e = mSlug.groupValues[2].toIntOrNull() ?: return null
+            return s to e
+        }
+        val mCode = EP_CODE_REGEX.find(str)
+        if (mCode != null) {
+            val s = mCode.groupValues[1].toIntOrNull() ?: return null
+            val e = mCode.groupValues[2].toIntOrNull() ?: return null
+            return s to e
+        }
+        val sMatch = SEASON_TEXT_REGEX.find(str)
+        val eMatch = EP_TEXT_REGEX.find(str)
+        if (sMatch != null && eMatch != null) {
+            val s = sMatch.groupValues[1].toIntOrNull() ?: return null
+            val e = eMatch.groupValues[2].toIntOrNull() ?: return null
+            return s to e
+        }
+        return null
+    }
+
+    internal fun parseSeasonNumber(str: String): Int? {
+        val m = SEASON_TEXT_REGEX.find(str)
+            ?: Regex("""-season-(\d{1,2})(?!\d)""", RegexOption.IGNORE_CASE).find(str)
+        return m?.groupValues?.get(1)?.toIntOrNull()
     }
 
     /**

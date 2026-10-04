@@ -882,6 +882,149 @@ object HttpClient {
         }
     }
 
+    fun postJson(url: String, json: String, referer: String? = null, headers: Map<String, String> = emptyMap(), tag: String? = null, maxBytes: Long = MAX_TEXT_BYTES): String? =
+        postJsonWithClient(shared, url, json, referer, headers, tag, maxBytes)
+
+    internal fun postJsonWithClient(client: OkHttpClient, url: String, json: String, referer: String? = null, headers: Map<String, String> = emptyMap(), tag: String? = null, maxBytes: Long = MAX_TEXT_BYTES, onFailure: FailureListener? = null): String? {
+        return try {
+            admitRequest(url)
+            refuseUnsafeTarget(url)
+            val mediaType = okhttp3.MediaType.parse("application/json; charset=utf-8")
+            val body = okhttp3.RequestBody.create(mediaType, json)
+            val reqBuilder = Request.Builder()
+                .url(safeUrl(url))
+                .post(body)
+                .header("User-Agent", DEFAULT_UA)
+                .header("Accept", "application/json, text/plain, */*")
+                .header("Accept-Language", "en-US,en;q=0.9")
+            if (!referer.isNullOrBlank()) {
+                reqBuilder.header("Referer", referer)
+            }
+            headers.forEach { (k, v) -> reqBuilder.header(k, v) }
+
+            val call = client.newCall(reqBuilder.build())
+            inFlightCalls.add(call)
+            if (tag != null) {
+                taggedCalls.computeIfAbsent(tag) { java.util.concurrent.CopyOnWriteArrayList() }.add(call)
+            }
+            val started = System.currentTimeMillis()
+            try {
+                val response = try {
+                    call.execute()
+                } catch (e: java.io.IOException) {
+                    if (call.isCanceled()) {
+                        throw kotlinx.coroutines.CancellationException("HTTP call canceled").apply { initCause(e) }
+                    }
+                    throw e
+                }
+                response.use { res ->
+                    com.anonrode.downloader.util.DebugLog.net(
+                        "POST_JSON ${safeUrl(url)} -> ${res.code} in ${System.currentTimeMillis() - started}ms"
+                    )
+                    recordCooldown(res)
+                    if (res.isSuccessful) {
+                        readCappedText(res, maxBytes, propagateFailure = onFailure != null)
+                    } else {
+                        if (res.code == 429 || res.code == 503) {
+                            throw OriginCooldownException(res.request.url.toString())
+                        }
+                        throw java.io.IOException("HTTP ${res.code} for ${res.request.url.toString().take(120)}")
+                    }
+                }
+            } finally {
+                inFlightCalls.remove(call)
+                if (tag != null) taggedCalls[tag]?.remove(call)
+            }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            val message = "postJson FAILED ${e.javaClass.simpleName}: ${e.message}"
+            lastFailure = message
+            Log.w("HttpClient", message)
+            onFailure?.onFailure(url, e)
+            null
+        }
+    }
+
+    internal fun executeRawWithClient(
+        client: OkHttpClient,
+        url: String,
+        method: String = "GET",
+        bodyPayload: okhttp3.RequestBody? = null,
+        referer: String? = null,
+        headers: Map<String, String> = emptyMap(),
+        maxBytes: Long = MAX_TEXT_BYTES,
+        timeoutMs: Long = 0L,
+        tag: String? = null
+    ): HttpRawResult? {
+        return try {
+            admitRequest(url)
+            refuseUnsafeTarget(url)
+            val reqBuilder = Request.Builder()
+                .url(safeUrl(url))
+                .header("User-Agent", DEFAULT_UA)
+                .header("Accept", "*/*")
+                .header("Accept-Language", "en-US,en;q=0.9")
+            if (!referer.isNullOrBlank()) reqBuilder.header("Referer", referer)
+            headers.forEach { (k, v) -> reqBuilder.header(k, v) }
+
+            when (method.uppercase()) {
+                "POST" -> reqBuilder.post(bodyPayload ?: okhttp3.RequestBody.create(null, ByteArray(0)))
+                "HEAD" -> reqBuilder.head()
+                else -> reqBuilder.get()
+            }
+
+            val effectiveClient = if (timeoutMs > 0L) {
+                client.newBuilder()
+                    .connectTimeout(timeoutMs.coerceIn(1_000L, 30_000L), java.util.concurrent.TimeUnit.MILLISECONDS)
+                    .readTimeout(timeoutMs.coerceIn(1_000L, 30_000L), java.util.concurrent.TimeUnit.MILLISECONDS)
+                    .build()
+            } else client
+
+            val call = effectiveClient.newCall(reqBuilder.build())
+            inFlightCalls.add(call)
+            if (tag != null) {
+                taggedCalls.computeIfAbsent(tag) { java.util.concurrent.CopyOnWriteArrayList() }.add(call)
+            }
+            val started = System.currentTimeMillis()
+            try {
+                val response = try {
+                    call.execute()
+                } catch (e: java.io.IOException) {
+                    if (call.isCanceled()) {
+                        throw kotlinx.coroutines.CancellationException("HTTP call canceled").apply { initCause(e) }
+                    }
+                    throw e
+                }
+                response.use { res ->
+                    com.anonrode.downloader.util.DebugLog.net(
+                        "RAW $method ${safeUrl(url)} -> ${res.code} in ${System.currentTimeMillis() - started}ms"
+                    )
+                    recordCooldown(res)
+                    val bodyText = if (method.uppercase() != "HEAD" && res.body != null) {
+                        readCappedText(res, maxBytes, propagateFailure = false)
+                    } else null
+                    HttpRawResult(
+                        code = res.code,
+                        body = bodyText,
+                        headers = res.headers,
+                        effectiveUrl = res.request.url.toString()
+                    )
+                }
+            } finally {
+                inFlightCalls.remove(call)
+                if (tag != null) taggedCalls[tag]?.remove(call)
+            }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            val message = "executeRaw FAILED ${e.javaClass.simpleName}: ${e.message}"
+            lastFailure = message
+            Log.w("HttpClient", message)
+            null
+        }
+    }
+
     /**
      * Reachability probe: request headers only (no body read) with a hard call
      * timeout, and report whether the server answered. Used by the HLS
@@ -1010,6 +1153,12 @@ object HttpClient {
                 if (tag != null) taggedCalls[tag]?.remove(call)
             }
         } catch (e: Exception) {
+            if (!permissive && isTlsChainFailure(e)) {
+                com.anonrode.downloader.util.DebugLog.net(
+                    "TERMINAL ${url.take(140)} TLS failure (${e.javaClass.simpleName}: ${e.message}), retrying permissive"
+                )
+                return probeTerminal(url, referer, timeoutMs, permissive = true, tag = tag)
+            }
             com.anonrode.downloader.util.DebugLog.net(
                 "TERMINAL ${url.take(140)} FAILED ${e.javaClass.simpleName}: ${e.message}"
             )
@@ -1019,13 +1168,22 @@ object HttpClient {
 
     /** Cached no-follow variants (pool/dispatcher/cookies/safeDns are shared
      *  with [shared] via newBuilder — only the redirect policy differs). */
-    private val terminalProbeClient: OkHttpClient by lazy {
+    val noRedirectClient: OkHttpClient by lazy {
         shared.newBuilder().followRedirects(false).followSslRedirects(false).build()
     }
-    private val terminalProbeClientPermissive: OkHttpClient by lazy {
+    val noRedirectPermissiveClient: OkHttpClient by lazy {
         permissiveClient.newBuilder().followRedirects(false).followSslRedirects(false).build()
     }
+    private val terminalProbeClient: OkHttpClient get() = noRedirectClient
+    private val terminalProbeClientPermissive: OkHttpClient get() = noRedirectPermissiveClient
 }
+
+data class HttpRawResult(
+    val code: Int,
+    val body: String?,
+    val headers: okhttp3.Headers,
+    val effectiveUrl: String
+)
 
 /**
  * Result of [HttpClient.probeTerminal]: the raw verdict on ONE no-redirect

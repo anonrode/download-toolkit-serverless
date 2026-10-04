@@ -9,6 +9,7 @@ import com.anonrode.downloader.data.net.HttpClient
 import com.anonrode.downloader.resolvers.ResolverRegistry
 import org.json.JSONObject
 import org.jsoup.Jsoup
+import com.anonrode.downloader.util.PostContentSanitizer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -16,16 +17,147 @@ import kotlinx.coroutines.coroutineScope
 import java.net.URI
 import java.util.regex.Pattern
 
+data class CleanedQuery(
+    val coreTitle: String,
+    val targetSeason: Int? = null,
+    val targetPart: Int? = null
+)
+
+object SeasonNoiseStripper {
+    fun clean(query: String): CleanedQuery {
+        var core = query.trim()
+        var season: Int? = null
+        var part: Int? = null
+
+        // 1. Extract season (e.g. s05, s5, season 5, 2nd season, 7th season)
+        Regex("""(?i)\b(?:season|s)\s*(\d{1,2})\b""").find(core)?.let {
+            season = it.groupValues[1].toIntOrNull()
+        } ?: Regex("""(?i)\b(\d{1,2})(?:st|nd|rd|th)\s+season\b""").find(core)?.let {
+            season = it.groupValues[1].toIntOrNull()
+        }
+
+        // 2. Extract part/cour (e.g. part 2, cour 1)
+        Regex("""(?i)\b(?:part|cour)\s*(\d{1,2})\b""").find(core)?.let {
+            part = it.groupValues[1].toIntOrNull()
+        }
+
+        // 3. Strip season/part/series noise
+        core = core.replace(Regex("""(?i)\b(?:season|s)\s*\d{1,2}\b"""), " ")
+            .replace(Regex("""(?i)\b\d{1,2}(?:st|nd|rd|th)\s+season\b"""), " ")
+            .replace(Regex("""(?i)\b(?:part|cour)\s*\d{1,2}\b"""), " ")
+            .replace(Regex("""(?i)\bseries\b"""), " ")
+            .replace(Regex("""\s+"""), " ")
+            .trim()
+
+        val finalCore = if (core.length >= 2) core else query.trim()
+        return CleanedQuery(finalCore, season, part)
+    }
+}
+
 object AnitakuProvider : SiteProvider {
     override val name: String = "anitaku"
     override val mainUrl: String get() = DynamicRulesManager.getBaseUrl(name)
 
+    private fun formatDisplayTitle(title: String, coreQuery: String): String {
+        val qTokens = RelevanceScorer.tokenize(coreQuery)
+        val tTokens = RelevanceScorer.tokenize(title)
+        if (qTokens.isNotEmpty() && qTokens.intersect(tTokens).isEmpty()) {
+            val prettyCore = coreQuery.split(" ")
+                .filter { it.isNotBlank() }
+                .joinToString(" ") { it.replaceFirstChar { c -> c.uppercase() } }
+            return "$title ($prettyCore)"
+        }
+        return title
+    }
+
+    private fun postProcessResults(items: List<ShowCard>, cleaned: CleanedQuery): List<ShowCard> {
+        val deduplicated = items.distinctBy { it.url.trimEnd('/') }
+        if (cleaned.targetSeason == null) return deduplicated
+
+        val sNum = cleaned.targetSeason
+        return deduplicated.sortedByDescending { card ->
+            val tLower = card.title.lowercase()
+            when {
+                tLower.contains("season $sNum") || tLower.contains("season 0$sNum") -> 3
+                tLower.contains("s$sNum") || tLower.contains("s0$sNum") -> 2
+                tLower.contains("${sNum}st season") || tLower.contains("${sNum}nd season") ||
+                    tLower.contains("${sNum}rd season") || tLower.contains("${sNum}th season") -> 3
+                else -> 0
+            }
+        }
+    }
+
+    private fun fetchAjaxCards(
+        ajaxUrl: String,
+        referer: String,
+        term: String,
+        cleaned: CleanedQuery
+    ): List<ShowCard> {
+        val batch = mutableListOf<ShowCard>()
+        try {
+            val form = mapOf("action" to "ts_ac_do_search", "ts_ac_query" to term)
+            val body = HttpClient.postForm(
+                url = ajaxUrl,
+                form = form,
+                referer = referer,
+                headers = mapOf("X-Requested-With" to "XMLHttpRequest"),
+                tag = "search"
+            ) ?: return emptyList()
+            val json = JSONObject(body)
+
+            val keys = json.keys()
+            while (keys.hasNext()) {
+                val key = keys.next()
+                val group = json.optJSONArray(key) ?: continue
+                for (i in 0 until group.length()) {
+                    val block = group.optJSONObject(i) ?: continue
+                    val all = block.optJSONArray("all") ?: continue
+                    for (j in 0 until all.length()) {
+                        val item = all.getJSONObject(j)
+                        val link = item.optString("post_link")
+                        val rawTitle = item.optString("post_title").trim()
+                        val image = item.optString("post_image")
+                        val sub = item.optString("post_sub")
+
+                        if (link.isNotBlank() && rawTitle.isNotBlank()) {
+                            val displayTitle = formatDisplayTitle(rawTitle, cleaned.coreTitle)
+                            batch.add(
+                                ShowCard(
+                                    title = displayTitle,
+                                    url = link,
+                                    posterUrl = image,
+                                    site = name,
+                                    category = "Anime ${if (sub.isNotBlank()) "($sub)" else ""}"
+                                )
+                            )
+                        }
+                    }
+                }
+            }
+        } catch (_: Exception) {}
+        return batch
+    }
+
     override suspend fun search(query: String): List<ShowCard> {
-        // OTA pipeline first (dual admin-ajax POST merge lives in the playbook);
-        // non-empty wins, else the compiled dual-endpoint path below runs.
+        val cleaned = SeasonNoiseStripper.clean(query)
+        val expandedTerms = AnimeOracle.expandTerms(cleaned.coreTitle)
+        val primaryTerm = if (cleaned.coreTitle.length >= 2) cleaned.coreTitle else query.trim()
+        val searchTerms = if (expandedTerms.isNotEmpty()) expandedTerms else listOf(primaryTerm)
+
+        // OTA pipeline first (dual admin-ajax POST merge lives in the playbook)
         DynamicRulesManager.getPipeline(name)?.search?.let { pl ->
-            val results = RulesPipeline.runSearch(name, pl, query)
-            if (results.isNotEmpty()) return results
+            val otaResults = mutableListOf<ShowCard>()
+            for (term in searchTerms.take(2)) {
+                val res = RulesPipeline.runSearch(name, pl, term)
+                if (res.isNotEmpty()) {
+                    otaResults.addAll(res.map {
+                        it.copy(title = formatDisplayTitle(it.title, cleaned.coreTitle))
+                    })
+                }
+            }
+            if (otaResults.isNotEmpty()) {
+                return postProcessResults(otaResults, cleaned)
+            }
         }
 
         return coroutineScope {
@@ -34,63 +166,22 @@ object AnitakuProvider : SiteProvider {
                 "https://anitaku.com.ro/wp-admin/admin-ajax.php" to "https://anitaku.com.ro/"
             )
 
-            val cleanQuery = query.replace(Regex("""(?i) (season|series|part|s\d+)\s*\d* """), "").trim()
-            val queryToUse = if (cleanQuery.length >= 2) cleanQuery else query
-
-            val deferreds = endpoints.map { (ajaxUrl, referer) ->
-                async(Dispatchers.IO) {
-                    val batch = mutableListOf<ShowCard>()
-                    try {
-                        val form = mapOf("action" to "ts_ac_do_search", "ts_ac_query" to queryToUse)
-                        val body = HttpClient.postForm(
-                            url = ajaxUrl,
-                            form = form,
-                            referer = referer,
-                            headers = mapOf("X-Requested-With" to "XMLHttpRequest"),
-                            tag = "search"
-                        ) ?: return@async emptyList()
-                        val json = JSONObject(body)
-
-                            val keys = json.keys()
-                            while (keys.hasNext()) {
-                                val key = keys.next()
-                                val group = json.optJSONArray(key) ?: continue
-                                for (i in 0 until group.length()) {
-                                    val block = group.optJSONObject(i) ?: continue
-                                    val all = block.optJSONArray("all") ?: continue
-                                    for (j in 0 until all.length()) {
-                                        val item = all.getJSONObject(j)
-                                        val link = item.optString("post_link")
-                                        val title = item.optString("post_title")
-                                        val image = item.optString("post_image")
-                                        val sub = item.optString("post_sub")
-
-                                        if (link.isNotBlank() && title.isNotBlank()) {
-                                            batch.add(
-                                                ShowCard(
-                                                    title = title,
-                                                    url = link,
-                                                    posterUrl = image,
-                                                    site = name,
-                                                    category = "Anime ${if (sub.isNotBlank()) "($sub)" else ""}"
-                                                )
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-                    } catch (_: Exception) {}
-                    batch
+            // Concurrently query (terms x endpoints)
+            val deferreds = searchTerms.take(2).flatMap { term ->
+                endpoints.map { (ajaxUrl, referer) ->
+                    async(Dispatchers.IO) {
+                        fetchAjaxCards(ajaxUrl, referer, term, cleaned)
+                    }
                 }
             }
 
             val allResults = deferreds.awaitAll().flatten()
-            val distinct = allResults.distinctBy { it.url }
+            val distinct = postProcessResults(allResults, cleaned)
             if (distinct.isNotEmpty()) return@coroutineScope distinct
 
             // HTML search fallback on gogoanime.or.at if AJAX autocomplete returned empty
             try {
-                val searchUrl = "https://gogoanime.or.at/?s=" + java.net.URLEncoder.encode(queryToUse, "UTF-8")
+                val searchUrl = "https://gogoanime.or.at/?s=" + java.net.URLEncoder.encode(cleaned.coreTitle, "UTF-8")
                 val html = HttpClient.getText(searchUrl, referer = "https://gogoanime.or.at/")
                 if (!html.isNullOrBlank()) {
                     val doc = Jsoup.parse(html, searchUrl)
@@ -103,9 +194,10 @@ object AnitakuProvider : SiteProvider {
                         val title = titleEl.text().trim()
                         val img = el.selectFirst("img[src]")?.let { it.attr("abs:src").ifBlank { it.attr("src") } } ?: ""
                         if (title.isNotBlank()) {
+                            val displayTitle = formatDisplayTitle(title, cleaned.coreTitle)
                             items.add(
                                 ShowCard(
-                                    title = title,
+                                    title = displayTitle,
                                     url = href,
                                     posterUrl = img,
                                     site = name,
@@ -114,7 +206,7 @@ object AnitakuProvider : SiteProvider {
                             )
                         }
                     }
-                    if (items.isNotEmpty()) return@coroutineScope items.distinctBy { it.url }
+                    if (items.isNotEmpty()) return@coroutineScope postProcessResults(items, cleaned)
                 }
             } catch (_: Exception) {}
 
@@ -150,8 +242,9 @@ object AnitakuProvider : SiteProvider {
 
             val episodes = mutableListOf<EpisodeItem>()
             val seen = mutableSetOf<String>()
+            PostContentSanitizer.clean(doc)
             val epLinks = doc.select(
-                ".bixbox.bxcl.epcheck a, .eplister ul li a, #episode_related a, .episodes a, ul.episodes-lists li a, a[href*='-episode-'], a[href*='-movie-'], a[href*='episode']"
+                ".bixbox.bxcl.epcheck a, .eplister ul li a, .episodes a, ul.episodes-lists li a, a[href*='-episode-'], a[href*='-movie-'], a[href*='episode']"
             )
 
             for (a in epLinks) {
@@ -164,9 +257,9 @@ object AnitakuProvider : SiteProvider {
 
                 if (href.isBlank() || href == showUrl || href in seen || href.contains("/category/") || href.contains("/genre/")) continue
                 if (showUrl.contains("/anime/") && href.endsWith("/anime/")) continue
-                seen.add(href)
-
                 val nameText = a.text().trim()
+                if (PostContentSanitizer.isSiblingPostAnchorText(nameText)) continue
+                seen.add(href)
                 val num = Regex("""\d+""").find(nameText)?.value?.toIntOrNull()
                     ?: Regex("""episode-(\d+)""", RegexOption.IGNORE_CASE).find(href)?.groupValues?.get(1)?.toIntOrNull()
                     ?: (episodes.size + 1)

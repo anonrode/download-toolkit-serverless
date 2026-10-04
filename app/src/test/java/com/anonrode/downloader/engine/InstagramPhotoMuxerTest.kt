@@ -268,10 +268,26 @@ class InstagramPhotoMuxerTest {
     }
 
     @Test
-    fun pickMuxable_carousel_withoutMusic_isNotMuxable() {
+    fun pickMuxable_carousel_withoutMusic_isPhotoMuxable() {
         val m = carouselWithMusic()
         m.remove("music_metadata")
-        assertNull(InstagramPhotoMuxer.pickMuxable(listOf(m)))
+        val parts = InstagramPhotoMuxer.pickMuxable(listOf(m))
+        assertNotNull(parts)
+        assertFalse(parts!!.hasVideo)
+        assertTrue(parts.carouselPhotoUrls.isNotEmpty())
+    }
+
+    @Test
+    fun pickMuxable_withShortcode_prefersMatchingTargetPost() {
+        val other = photoMusicMedia()
+        other.put("code", "OTHER_CODE")
+        val target = photoMusicMedia()
+        target.put("code", "TARGET_CODE")
+        target.getJSONObject("caption").put("text", "Target Post Caption")
+
+        val parts = InstagramPhotoMuxer.pickMuxable(listOf(other, target), shortcode = "TARGET_CODE")
+        assertNotNull(parts)
+        assertEquals("Target Post Caption", parts!!.caption)
     }
 
     // ---- filename ----------------------------------------------------------

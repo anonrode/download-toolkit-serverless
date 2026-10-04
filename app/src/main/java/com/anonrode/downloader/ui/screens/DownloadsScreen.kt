@@ -973,6 +973,7 @@ fun DownloadCard(
                 val speedStr = when {
                     speedMb >= 0.1 -> "%.1f MB/s".format(java.util.Locale.US, speedMb)
                     task.speedBytesPerSec >= 1024.0 -> "%.0f KB/s".format(java.util.Locale.US, task.speedBytesPerSec / 1024.0)
+                    task.speedBytesPerSec > 0.0 -> "%.0f B/s".format(java.util.Locale.US, task.speedBytesPerSec)
                     else -> null
                 }
                 val etaStr = if (task.etaSeconds > 0) formatEta(task.etaSeconds) else null
@@ -996,11 +997,17 @@ fun DownloadCard(
                     TaskStatus.RESOLVING -> {
                         // Bytes already landing during the engine's fallback
                         // chain (aria2c -> turbo -> yt-dlp) while the status
-                        // is still RESOLVING: surface the real byte count
-                        // instead of a stale "Resolving stream link..." that
+                        // is still RESOLVING: surface the real byte count, speed,
+                        // and ETA instead of a stale "Resolving stream link..." that
                         // reads as a hang (dramakey/HLS symptom).
-                        if (estimating && sizeStr.isNotBlank()) "$sizeStr • Estimating..."
-                        else "Resolving stream link..."
+                        if (estimating && sizeStr.isNotBlank()) {
+                            val parts = mutableListOf<String>()
+                            parts += sizeStr
+                            speedStr?.let { parts += it }
+                            etaStr?.let { parts += it }
+                            if (etaStr == null) parts += "Estimating..."
+                            parts.joinToString(" • ")
+                        } else "Resolving stream link..."
                     }
                     TaskStatus.VALIDATING -> "Checking downloaded file..."
                     TaskStatus.PAUSED -> {
@@ -1155,9 +1162,9 @@ fun formatEta(seconds: Long): String {
     val m = seconds / 60
     val s = seconds % 60
     val h = m / 60
-    return if (h > 0) {
-        "%02d:%02d:%02d left".format(java.util.Locale.US, h, m % 60, s)
-    } else {
-        "%02d:%02d left".format(java.util.Locale.US, m, s)
+    return when {
+        h > 0 -> "%02d:%02d:%02d left".format(java.util.Locale.US, h, m % 60, s)
+        m > 0 -> "%02d:%02d left".format(java.util.Locale.US, m, s)
+        else -> "${s}s left"
     }
 }
