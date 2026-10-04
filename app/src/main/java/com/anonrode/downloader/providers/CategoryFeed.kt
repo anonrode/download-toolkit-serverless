@@ -1,10 +1,14 @@
 package com.anonrode.downloader.providers
 
 import com.anonrode.downloader.data.models.ShowCard
+import com.anonrode.downloader.data.net.HttpClient
+import com.anonrode.downloader.data.rules.DynamicRulesManager
+import com.anonrode.downloader.util.NameSanitizer
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withTimeoutOrNull
+import org.jsoup.Jsoup
 
 /**
  * Category sections — the MIXED genre pages (v3.1.6 redesign, user: "dont
@@ -158,6 +162,7 @@ object CategoryFeed {
      */
     suspend fun fetch(
         category: Category,
+        page: Int = 1,
         filterExplicit: Boolean = true,
         onPartial: (List<ShowCard>) -> Unit = {}
     ): List<ShowCard> = coroutineScope {
@@ -166,7 +171,7 @@ object CategoryFeed {
         val lock = Any()
         candidates.mapIndexed { i, site ->
             async {
-                val cards = withTimeoutOrNull(TIMEOUT_MS) { fetchSite(site, category, filterExplicit) } ?: emptyList()
+                val cards = withTimeoutOrNull(TIMEOUT_MS) { fetchSite(site, category, page, filterExplicit) } ?: emptyList()
                 synchronized(lock) {
                     slots[i] = cards
                     if (cards.isNotEmpty()) {
@@ -178,48 +183,114 @@ object CategoryFeed {
         val pairs = candidates.mapIndexed { j, site -> site to (slots[j] ?: emptyList()) }
         val mixed = mixCards(pairs, filterExplicit)
         com.anonrode.downloader.util.DebugLog.resolve(
-            "category '${category.label}': ${mixed.size} mixed (${pairs.joinToString { it.first + "=" + it.second.size }})"
+            "category '${category.label}' (page $page): ${mixed.size} mixed (${pairs.joinToString { it.first + "=" + it.second.size }})"
         )
         mixed
     }
 
     /** One site's confirmed cards for a genre, by its feed kind. */
-    private suspend fun fetchSite(site: String, category: Category, filterExplicit: Boolean = true): List<ShowCard> {
+    private suspend fun fetchSite(site: String, category: Category, page: Int = 1, filterExplicit: Boolean = true): List<ShowCard> {
         val (kind, template) = FEED_SOURCES[site] ?: return emptyList()
         val term = category.termFor(site)
         return when (kind) {
             FeedKind.WP_REST -> TrendingFeed.fetchWpRest(
-                site, query = term, limit = PER_ROW_LIMIT,
+                site, query = term, page = page, limit = PER_ROW_LIMIT,
                 extraParams = "&orderby=relevance",
                 confirmTerms = category.aliases,
                 filterExplicit = filterExplicit
             )
-            FeedKind.RSS -> TrendingFeed.fetchRss(
-                site, String.format(template, encodedTerm(term)),
-                confirmTerms = category.aliases,
-                filterExplicit = filterExplicit
-            )
-            FeedKind.API_JSON -> {
-                val rawCards = TrendingFeed.fetchApiSearch(site, term, PER_ROW_LIMIT)
-                val safeCards = if (filterExplicit) com.anonrode.downloader.util.ExplicitContentFilter.filterSafe(rawCards) else rawCards
-                if (category.aliases.isNotEmpty() && site == "nepu") {
-                    safeCards.filter { TrendingFeed.genreConfirmed(it.title, it.genres.ifEmpty { it.tags }, category.aliases) }
+            FeedKind.RSS -> {
+                val path = if (page > 1) {
+                    String.format(template, encodedTerm(term)) + "?paged=$page"
                 } else {
-                    safeCards
+                    String.format(template, encodedTerm(term))
+                }
+                TrendingFeed.fetchRss(
+                    site, path,
+                    confirmTerms = category.aliases,
+                    filterExplicit = filterExplicit
+                )
+            }
+            FeedKind.API_JSON -> {
+                if (site == "asianc") {
+                    if (page > 1) {
+                        fetchAsianCHtml(term, page, category.aliases, filterExplicit)
+                    } else {
+                        val rawCards = TrendingFeed.fetchApiSearch(site, term, PER_ROW_LIMIT)
+                        if (filterExplicit) com.anonrode.downloader.util.ExplicitContentFilter.filterSafe(rawCards) else rawCards
+                    }
+                } else {
+                    // Nepu TMDB proxy does not paginate; returns on page 1, empty on page > 1
+                    if (page > 1) return emptyList()
+                    val rawCards = TrendingFeed.fetchApiSearch(site, term, PER_ROW_LIMIT)
+                    val safeCards = if (filterExplicit) com.anonrode.downloader.util.ExplicitContentFilter.filterSafe(rawCards) else rawCards
+                    if (category.aliases.isNotEmpty()) {
+                        safeCards.filter { TrendingFeed.genreConfirmed(it.title, it.genres.ifEmpty { it.tags }, category.aliases) }
+                    } else {
+                        safeCards
+                    }
                 }
             }
             FeedKind.ANIME_PROVIDER -> {
+                if (page > 1) return emptyList()
                 val animeCards = AnitakuProvider.search(term).take(PER_ROW_LIMIT)
                 if (filterExplicit) com.anonrode.downloader.util.ExplicitContentFilter.filterSafe(animeCards) else animeCards
             }
         }
     }
 
+    /** AsianC HTML search pagination for page > 1 */
+    internal suspend fun fetchAsianCHtml(
+        term: String,
+        page: Int,
+        aliases: Set<String>,
+        filterExplicit: Boolean
+    ): List<ShowCard> {
+        val base = DynamicRulesManager.getBaseUrl("asianc").ifBlank { "https://asianc.id" }.trimEnd('/')
+        val url = "$base/search?type=drama&keyword=${encodedTerm(term)}&page=$page"
+        val html = HttpClient.getText(url, referer = "$base/", tag = "browse") ?: return emptyList()
+        val doc = Jsoup.parse(html, url)
+        val cards = mutableListOf<ShowCard>()
+        for (item in doc.select("ul.listing.items li, .list-episode-item li, .video-block, li.filter-item")) {
+            val a = item.selectFirst("a[href*='/drama-detail/']") ?: item.selectFirst("a[href]") ?: continue
+            val rawHref = a.attr("href")
+            if (rawHref.isBlank()) continue
+            val fullUrl = if (rawHref.startsWith("/")) "$base$rawHref" else rawHref
+
+            val titleEl = item.selectFirst(".title, h3, .name") ?: a
+            val rawTitle = titleEl.text().trim()
+            if (rawTitle.isBlank()) continue
+
+            val img = item.selectFirst("img")
+            val poster = img?.attr("abs:data-original")?.ifBlank {
+                img.attr("data-original").ifBlank {
+                    img.attr("abs:src").ifBlank { img.attr("src") }
+                }
+            }.orEmpty()
+
+            val clean = NameSanitizer.cleanTitle(rawTitle)
+            val card = ShowCard(
+                title = clean.ifBlank { rawTitle },
+                url = fullUrl,
+                posterUrl = poster,
+                site = "asianc",
+                category = "Asian Drama",
+                tags = listOf("Asian Drama"),
+                genres = listOf("Asian Drama")
+            )
+            if (!filterExplicit || !com.anonrode.downloader.util.ExplicitContentFilter.isExplicit(card)) {
+                cards.add(card)
+            }
+            if (cards.size >= PER_ROW_LIMIT) break
+        }
+        return cards
+    }
+
     /**
      * Pure mixing policy (JVM-tested): round-robin interleave across the
      * candidate sites in priority order — the row leads with variety, never
      * twelve nepu cards before the first nkiri one — normalized-title dedupe
-     * (sites mirror each other), capped at [GRID_CAP]. Works on PARTIAL
+     * (sites mirror each other). Works on PARTIAL
      * inputs: sites that have not answered yet are empty lists, so a
      * mid-stream publish is an ORDER-PRESERVING subset of the final mix —
      * a late site interleaves its own cards between what's on screen but
@@ -227,19 +298,20 @@ object CategoryFeed {
      */
     internal fun mixCards(
         pairs: List<Pair<String, List<ShowCard>>>,
-        filterExplicit: Boolean = true
+        filterExplicit: Boolean = true,
+        limit: Int = Int.MAX_VALUE
     ): List<ShowCard> {
         val out = mutableListOf<ShowCard>()
         val seen = mutableSetOf<String>()
         var idx = 0
-        while (out.size < GRID_CAP) {
+        while (out.size < limit) {
             var advanced = false
             for ((_, cards) in pairs) {
                 if (idx < cards.size) {
                     val card = cards[idx]
                     val key = card.title.lowercase().filter { it.isLetterOrDigit() }
                     val isSafe = !filterExplicit || !com.anonrode.downloader.util.ExplicitContentFilter.isExplicit(card)
-                    if (out.size < GRID_CAP && key.isNotBlank() && isSafe && seen.add(key)) out.add(card)
+                    if (out.size < limit && key.isNotBlank() && isSafe && seen.add(key)) out.add(card)
                     advanced = true
                 }
             }

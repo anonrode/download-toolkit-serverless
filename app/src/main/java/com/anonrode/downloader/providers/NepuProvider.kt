@@ -178,7 +178,7 @@ object NepuProvider : SiteProvider {
             var extractedTitle: String? = null
             var extractedSynopsis: String? = null
             try {
-                val html = HttpClient.getText(showUrl, referer = "$mainUrl/", headers = mapOf("Cookie" to "hv=1")) ?: ""
+                val html = fetchUnlockedHtml(showUrl)
                 val srvMap = extractSrvMap(html)
                 val doc = Jsoup.parse(html, showUrl)
 
@@ -224,8 +224,8 @@ object NepuProvider : SiteProvider {
                     if (s == 1) continue
                     try {
                         val seasonUrl = "$mainUrl/watch/tv/$tmdbId/$s/1"
-                        val sHtml = HttpClient.getText(seasonUrl, referer = "$mainUrl/", headers = mapOf("Cookie" to "hv=1"))
-                        if (!sHtml.isNullOrBlank()) {
+                        val sHtml = fetchUnlockedHtml(seasonUrl)
+                        if (sHtml.isNotBlank()) {
                             val sDoc = Jsoup.parse(sHtml, seasonUrl)
                             parseDocEpisodes(sDoc, s)
                         }
@@ -253,7 +253,7 @@ object NepuProvider : SiteProvider {
         }
 
         val html = try {
-            HttpClient.getText(showUrl, referer = "$mainUrl/", headers = mapOf("Cookie" to "hv=1")) ?: ""
+            fetchUnlockedHtml(showUrl)
         } catch (_: Exception) { "" }
         val srvMap = extractSrvMap(html)
         val doc = Jsoup.parse(html, showUrl)
@@ -313,5 +313,93 @@ object NepuProvider : SiteProvider {
             backend = "yt-dlp",
             parallelSockets = 16
         )
+    }
+
+    @Volatile
+    private var cachedHv3: String? = null
+    @Volatile
+    private var cachedHv3Timestamp: Long = 0L
+
+    internal suspend fun fetchUnlockedHtml(url: String): String {
+        val now = System.currentTimeMillis()
+        val currentToken = if (now - cachedHv3Timestamp < 23 * 3600 * 1000L) cachedHv3 else null
+        val cookieHeader = if (!currentToken.isNullOrBlank()) "hv=1; hv2=1; hv3=$currentToken" else "hv=1; hv2=1"
+
+        var html = try {
+            HttpClient.getText(url, referer = "$mainUrl/", headers = mapOf("Cookie" to cookieHeader)) ?: ""
+        } catch (_: Exception) { "" }
+
+        if (html.isNotBlank() && !isChallengePage(html)) {
+            return html
+        }
+
+        // Challenge encountered or token expired — solve PoW
+        val solvedToken = solveHvTok(url)
+        if (!solvedToken.isNullOrBlank()) {
+            cachedHv3 = solvedToken
+            cachedHv3Timestamp = now
+            val solvedCookie = "hv=1; hv2=1; hv3=$solvedToken"
+            html = try {
+                HttpClient.getText(url, referer = "$mainUrl/", headers = mapOf("Cookie" to solvedCookie)) ?: ""
+            } catch (_: Exception) { "" }
+        }
+        return html
+    }
+
+    private fun isChallengePage(html: String): Boolean {
+        return html.contains("__hvtok") || html.contains("<title>Quick check</title>") ||
+                (html.length < 25000 && !html.contains("SRV_MAP") && !html.contains("watch/tv/"))
+    }
+
+    internal suspend fun solveHvTok(showUrl: String): String? {
+        val delim = if (showUrl.contains("?")) "&" else "?"
+        val s1Url = "$showUrl${delim}__hvtok=1&s=1&r=0"
+        val headers = mapOf(
+            "Cookie" to "hv=1; hv2=1",
+            "Referer" to showUrl
+        )
+        val s1Body = try {
+            HttpClient.getText(s1Url, referer = showUrl, headers = headers)
+        } catch (_: Exception) { null } ?: return null
+
+        val seed: String
+        val bits: Int
+        try {
+            val json = JSONObject(s1Body)
+            seed = json.optString("seed")
+            bits = json.optInt("bits", 12)
+        } catch (_: Exception) {
+            return null
+        }
+        if (seed.isBlank() || bits <= 0) return null
+
+        val target = Math.pow(2.0, (32 - bits).toDouble()).toLong()
+        val md = try { java.security.MessageDigest.getInstance("SHA-256") } catch (_: Exception) { return null }
+        val seedBytes = seed.toByteArray(Charsets.UTF_8)
+        val colonByte = ':'.code.toByte()
+
+        var solvedNonce = -1
+        for (n in 1..1_000_000) {
+            md.reset()
+            md.update(seedBytes)
+            md.update(colonByte)
+            md.update(n.toString().toByteArray(Charsets.UTF_8))
+            val digest = md.digest()
+            val first4 = (((digest[0].toLong() and 0xFF) shl 24) or
+                          ((digest[1].toLong() and 0xFF) shl 16) or
+                          ((digest[2].toLong() and 0xFF) shl 8) or
+                          (digest[3].toLong() and 0xFF)) and 0xFFFFFFFFL
+            if (first4 < target) {
+                solvedNonce = n
+                break
+            }
+        }
+        if (solvedNonce <= 0) return null
+
+        val submitUrl = "$showUrl${delim}__hvtok=1&seed=$seed&n=$solvedNonce&r=0"
+        val token = try {
+            HttpClient.getText(submitUrl, referer = showUrl, headers = headers)?.trim()
+        } catch (_: Exception) { null }
+        return token?.takeIf { it.isNotBlank() && !it.contains("<") }
     }
 }

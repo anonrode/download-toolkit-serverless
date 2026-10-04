@@ -235,6 +235,20 @@ object DynamicRulesManager {
     fun getPipeline(site: String): SitePipeline? =
         activePipelines[site.lowercase()]
 
+    /** Look up a pipeline key matching the host or any terminal.hosts allowlist. */
+    fun findPipelineKey(host: String): String? {
+        val cleanHost = host.lowercase().removePrefix("www.")
+        val direct = activePipelines[cleanHost]
+        if (direct != null) return cleanHost
+        for ((key, pipeline) in activePipelines) {
+            val t = pipeline.terminal
+            if (t != null && t.hosts.any { cleanHost == it || cleanHost.endsWith(".$it") }) {
+                return key
+            }
+        }
+        return null
+    }
+
     suspend fun syncFromGitHub(context: Context): Pair<Boolean, String> = withContext(Dispatchers.IO) {
         try {
             // Append cache-buster timestamp to bypass GitHub CDN's 5-minute cache

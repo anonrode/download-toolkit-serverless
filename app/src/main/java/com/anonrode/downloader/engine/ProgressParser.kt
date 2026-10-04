@@ -25,10 +25,16 @@ private val ARIA_TOTAL_REGEX = Regex(
 // aria2c WITHOUT a total (CDN omits Content-Length, or a resumed piece queue):
 // [#a1b2 100.7MiB(100%) CN:4 DL:3.8MiB ETA:1s]. The size is wire bytes
 // (re-downloaded pieces over-count the file), and the percentage infers the
-// total from the best total seen so far. Matched only after the dl/total form
-// above — its per-line size looks like the second byte string of the first form.
+// total from the best total seen so far.
 private val ARIA_NO_TOTAL_REGEX = Regex(
     """([\d.]+[KMGT]?i?B)\((\d+)%\)(?:.*?DL:\s*([\d.]+[KMGT]?i?B(?:/s)?))?""",
+    RegexOption.IGNORE_CASE
+)
+
+// aria2c WITHOUT total and WITHOUT percentage (chunked HTTP streams):
+// [#a1b2 15.2MiB CN:4 DL:2.1MiB ETA:35s].
+private val ARIA_RAW_CHUNK_REGEX = Regex(
+    """\[#[0-9a-fA-F]+\s+([\d.]+[KMGT]?i?B)(?:.*?DL:\s*([\d.]+[KMGT]?i?B(?:/s)?))?""",
     RegexOption.IGNORE_CASE
 )
 
@@ -37,7 +43,7 @@ private val ARIA_NO_TOTAL_REGEX = Regex(
 // "of ~Unknown at Unknown ETA Unknown") so whatever fields ARE filled
 // still land instead of the whole line being dropped.
 private val YTDL_REGEX = Regex(
-    """([\d.]+)%\s+of\s+~?([\d.]+[KMGT]?i?B|Unknown).*?at\s+([\d.]+[KMGT]?i?B/s|Unknown)(?:.*?ETA\s+(\d+):(\d+))?""",
+    """([\d.]+)%\s+of\s+~?([\d.]+[KMGT]?i?B|Unknown).*?at\s+([\d.]+[KMGT]?i?B/s|Unknown)(?:.*?ETA\s+([0-9a-zA-Z:]+))?""",
     RegexOption.IGNORE_CASE
 )
 
@@ -96,8 +102,20 @@ internal fun parseProgressTick(line: String?, libraryProgress: Float, lastDl: Lo
                 if (pct != null && pct > 0.0 && pct <= 100.0 && lastTot > 0) {
                     totBytes = (dlBytes * 100.0 / pct).toLong()
                 }
+                Regex("""ETA:\s*([0-9a-zA-Z:]+)""", RegexOption.IGNORE_CASE).find(line)?.let {
+                    etaSecs = parseEtaString(it.groupValues[1])
+                }
             } else {
-                val ytdlMatch = YTDL_REGEX.find(line)
+                val ariaRawChunk = ARIA_RAW_CHUNK_REGEX.find(line)
+                if (ariaRawChunk != null) {
+                    parsed = true
+                    dlBytes = parseByteString(ariaRawChunk.groupValues[1])
+                    spdBps = parseSpeedString(ariaRawChunk.groupValues[2])
+                    Regex("""ETA:\s*([0-9a-zA-Z:]+)""", RegexOption.IGNORE_CASE).find(line)?.let {
+                        etaSecs = parseEtaString(it.groupValues[1])
+                    }
+                } else {
+                    val ytdlMatch = YTDL_REGEX.find(line)
                 if (ytdlMatch != null) {
                     parsed = true
                     val pct = ytdlMatch.groupValues[1].toDoubleOrNull() ?: libraryProgress.toDouble()
@@ -113,7 +131,10 @@ internal fun parseProgressTick(line: String?, libraryProgress: Float, lastDl: Lo
                         }
                     }
                     spdBps = parseSpeedString(ytdlMatch.groupValues[3])
-                    etaSecs = parseEtaString("${ytdlMatch.groupValues[4]}:${ytdlMatch.groupValues[5]}")
+                    val etaRaw = ytdlMatch.groupValues[4].trim()
+                    if (etaRaw.isNotEmpty()) {
+                        etaSecs = parseEtaString(etaRaw)
+                    }
                 } else {
                     // --progress-template @@DLP@@ format: pipe-separated
                     // fields.  field 1 = percent string ("45.2%"), 2 = speed
@@ -199,6 +220,7 @@ internal fun parseProgressTick(line: String?, libraryProgress: Float, lastDl: Lo
             }
         }
     }
+}
 
     // Library-supplied percentage as the last-resort source when the line
     // itself carries no usable size (unknown formats, mixed downloader output).

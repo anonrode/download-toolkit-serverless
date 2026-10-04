@@ -7,6 +7,7 @@ import com.anonrode.downloader.data.models.ShowCard
 import com.anonrode.downloader.data.models.ShowDetails
 import com.anonrode.downloader.data.net.HttpClient
 import com.anonrode.downloader.resolvers.ResolverRegistry
+import com.anonrode.downloader.util.PostContentSanitizer
 import org.jsoup.Jsoup
 import java.net.URI
 import java.net.URLEncoder
@@ -94,7 +95,9 @@ object NaijaPreyProvider : SiteProvider {
 
             val episodes = mutableListOf<EpisodeItem>()
             val seen = mutableSetOf<String>()
-            val links = doc.select("a[href*='download'], a.elementor-button, .entry-content a")
+            val articleRoot = doc.selectFirst("article") ?: doc.body() ?: doc
+            PostContentSanitizer.clean(articleRoot)
+            val links = articleRoot.select("a[href*='download'], a.elementor-button, .entry-content a, a.button")
 
             // Nav garbage the a[href*='download'] selector keeps catching:
             // "Download Movies" (/download-movies-xxx/), "Series Download"
@@ -116,7 +119,9 @@ object NaijaPreyProvider : SiteProvider {
                 if (href.isNotBlank() && href !in seen &&
                     !href.contains("/category/") && !href.contains("/tag/") &&
                     !navHref.containsMatchIn(href) && !navText.matches(text) &&
-                    !href.equals(showUrl, ignoreCase = true)
+                    !href.equals(showUrl, ignoreCase = true) &&
+                    !PostContentSanitizer.isSameSitePostPermalink(href, "naijaprey.tv") &&
+                    !PostContentSanitizer.isSiblingPostAnchorText(text)
                 ) {
                     seen.add(href)
                     val parsedNum = Regex("""(?i)\b(?:Episode|Ep|E)[- ]*(\d{1,4})\b""").find(text)?.groupValues?.get(1)?.toIntOrNull()

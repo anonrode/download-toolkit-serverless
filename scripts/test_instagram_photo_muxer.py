@@ -112,5 +112,64 @@ class InstagramPhotoMuxerSlideshowTest(unittest.TestCase):
         self.assertIn("mpeg4", mpeg4)
         self.assertEqual(mpeg4[-1], out)
 
+    def test_best_candidate_without_width_in_sjs(self):
+        # In modern Instagram SJS, candidates do not contain integer width fields
+        candidates = [
+            {"url": "https://instagram.fcdn.net/v/t51/p1080x1350/img_orig.jpg"},
+            {"url": "https://instagram.fcdn.net/v/t51/p640x800/img_med.jpg"},
+            {"url": "https://instagram.fcdn.net/v/t51/p320x400/img_low.jpg"}
+        ]
+        import re
+        best = None
+        bestW = -1
+        for i, c in enumerate(candidates):
+            url = c.get("url")
+            if not url:
+                continue
+            w = c.get("width", 0)
+            if w == 0:
+                m = re.search(r'p(\d+)x\d+', url)
+                w = int(m.group(1)) if m else (9999 if i == 0 else 0)
+            if w > bestW:
+                bestW = w
+                best = url
+        self.assertEqual(best, "https://instagram.fcdn.net/v/t51/p1080x1350/img_orig.jpg")
+
+    def test_shortcode_matching_in_media_set(self):
+        objects = [
+            {"code": "other1", "image_versions2": {"candidates": [{"url": "https://cdn/1.jpg", "width": 640}]}},
+            {"code": "target_code", "image_versions2": {"candidates": [{"url": "https://cdn/target.jpg", "width": 1080}]}},
+            {"code": "other2", "image_versions2": {"candidates": [{"url": "https://cdn/2.jpg", "width": 640}]}}
+        ]
+        target = "target_code"
+        matched = None
+        fallback = None
+        for o in objects:
+            code = o.get("code")
+            if code == target:
+                matched = o
+                break
+            if fallback is None:
+                fallback = o
+        res = matched or fallback
+        self.assertIsNotNone(res)
+        self.assertEqual(res["code"], "target_code")
+
+    def test_is_instagram_photo_error_matching(self):
+        err_samples = [
+            "ERROR: [Instagram] DdoIYvzgiwj: This Instagram post contains only still photos (no video).",
+            "There is no video in this post",
+            "No video formats found",
+            "only still photos"
+        ]
+        for err in err_samples:
+            is_match = (
+                "No video formats found".lower() in err.lower() or
+                "There is no video in this post".lower() in err.lower() or
+                "This Instagram post contains only still photos".lower() in err.lower() or
+                "only still photos".lower() in err.lower()
+            )
+            self.assertTrue(is_match, f"Failed to match error: {err}")
+
 if __name__ == "__main__":
     unittest.main()

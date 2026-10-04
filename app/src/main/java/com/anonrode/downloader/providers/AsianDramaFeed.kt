@@ -24,14 +24,15 @@ object AsianDramaFeed {
     suspend fun fetch(
         region: DramaRegion,
         era: DramaEra,
+        page: Int = 1,
         forceRefresh: Boolean = false,
         filterExplicit: Boolean = true,
         onPartial: (List<ShowCard>) -> Unit = {}
     ): List<ShowCard> {
         val key = cacheKeyFor(region, era)
 
-        // 1. Return fresh cached cards immediately if available
-        if (!forceRefresh && FeedCache.isCategoryFresh(key)) {
+        // 1. Return fresh cached cards immediately if available on page 1
+        if (page == 1 && !forceRefresh && FeedCache.isCategoryFresh(key)) {
             val cached = FeedCache.categoryCards(key)
             if (cached.isNotEmpty()) {
                 val filtered = if (filterExplicit) ExplicitContentFilter.filterSafe(cached) else cached
@@ -53,7 +54,7 @@ object AsianDramaFeed {
             candidateSites.mapIndexed { i, site ->
                 async(Dispatchers.IO) {
                     val cards = withTimeoutOrNull(TIMEOUT_MS) {
-                        fetchSiteFor(site, region, era, filterExplicit)
+                        fetchSiteFor(site, region, era, page, filterExplicit)
                     } ?: emptyList()
 
                     synchronized(lock) {
@@ -61,19 +62,20 @@ object AsianDramaFeed {
                         val availablePairs = candidateSites.mapIndexed { j, s -> s to (slots[j] ?: emptyList()) }
                         val currentMix = CategoryFeed.mixCards(availablePairs, filterExplicit)
                         if (currentMix.isNotEmpty()) {
-                            onPartial(currentMix.take(MAX_FEED_CARDS))
+                            onPartial(currentMix)
                         }
                     }
                 }
             }.awaitAll()
 
             val finalPairs = candidateSites.mapIndexed { j, s -> s to (slots[j] ?: emptyList()) }
-            val finalMixed = CategoryFeed.mixCards(finalPairs, filterExplicit).take(MAX_FEED_CARDS)
+            val finalMixed = CategoryFeed.mixCards(finalPairs, filterExplicit)
+            val result = finalMixed
 
-            if (finalMixed.isNotEmpty()) {
-                FeedCache.saveCategory(key, finalMixed)
+            if (page == 1 && result.isNotEmpty()) {
+                FeedCache.saveCategory(key, result)
             }
-            finalMixed
+            result
         }
     }
 
@@ -81,16 +83,17 @@ object AsianDramaFeed {
         site: String,
         region: DramaRegion,
         era: DramaEra,
+        page: Int,
         filterExplicit: Boolean
     ): List<ShowCard> {
         return try {
             when (site) {
-                "asianc" -> fetchAsianC(region, era, filterExplicit)
-                "dramakey" -> fetchDramaKey(region, era, filterExplicit)
-                "dramarain" -> fetchDramaRain(region, era, filterExplicit)
-                "nepu" -> fetchNepu(region, era, filterExplicit)
-                "nkiri" -> fetchNkiri(region, era, filterExplicit)
-                "9jarocks" -> fetch9jaRocks(region, era, filterExplicit)
+                "asianc" -> fetchAsianC(region, era, page, filterExplicit)
+                "dramakey" -> fetchDramaKey(region, era, page, filterExplicit)
+                "dramarain" -> fetchDramaRain(region, era, page, filterExplicit)
+                "nepu" -> if (page > 1) emptyList() else fetchNepu(region, era, filterExplicit)
+                "nkiri" -> fetchNkiri(region, era, page, filterExplicit)
+                "9jarocks" -> fetch9jaRocks(region, era, page, filterExplicit)
                 else -> emptyList()
             }
         } catch (_: Throwable) {
@@ -101,14 +104,16 @@ object AsianDramaFeed {
     private suspend fun fetchAsianC(
         region: DramaRegion,
         era: DramaEra,
+        page: Int,
         filterExplicit: Boolean
     ): List<ShowCard> {
         val base = DynamicRulesManager.getBaseUrl("asianc").ifBlank { "https://asianc.id" }.trimEnd('/')
+        val pageSuffix = if (page > 1) "&page=$page" else ""
         val url = when {
-            region == DramaRegion.KDRAMA && era == DramaEra.HISTORICAL -> "$base/search?type=drama&keyword=historical"
-            region == DramaRegion.CDRAMA && era == DramaEra.HISTORICAL -> "$base/search?type=drama&keyword=wuxia"
-            region == DramaRegion.KDRAMA -> "$base/search?type=drama&keyword=korean"
-            else -> "$base/search?type=drama&keyword=chinese"
+            region == DramaRegion.KDRAMA && era == DramaEra.HISTORICAL -> "$base/search?type=drama&keyword=historical$pageSuffix"
+            region == DramaRegion.CDRAMA && era == DramaEra.HISTORICAL -> "$base/search?type=drama&keyword=wuxia$pageSuffix"
+            region == DramaRegion.KDRAMA -> "$base/search?type=drama&keyword=korean$pageSuffix"
+            else -> "$base/search?type=drama&keyword=chinese$pageSuffix"
         }
 
         val html = HttpClient.getText(url, referer = "$base/", tag = "browse") ?: return emptyList()
@@ -154,13 +159,15 @@ object AsianDramaFeed {
     private suspend fun fetchDramaKey(
         region: DramaRegion,
         era: DramaEra,
+        page: Int,
         filterExplicit: Boolean
     ): List<ShowCard> {
         val base = "https://dramakey.cc"
+        val pagePrefix = if (page > 1) "page/$page/" else ""
         val url = when {
-            era == DramaEra.HISTORICAL -> "$base/genre/historical/"
-            region == DramaRegion.KDRAMA -> "$base/korean/"
-            else -> "$base/chinese/"
+            era == DramaEra.HISTORICAL -> "$base/genre/historical/$pagePrefix"
+            region == DramaRegion.KDRAMA -> "$base/korean/$pagePrefix"
+            else -> "$base/chinese/$pagePrefix"
         }
 
         val html = HttpClient.getText(url, referer = "$base/", tag = "browse") ?: return emptyList()
@@ -205,12 +212,14 @@ object AsianDramaFeed {
     private suspend fun fetchDramaRain(
         region: DramaRegion,
         era: DramaEra,
+        page: Int,
         filterExplicit: Boolean
     ): List<ShowCard> {
         val base = DynamicRulesManager.getBaseUrl("dramarain").ifBlank { "https://dramarain.com" }.trimEnd('/')
+        val pagePrefix = if (page > 1) "page/$page/" else ""
         val url = when {
-            era == DramaEra.HISTORICAL -> "$base/tag/historical/"
-            else -> "$base/chinese-drama/"
+            era == DramaEra.HISTORICAL -> "$base/tag/historical/$pagePrefix"
+            else -> "$base/chinese-drama/$pagePrefix"
         }
 
         val html = HttpClient.getText(url, referer = "$base/", tag = "browse") ?: return emptyList()
@@ -266,6 +275,7 @@ object AsianDramaFeed {
     private suspend fun fetchNkiri(
         region: DramaRegion,
         era: DramaEra,
+        page: Int,
         filterExplicit: Boolean
     ): List<ShowCard> {
         val query = when {
@@ -274,16 +284,18 @@ object AsianDramaFeed {
             region == DramaRegion.KDRAMA -> "korean drama"
             else -> "chinese drama"
         }
-        return TrendingFeed.fetchWpRest("nkiri", query = query, limit = PER_SITE_LIMIT, filterExplicit = filterExplicit)
+        return TrendingFeed.fetchWpRest("nkiri", query = query, page = page, limit = PER_SITE_LIMIT, filterExplicit = filterExplicit)
     }
 
     private suspend fun fetch9jaRocks(
         region: DramaRegion,
         era: DramaEra,
+        page: Int,
         filterExplicit: Boolean
     ): List<ShowCard> {
         val term = if (region == DramaRegion.KDRAMA) "korean drama" else "chinese drama"
         val enc = java.net.URLEncoder.encode(term, "UTF-8")
-        return TrendingFeed.fetchRss("9jarocks", "/search/$enc/feed/rss2/", filterExplicit = filterExplicit)
+        val path = if (page > 1) "/search/$enc/feed/rss2/?paged=$page" else "/search/$enc/feed/rss2/"
+        return TrendingFeed.fetchRss("9jarocks", path, filterExplicit = filterExplicit)
     }
 }

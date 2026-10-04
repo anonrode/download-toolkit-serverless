@@ -83,8 +83,11 @@ class FlickerFreeEtaCalculator(initialTimeMs: Long = System.currentTimeMillis())
         nowMs: Long = System.currentTimeMillis()
     ): Long {
         if (totalBytes <= 0L || currentBytes >= totalBytes) return 0L
+        val remBytes = totalBytes - currentBytes
+        val fallbackEta = if (currentSpeedBps > 0.0) maxOf(1L, (remBytes / currentSpeedBps).toLong()) else -1L
+
         if (currentSpeedBps < 1024.0) {
-            return if (smoothEta > 0) Math.round(smoothEta) else -1L
+            return if (smoothEta > 0) Math.round(smoothEta) else fallbackEta
         }
 
         history.add(Pair(nowMs, currentBytes))
@@ -100,10 +103,9 @@ class FlickerFreeEtaCalculator(initialTimeMs: Long = System.currentTimeMillis())
         }
 
         if (winSpeed < 1024.0) {
-            return if (smoothEta > 0) Math.round(smoothEta) else -1L
+            return if (smoothEta > 0) Math.round(smoothEta) else fallbackEta
         }
 
-        val remBytes = totalBytes - currentBytes
         val rawEta = remBytes / winSpeed
 
         if (smoothEta < 0.0) {

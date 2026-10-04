@@ -624,7 +624,9 @@ object YoutubeDlDownloader {
             if (produced == null && attempts < ytdlpMaxAttempts) {
                 val isInstagramPhotoError = InstagramPhotoMuxer.shortcodeFromUrl(sourceUrl) != null && (
                     errors.contains("No video formats found", ignoreCase = true) ||
-                    errors.contains("There is no video in this post", ignoreCase = true)
+                    errors.contains("There is no video in this post", ignoreCase = true) ||
+                    errors.contains("This Instagram post contains only still photos", ignoreCase = true) ||
+                    errors.contains("only still photos", ignoreCase = true)
                 )
                 if (isInstagramPhotoError) {
                     com.anonrode.downloader.util.DebugLog.backend("task=$taskId yt-dlp: Instagram photo post detected (no video in post) — skipping retry to run photo muxer immediately")
@@ -659,10 +661,12 @@ object YoutubeDlDownloader {
         if (produced == null && errors.isNotBlank()) {
             val isIgPhoto = InstagramPhotoMuxer.shortcodeFromUrl(sourceUrl) != null && (
                 errors.contains("No video formats found", ignoreCase = true) ||
-                errors.contains("There is no video in this post", ignoreCase = true)
+                errors.contains("There is no video in this post", ignoreCase = true) ||
+                errors.contains("This Instagram post contains only still photos", ignoreCase = true) ||
+                errors.contains("only still photos", ignoreCase = true)
             )
             val friendlyError = if (isIgPhoto) {
-                "This Instagram post contains only still photos (no video). Instagram requires an authenticated session to download still photo posts. Reels and video posts download directly."
+                "Unable to extract Instagram photo or media stream. Please verify the post is public."
             } else {
                 "yt-dlp failed after $attempts attempt(s): ${errors.toString().trim()}"
             }
@@ -733,6 +737,20 @@ object YoutubeDlDownloader {
                 throw java.io.IOException(
                     "Download finished, but it could not be moved into your folder (storage full or access lost). Free some space, then tap retry."
                 )
+            }
+            // Move any remaining files (e.g. carousel sibling images)
+            outDir.listFiles()?.filter { it.isFile }?.forEach { sibling ->
+                var sibDest = File(targetDir, sibling.name)
+                var sn = 1
+                while (sibDest.exists()) {
+                    val stem = sibling.nameWithoutExtension
+                    val ext = sibling.extension.takeIf { it.isNotBlank() }?.let { ".$it" } ?: ""
+                    sibDest = File(targetDir, "$stem ($sn)$ext")
+                    sn++
+                }
+                if (!sibling.renameTo(sibDest)) {
+                    runCatching { sibling.copyTo(sibDest, overwrite = true); sibling.delete() }
+                }
             }
             outDir.listFiles()?.takeIf { it.isEmpty() }?.let { outDir.delete() }
         }

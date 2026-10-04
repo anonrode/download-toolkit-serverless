@@ -10,8 +10,10 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -51,6 +53,9 @@ fun AsianDramaExplorer(
     isLoading: Boolean,
     failed: Boolean,
     showPosters: Boolean,
+    isLoadingMore: Boolean = false,
+    hasMore: Boolean = true,
+    onLoadMore: () -> Unit = {},
     onBack: () -> Unit,
     onSelectEra: (DramaEra) -> Unit,
     onSelectStatus: (DramaStatusFilter) -> Unit,
@@ -59,6 +64,24 @@ fun AsianDramaExplorer(
     onOpen: (ShowCard) -> Unit
 ) {
     BackHandler(onBack = onBack)
+
+    val gridState = rememberLazyGridState()
+
+    val shouldLoadMore by remember(cards.size, isLoading, isLoadingMore, hasMore) {
+        derivedStateOf {
+            if (!hasMore || isLoading || isLoadingMore || cards.isEmpty()) return@derivedStateOf false
+            val layoutInfo = gridState.layoutInfo
+            val totalItems = layoutInfo.totalItemsCount
+            val lastVisible = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+            totalItems > 0 && lastVisible >= totalItems - 6
+        }
+    }
+
+    LaunchedEffect(shouldLoadMore) {
+        if (shouldLoadMore) {
+            onLoadMore()
+        }
+    }
 
     val genres = remember(region, era) {
         AsianDramaTaxonomy.genresFor(region, era)
@@ -295,6 +318,7 @@ fun AsianDramaExplorer(
                     }
                 } else {
                     LazyVerticalGrid(
+                        state = gridState,
                         columns = GridCells.Fixed(3),
                         horizontalArrangement = Arrangement.spacedBy(Spacing.sm),
                         verticalArrangement = Arrangement.spacedBy(Spacing.md),
@@ -307,6 +331,22 @@ fun AsianDramaExplorer(
                                 showPosters = showPosters,
                                 onClick = { onOpen(show) }
                             )
+                        }
+                        if (isLoadingMore) {
+                            item(span = { GridItemSpan(maxLineSpan) }) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = Spacing.md),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    CircularProgressIndicator(
+                                        color = AccentPrimary,
+                                        strokeWidth = 2.dp,
+                                        modifier = Modifier.size(24.dp)
+                                    )
+                                }
+                            }
                         }
                     }
                 }

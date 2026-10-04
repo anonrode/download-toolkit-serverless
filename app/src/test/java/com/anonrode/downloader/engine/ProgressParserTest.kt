@@ -300,10 +300,45 @@ class ProgressParserTest {
     }
 
     @Test
+    fun ytdlNativeLineCarriesSecondsEta() {
+        val t = parseProgressTick("[download]  45.2% of ~65.00MiB at 4.20MiB/s ETA 45s", 0f, 0L, 0L)
+        assertEquals(45L, t.etaSeconds)
+    }
+
+    @Test
+    fun ytdlNativeLineCarriesHoursEta() {
+        val t = parseProgressTick("[download]  45.2% of ~65.00MiB at 4.20MiB/s ETA 01:23:45", 0f, 0L, 0L)
+        assertEquals(5025L, t.etaSeconds)
+    }
+
+    @Test
+    fun ariaRawChunkWithoutPercentCarriesEta() {
+        val t = parseProgressTick("[#a1b2 15.2MiB CN:4 DL:2.1MiB ETA:35s]", 0f, 0L, 0L)
+        assertEquals((15.2 * 1024 * 1024).toLong(), t.downloadedBytes)
+        assertEquals(2.1 * 1024 * 1024, t.speedBytesPerSec, 1.0)
+        assertEquals(35L, t.etaSeconds)
+    }
+
+    @Test
+    fun ariaNoTotalWithPercentCarriesEta() {
+        val t = parseProgressTick("[#a1b2 100.7MiB(100%) CN:4 DL:3.8MiB ETA:1s]", 0f, 0L, 0L)
+        assertEquals(1L, t.etaSeconds)
+    }
+
+    @Test
+    fun ariaRawChunkWithoutSpeed() {
+        val t = parseProgressTick("[#a1b2 15.2MiB CN:4]", 0f, 0L, 0L)
+        assertEquals((15.2 * 1024 * 1024).toLong(), t.downloadedBytes)
+        assertEquals(0.0, t.speedBytesPerSec, 0.0)
+    }
+
+    @Test
     fun etaStringFormats() {
         assertEquals(30L, parseEtaString("00:30"))
         assertEquals(8L, parseEtaString("00:08"))
         assertEquals(3723L, parseEtaString("1:02:03"))
+        assertEquals(45L, parseEtaString("45s"))
+        assertEquals(5400L, parseEtaString("1h30m"))
         assertEquals(-1L, parseEtaString("Unknown"))
         assertEquals(-1L, parseEtaString("NA"))
         assertEquals(-1L, parseEtaString(""))

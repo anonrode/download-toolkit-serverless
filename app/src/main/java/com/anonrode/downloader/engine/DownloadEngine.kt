@@ -1663,9 +1663,15 @@ class DownloadEngine(
      *  cached (possibly dead-token) URL on the refresh path. All four
      *  call sites (startTask + the 401/403/404 self-heal re-resolves) get
      *  identical behavior to before the move. */
-    private suspend fun resolveStreamUrl(permUrl: String, site: String, defaultQual: String, bypassHealth: Boolean = false): String? =
+    private suspend fun resolveStreamUrl(
+        permUrl: String,
+        site: String,
+        defaultQual: String,
+        bypassHealth: Boolean = false,
+        allowCacheHit: Boolean = false
+    ): String? =
         com.anonrode.downloader.pipeline.LinkResolver.resolveChain(
-            permUrl, site, defaultQual, bypassHealth = bypassHealth, allowCacheHit = false
+            permUrl, site, defaultQual, bypassHealth = bypassHealth, allowCacheHit = allowCacheHit
         )
 
     /**
@@ -1813,29 +1819,27 @@ class DownloadEngine(
                         val vSeg = variant.lineSequence().map { it.trim() }
                             .firstOrNull { it.isNotBlank() && !it.startsWith("#") }
                         if (vSeg != null) probeUrl = resolveSegmentUrl(vUrl, vSeg)
-                        // Segment-Sampling Estimator: measure real segment
-                        // sizes instead of trusting BANDWIDTH tags.
-                        // Runs on the first variant only (the one yt-dlp
-                        // will consume by default).
-                        runSizeEstimate(taskId, playlist, currentUrl, vUrl, referer, estimatedTotalBytes)
+                        // Segment-Sampling Estimator: runs asynchronously in the
+                        // background without blocking yt-dlp's launch.
+                        triggerAsyncHlsSizeEstimate(taskId, playlist, currentUrl, vUrl, referer)
                     }
                 }
             } else {
                 probeUrl = firstResolved
                 // The URL is a media playlist itself (single-variant stream):
-                // estimate directly on it.
-                runSizeEstimate(taskId, playlist, currentUrl, currentUrl, referer, estimatedTotalBytes)
+                // estimate asynchronously in the background.
+                triggerAsyncHlsSizeEstimate(taskId, playlist, currentUrl, currentUrl, referer)
             }
         }
 
         // Probe the segment host exactly as yt-dlp will reach it after the
         // rewrite — https first, http only as a fallback for https-dead CDNs.
         if (probeUrl != null) {
-            if (!HttpClient.probe(probeUrl, referer, timeoutMs = 10_000L, tag = "preflight")) {
+            if (!HttpClient.probe(probeUrl, referer, timeoutMs = 2_500L, tag = "preflight")) {
                 val httpVariant = if (probeUrl.startsWith("https:")) {
                     "http:" + probeUrl.substringAfter("https:")
                 } else null
-                if (httpVariant == null || !HttpClient.probe(httpVariant, referer, timeoutMs = 8_000L, tag = "preflight")) {
+                if (httpVariant == null || !HttpClient.probe(httpVariant, referer, timeoutMs = 2_500L, tag = "preflight")) {
                     val host = probeUrl.substringAfter("://").substringBefore('/')
                     for (f in created) {
                         try { f.delete() } catch (_: Exception) {}
@@ -1895,6 +1899,39 @@ class DownloadEngine(
                 "task=$taskId hls-size-estimate=null (no estimate)"
             }
         )
+    }
+
+    private fun triggerAsyncHlsSizeEstimate(
+        taskId: String,
+        masterText: String,
+        masterUrl: String,
+        variantUrl: String,
+        referer: String?
+    ) {
+        engineScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            val estimate = try {
+                HlsSizeEstimator.estimate(masterText, masterUrl, variantUrl, referer)
+            } catch (_: kotlinx.coroutines.CancellationException) {
+                null
+            } catch (_: Exception) {
+                null
+            }
+            if (estimate != null && estimate > 0L) {
+                com.anonrode.downloader.util.DebugLog.resolve(
+                    "task=$taskId async hls-size-estimate=$estimate (${estimate / (1024 * 1024)} MiB)"
+                )
+                val live = repository.find(taskId)
+                if (live != null && live.status == TaskStatus.DOWNLOADING && live.totalBytes <= 0L) {
+                    repository.updateProgress(
+                        taskId = taskId,
+                        downloaded = live.downloadedBytes,
+                        total = estimate,
+                        speed = live.speedBytesPerSec,
+                        eta = live.etaSeconds
+                    )
+                }
+            }
+        }
     }
 
     /**
@@ -2032,7 +2069,7 @@ class DownloadEngine(
                             for (candidate in candidates) {
                                 coroutineContext.ensureActive()
                                 val output = try {
-                                    resolveStreamUrl(candidate, task.site, task.quality ?: defaultQuality, bypassHealth = bypassHealth)
+                                    resolveStreamUrl(candidate, task.site, task.quality ?: defaultQuality, bypassHealth = bypassHealth, allowCacheHit = true)
                                 } catch (e: CancellationException) {
                                     throw e
                                 } catch (_: Exception) { null }
@@ -2291,12 +2328,19 @@ class DownloadEngine(
                             if (safeDisk > t.downloadedBytes) {
                                 val speed = if (t.speedBytesPerSec > 0.0) t.speedBytesPerSec
                                 else diskDelta.coerceAtLeast(0L) * 1000.0 / 2000.0
+                                val eta = if (t.etaSeconds > 0) {
+                                    t.etaSeconds
+                                } else if (speed > 0.0 && t.totalBytes > safeDisk) {
+                                    ((t.totalBytes - safeDisk) / speed).toLong().coerceAtLeast(1L)
+                                } else {
+                                    0L
+                                }
                                 repository.updateProgress(
                                     taskId = task.id,
                                     downloaded = safeDisk,
                                     total = t.totalBytes,
                                     speed = speed,
-                                    eta = 0L
+                                    eta = eta
                                 )
                             }
                         }
@@ -2492,38 +2536,48 @@ class DownloadEngine(
                     // Failure fails the task loudly instead of queueing garbage.
                     var directRefreshAttempted = false
                     if (!isSocial) {
-                        var rejection = StreamValidator.validateResult(streamUrl, hdrs)
-                        if (rejection?.refreshable == true) {
-                            directRefreshAttempted = true
-                            coroutineContext.ensureActive()
-                            val fresh = resolveStreamUrl(permUrl, task.site, task.quality ?: defaultQuality)
-                            if (!fresh.isNullOrBlank() && fresh != streamUrl &&
-                                (isDirectMediaUrl(fresh) || isProvablyDirectFile(fresh))) {
-                                streamUrl = fresh
-                                refererToPass = getRefererForUrl(fresh)
-                                hdrs.remove("Referer")
-                                if (refererToPass.isNotBlank()) hdrs["Referer"] = refererToPass
-                                rejection = StreamValidator.validateResult(streamUrl, hdrs)
+                        // Provably direct media files (.mp4, .mkv, .ts) and tasks with
+                        // existing landed bytes bypass this pre-probe: aria2c and
+                        // TurboDownloader validate HTTP responses and headers immediately
+                        // on connect, eliminating 8-15s of redundant pre-flight lag.
+                        val skipPreflight = isProvablyDirectFile(streamUrl) || bytesLanded(task) > 0L
+                        var rejection: StreamValidator.Rejection? = null
+                        if (!skipPreflight) {
+                            rejection = StreamValidator.validateResult(streamUrl, hdrs)
+                            if (rejection?.refreshable == true) {
+                                directRefreshAttempted = true
                                 coroutineContext.ensureActive()
-                                repository.update(task.id) { it.copy(directUrl = streamUrl) }
+                                val fresh = resolveStreamUrl(permUrl, task.site, task.quality ?: defaultQuality, allowCacheHit = false)
+                                if (!fresh.isNullOrBlank() && fresh != streamUrl &&
+                                    (isDirectMediaUrl(fresh) || isProvablyDirectFile(fresh))) {
+                                    streamUrl = fresh
+                                    refererToPass = getRefererForUrl(fresh)
+                                    hdrs.remove("Referer")
+                                    if (refererToPass.isNotBlank()) hdrs["Referer"] = refererToPass
+                                    rejection = StreamValidator.validateResult(streamUrl, hdrs)
+                                    coroutineContext.ensureActive()
+                                    repository.update(task.id) { it.copy(directUrl = streamUrl) }
+                                }
                             }
-                        }
-                        rejection?.let {
-                            if (task.downloadedBytes == 0L && bytesLanded(task) == 0L && attemptCrossProviderFailover(task)) {
-                                return@launch
+                            rejection?.let {
+                                if (task.downloadedBytes == 0L && bytesLanded(task) == 0L && attemptCrossProviderFailover(task)) {
+                                    return@launch
+                                }
+                                throw PipelineError.ValidationFailed(it.reason)
                             }
-                            throw PipelineError.ValidationFailed(it.reason)
                         }
                     }
 
                     val progressCb: (Long, Long, Long) -> Unit = { got, tot, bps ->
                         val eta = if (bps > 0 && tot > got) (tot - got) / bps else 0L
+                        val live = repository.find(task.id)
+                        val safeEta = if (eta > 0L) eta else if (live?.etaSeconds != null && live.etaSeconds > 0L) live.etaSeconds else 0L
                         repository.updateProgress(
                             taskId = task.id,
                             downloaded = got,
                             total = tot,
                             speed = bps.toDouble(),
-                            eta = eta
+                            eta = safeEta
                         )
                         updateServiceState(force = false)
                     }

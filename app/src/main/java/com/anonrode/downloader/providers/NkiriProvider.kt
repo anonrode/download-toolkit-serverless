@@ -1,6 +1,7 @@
 package com.anonrode.downloader.providers
 
 import com.anonrode.downloader.util.DownloadLinkLabels
+import com.anonrode.downloader.util.PostContentSanitizer
 import com.anonrode.downloader.data.rules.DynamicRulesManager
 import com.anonrode.downloader.data.models.DownloadRecipe
 import com.anonrode.downloader.data.models.EpisodeItem
@@ -137,7 +138,9 @@ object NkiriProvider : SiteProvider {
 
             val episodes = mutableListOf<EpisodeItem>()
             val seen = mutableSetOf<String>()
-            val allLinks = doc.select("a[href]")
+            val contentRoot = doc.selectFirst("article, .entry-content, .elementor-widget-theme-post-content") ?: doc.body() ?: doc
+            PostContentSanitizer.clean(contentRoot)
+            val allLinks = contentRoot.select("a[href]")
 
             var count = 1
             for (a in allLinks) {
@@ -151,6 +154,9 @@ object NkiriProvider : SiteProvider {
                 if (lowerHref.contains("error?e=") || lowerHref.contains("errore=") || lowerHref.contains("telegram") || lowerHref.contains("facebook") || lowerHref.contains("twitter") || lowerHref.contains("whatsapp") || lowerHref.contains("how-to") || lowerHref.contains("cant-download")) {
                     continue
                 }
+                if (PostContentSanitizer.isSameSitePostPermalink(href, "nkiri.top") || PostContentSanitizer.isSiblingPostAnchorText(a.text())) {
+                    continue
+                }
 
                 val isLocker = lowerHref.contains("downloadwella.com") ||
                         lowerHref.contains("wetafiles.com") ||
@@ -162,14 +168,36 @@ object NkiriProvider : SiteProvider {
                         lowerHref.contains("kissorgrab") ||
                         lowerHref.contains("wildshare") ||
                         lowerHref.contains("pixeldrain") ||
-                        com.anonrode.downloader.pipeline.StrictLinkClassifier.isKnownLocker(href)
+                        com.anonrode.downloader.pipeline.StrictLinkClassifier.isKnownLocker(href) ||
+                        com.anonrode.downloader.pipeline.StrictLinkClassifier.isDirectMedia(href)
 
                 if (isLocker) {
                     seen.add(href)
                     val text = a.text().trim()
                     val parent = a.parent()
-                    val prevHeading = parent?.previousElementSibling()?.let { elem ->
+                    var prevHeading: String? = parent?.previousElementSibling()?.let { elem ->
                         if (elem.tagName().startsWith("h", ignoreCase = true) || elem.tagName() == "p") elem.text().trim() else null
+                    }
+                    if (prevHeading.isNullOrBlank()) {
+                        var curr: org.jsoup.nodes.Element? = a
+                        for (depth in 0..4) {
+                            if (curr == null || curr == contentRoot) break
+                            var sib = curr.previousElementSibling()
+                            while (sib != null) {
+                                val headingElem = if (sib.tagName().startsWith("h", ignoreCase = true) || sib.tagName() == "p") sib
+                                    else sib.selectFirst("h1, h2, h3, h4, h5, h6, p, .elementor-heading-title")
+                                if (headingElem != null) {
+                                    val ht = headingElem.text().trim()
+                                    if (ht.contains("Episode", ignoreCase = true) || Regex("""\b(?:Ep|E)[- ]*\d{1,4}\b""", RegexOption.IGNORE_CASE).containsMatchIn(ht)) {
+                                        prevHeading = ht
+                                        break
+                                    }
+                                }
+                                sib = sib.previousElementSibling()
+                            }
+                            if (!prevHeading.isNullOrBlank()) break
+                            curr = curr.parent()
+                        }
                     }
 
                     // Number from the anchor's own evidence before falling back
@@ -196,6 +224,8 @@ object NkiriProvider : SiteProvider {
                                 val isOldDirect = existing.url.contains("nkiserv.com") || com.anonrode.downloader.pipeline.StrictLinkClassifier.isDirectMedia(existing.url)
                                 if (isNewDirect && !isOldDirect) {
                                     episodes[existingIdx] = existing.copy(url = href)
+                                } else if (href != existing.url && href !in existing.mirrorUrls) {
+                                    episodes[existingIdx] = existing.copy(mirrorUrls = existing.mirrorUrls + href)
                                 }
                             } else {
                                 episodes.add(
@@ -223,13 +253,15 @@ object NkiriProvider : SiteProvider {
                             else -> "Episode $num"
                         }
 
-                        val existingIdx = episodes.indexOfFirst { it.episodeNum == num }
+                        val existingIdx = episodes.indexOfFirst { it.episodeNum == num && (mirrorLabel == null || it.title == epTitle) }
                         if (existingIdx >= 0) {
                             val existing = episodes[existingIdx]
                             val isNewDirect = href.contains("nkiserv.com") || com.anonrode.downloader.pipeline.StrictLinkClassifier.isDirectMedia(href)
                             val isOldDirect = existing.url.contains("nkiserv.com") || com.anonrode.downloader.pipeline.StrictLinkClassifier.isDirectMedia(existing.url)
                             if (isNewDirect && !isOldDirect) {
                                 episodes[existingIdx] = existing.copy(url = href)
+                            } else if (href != existing.url && href !in existing.mirrorUrls) {
+                                episodes[existingIdx] = existing.copy(mirrorUrls = existing.mirrorUrls + href)
                             }
                         } else {
                             episodes.add(
@@ -240,11 +272,13 @@ object NkiriProvider : SiteProvider {
                                     site = name
                                 )
                             )
-                            count = num + 1
+                            if (num >= count) count = num + 1
                         }
                     }
                 }
             }
+
+            episodes.sortWith(compareBy({ it.episodeNum }, { it.title }))
 
             val card = ShowCard(title = title, url = cleanUrl, posterUrl = poster, site = name)
             return ShowDetails(show = card, synopsis = synopsis, episodes = episodes)

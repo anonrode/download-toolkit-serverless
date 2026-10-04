@@ -373,8 +373,8 @@ def _validate_pipeline(where, pl, problems):
             continue
         if step.get("mode", "single") not in ("single", "failover", "merge"):
             problems.append(f"{w}.mode: must be single|failover|merge")
-        if step.get("as", "html") not in ("html", "json", "rss"):
-            problems.append(f"{w}.as: must be html|json|rss")
+        if step.get("as", "html") not in ("html", "json", "rss", "packed_js"):
+            problems.append(f"{w}.as: must be html|json|rss|packed_js")
 
         sources = step.get("sources")
         if not isinstance(sources, list) or not 1 <= len(sources) <= PIPELINE_MAX_SOURCES:
@@ -388,8 +388,8 @@ def _validate_pipeline(where, pl, problems):
                 continue
             if not isinstance(src["url"], str) or len(src["url"]) > MAX_SELECTOR_LEN:
                 problems.append(f"{sw}.url: string <= {MAX_SELECTOR_LEN}")
-            if src.get("method", "GET") not in ("GET", "POST"):
-                problems.append(f"{sw}.method: must be GET|POST")
+            if src.get("method", "GET") not in ("GET", "POST", "HEAD"):
+                problems.append(f"{sw}.method: must be GET|POST|HEAD")
             headers = src.get("headers") or {}
             if not isinstance(headers, dict):
                 problems.append(f"{sw}.headers: must be an object")
@@ -404,21 +404,92 @@ def _validate_pipeline(where, pl, problems):
                 for fk, fv in form.items():
                     if not isinstance(fv, str) or len(fv) > MAX_SELECTOR_LEN:
                         problems.append(f"{sw}.form.{fk}: string <= {MAX_SELECTOR_LEN}")
+            queryParams = src.get("queryParams") or {}
+            if not isinstance(queryParams, dict):
+                problems.append(f"{sw}.queryParams: must be an object")
+            else:
+                for qk, qv in queryParams.items():
+                    if not isinstance(qv, str) or len(qv) > MAX_SELECTOR_LEN:
+                        problems.append(f"{sw}.queryParams.{qk}: string <= {MAX_SELECTOR_LEN}")
+            if "body" in src and not isinstance(src["body"], str):
+                problems.append(f"{sw}.body: must be a string")
+            if "followRedirects" in src and not isinstance(src["followRedirects"], bool):
+                problems.append(f"{sw}.followRedirects: must be a boolean")
+            if "permissiveSsl" in src and not isinstance(src["permissiveSsl"], bool):
+                problems.append(f"{sw}.permissiveSsl: must be a boolean")
+            if "timeoutMs" in src and (not isinstance(src["timeoutMs"], int) or isinstance(src["timeoutMs"], bool) or not 0 <= src["timeoutMs"] <= 60000):
+                problems.append(f"{sw}.timeoutMs: must be an int 0..60000")
 
         bind = step.get("bind")
         if bind is not None:
             if not isinstance(bind, dict):
                 problems.append(f"{w}.bind: must be an object")
             else:
+                ALLOWED_BIND_EXTRACTORS = (
+                    "regex", "json", "selector", "header", "cookie",
+                    "pow", "pow_sha256", "unpackJs", "sourceVar"
+                )
+                ALLOWED_TRANSFORMS = {
+                    "base64decode", "base64encode", "hexdecode", "rot13",
+                    "urldecode", "urlencode", "trim", "lowercase", "uppercase", "reverse"
+                }
                 for bk, bv in bind.items():
-                    if (not isinstance(bv, dict)
-                            or not any(k in bv for k in ("regex", "json", "selector"))):
-                        problems.append(f"{w}.bind.{bk}: needs regex|json|selector")
+                    bw = f"{w}.bind.{bk}"
+                    if not isinstance(bv, dict):
+                        problems.append(f"{bw}: must be an object")
+                        continue
+                    if not any(k in bv for k in ALLOWED_BIND_EXTRACTORS):
+                        problems.append(
+                            f"{bw}: needs at least one of {'|'.join(ALLOWED_BIND_EXTRACTORS)}"
+                        )
+                    if "regex" in bv:
+                        _check_regex(bv["regex"], f"{bw}.regex", problems)
+                    if "group" in bv and (isinstance(bv["group"], bool) or not isinstance(bv["group"], int) or not 0 <= bv["group"] <= 32):
+                        problems.append(f"{bw}.group: must be an int 0-32")
+                    if "unpackJs" in bv and not isinstance(bv["unpackJs"], bool):
+                        problems.append(f"{bw}.unpackJs: must be a boolean")
+                    if "sourceVar" in bv and not isinstance(bv["sourceVar"], str):
+                        problems.append(f"{bw}.sourceVar: must be a string")
+                    if "header" in bv and not isinstance(bv["header"], str):
+                        problems.append(f"{bw}.header: must be a string")
+                    if "cookie" in bv and not isinstance(bv["cookie"], str):
+                        problems.append(f"{bw}.cookie: must be a string")
+                    if "transforms" in bv:
+                        tf = bv["transforms"]
+                        if not isinstance(tf, list) or len(tf) > 16:
+                            problems.append(f"{bw}.transforms: list <= 16")
+                        else:
+                            for t_name in tf:
+                                if t_name not in ALLOWED_TRANSFORMS:
+                                    problems.append(f"{bw}.transforms: unknown transform {t_name!r}")
+                    for pow_key in ("pow", "pow_sha256"):
+                        if pow_key in bv:
+                            pv = bv[pow_key]
+                            if isinstance(pv, dict):
+                                if "algorithm" in pv and pv["algorithm"] not in ("sha256", "md5", "sha1"):
+                                    problems.append(f"{bw}.{pow_key}.algorithm: must be sha256|md5|sha1")
+                                if "maxIterations" in pv and (not isinstance(pv["maxIterations"], int) or pv["maxIterations"] <= 0):
+                                    problems.append(f"{bw}.{pow_key}.maxIterations: must be positive int")
+                            elif not isinstance(pv, bool):
+                                problems.append(f"{bw}.{pow_key}: must be an object or boolean")
 
         if "delayMs" in step:
             d = step["delayMs"]
-            if not isinstance(d, int) or not 0 <= d <= 15000:
-                problems.append(f"{w}.delayMs: must be an int 0..15000")
+            if not isinstance(d, int) or isinstance(d, bool) or not 0 <= d <= 60000:
+                problems.append(f"{w}.delayMs: must be an int 0..60000")
+
+        if "delayVar" in step and not isinstance(step["delayVar"], str):
+            problems.append(f"{w}.delayVar: must be a string")
+
+        if "maxBytes" in step and (not isinstance(step["maxBytes"], int) or isinstance(step["maxBytes"], bool) or step["maxBytes"] < 0):
+            problems.append(f"{w}.maxBytes: must be a non-negative int")
+
+        if "deadPatterns" in step:
+            dp = step["deadPatterns"]
+            if not isinstance(dp, list) or len(dp) > MAX_RULES_ARRAY:
+                problems.append(f"{w}.deadPatterns: list <= {MAX_RULES_ARRAY}")
+            elif not all(isinstance(x, str) and len(x) <= 200 for x in dp):
+                problems.append(f"{w}.deadPatterns: entries must be short strings")
 
         if "items" in step:
             _validate_pipeline_items(f"{w}.items", step["items"], problems)

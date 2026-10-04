@@ -56,6 +56,7 @@ object TrendingFeed {
     )
 
     suspend fun fetch(
+        page: Int = 1,
         filterExplicit: Boolean = true,
         onPartial: (List<ShowCard>) -> Unit = {}
     ): List<ShowCard> = coroutineScope {
@@ -74,22 +75,24 @@ object TrendingFeed {
             val cards = withTimeoutOrNull(TIMEOUT_MS) { block() } ?: emptyList()
             synchronized(lock) {
                 slots[i] = cards
-                if (cards.isNotEmpty()) onPartial(mergeRoundRobin(slots.map { it ?: emptyList() }, filterExplicit))
+                if (cards.isNotEmpty()) onPartial(mergeRoundRobin(slots.map { it ?: emptyList() }, filterExplicit, limit = Int.MAX_VALUE))
             }
         }
+        val npFeedPath = if (page > 1) "/feed/?paged=$page" else "/feed/"
+        val rocksFeedPath = if (page > 1) "/feed/?paged=$page" else "/feed/"
         listOf(
-            async { fetchSlot(0) { fetchWpRest("naijavault", filterExplicit = filterExplicit) } },
-            async { fetchSlot(1) { fetchWpRest("nkiri", filterExplicit = filterExplicit) } },
-            async { fetchSlot(2) { fetchRss("naijaprey", "/feed/", filterExplicit = filterExplicit) } },
-            async { fetchSlot(3) { fetchRss("9jarocks", "/feed/", filterExplicit = filterExplicit) } }
+            async { fetchSlot(0) { fetchWpRest("naijavault", page = page, filterExplicit = filterExplicit) } },
+            async { fetchSlot(1) { fetchWpRest("nkiri", page = page, filterExplicit = filterExplicit) } },
+            async { fetchSlot(2) { fetchRss("naijaprey", npFeedPath, filterExplicit = filterExplicit) } },
+            async { fetchSlot(3) { fetchRss("9jarocks", rocksFeedPath, filterExplicit = filterExplicit) } }
         ).awaitAll()
         val perSite = slots.map { it ?: emptyList() }
 
         // Final merge == the same pure function, so the last publish and the
         // return value are consistent by construction.
-        val out = mergeRoundRobin(perSite, filterExplicit)
+        val out = mergeRoundRobin(perSite, filterExplicit, limit = Int.MAX_VALUE)
         com.anonrode.downloader.util.DebugLog.resolve(
-            "trending feed: ${out.size} cards (per-site ${perSite.map { it.size }})"
+            "trending feed (page $page): ${out.size} cards (per-site ${perSite.map { it.size }})"
         )
         out
     }
@@ -103,19 +106,20 @@ object TrendingFeed {
      */
     internal fun mergeRoundRobin(
         perSite: List<List<ShowCard>>,
-        filterExplicit: Boolean = true
+        filterExplicit: Boolean = true,
+        limit: Int = ROW_LIMIT
     ): List<ShowCard> {
         val out = mutableListOf<ShowCard>()
         val seenTitles = mutableSetOf<String>()
         var idx = 0
-        while (out.size < ROW_LIMIT) {
+        while (out.size < limit) {
             var advanced = false
             for (site in perSite) {
                 if (idx < site.size) {
                     val card = site[idx]
                     val key = card.title.lowercase().replace(Regex("[^a-z0-9]"), "")
                     val isSafe = !filterExplicit || !com.anonrode.downloader.util.ExplicitContentFilter.isExplicit(card)
-                    if (out.size < ROW_LIMIT && key.isNotBlank() && isSafe && seenTitles.add(key)) {
+                    if (out.size < limit && key.isNotBlank() && isSafe && seenTitles.add(key)) {
                         out.add(card)
                     }
                     advanced = true
@@ -138,6 +142,7 @@ object TrendingFeed {
     internal suspend fun fetchWpRest(
         site: String,
         query: String? = null,
+        page: Int = 1,
         limit: Int = PER_SITE_LIMIT,
         extraParams: String = "",
         confirmTerms: Set<String>? = null,
@@ -145,6 +150,7 @@ object TrendingFeed {
     ): List<ShowCard> =
         fetchWpRestFrom(
             DynamicRulesManager.getBaseUrl(site), site, query, limit,
+            page = page,
             extraParams = extraParams, confirmTerms = confirmTerms,
             filterExplicit = filterExplicit
         )
@@ -163,23 +169,25 @@ object TrendingFeed {
         site: String,
         query: String?,
         limit: Int,
+        page: Int = 1,
         extraParams: String = "",
         tag: String = "trending",
         confirmTerms: Set<String>? = null,
         filterExplicit: Boolean = true
     ): List<ShowCard> {
-        val url = wpRestUrl(base, query, limit, extraParams) ?: return emptyList()
+        val url = wpRestUrl(base, query, limit, page, extraParams) ?: return emptyList()
         val json = HttpClient.getText(url, referer = "${base.trimEnd('/')}/", tag = tag) ?: return emptyList()
         return gateWpRest(parseWpRestPosts(json, site), confirmTerms, filterExplicit = filterExplicit)
     }
 
     /** Pure endpoint assembly — shape live-verified 2026-09-14 on nkiri.top
      *  and naijavault (`orderby=relevance` accepted WITH a search param). */
-    internal fun wpRestUrl(base: String, query: String?, limit: Int, extraParams: String = ""): String? {
+    internal fun wpRestUrl(base: String, query: String?, limit: Int, page: Int = 1, extraParams: String = ""): String? {
         val clean = base.trimEnd('/')
         if (clean.isBlank()) return null
         val search = if (query == null) "" else "&search=${java.net.URLEncoder.encode(query, "UTF-8")}"
-        return "$clean/wp-json/wp/v2/posts?per_page=$limit$search$extraParams&_embed=1"
+        val pageParam = if (page > 1) "&page=$page" else ""
+        return "$clean/wp-json/wp/v2/posts?per_page=$limit$pageParam$search$extraParams&_embed=1"
     }
 
     /** A parsed card plus the rendered post body it came from (gate input)

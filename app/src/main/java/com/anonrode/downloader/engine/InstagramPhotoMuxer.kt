@@ -47,6 +47,7 @@ object InstagramPhotoMuxer {
     internal const val DOC_ID = "27130156389949648"
     internal const val FRIENDLY = "PolarisLoggedOutDesktopWWWPostRootContentQuery"
     private const val POST_BASE = "https://www.instagram.com"
+    internal const val CRAWLER_UA = "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
     // Hard cap for one ffmpeg encode of a still image + ≤32MB audio. A 90s
     // budget is generous on phone hardware for this workload; past it the
     // child is wedged and must not outlive the task.
@@ -159,32 +160,95 @@ object InstagramPhotoMuxer {
 
     private fun looksLikeMedia(o: JSONObject): Boolean =
         o.has("image_versions2") || o.has("video_versions") ||
-            o.has("carousel_media") || (o.has("pk") && (o.has("code") || o.has("taken_at")))
+            o.has("carousel_media") || o.has("display_url") ||
+            o.has("display_uri") || o.has("display_resources") ||
+            o.has("edge_sidecar_to_children") || o.has("music_metadata") ||
+            o.has("audio_tracks") || (o.has("pk") && (o.has("code") || o.has("taken_at")))
+
+    private fun bestDisplayResource(resources: JSONArray?): String? {
+        if (resources == null || resources.length() == 0) return null
+        var best: String? = null
+        var bestW = -1
+        for (i in 0 until resources.length()) {
+            val r = resources.optJSONObject(i) ?: continue
+            val src = r.optString("src").takeIf { it.isNotBlank() } ?: continue
+            val w = r.optInt("config_width", 0)
+            if (w > bestW) { bestW = w; best = src }
+        }
+        return best
+    }
+
+    private fun allSidecarPhotos(m: JSONObject): List<String> {
+        val sidecar = m.optJSONObject("edge_sidecar_to_children")?.optJSONArray("edges") ?: return emptyList()
+        val urls = mutableListOf<String>()
+        for (i in 0 until sidecar.length()) {
+            val node = sidecar.optJSONObject(i)?.optJSONObject("node") ?: continue
+            if (node.optBoolean("is_video", false)) continue
+            val url = bestCandidate(node.optJSONObject("image_versions2")?.optJSONArray("candidates"))
+                ?: bestDisplayResource(node.optJSONArray("display_resources"))
+                ?: node.optString("display_url").takeIf { it.isNotBlank() }
+                ?: node.optString("display_uri").takeIf { it.isNotBlank() }
+            if (url != null) urls.add(url)
+        }
+        return urls
+    }
 
     /** Decide the muxable shape from a media object; null when not applicable. */
     internal fun mediaToParts(m: JSONObject): MediaParts? {
         val videoVersions = m.optJSONArray("video_versions")
-        val hasVideo = videoVersions != null && videoVersions.length() > 0
+        val hasVideo = (videoVersions != null && videoVersions.length() > 0) || m.optBoolean("is_video", false)
         // A real video (even if yt-dlp choked on gating) is not a photo+music:
         // never fabricate a still from it — let yt-dlp's own error stand.
         if (hasVideo) return MediaParts("", "", 0, null, null, null, hasVideo = true)
 
-        // A photo carousel keeps its images in `carousel_media` CHILDREN while
-        // the music_metadata rides the post itself — gallery-dl reads them
-        // from exactly those two places (`post["carousel_media"]` items +
-        // `post["music_metadata"]`, instagram.py).
+        // A photo carousel keeps its images in `carousel_media` or `edge_sidecar_to_children`
         val singlePhoto = bestCandidate(m.optJSONObject("image_versions2")?.optJSONArray("candidates"))
-        val isCarousel = m.has("carousel_media")
-        val carouselPhotos = if (isCarousel) allCarouselPhotos(m) else emptyList()
+            ?: bestDisplayResource(m.optJSONArray("display_resources"))
+            ?: m.optString("display_url").takeIf { it.isNotBlank() }
+            ?: m.optString("display_uri").takeIf { it.isNotBlank() }
+
+        val isCarousel = m.has("carousel_media") || m.has("edge_sidecar_to_children")
+        val carouselPhotos = if (m.has("carousel_media")) {
+            allCarouselPhotos(m)
+        } else if (m.has("edge_sidecar_to_children")) {
+            allSidecarPhotos(m)
+        } else emptyList()
+
         val photoUrl = singlePhoto
             ?: carouselPhotos.firstOrNull()
             ?: return null
+
         val audio = musicAssetInfo(m)
-        val audioUrl = audio?.optString("progressive_download_url")?.takeIf { it.isNotBlank() } ?: ""
-        val durationMs = audio?.optLong("duration_in_ms", 0L)?.coerceAtLeast(0L) ?: 0L
+            ?: (if (m.has("carousel_media")) {
+                val cm = m.optJSONArray("carousel_media")
+                var found: JSONObject? = null
+                if (cm != null) {
+                    for (i in 0 until cm.length()) {
+                        val child = cm.optJSONObject(i) ?: continue
+                        found = musicAssetInfo(child)
+                        if (found != null) break
+                    }
+                }
+                found
+            } else null)
+
+        val audioUrl = (audio?.optString("progressive_download_url")?.takeIf { it.isNotBlank() }
+            ?: audio?.optString("audio_src")?.takeIf { it.isNotBlank() }
+            ?: audio?.optString("fast_start_progressive_download_url")?.takeIf { it.isNotBlank() }
+            ?: "").trim()
+        val durationMs = audio?.optLong("duration_in_ms", 0L)?.coerceAtLeast(0L)
+            ?: (audio?.optDouble("duration", 0.0)?.times(1000)?.toLong()?.coerceAtLeast(0L) ?: 0L)
         val title = audio?.optString("title")?.takeIf { it.isNotBlank() }
-        val artist = audio?.let { (it.optString("display_artist").ifBlank { it.optString("ig_artist") }).takeIf { a -> a.isNotBlank() } }
+            ?: audio?.optString("audio_title")?.takeIf { it.isNotBlank() }
+        val artist = audio?.let {
+            (it.optString("display_artist")
+                .ifBlank { it.optString("ig_artist") }
+                .ifBlank { it.optString("artist_name") }
+                .ifBlank { it.optString("audio_artist") }
+            ).takeIf { a -> a.isNotBlank() }
+        }
         val caption = m.optJSONObject("caption")?.optString("text")?.takeIf { it.isNotBlank() }
+            ?: m.optString("caption").takeIf { it.isNotBlank() }
             ?: m.optJSONObject("edge_media_to_caption")?.optJSONArray("edges")?.optJSONObject(0)
                 ?.optJSONObject("node")?.optString("text")?.takeIf { it.isNotBlank() }
         return MediaParts(photoUrl, audioUrl, durationMs, title, artist, caption,
@@ -198,10 +262,14 @@ object InstagramPhotoMuxer {
         for (i in 0 until candidates.length()) {
             val c = candidates.optJSONObject(i) ?: continue
             val url = c.optString("url").takeIf { it.isNotBlank() } ?: continue
-            val w = c.optInt("width", 0)
+            var w = c.optInt("width", 0)
+            if (w == 0) {
+                val m = Regex("""p(\d+)x\d+""").find(url)
+                w = m?.groupValues?.get(1)?.toIntOrNull() ?: if (i == 0) 9999 else 0
+            }
             if (w > bestW) { bestW = w; best = url }
         }
-        return best
+        return best ?: candidates.optJSONObject(0)?.optString("url")?.takeIf { it.isNotBlank() }
     }
 
     /** ALL PHOTO children of a carousel — video children are skipped on the
@@ -216,28 +284,88 @@ object InstagramPhotoMuxer {
             val child = carousel.optJSONObject(i) ?: continue
             val v = child.optJSONArray("video_versions")
             if (v != null && v.length() > 0) continue
-            bestCandidate(child.optJSONObject("image_versions2")?.optJSONArray("candidates"))
-                ?.let { urls.add(it) }
+            val photo = bestCandidate(child.optJSONObject("image_versions2")?.optJSONArray("candidates"))
+                ?: bestDisplayResource(child.optJSONArray("display_resources"))
+                ?: child.optString("display_url").takeIf { it.isNotBlank() }
+                ?: child.optString("display_uri").takeIf { it.isNotBlank() }
+            photo?.let { urls.add(it) }
         }
         return urls
     }
 
-    /** music_metadata.music_info.music_asset_info, with the consumption-info
-     *  sibling as a fallback when the asset node is absent. */
+    /** Comprehensive audio extraction: checks music_metadata, music_info,
+     *  music_consumption_info, story_music_stickers, clips_metadata, and audio_tracks. */
     private fun musicAssetInfo(m: JSONObject): JSONObject? {
-        val mm = m.optJSONObject("music_metadata") ?: return null
-        val mi = mm.optJSONObject("music_info") ?: mm
-        return mi.optJSONObject("music_asset_info") ?: mi.optJSONObject("music_consumption_info")
+        // 1. Direct music_metadata
+        val mm = m.optJSONObject("music_metadata")
+        if (mm != null) {
+            val mi = mm.optJSONObject("music_info") ?: mm
+            val asset = mi.optJSONObject("music_asset_info") ?: mi.optJSONObject("music_consumption_info")
+            if (asset != null && (asset.has("progressive_download_url") || asset.has("audio_src") || asset.has("fast_start_progressive_download_url"))) return asset
+            if (asset != null) return asset
+        }
+        // 2. Direct music_info on m
+        val miDirect = m.optJSONObject("music_info")
+        if (miDirect != null) {
+            val asset = miDirect.optJSONObject("music_asset_info") ?: miDirect.optJSONObject("music_consumption_info") ?: miDirect
+            if (asset.has("progressive_download_url") || asset.has("audio_src")) return asset
+        }
+        // 3. Direct music_asset_info or music_consumption_info on m
+        val directAsset = m.optJSONObject("music_asset_info") ?: m.optJSONObject("music_consumption_info")
+        if (directAsset != null) return directAsset
+
+        // 4. clips_metadata (reels or cross-posted clips)
+        val clips = m.optJSONObject("clips_metadata")
+        if (clips != null) {
+            val cmi = clips.optJSONObject("music_info") ?: clips
+            val cAsset = cmi.optJSONObject("music_asset_info") ?: cmi.optJSONObject("music_consumption_info")
+            if (cAsset != null) return cAsset
+        }
+
+        // 5. story_music_stickers (array of stickers on images)
+        val stickers = m.optJSONArray("story_music_stickers")
+        if (stickers != null && stickers.length() > 0) {
+            for (i in 0 until stickers.length()) {
+                val st = stickers.optJSONObject(i) ?: continue
+                val stAsset = st.optJSONObject("music_asset_info")
+                    ?: st.optJSONObject("music_consumption_info")
+                    ?: st.optJSONObject("sticker_data")?.optJSONObject("music_asset_info")
+                if (stAsset != null) return stAsset
+            }
+        }
+
+        // 6. audio_tracks (list of audio streams)
+        val audioTracks = m.optJSONArray("audio_tracks")
+        if (audioTracks != null && audioTracks.length() > 0) {
+            for (i in 0 until audioTracks.length()) {
+                val tr = audioTracks.optJSONObject(i) ?: continue
+                if (tr.has("progressive_download_url") || tr.has("audio_src")) return tr
+            }
+        }
+
+        // 7. Check if m itself contains progressive_download_url or audio_src
+        if (m.has("progressive_download_url") || m.has("audio_src")) return m
+
+        return null
     }
 
-    /** Parse a candidate media set into the first muxable photo+music. */
-    internal fun pickMuxable(objects: List<JSONObject>): MediaParts? {
+    /** Parse a candidate media set into the first muxable photo+music.
+     *  When `shortcode` is provided, prefers the exact post whose code matches `shortcode`. */
+    internal fun pickMuxable(objects: List<JSONObject>, shortcode: String? = null): MediaParts? {
+        var fallback: MediaParts? = null
         for (o in objects) {
+            val code = o.optString("code")
+            val matchesShortcode = shortcode != null && code.equals(shortcode, ignoreCase = true)
             val parts = mediaToParts(o) ?: continue
             if (parts.hasVideo) continue
-            if (parts.photoUrl.isNotBlank()) return parts
+            if (parts.photoUrl.isNotBlank()) {
+                if (matchesShortcode) {
+                    return parts
+                }
+                if (fallback == null) fallback = parts
+            }
         }
-        return null
+        return fallback
     }
 
     /** Filename: caption (or a slug fallback) + shortcode, filesystem-safe.
@@ -317,8 +445,13 @@ object InstagramPhotoMuxer {
      *  original message. */
     internal suspend fun probeMedia(shortcode: String, isCancelled: () -> Boolean): MediaParts? {
         val url = "$POST_BASE/p/$shortcode/"
-        val html = HttpClient.getText(url, referer = POST_BASE, tag = "instagram",
-            maxBytes = HttpClient.MAX_TEXT_BYTES) ?: return null
+        val crawlerHeaders = mapOf(
+            "User-Agent" to CRAWLER_UA,
+            "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language" to "en-US,en;q=0.9"
+        )
+        val html = HttpClient.getText(url, referer = POST_BASE, headers = crawlerHeaders,
+            tag = "instagram", maxBytes = HttpClient.MAX_TEXT_BYTES) ?: return null
         if (isCancelled()) throw CancellationException("IG mux cancelled after page fetch")
 
         val lsd = extractLsdToken(html)
@@ -343,7 +476,7 @@ object InstagramPhotoMuxer {
             if (isCancelled()) throw CancellationException("IG mux cancelled after rest")
             if (!rest.isNullOrBlank() && rest.trimStart().startsWith("{")) {
                 try {
-                    val parts = pickMuxable(findMediaObjects(JSONObject(rest)))
+                    val parts = pickMuxable(findMediaObjects(JSONObject(rest)), shortcode)
                     if (parts != null) return parts
                 } catch (_: Exception) {}
             }
@@ -363,7 +496,7 @@ object InstagramPhotoMuxer {
             if (isCancelled()) throw CancellationException("IG mux cancelled after graphql")
             if (!resp.isNullOrBlank() && resp.trimStart().startsWith("{")) {
                 try {
-                    val parts = pickMuxable(findMediaObjects(JSONObject(resp)))
+                    val parts = pickMuxable(findMediaObjects(JSONObject(resp)), shortcode)
                     if (parts != null) return parts
                     // GraphQL responded but no muxable media (gated / video): the
                     // video case means yt-dlp failed for another reason — bail out.
@@ -372,12 +505,65 @@ object InstagramPhotoMuxer {
             }
         }
 
-        // 3) RelayPrefetched blob baked into the post HTML (last resort).
+        // 3) RelayPrefetched blob baked into the post HTML.
         val objs = ArrayList<JSONObject>()
         for (mm in SJS.findAll(html)) {
             try { objs.addAll(findMediaObjects(JSONObject(mm.groupValues[1]))) } catch (_: Exception) {}
         }
-        return pickMuxable(objs)
+        val sjsParts = pickMuxable(objs, shortcode)
+        if (sjsParts != null) return sjsParts
+
+        // 4) HTML OpenGraph tags: <meta property="og:image" content="..." />
+        // Guard against video posts: if HTML indicates a video post, yt-dlp failed on a video.
+        // Do NOT download the video poster frame as a photo.
+        val isVideoOg = html.contains("og:video", ignoreCase = true)
+        if (isVideoOg) return null
+
+        val ogImg = Regex("""<meta[^>]+(?:property=["']og:image["'][^>]+content=["']([^"']+)["']|content=["']([^"']+)["'][^>]+property=["']og:image["'])""", RegexOption.IGNORE_CASE)
+            .find(html)?.let { m -> m.groupValues[1].ifEmpty { m.groupValues[2] } }?.replace("&amp;", "&")
+        if (!ogImg.isNullOrBlank()) {
+            val ogTitle = Regex("""<meta[^>]+(?:property=["']og:title["'][^>]+content=["']([^"']+)["']|content=["']([^"']+)["'][^>]+property=["']og:title["'])""", RegexOption.IGNORE_CASE)
+                .find(html)?.let { m -> m.groupValues[1].ifEmpty { m.groupValues[2] } }
+            return MediaParts(
+                photoUrl = ogImg,
+                audioUrl = "",
+                durationMs = 0L,
+                title = null,
+                artist = null,
+                caption = ogTitle,
+                hasVideo = false
+            )
+        }
+
+        // 5) Public embed fallback: https://www.instagram.com/p/$shortcode/embed/captioned/
+        try {
+            val embedHeaders = mapOf(
+                "Accept" to "text/html",
+                "User-Agent" to CRAWLER_UA,
+                "Accept-Language" to "en-US,en;q=0.9"
+            )
+            val embedHtml = HttpClient.get("https://www.instagram.com/p/$shortcode/embed/captioned/",
+                referer = POST_BASE, headers = embedHeaders, tag = "instagram")
+                .use { res -> if (res.isSuccessful) res.body?.string() else null }
+            if (!embedHtml.isNullOrBlank() && !embedHtml.contains("og:video", ignoreCase = true)) {
+                val embedImg = Regex("""<img[^>]+class=["'][^"']*EmbeddedMediaImage[^"']*["'][^>]+src=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
+                    .find(embedHtml)?.groupValues?.get(1)?.replace("&amp;", "&")
+                    ?: Regex("""<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
+                        .find(embedHtml)?.groupValues?.get(1)?.replace("&amp;", "&")
+                if (!embedImg.isNullOrBlank()) {
+                    return MediaParts(
+                        photoUrl = embedImg,
+                        audioUrl = "",
+                        durationMs = 0L,
+                        title = null,
+                        artist = null,
+                        caption = null,
+                        hasVideo = false
+                    )
+                }
+            }
+        } catch (_: Exception) {}
+        return null
     }
 
     private fun anyVideoMedia(respJson: String): Boolean {
@@ -389,6 +575,38 @@ object InstagramPhotoMuxer {
     }
 
     // ------------------------------------------------------------------ run
+
+    /**
+     * Directly delivers pristine high-res photo(s) without audio/video re-encoding.
+     * Used when the post has no audio, when audio download fails or is restricted,
+     * or when ffmpeg is missing / fails to produce a valid video.
+     */
+    internal fun deliverStillPhotos(outDir: File, shortcode: String, parts: MediaParts): File? {
+        val source = (parts.caption ?: parts.title?.let { t -> parts.artist?.let { a -> "$t — $a" } ?: t })
+            ?: "Instagram"
+        val label = if (source.isBlank()) "Instagram"
+            else com.anonrode.downloader.util.NameSanitizer.savedName(source, 80, stripNoise = false)
+
+        if (parts.carouselPhotoUrls.size >= 2) {
+            var firstDelivered: File? = null
+            for ((idx, url) in parts.carouselPhotoUrls.withIndex()) {
+                val ext = guessExt(url, ".jpg")
+                val targetFile = File(outDir, "$label [$shortcode]_${idx + 1}$ext")
+                val downloaded = fetchTo(outDir, targetFile.name, url)
+                if (downloaded != null && downloaded.exists() && downloaded.length() > 0) {
+                    if (firstDelivered == null) firstDelivered = downloaded
+                }
+            }
+            if (firstDelivered != null) return firstDelivered
+        }
+        val ext = guessExt(parts.photoUrl, ".jpg")
+        val targetFile = File(outDir, "$label [$shortcode]$ext")
+        val downloaded = fetchTo(outDir, targetFile.name, parts.photoUrl)
+        if (downloaded != null && downloaded.exists() && downloaded.length() > 0) {
+            return downloaded
+        }
+        return null
+    }
 
     /**
      * Orchestration entry point, called from YoutubeDlDownloader ONLY after
@@ -419,6 +637,11 @@ object InstagramPhotoMuxer {
         }
         if (parts.hasVideo || parts.photoUrl.isBlank()) return null
 
+        // If the post has no audio (still picture without music), save directly as JPG without ffmpeg
+        if (parts.audioUrl.isBlank()) {
+            return deliverStillPhotos(outDir, shortcode, parts)
+        }
+
         val work = File(outDir, ".igmux-$taskId").apply { mkdirs() }
         val produced = File(outDir, buildFilename(shortcode, parts))
         var delivered = false
@@ -426,15 +649,19 @@ object InstagramPhotoMuxer {
             // ---------- fetch audio (shared for both single + slideshow)
             val audio = if (parts.audioUrl.isNotBlank()) {
                 val audExt = guessExt(parts.audioUrl, ".m4a")
-                val a = fetchTo(work, "audio$audExt", parts.audioUrl) ?: return null
+                val a = fetchTo(work, "audio$audExt", parts.audioUrl)
+                if (a == null) {
+                    DebugLog.backend("task=$taskId ig-mux: audio fetch failed, falling back to still photos")
+                    return deliverStillPhotos(outDir, shortcode, parts)
+                }
                 if (isCancelled()) throw CancellationException("IG mux cancelled after audio fetch")
                 a
             } else null
 
             val lib = File(context.applicationInfo.nativeLibraryDir, "libffmpeg.so")
             if (!lib.exists()) {
-                DebugLog.backend("task=$taskId ig-mux: bundled ffmpeg not found at ${lib.name}")
-                return null
+                DebugLog.backend("task=$taskId ig-mux: bundled ffmpeg not found at ${lib.name}, falling back to still photos")
+                return deliverStillPhotos(outDir, shortcode, parts)
             }
             try { lib.setExecutable(true) } catch (_: Exception) {}
 
@@ -449,7 +676,10 @@ object InstagramPhotoMuxer {
                     val f = fetchTo(work, "slide_$idx$ext", url)
                     if (f != null) slideFiles.add(f)
                 }
-                if (slideFiles.isEmpty()) return null
+                if (slideFiles.isEmpty()) {
+                    DebugLog.backend("task=$taskId ig-mux: slideshow slide fetch failed, falling back to still photos")
+                    return deliverStillPhotos(outDir, shortcode, parts)
+                }
                 // duration per slide: song length / num slides (min 3s per slide)
                 val durationMs = if (parts.durationMs > 0) parts.durationMs else (slideFiles.size * 5000L)
                 val perSlideSec = (durationMs.toDouble() / slideFiles.size / 1000.0).coerceAtLeast(3.0)
@@ -471,7 +701,11 @@ object InstagramPhotoMuxer {
             } else {
                 // ---------- single-image path (original behavior)
                 val imgExt = guessExt(parts.photoUrl, ".jpg")
-                val cover = fetchTo(work, "cover$imgExt", parts.photoUrl) ?: return null
+                val cover = fetchTo(work, "cover$imgExt", parts.photoUrl)
+                if (cover == null) {
+                    DebugLog.backend("task=$taskId ig-mux: cover fetch failed, falling back to still photos")
+                    return deliverStillPhotos(outDir, shortcode, parts)
+                }
                 if (isCancelled()) throw CancellationException("IG mux cancelled after cover fetch")
                 ffmpegVariants(lib.absolutePath, cover.absolutePath, audio?.absolutePath, produced.absolutePath)
             }
@@ -485,13 +719,13 @@ object InstagramPhotoMuxer {
                     return produced
                 }
             }
-            DebugLog.backend("task=$taskId ig-mux: ffmpeg produced nothing")
-            return null
+            DebugLog.backend("task=$taskId ig-mux: ffmpeg produced nothing, falling back to still photos")
+            return deliverStillPhotos(outDir, shortcode, parts)
         } catch (ce: CancellationException) {
             throw ce
         } catch (t: Throwable) {
             DebugLog.backend("task=$taskId ig-mux error: ${(t.message ?: t.javaClass.simpleName).take(200)}")
-            return null
+            return deliverStillPhotos(outDir, shortcode, parts)
         } finally {
             runCatching { work.deleteRecursively() }
             // A cancelled/killed ffmpeg can leave a truncated, moov-less mp4

@@ -138,12 +138,18 @@ class DownloadRepository {
                         else -> it.totalBytes
                     }
                     val transferring = status == TaskStatus.DOWNLOADING
+                    val finalEta = when {
+                        !transferring -> 0L
+                        eta > 0L -> eta
+                        it.etaSeconds > 0L -> it.etaSeconds
+                        else -> 0L
+                    }
                     it.copy(
                         status = status,
                         downloadedBytes = finalDl,
                         totalBytes = finalTot,
                         speedBytesPerSec = if (transferring) speed else 0.0,
-                        etaSeconds = if (transferring) eta else 0L
+                        etaSeconds = finalEta
                     )
                 } else it
             }

@@ -7,9 +7,12 @@ import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.ActivityInfo
+import android.media.audiofx.LoudnessEnhancer
 import android.net.Uri
 import android.graphics.Typeface
+import android.view.HapticFeedbackConstants
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.widget.FrameLayout
 import androidx.activity.compose.BackHandler
 import androidx.activity.ComponentActivity
@@ -59,6 +62,12 @@ import androidx.compose.material.icons.rounded.Replay10
 import androidx.compose.material.icons.rounded.ScreenRotation
 import androidx.compose.material.icons.rounded.SkipNext
 import androidx.compose.material.icons.rounded.SkipPrevious
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.material.icons.automirrored.filled.VolumeDown
+import androidx.compose.material.icons.automirrored.filled.VolumeOff
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.rounded.Speed
 import androidx.compose.material.icons.rounded.SubtitlesOff
 import androidx.compose.material3.Icon
@@ -66,6 +75,8 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.ripple
 import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
@@ -85,8 +96,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -369,12 +383,25 @@ private fun MediaPlayerModalImpl(
     // ---- Persisted prefs ----
     val initialSpeed = remember { MediaPlayerPrefs.getPlaybackSpeed(context) }
     val initialSubtitle = remember { MediaPlayerPrefs.getSubtitleTrack(context) }
+    val initialSavedVolume = remember {
+        (MediaPlayerPrefs.getMediaVolume(context) * 100).toInt().coerceIn(0, 100)
+    }
 
     // ---- UI state ----
     var isPlaying by remember { mutableStateOf(true) }
     var currentPosition by remember { mutableLongStateOf(0L) }
     var duration by remember { mutableLongStateOf(0L) }
     var showControls by remember { mutableStateOf(true) }
+    var currentVolumePercent by remember { mutableIntStateOf(initialSavedVolume) }
+    var allowVolumeBoost by remember {
+        mutableStateOf(MediaPlayerPrefs.getAllowVolumeBoost(context))
+    }
+    val loudnessEnhancer = remember { PlayerLoudnessEnhancer() }
+    var isVolumeDragging by remember { mutableStateOf(false) }
+    var showVolumeHud by remember { mutableStateOf(false) }
+    var volumeHudTick by remember { mutableIntStateOf(0) }
+    var overdragDistance by remember { mutableFloatStateOf(0f) }
+    var boostDetentBroken by remember { mutableStateOf(false) }
     // Seek-drag ownership: while the thumb is held, the finger (dragFrac) IS
     // the value. The 500 ms poll otherwise yanks the thumb back to the
     // player's real (pre-seek, keyframe-snapped) position mid-drag, and
@@ -425,6 +452,21 @@ private fun MediaPlayerModalImpl(
     var resizeMode by remember { mutableStateOf(AspectRatioFrameLayout.RESIZE_MODE_FIT) }
     var isVerticalVideo by remember { mutableStateOf(false) }
 
+    // Keep the screen awake ONLY while actively playing media. When paused,
+    // buffering stalls, or the modal is dismissed, the flag is cleanly cleared so
+    // the device's normal screen timeout applies and battery is not wasted.
+    DisposableEffect(isPlaying, activity) {
+        val window = activity?.window
+        if (isPlaying) {
+            window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        } else {
+            window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+        onDispose {
+            window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+    }
+
     // ---- Player + session: ONE instance for the modal's whole lifetime ----
     val exoPlayer = remember {
         ExoPlayer.Builder(context)
@@ -445,6 +487,7 @@ private fun MediaPlayerModalImpl(
             .apply {
                 playWhenReady = true
                 playbackParameters = PlaybackParameters(initialSpeed)
+                volume = (initialSavedVolume / 100f).coerceIn(0f, 1f)
             }
     }
     val mediaSession = remember {
@@ -530,11 +573,23 @@ private fun MediaPlayerModalImpl(
         currentAudioLabel = null
         subtitleOptions = emptyList()
         currentSubtitleLabel = initialSubtitle
+        if (currentVolumePercent > 100) {
+            currentVolumePercent = 100
+            exoPlayer.volume = 1.0f
+            loudnessEnhancer.setBoostPercent(100, allowVolumeBoost)
+        }
     }
 
     // One listener for the player's lifetime.
     DisposableEffect(exoPlayer) {
         val listener = object : Player.Listener {
+            override fun onAudioSessionIdChanged(audioSessionId: Int) {
+                if (audioSessionId > 0) {
+                    loudnessEnhancer.attach(audioSessionId)
+                    loudnessEnhancer.setBoostPercent(currentVolumePercent, allowVolumeBoost)
+                }
+            }
+
             override fun onIsPlayingChanged(playing: Boolean) {
                 isPlaying = playing
             }
@@ -544,6 +599,11 @@ private fun MediaPlayerModalImpl(
                 when (playbackState) {
                     Player.STATE_READY -> {
                         duration = exoPlayer.duration.coerceAtLeast(0L)
+                        val sid = exoPlayer.audioSessionId
+                        if (sid > 0) {
+                            loudnessEnhancer.attach(sid)
+                            loudnessEnhancer.setBoostPercent(currentVolumePercent, allowVolumeBoost)
+                        }
                     }
                     Player.STATE_ENDED -> {
                         // Watched to the end: drop the saved position so a
@@ -677,6 +737,14 @@ private fun MediaPlayerModalImpl(
         }
     }
 
+    // Auto-hide volume HUD 1.2s after gesture ends.
+    LaunchedEffect(showVolumeHud, isVolumeDragging, volumeHudTick) {
+        if (showVolumeHud && !isVolumeDragging) {
+            delay(1200)
+            showVolumeHud = false
+        }
+    }
+
     // Rotation (Rotate chip): SENSOR_LANDSCAPE (not USER_LANDSCAPE) so the
     // tap works even with system rotation locked; PORTRAIT is a hard lock
     // so "rotate to portrait" means portrait, not "whatever the sensor
@@ -750,6 +818,7 @@ private fun MediaPlayerModalImpl(
                 }
                 Lifecycle.Event.ON_DESTROY -> {
                     savePosition()
+                    try { loudnessEnhancer.release() } catch (_: Exception) {}
                     try { exoPlayer.release() } catch (_: Exception) {}
                     try { mediaSession.release() } catch (_: Exception) {}
                 }
@@ -760,6 +829,7 @@ private fun MediaPlayerModalImpl(
         onDispose {
             lifecycleOwner.lifecycle.removeObserver(observer)
             savePosition()
+            try { loudnessEnhancer.release() } catch (_: Exception) {}
             try { exoPlayer.release() } catch (_: Exception) {}
             try { mediaSession.release() } catch (_: Exception) {}
         }
@@ -803,17 +873,125 @@ private fun MediaPlayerModalImpl(
     // stack over this overlay fine.
     BackHandler { onDismiss() }
 
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(Color.Black)
-                .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null
-                ) {
-                    showControls = !showControls
-                }
-        ) {
+    val view = LocalView.current
+    val density = LocalDensity.current
+    val detentThresholdPx = remember(density) { with(density) { 42.dp.toPx() } }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black)
+            .pointerInput(inPip) {
+                if (inPip) return@pointerInput
+                detectTapGestures(
+                    onTap = {
+                        showControls = !showControls
+                    }
+                )
+            }
+            .pointerInput(allowVolumeBoost, inPip) {
+                if (inPip) return@pointerInput
+                detectVerticalDragGestures(
+                    onDragStart = { offset ->
+                        if (offset.x >= size.width / 2f) {
+                            isVolumeDragging = true
+                            showVolumeHud = true
+                            volumeHudTick++
+                            overdragDistance = 0f
+                            boostDetentBroken = (currentVolumePercent > 100)
+                            showControls = false
+                        }
+                    },
+                    onDragEnd = {
+                        isVolumeDragging = false
+                        overdragDistance = 0f
+                        boostDetentBroken = false
+                        if (currentVolumePercent <= 100) {
+                            MediaPlayerPrefs.setMediaVolume(context, currentVolumePercent / 100f)
+                        }
+                    },
+                    onDragCancel = {
+                        isVolumeDragging = false
+                        overdragDistance = 0f
+                        boostDetentBroken = false
+                    },
+                    onVerticalDrag = { change, dragAmount ->
+                        if (!isVolumeDragging) return@detectVerticalDragGestures
+                        change.consume()
+                        volumeHudTick++
+                        showVolumeHud = true
+
+                        // Upward drag: dragAmount is negative
+                        val delta = (-dragAmount / size.height) * 120f
+                        val oldVol = currentVolumePercent
+
+                        if (oldVol < 100) {
+                            boostDetentBroken = false
+                            overdragDistance = 0f
+                            val candidate = (oldVol + delta).coerceIn(0f, 100f)
+                            val newVol = candidate.toInt()
+                            if (newVol != oldVol) {
+                                currentVolumePercent = newVol
+                                exoPlayer.volume = newVol / 100f
+                                loudnessEnhancer.setBoostPercent(newVol, allowVolumeBoost)
+                            }
+                        } else if (oldVol == 100) {
+                            if (delta < 0) {
+                                boostDetentBroken = false
+                                overdragDistance = 0f
+                                val newVol = (100f + delta).coerceIn(0f, 100f).toInt()
+                                currentVolumePercent = newVol
+                                exoPlayer.volume = newVol / 100f
+                                loudnessEnhancer.setBoostPercent(newVol, allowVolumeBoost)
+                            } else {
+                                if (!allowVolumeBoost) {
+                                    currentVolumePercent = 100
+                                } else if (!boostDetentBroken) {
+                                    overdragDistance += -dragAmount
+                                    if (overdragDistance >= detentThresholdPx) {
+                                        boostDetentBroken = true
+                                        view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                                        currentVolumePercent = 101
+                                        exoPlayer.volume = 1.0f
+                                        loudnessEnhancer.setBoostPercent(101, allowVolumeBoost)
+                                    }
+                                } else {
+                                    val newVol = (100f + delta).coerceIn(100f, 150f).toInt()
+                                    if (newVol != oldVol) {
+                                        currentVolumePercent = newVol
+                                        exoPlayer.volume = 1.0f
+                                        loudnessEnhancer.setBoostPercent(newVol, allowVolumeBoost)
+                                    }
+                                }
+                            }
+                        } else {
+                            if (!allowVolumeBoost) {
+                                currentVolumePercent = 100
+                                exoPlayer.volume = 1.0f
+                                loudnessEnhancer.setBoostPercent(100, false)
+                            } else {
+                                val candidate = oldVol + delta
+                                if (candidate <= 100f) {
+                                    boostDetentBroken = false
+                                    overdragDistance = 0f
+                                    view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                                    currentVolumePercent = 100
+                                    exoPlayer.volume = 1.0f
+                                    loudnessEnhancer.setBoostPercent(100, allowVolumeBoost)
+                                } else {
+                                    val newVol = candidate.coerceIn(101f, 150f).toInt()
+                                    if (newVol != oldVol) {
+                                        currentVolumePercent = newVol
+                                        exoPlayer.volume = 1.0f
+                                        loudnessEnhancer.setBoostPercent(newVol, allowVolumeBoost)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                )
+            }
+    ) {
             // Render surface. PlayerView is created ONCE and holds the same
             // player for the modal's lifetime — update only syncs state the
             // Compose side can change.
@@ -834,6 +1012,7 @@ private fun MediaPlayerModalImpl(
                         .inflate(R.layout.player_modal_texture_view, null) as PlayerView).apply {
                         useController = false
                         player = exoPlayer
+                        keepScreenOn = isPlaying
                         setBackgroundColor(android.graphics.Color.BLACK)
                         configureSubtitles(this, isLandscape, showControls, resizeMode, isVerticalVideo)
                     }
@@ -842,6 +1021,7 @@ private fun MediaPlayerModalImpl(
                     // Live-apply the Fit/Crop cycle; also re-asserted after
                     // any recomposition so the mode never drifts.
                     view.resizeMode = resizeMode
+                    view.keepScreenOn = isPlaying
                     configureSubtitles(view, isLandscape, showControls, resizeMode, isVerticalVideo)
                 },
                 modifier = if (isAudio) Modifier.size(1.dp) else Modifier.fillMaxSize()
@@ -894,6 +1074,22 @@ private fun MediaPlayerModalImpl(
                         .fillMaxWidth(),
                     color = PlayerAccent,
                     trackColor = Color.White.copy(alpha = 0.15f)
+                )
+            }
+
+            // Volume & Boost HUD Pill
+            AnimatedVisibility(
+                visible = showVolumeHud && !inPip,
+                enter = fadeIn(),
+                exit = fadeOut(),
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 64.dp)
+            ) {
+                VolumeHudPill(
+                    volume = currentVolumePercent,
+                    isBoostAllowed = allowVolumeBoost,
+                    isDetentActive = (currentVolumePercent == 100 && !boostDetentBroken && allowVolumeBoost && isVolumeDragging)
                 )
             }
 
@@ -1169,6 +1365,27 @@ private fun MediaPlayerModalImpl(
                                 onClick = { touchControls(); showAudioSheet = true },
                                 leading = Icons.Filled.GraphicEq
                             )
+                            PlayerChip(
+                                label = if (allowVolumeBoost) {
+                                    if (currentVolumePercent > 100) "$currentVolumePercent% Boost" else "Boost On"
+                                } else "Boost Off",
+                                selected = allowVolumeBoost,
+                                onClick = {
+                                    touchControls()
+                                    val next = !allowVolumeBoost
+                                    allowVolumeBoost = next
+                                    MediaPlayerPrefs.setAllowVolumeBoost(context, next)
+                                    if (!next && currentVolumePercent > 100) {
+                                        currentVolumePercent = 100
+                                        exoPlayer.volume = 1.0f
+                                        loudnessEnhancer.setBoostPercent(100, false)
+                                    }
+                                    showVolumeHud = true
+                                    volumeHudTick++
+                                    view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                                },
+                                leading = Icons.Filled.GraphicEq
+                            )
                             // (the Rotate chip moved to slot 2 in this row per
                             // the 2026-09-15 audio/rotation swap — Audio now
                             // closes the row where Rotate used to sit)
@@ -1180,26 +1397,40 @@ private fun MediaPlayerModalImpl(
         // (formerly the Dialog's closing brace — the overlay Box now closes
         // directly before the choice sheets)
         if (showAudioSheet) {
-        BottomChoiceSheet(
-            title = "Audio Track",
-            options = audioTrackLabels,
-            selected = currentAudioLabel,
-            onPick = { label ->
-                currentAudioLabel = label
-                val groups = exoPlayer.currentTracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO }
-                val matchIdx = audioTrackLabels.indexOf(label)
-                if (matchIdx in groups.indices) {
-                    val group = groups[matchIdx].mediaTrackGroup
-                    exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters
-                        .buildUpon()
-                        .setOverrideForType(TrackSelectionOverride(group, 0))
-                        .build()
-                }
-                showAudioSheet = false
-            },
-            onDismiss = { showAudioSheet = false }
-        )
-    }
+            AudioOptionsSheet(
+                title = "Audio Settings",
+                trackOptions = audioTrackLabels,
+                selectedTrack = currentAudioLabel,
+                allowVolumeBoost = allowVolumeBoost,
+                currentVolumePercent = currentVolumePercent,
+                onToggleVolumeBoost = { next ->
+                    allowVolumeBoost = next
+                    MediaPlayerPrefs.setAllowVolumeBoost(context, next)
+                    if (!next && currentVolumePercent > 100) {
+                        currentVolumePercent = 100
+                        exoPlayer.volume = 1.0f
+                        loudnessEnhancer.setBoostPercent(100, false)
+                    }
+                    showVolumeHud = true
+                    volumeHudTick++
+                    view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                },
+                onPickTrack = { label ->
+                    currentAudioLabel = label
+                    val groups = exoPlayer.currentTracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO }
+                    val matchIdx = audioTrackLabels.indexOf(label)
+                    if (matchIdx in groups.indices) {
+                        val group = groups[matchIdx].mediaTrackGroup
+                        exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters
+                            .buildUpon()
+                            .setOverrideForType(TrackSelectionOverride(group, 0))
+                            .build()
+                    }
+                    showAudioSheet = false
+                },
+                onDismiss = { showAudioSheet = false }
+            )
+        }
     if (showSubtitleSheet) {
         BottomChoiceSheet(
             title = "Subtitles",
@@ -1519,3 +1750,284 @@ private fun formatDuration(ms: Long): String {
         "%02d:%02d".format(java.util.Locale.US, m, s)
     }
 }
+
+@Composable
+private fun AudioOptionsSheet(
+    title: String,
+    trackOptions: List<String>,
+    selectedTrack: String?,
+    allowVolumeBoost: Boolean,
+    currentVolumePercent: Int,
+    onToggleVolumeBoost: (Boolean) -> Unit,
+    onPickTrack: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.6f))
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = onDismiss
+                ),
+            contentAlignment = Alignment.BottomCenter
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .navigationBarsPadding()
+                    .clip(RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp))
+                    .background(PlayerSurface)
+                    .padding(Spacing.lg)
+            ) {
+                Text(
+                    text = title,
+                    color = Color.White,
+                    fontSize = Type.itemTitle.fontSize,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(bottom = Spacing.md)
+                )
+
+                // Volume Boost Card
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(PlayerSurfaceElevated)
+                        .padding(horizontal = Spacing.md, vertical = Spacing.md),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(Spacing.xs)
+                        ) {
+                            Text(
+                                text = "150% Volume Boost",
+                                color = if (allowVolumeBoost) Color(0xFFFFA000) else Color.White,
+                                fontSize = Type.rowTitle.fontSize,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            if (currentVolumePercent > 100) {
+                                Text(
+                                    text = "($currentVolumePercent%)",
+                                    color = Color(0xFFFFA000),
+                                    fontSize = Type.caption.fontSize,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = "Amplifies quiet dialogue tracks on phone speakers",
+                            color = PlayerTextSecondary,
+                            fontSize = Type.caption.fontSize
+                        )
+                    }
+                    Switch(
+                        checked = allowVolumeBoost,
+                        onCheckedChange = onToggleVolumeBoost,
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Color.Black,
+                            checkedTrackColor = Color(0xFFFFA000),
+                            uncheckedThumbColor = PlayerTextSecondary,
+                            uncheckedTrackColor = PlayerSurface
+                        )
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(Spacing.md))
+
+                if (trackOptions.isNotEmpty()) {
+                    Text(
+                        text = "Tracks",
+                        color = PlayerTextSecondary,
+                        fontSize = Type.caption.fontSize,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.padding(bottom = Spacing.xs)
+                    )
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 280.dp)
+                            .verticalScroll(rememberScrollState())
+                    ) {
+                        trackOptions.forEach { opt ->
+                            val isSelected = opt == selectedTrack
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(if (isSelected) PlayerSurfaceElevated else Color.Transparent)
+                                    .clickable(
+                                        interactionSource = remember { MutableInteractionSource() },
+                                        indication = ripple(),
+                                        onClick = { onPickTrack(opt) }
+                                    )
+                                    .padding(horizontal = Spacing.md, vertical = Spacing.md),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = opt,
+                                    color = if (isSelected) PlayerAccent else Color.White,
+                                    fontSize = Type.rowTitle.fontSize,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                if (isSelected) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Check,
+                                        contentDescription = "Selected",
+                                        tint = PlayerAccent,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun VolumeHudPill(
+    volume: Int,
+    isBoostAllowed: Boolean,
+    isDetentActive: Boolean
+) {
+    val isBoost = volume > 100
+    val boostAmber = Color(0xFFFFA000)
+    val pillBg = Color(0xDD12141A)
+    val borderColor = if (isBoost) boostAmber.copy(alpha = 0.6f) else Color.White.copy(alpha = 0.2f)
+
+    val icon = when {
+        isBoost -> Icons.Filled.GraphicEq
+        volume == 0 -> Icons.AutoMirrored.Filled.VolumeOff
+        volume <= 50 -> Icons.AutoMirrored.Filled.VolumeDown
+        else -> Icons.AutoMirrored.Filled.VolumeUp
+    }
+
+    val iconTint = if (isBoost) boostAmber else Color.White
+    val textTint = if (isBoost) boostAmber else Color.White
+
+    val labelText = when {
+        isBoost -> if (volume >= 150) "150% (Max Boost)" else "$volume% (Boost)"
+        isDetentActive -> "100% (Pull to Boost)"
+        !isBoostAllowed && volume >= 100 -> "100% (Max)"
+        else -> "$volume%"
+    }
+
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(24.dp))
+            .background(pillBg)
+            .border(1.dp, borderColor, RoundedCornerShape(24.dp))
+            .padding(horizontal = Spacing.md, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(Spacing.sm)
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = iconTint,
+            modifier = Modifier.size(18.dp)
+        )
+        Text(
+            text = labelText,
+            color = textTint,
+            fontSize = Type.caption.fontSize,
+            fontWeight = FontWeight.Bold
+        )
+        // Level indicator bar (width 64dp, height 4dp)
+        Box(
+            modifier = Modifier
+                .width(64.dp)
+                .height(4.dp)
+                .clip(RoundedCornerShape(2.dp))
+                .background(Color.White.copy(alpha = 0.2f))
+        ) {
+            if (isBoost) {
+                // 100% nominal base
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(0.67f)
+                        .fillMaxHeight()
+                        .background(Color.White.copy(alpha = 0.7f))
+                )
+                // Boost segment
+                val boostFraction = ((volume - 100) / 50f).coerceIn(0f, 1f)
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth((0.67f + (0.33f * boostFraction)).coerceIn(0f, 1f))
+                        .fillMaxHeight()
+                        .background(boostAmber)
+                )
+            } else {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth((volume / 100f).coerceIn(0f, 1f))
+                        .fillMaxHeight()
+                        .background(Color.White)
+                )
+            }
+        }
+    }
+}
+
+@UnstableApi
+internal class PlayerLoudnessEnhancer {
+    private var enhancer: LoudnessEnhancer? = null
+    private var currentSessionId: Int = -1
+
+    var isAvailable: Boolean = false
+        private set
+
+    fun attach(audioSessionId: Int) {
+        if (audioSessionId <= 0 || audioSessionId == currentSessionId) return
+        release()
+        runCatching {
+            enhancer = LoudnessEnhancer(audioSessionId).apply {
+                enabled = false
+            }
+            currentSessionId = audioSessionId
+            isAvailable = true
+        }.onFailure {
+            enhancer = null
+            currentSessionId = -1
+            isAvailable = false
+        }
+    }
+
+    fun setBoostPercent(percent: Int, allowed: Boolean) {
+        val e = enhancer ?: return
+        if (!allowed || percent <= 100) {
+            if (e.enabled) {
+                runCatching { e.enabled = false }
+            }
+        } else {
+            val boostFraction = ((percent - 100).coerceIn(1, 50)) / 50f
+            val targetGainmB = (boostFraction * 4000f).toInt()
+            runCatching {
+                if (!e.enabled) e.enabled = true
+                e.setTargetGain(targetGainmB)
+            }
+        }
+    }
+
+    fun release() {
+        runCatching {
+            enhancer?.enabled = false
+            enhancer?.release()
+        }
+        enhancer = null
+        currentSessionId = -1
+        isAvailable = false
+    }
+}
+
