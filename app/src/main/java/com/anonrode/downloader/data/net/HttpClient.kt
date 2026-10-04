@@ -8,6 +8,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Protocol
 import okhttp3.Request
 import okhttp3.Response
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import java.util.Collections
 import java.util.concurrent.TimeUnit
 
@@ -427,8 +428,14 @@ object HttpClient {
      * return null; identical net semantics. Do not add raw HttpUrl.parse
      * call sites.
      */
-    private fun parseHttpUrl(url: String): okhttp3.HttpUrl? = try {
+    internal fun parseHttpUrl(url: String): okhttp3.HttpUrl? = try {
         okhttp3.Request.Builder().url(url).build().url
+    } catch (_: IllegalArgumentException) {
+        null
+    }
+
+    internal fun parseMediaType(mediaType: String): okhttp3.MediaType? = try {
+        mediaType.toMediaTypeOrNull()
     } catch (_: IllegalArgumentException) {
         null
     }
@@ -889,7 +896,7 @@ object HttpClient {
         return try {
             admitRequest(url)
             refuseUnsafeTarget(url)
-            val mediaType = okhttp3.MediaType.parse("application/json; charset=utf-8")
+            val mediaType = parseMediaType("application/json; charset=utf-8")
             val body = okhttp3.RequestBody.create(mediaType, json)
             val reqBuilder = Request.Builder()
                 .url(safeUrl(url))
