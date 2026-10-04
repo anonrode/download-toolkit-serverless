@@ -139,7 +139,7 @@ object RulesPipeline {
 
     private suspend fun runEpisodesInner(site: String, pipeline: Pipeline, showUrl: String): PipelineEpisodes? {
         val bases = DynamicRulesManager.getBaseUrls(site)
-        val u = okhttp3.HttpUrl.parse(showUrl)
+        val u = HttpClient.parseHttpUrl(showUrl)
         val origin = if (u != null) "${u.scheme}://${u.host}" else ""
         val base = (bases.firstOrNull { it.isNotBlank() } ?: origin).trimEnd('/')
         val nowMs = System.currentTimeMillis()
@@ -287,7 +287,7 @@ object RulesPipeline {
             return null
         }
         if (source.queryParams.isNotEmpty()) {
-            val parsed = okhttp3.HttpUrl.parse(resolvedUrl)
+            val parsed = HttpClient.parseHttpUrl(resolvedUrl)
             if (parsed != null) {
                 val builder = parsed.newBuilder()
                 for ((k, v) in source.queryParams) {
@@ -320,13 +320,13 @@ object RulesPipeline {
                 when {
                     source.json != null -> {
                         val jsonStr = renderTemplate(source.json.toString(), vars) { vars[it] } ?: ""
-                        okhttp3.RequestBody.create(okhttp3.MediaType.parse("application/json; charset=utf-8"), jsonStr)
+                        okhttp3.RequestBody.create(HttpClient.parseMediaType("application/json; charset=utf-8"), jsonStr)
                     }
                     source.body.isNotBlank() -> {
                         val renderedBody = renderTemplate(source.body, vars) { vars[it] } ?: ""
                         val mediaType = if (headers.any { it.key.equals("Content-Type", true) && it.value.contains("json") }) {
-                            okhttp3.MediaType.parse("application/json; charset=utf-8")
-                        } else okhttp3.MediaType.parse("text/plain; charset=utf-8")
+                            HttpClient.parseMediaType("application/json; charset=utf-8")
+                        } else HttpClient.parseMediaType("text/plain; charset=utf-8")
                         okhttp3.RequestBody.create(mediaType, renderedBody)
                     }
                     else -> {
@@ -644,7 +644,7 @@ object RulesPipeline {
         handoff: suspend (String) -> String?
     ): String? {
         val bases = DynamicRulesManager.getBaseUrls(site)
-        val u = okhttp3.HttpUrl.parse(episodeUrl)
+        val u = HttpClient.parseHttpUrl(episodeUrl)
         val fallbackOrigin = if (u != null) "${u.scheme}://${u.host}" else ""
         val base = (bases.firstOrNull { it.isNotBlank() } ?: fallbackOrigin).trimEnd('/')
         val nowMs = System.currentTimeMillis()
@@ -653,7 +653,7 @@ object RulesPipeline {
             "origin" to fallbackOrigin,
             "url" to episodeUrl,
             "path" to (u?.encodedPath ?: ""),
-            "host" to (u?.host() ?: ""),
+            "host" to (u?.host ?: ""),
             "query" to "",
             "page" to "1",
             "offset" to "0",
