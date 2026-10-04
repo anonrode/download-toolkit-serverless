@@ -1366,7 +1366,7 @@ object NaijaVaultGatewayResolver : BaseResolver {
                 val href = btn.attr("abs:href").ifBlank { btn.attr("href") }
                 if (href.isNotBlank()) {
                     if (href.contains("sdm_process_download") || href.contains("/sdm_downloads/")) {
-                        val redirected = HttpClient.probeTerminal(href, referer = url)?.url ?: href
+                        val redirected = HttpClient.probeTerminal(href, referer = url)?.location ?: href
                         if (redirected != href && redirected.isNotBlank()) {
                             val cracked = ResolverRegistry.resolve(redirected, quality) ?: redirected
                             return cracked
