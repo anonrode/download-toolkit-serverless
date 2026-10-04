@@ -439,7 +439,7 @@ object NaijaVaultProvider : SiteProvider {
                     val sdmHref = sdmBtn?.attr("abs:href")?.ifBlank { sdmBtn.attr("href") }
                     if (!sdmHref.isNullOrBlank()) {
                         if (sdmHref.contains("sdm_process_download") || sdmHref.contains("/sdm_downloads/")) {
-                            val redirected = HttpClient.probeTerminal(sdmHref, referer = episodeUrl)?.url ?: sdmHref
+                            val redirected = HttpClient.probeTerminal(sdmHref, referer = episodeUrl)?.location ?: sdmHref
                             direct = ResolverRegistry.resolve(redirected, quality) ?: redirected
                         } else {
                             direct = ResolverRegistry.resolve(sdmHref, quality) ?: sdmHref

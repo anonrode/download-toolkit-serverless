@@ -140,15 +140,15 @@ object RulesPipeline {
     private suspend fun runEpisodesInner(site: String, pipeline: Pipeline, showUrl: String): PipelineEpisodes? {
         val bases = DynamicRulesManager.getBaseUrls(site)
         val u = okhttp3.HttpUrl.parse(showUrl)
-        val origin = if (u != null) "${u.scheme()}://${u.host()}" else ""
+        val origin = if (u != null) "${u.scheme}://${u.host}" else ""
         val base = (bases.firstOrNull { it.isNotBlank() } ?: origin).trimEnd('/')
         val nowMs = System.currentTimeMillis()
         val vars = mutableMapOf(
             "base" to base,
             "origin" to origin,
             "url" to showUrl,
-            "path" to (u?.encodedPath() ?: ""),
-            "host" to (u?.host() ?: ""),
+            "path" to (u?.encodedPath ?: ""),
+            "host" to (u?.host ?: ""),
             "query" to "",
             "page" to "1",
             "offset" to "0",
@@ -645,14 +645,14 @@ object RulesPipeline {
     ): String? {
         val bases = DynamicRulesManager.getBaseUrls(site)
         val u = okhttp3.HttpUrl.parse(episodeUrl)
-        val fallbackOrigin = if (u != null) "${u.scheme()}://${u.host()}" else ""
+        val fallbackOrigin = if (u != null) "${u.scheme}://${u.host}" else ""
         val base = (bases.firstOrNull { it.isNotBlank() } ?: fallbackOrigin).trimEnd('/')
         val nowMs = System.currentTimeMillis()
         val vars = mutableMapOf(
             "base" to base,
             "origin" to fallbackOrigin,
             "url" to episodeUrl,
-            "path" to (u?.encodedPath() ?: ""),
+            "path" to (u?.encodedPath ?: ""),
             "host" to (u?.host() ?: ""),
             "query" to "",
             "page" to "1",
