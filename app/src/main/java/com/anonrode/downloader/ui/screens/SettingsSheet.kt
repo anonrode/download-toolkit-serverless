@@ -4,8 +4,7 @@ package com.anonrode.downloader.ui.screens
 
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
-import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.*
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -41,6 +40,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.anonrode.downloader.BuildConfig
@@ -222,10 +222,7 @@ private fun rememberSettingsState(
 }
 
 /** Tabbed host.  Same content as the sheet, just without the bottom-sheet
- *  chrome so the user can navigate to it from the bottom nav.  Uses a
- *  LazyColumn so off-screen categories do not compose at all — the structural
- *  fix for the "first open is slow" symptom that the sheet had. */
-@Composable
+ *  chrome so the user can navigate to it from the bottom nav. */
 /** The five settings drawers (approved re-group, 2026-10-14). Pure
  *  re-grouping: every existing control renders inside exactly one of these —
  *  none added except the two player defaults that already had stored prefs,
@@ -240,6 +237,7 @@ internal enum class SettingsDrawer(val label: String, val sub: String, val count
 
 private val SettingsEasing = CubicBezierEasing(0.2f, 0f, 0f, 1f)
 
+@Composable
 fun SettingsScreen(
     viewModel: MainViewModel,
     themeMode: String,
@@ -356,9 +354,7 @@ fun SettingsScreen(
                         SettingsDrawer.UPDATES -> SettingsUpdatesSection(
                             state = state,
                             rulesVersion = rulesVersion,
-                            scope = scope,
-                            uiState = uiState,
-                            viewModel = viewModel
+                            scope = scope
                         )
                         SettingsDrawer.LOGS -> SettingsLogsSection(state = state)
                         null -> SettingsHub(

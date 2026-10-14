@@ -112,6 +112,9 @@ object NaijaPreyProvider : SiteProvider {
             var count = 1
             for (a in links) {
                 val rawHref = a.attr("href")
+                // The anchor's own visible text — every guard below reasons on
+                // it (nav labels, bare-URL anchors, "Subtitle" links).
+                val text = a.text().trim()
                 val href = a.attr("abs:href").ifBlank {
                     HttpClient.safeResolveUri(showUrl, rawHref)
                 }

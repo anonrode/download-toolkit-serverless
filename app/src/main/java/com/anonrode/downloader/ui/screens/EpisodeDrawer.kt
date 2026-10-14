@@ -941,6 +941,7 @@ fun EpisodeRow(
         }
     }
 }
+}
 
 /** Parse (host, file name) from a locker URL without touching the network.
  *  The name comes from the last path segment; query strings (tokens, ?pt=,

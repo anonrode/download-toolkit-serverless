@@ -17,9 +17,9 @@ import com.yausername.youtubedl_android.YoutubeDL
  * (nightly); STABLE remains one tap away and is the automatic fallback
  * whenever the chosen channel's payload errors out.
  *
- * The channel enum constant is resolved by NAME at runtime (valueOf wrapped
- * in runCatching): this compiles and degrades to STABLE against any library
- * version whose enum omits MASTER, instead of failing the build.
+ * The channel enum constant is resolved by reflection at runtime: this
+ * compiles and degrades to STABLE against any library version whose enum
+ * omits MASTER, instead of failing the build.
  */
 object YtDlpCore {
 
@@ -49,7 +49,7 @@ object YtDlpCore {
      *  caller silently gets STABLE instead of a compile error. */
     private fun channel(name: String): YoutubeDL.UpdateChannel {
         return try {
-            YoutubeDL.UpdateChannel.valueOf(name.uppercase())
+            java.lang.Enum.valueOf(YoutubeDL.UpdateChannel::class.java, name.uppercase())
         } catch (_: Exception) {
             YoutubeDL.UpdateChannel.STABLE
         }
@@ -67,12 +67,12 @@ object YtDlpCore {
         val channelUsed: String
     )
 
-    private suspend fun attempt(context: Context, name: String): Triple<Boolean, String> {
+    private suspend fun attempt(context: Context, name: String): Pair<Boolean, String> {
         val status = YoutubeDL.getInstance().updateYoutubeDL(context, channel(name))
         val statusName = status?.name ?: "UNDEFINED"
         return when (statusName) {
-            "ERROR" -> Triple(false, "yt-dlp reported an error on the $name channel")
-            else -> Triple(true, "success ($statusName)")
+            "ERROR" -> Pair(false, "yt-dlp reported an error on the $name channel")
+            else -> Pair(true, "success ($statusName)")
         }
     }
 
