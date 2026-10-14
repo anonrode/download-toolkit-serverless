@@ -345,7 +345,7 @@ fun SettingsScreen(
                     modifier = Modifier
                         .fillMaxSize()
                         .verticalScroll(rememberScrollState())
-                        .padding(horizontal = Spacing.lg, bottom = Spacing.xl)
+                        .padding(start = Spacing.lg, end = Spacing.lg, bottom = Spacing.xl)
                 ) {
                     when (drawer) {
                         SettingsDrawer.PLAYBACK -> SettingsPlaybackSection(state = state)
@@ -491,25 +491,23 @@ private fun SettingsHub(
 
     Spacer(modifier = Modifier.height(Spacing.lg))
 
-    val iconFor: (SettingsDrawer) -> androidx.compose.ui.graphics.vector.ImageVector = {
-        when (it) {
+    // NOTE: Accent*/Status* tokens are @Composable getters — their when()
+    // must run in composable scope, never inside a plain lambda.
+    SettingsDrawer.entries.forEach { drawer ->
+        val drawerIcon = when (drawer) {
             SettingsDrawer.PLAYBACK -> Icons.Rounded.PlayArrow
             SettingsDrawer.DOWNLOADS -> Icons.Rounded.Download
             SettingsDrawer.CONNECTIONS -> Icons.Rounded.Hub
             SettingsDrawer.UPDATES -> Icons.Rounded.SystemUpdate
             SettingsDrawer.LOGS -> Icons.Rounded.BugReport
         }
-    }
-    val chipColorFor: (SettingsDrawer) -> Color = {
-        when (it) {
+        val chipColor = when (drawer) {
             SettingsDrawer.PLAYBACK -> AccentViolet
             SettingsDrawer.DOWNLOADS -> StatusSuccess
             SettingsDrawer.CONNECTIONS -> Color(0xFF22D3EE)
             SettingsDrawer.UPDATES -> StatusWarning
             SettingsDrawer.LOGS -> StatusError
         }
-    }
-    SettingsDrawer.entries.forEach { drawer ->
         val src = remember { MutableInteractionSource() }
         Row(
             modifier = Modifier
@@ -523,7 +521,6 @@ private fun SettingsHub(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(Spacing.md)
         ) {
-            val chipColor = chipColorFor(drawer)
             Box(
                 modifier = Modifier
                     .size(40.dp)
@@ -532,7 +529,7 @@ private fun SettingsHub(
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
-                    imageVector = iconFor(drawer),
+                    imageVector = drawerIcon,
                     contentDescription = null,
                     tint = chipColor,
                     modifier = Modifier.size(19.dp)

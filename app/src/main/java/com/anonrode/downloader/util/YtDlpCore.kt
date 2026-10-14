@@ -45,14 +45,12 @@ object YtDlpCore {
     }
 
     /** Parses "master"/"stable" into the library enum WITHOUT naming the
-     *  constants — a library whose enum lacks MASTER throws here and the
-     *  caller silently gets STABLE instead of a compile error. */
+     *  constants — a library whose enum lacks MASTER yields null here and
+     *  the caller silently gets STABLE instead of a compile error. */
     private fun channel(name: String): YoutubeDL.UpdateChannel {
-        return try {
-            java.lang.Enum.valueOf(YoutubeDL.UpdateChannel::class.java, name.uppercase())
-        } catch (_: Exception) {
-            YoutubeDL.UpdateChannel.STABLE
-        }
+        return YoutubeDL.UpdateChannel.values()
+            .firstOrNull { it.name.equals(name, ignoreCase = true) }
+            ?: YoutubeDL.UpdateChannel.STABLE
     }
 
     private fun channelLabel(name: String): String = when (name) {
