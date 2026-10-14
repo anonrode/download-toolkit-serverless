@@ -752,13 +752,27 @@ def validate_schema(plain: bytes) -> list:
                        "directMediaExtensions", "dynamic_providers", "lockerHosts",
                        "hostPolicies", "searchStrategies", "urlTemplates",
                        "knownDead", "tokenTtlMinutes", "validation",
-                       "minAppVersion", "pipelines"):
+                       "minAppVersion", "pipelines", "remote_logging_url"):
             problems.append(f"unknown top-level field '{key}' (add it to the "
                             "allow-list in encrypt_rules.py AND DynamicRulesManager)")
 
     mav = obj.get("minAppVersion")
     if mav is not None and (not isinstance(mav, int) or isinstance(mav, bool) or mav <= 0):
         problems.append("minAppVersion must be a positive integer")
+
+    # Remote error-log sink (Track 6): consumed verbatim by
+    # DynamicRulesManager.getRemoteLoggingUrl / RemoteLogger, so only a
+    # well-formed http(s) endpoint string may ship — the app additionally
+    # re-checks the scheme at parse and drops anything else.
+    rlu = obj.get("remote_logging_url")
+    if rlu is not None:
+        if (not isinstance(rlu, str)
+                or not rlu.startswith(("http://", "https://"))
+                or len(rlu) > 300):
+            problems.append(
+                "remote_logging_url: http(s) URL string <= 300 chars")
+        elif not rlu.split("://", 1)[1]:
+            problems.append("remote_logging_url: host part missing")
 
     problems.extend(validate_pipelines(obj))
     return problems

@@ -115,8 +115,27 @@ object NaijaPreyProvider : SiteProvider {
                 val href = a.attr("abs:href").ifBlank {
                     HttpClient.safeResolveUri(showUrl, rawHref)
                 }
-                val text = a.text().trim()
+                val isForbiddenMetadata = href.contains("themoviedb.org", ignoreCase = true) ||
+                    href.contains("imdb.com", ignoreCase = true) ||
+                    href.contains("wikipedia.org", ignoreCase = true) ||
+                    href.contains("opensubtitles", ignoreCase = true) ||
+                    href.contains("subscene", ignoreCase = true) ||
+                    text.contains("Subtitle", ignoreCase = true) ||
+                    href.endsWith(".srt", ignoreCase = true) ||
+                    href.endsWith(".vtt", ignoreCase = true) ||
+                    text.startsWith("http://", ignoreCase = true) ||
+                    text.startsWith("https://", ignoreCase = true)
+
+                val isLikelyMediaOrLocker = com.anonrode.downloader.pipeline.StrictLinkClassifier.isKnownLocker(href) ||
+                    com.anonrode.downloader.pipeline.StrictLinkClassifier.isDirectMedia(href) ||
+                    href.contains("download", ignoreCase = true) ||
+                    href.contains("/file/", ignoreCase = true) ||
+                    href.contains("/d/", ignoreCase = true) ||
+                    a.hasClass("elementor-button") ||
+                    a.hasClass("button")
+
                 if (href.isNotBlank() && href !in seen &&
+                    !isForbiddenMetadata && isLikelyMediaOrLocker &&
                     !href.contains("/category/") && !href.contains("/tag/") &&
                     !navHref.containsMatchIn(href) && !navText.matches(text) &&
                     !href.equals(showUrl, ignoreCase = true) &&
@@ -126,9 +145,10 @@ object NaijaPreyProvider : SiteProvider {
                     seen.add(href)
                     val parsedNum = Regex("""(?i)\b(?:Episode|Ep|E)[- ]*(\d{1,4})\b""").find(text)?.groupValues?.get(1)?.toIntOrNull()
                         ?: Regex("""(?i)\b(?:Episode|Ep|E)[- ]*(\d{1,4})\b""").find(href)?.groupValues?.get(1)?.toIntOrNull()
+                    val cleanTitle = if (text.isNotBlank() && !text.equals("Download", ignoreCase = true) && !text.startsWith("http", ignoreCase = true)) text else "Download $count"
                     episodes.add(
                         EpisodeItem(
-                            title = if (text.isNotBlank() && !text.equals("Download", ignoreCase = true)) text else "Download $count",
+                            title = cleanTitle,
                             url = href,
                             episodeNum = parsedNum ?: count++,
                             site = name

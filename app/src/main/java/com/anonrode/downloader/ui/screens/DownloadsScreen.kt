@@ -206,6 +206,32 @@ fun DownloadsScreen(
         groups.map { (header, items) -> header to items.mapNotNull { tasksById[it.id] } }
     }
 
+    // Track 4 ("Download Remaining"): per-series count of episodes still
+    // missing from the library. seriesUrl/seriesTotal are stamped on tasks by
+    // the episode drawer at enqueue time (older builds and direct downloads
+    // leave them blank/0 → no entry → no chip). The drawer recomputes the
+    // exact live set from the provider when the chip opens it; this count is
+    // the card-level hint, keyed on the same clean show title the drawer uses
+    // for its folder name.
+    val seriesRemaining = remember(structureSig) {
+        val byShow = viewModel.engine.tasks.value
+            .filter { it.seriesUrl.isNotBlank() }
+            .groupBy { it.showTitle }
+        byShow.mapValues { (_, items) ->
+            (items.maxOf { it.seriesTotal } - items.size).coerceAtLeast(0)
+        }.filterValues { it > 0 }
+    }
+    val seriesInfo = remember(structureSig) {
+        val byShow = viewModel.engine.tasks.value
+            .filter { it.seriesUrl.isNotBlank() }
+            .groupBy { it.showTitle }
+        byShow.mapValues { (_, items) ->
+            val url = items.firstOrNull { it.seriesUrl.isNotBlank() }?.seriesUrl.orEmpty()
+            val site = items.firstOrNull { it.site.isNotBlank() }?.site.orEmpty()
+            url to site
+        }
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -369,6 +395,7 @@ fun DownloadsScreen(
                         val isExpanded = expandedShows[showTitle] ?: (showItems.size == 1 || showItems.any {
                             it.status == TaskStatus.DOWNLOADING || it.status == TaskStatus.RESOLVING
                         })
+                        val info = seriesInfo[showTitle]
                         ShowFolderCard(
                             showTitle = showTitle,
                             items = showItems,
@@ -376,6 +403,12 @@ fun DownloadsScreen(
                             onToggleExpand = {
                                 expandedShows[showTitle] = !isExpanded
                             },
+                            remainingCount = seriesRemaining[showTitle] ?: 0,
+                            onDownloadRemaining = if (info != null) {
+                                {
+                                    viewModel.openRemainingEpisodes(showTitle, info.first, info.second)
+                                }
+                            } else null,
                             context = context,
                             onPlayTask = onPlayTask,
                             onPauseTask = { viewModel.engine.pause(it) },
@@ -397,6 +430,7 @@ fun DownloadsScreen(
                             )
                         }
                         items(items, key = { it.id }) { task ->
+                            val info = seriesInfo[task.showTitle]
                             DownloadCard(
                                 task = task,
                                 context = context,
@@ -404,7 +438,13 @@ fun DownloadsScreen(
                                 onPause = { viewModel.engine.pause(task.id) },
                                 onRetry = { viewModel.engine.retry(task.id) },
                                 onCancel = { viewModel.engine.cancel(task.id) },
-                                onDelete = { pendingDeleteTask = task }
+                                onDelete = { pendingDeleteTask = task },
+                                remainingCount = seriesRemaining[task.showTitle] ?: 0,
+                                onDownloadRemaining = if (info != null) {
+                                    {
+                                        viewModel.openRemainingEpisodes(task.showTitle, info.first, info.second)
+                                    }
+                                } else null
                             )
                         }
                     }
@@ -479,6 +519,8 @@ private fun ShowFolderCard(
     items: List<DownloadTask>,
     isExpanded: Boolean,
     onToggleExpand: () -> Unit,
+    remainingCount: Int = 0,
+    onDownloadRemaining: (() -> Unit)? = null,
     context: Context,
     onPlayTask: (DownloadTask) -> Unit,
     onPauseTask: (String) -> Unit,
@@ -578,6 +620,26 @@ private fun ShowFolderCard(
                         contentDescription = if (isExpanded) "Collapse" else "Expand",
                         tint = if (isExpanded) AccentPrimary else TextMuted,
                         modifier = Modifier.size(24.dp)
+                    )
+                }
+            }
+
+            // Track 4: one-tap "grab the rest of this series". Rendered above
+            // the expanded list so it's reachable in the collapsed card too —
+            // refusing the tap just because a folder is folded was the
+            // original complaint this feature exists to fix.
+            if (onDownloadRemaining != null && remainingCount > 0) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = Spacing.md, end = Spacing.md, bottom = Spacing.xs),
+                    horizontalArrangement = Arrangement.Start
+                ) {
+                    BulkActionChip(
+                        label = "Download Remaining ($remainingCount left)",
+                        icon = Icons.Rounded.Download,
+                        iconTint = AccentPrimary,
+                        onClick = onDownloadRemaining
                     )
                 }
             }
@@ -697,7 +759,9 @@ fun DownloadCard(
     onPause: () -> Unit,
     onRetry: () -> Unit,
     onCancel: () -> Unit,
-    onDelete: () -> Unit = onCancel
+    onDelete: () -> Unit = onCancel,
+    remainingCount: Int = 0,
+    onDownloadRemaining: (() -> Unit)? = null
 ) {
     val isCompleted = task.status == TaskStatus.COMPLETED
     val isDownloading = task.status == TaskStatus.DOWNLOADING || task.status == TaskStatus.RESOLVING
@@ -1016,18 +1080,23 @@ fun DownloadCard(
                         else "Paused"
                     }
                     TaskStatus.DOWNLOADING -> {
-                        // With an unknown total (e.g. HLS) show size + speed, no percentage.
-                        val parts = mutableListOf<String>()
-                        // Real stream resolution first when known (HLS masters
-                        // carry RESOLUTION; the requested quality falls back
-                        // only when resolution was never parsed).
-                        (task.resolution ?: task.quality)?.let { parts += it }
-                        if (task.totalBytes > 0) parts += "$pctInt%"
-                        if (sizeStr.isNotBlank()) parts += sizeStr
-                        speedStr?.let { parts += it }
-                        etaStr?.let { parts += it }
-                        if (estimating && etaStr == null) parts += "Estimating..."
-                        parts.joinToString(" • ").ifBlank { "Starting..." }
+                        val isMagnet = task.sourceUrl.startsWith("magnet:", ignoreCase = true)
+                        if (isMagnet && task.downloadedBytes == 0L) {
+                            "Connecting to swarm (discovering peers)..."
+                        } else {
+                            // With an unknown total (e.g. HLS) show size + speed, no percentage.
+                            val parts = mutableListOf<String>()
+                            // Real stream resolution first when known (HLS masters
+                            // carry RESOLUTION; the requested quality falls back
+                            // only when resolution was never parsed).
+                            (task.resolution ?: task.quality)?.let { parts += it }
+                            if (task.totalBytes > 0) parts += "$pctInt%"
+                            if (sizeStr.isNotBlank()) parts += sizeStr
+                            speedStr?.let { parts += it }
+                            etaStr?.let { parts += it }
+                            if (estimating && etaStr == null) parts += "Estimating..."
+                            parts.joinToString(" • ").ifBlank { "Starting..." }
+                        }
                     }
                     TaskStatus.FAILED -> task.errorMessage ?: "Download failed"
                     else -> "Queued • Waiting to start"
@@ -1095,6 +1164,25 @@ fun DownloadCard(
                             )
                         }
                     }
+                }
+            }
+
+            // Track 4: series chip in the flat (non-"By Show") sort modes —
+            // the folder card carries it in library mode, these cards carry it
+            // everywhere else so the shortcut never depends on the sort.
+            if (onDownloadRemaining != null && remainingCount > 0) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = Spacing.xxs),
+                    horizontalArrangement = Arrangement.End
+                ) {
+                    BulkActionChip(
+                        label = "Download Remaining ($remainingCount left)",
+                        icon = Icons.Rounded.Download,
+                        iconTint = AccentPrimary,
+                        onClick = onDownloadRemaining
+                    )
                 }
             }
         }

@@ -100,6 +100,7 @@ object RocksProvider : SiteProvider {
 
             val episodes = mutableListOf<EpisodeItem>()
             val seen = mutableSetOf<String>()
+            val seenSeasonZips = mutableSetOf<Int>()
             val entry = doc.selectFirst(".entry-content") ?: doc.body()
             PostContentSanitizer.clean(entry)
 
@@ -117,9 +118,9 @@ object RocksProvider : SiteProvider {
                 val tagName = elem.tagName().lowercase()
 
                 // Track active Season headings in page content (only if not an explicit single-season page)
-                if (!isExplicitSingleSeasonPage && tagName in listOf("h1", "h2", "h3", "h4", "strong", "b", "p", "div")) {
+                if (!isExplicitSingleSeasonPage && tagName in listOf("h1", "h2", "h3", "h4", "strong", "b", "p", "div", "span")) {
                     val t = elem.text().trim()
-                    val isExclusion = Regex("""\b(synopsis|storyline|about|comment|download|how to|click|added)\b""", RegexOption.IGNORE_CASE).containsMatchIn(t)
+                    val isExclusion = Regex("""\b(synopsis|storyline|about|comment|how to|click|added)\b""", RegexOption.IGNORE_CASE).containsMatchIn(t)
                     if (t.length < 60 && !isExclusion) {
                         val sm = Regex("""\b(?:SEASON|S)\s*(\d{1,2})\b(?!\s*-\s*\d+)""", RegexOption.IGNORE_CASE).find(t)
                         if (sm != null) {
@@ -166,28 +167,40 @@ object RocksProvider : SiteProvider {
                             s.trim()
                         }
 
-                        // Season ZIP detection
-                        val zipMatch = Regex("""\b(?:SEASON|S)\s*(\d{1,2})\b.*\bZIP\b""", RegexOption.IGNORE_CASE).find(parentText)
-                        val isZip = zipMatch != null || parentText.contains("ZIP", ignoreCase = true) || href.contains("ZIP", ignoreCase = true)
+                        // Season ZIP detection: strict anchor and target inspection
+                        val anchorText = text
+                        val isZip = href.endsWith(".zip", ignoreCase = true) ||
+                            href.contains(".zip?", ignoreCase = true) ||
+                            anchorText.contains("ZIP", ignoreCase = true) ||
+                            (parentText.contains("ZIP", ignoreCase = true) && (anchorText.contains("DOWNLOAD", ignoreCase = true) || href.contains(".zip", ignoreCase = true)))
+
                         if (isZip) {
-                            val zipSeason = zipMatch?.groupValues?.getOrNull(1)?.toIntOrNull() ?: currentSeason
-                            val zipLabel = "S%02d Complete Season ZIP".format(zipSeason)
-                            episodes.add(
-                                EpisodeItem(
-                                    title = zipLabel,
-                                    url = href,
-                                    episodeNum = count++,
-                                    site = name
+                            val zipSeason = Regex("""\b(?:SEASON|S)\s*(\d{1,2})\b""", RegexOption.IGNORE_CASE).find(href)?.groupValues?.getOrNull(1)?.toIntOrNull()
+                                ?: Regex("""\b(?:SEASON|S)\s*(\d{1,2})\b""", RegexOption.IGNORE_CASE).find(parentText)?.groupValues?.getOrNull(1)?.toIntOrNull()
+                                ?: Regex("""\b(?:SEASON|S)\s*(\d{1,2})\b""", RegexOption.IGNORE_CASE).find(anchorText)?.groupValues?.getOrNull(1)?.toIntOrNull()
+                                ?: currentSeason
+
+                            if (zipSeason !in seenSeasonZips) {
+                                seenSeasonZips.add(zipSeason)
+                                val zipLabel = "S%02d Complete Season ZIP".format(zipSeason)
+                                episodes.add(
+                                    EpisodeItem(
+                                        title = zipLabel,
+                                        url = href,
+                                        episodeNum = zipSeason * 100,
+                                        site = name
+                                    )
                                 )
-                            )
+                            }
                             continue
                         }
 
                         val explicitSm = Regex("""\bS(\d{1,2})E(\d{1,3})\b""", RegexOption.IGNORE_CASE).find(text)
-                            ?: Regex("""\bS(\d{1,2})E(\d{1,3})\b""", RegexOption.IGNORE_CASE).findAll(safeParentText).lastOrNull()
                             ?: Regex("""\bS(\d{1,2})E(\d{1,3})\b""", RegexOption.IGNORE_CASE).find(href)
+                            ?: Regex("""\bS(\d{1,2})E(\d{1,3})\b""", RegexOption.IGNORE_CASE).findAll(safeParentText).lastOrNull()
 
                         val epMatch = Regex("""\b(?:EPISODE|EP|E)\s*(\d{1,3})\b""", RegexOption.IGNORE_CASE).find(text)
+                            ?: Regex("""\b(?:EPISODE|EP|E)\s*(\d{1,3})\b""", RegexOption.IGNORE_CASE).find(href)
                             ?: Regex("""\b(?:EPISODE|EP|E)\s*(\d{1,3})\b""", RegexOption.IGNORE_CASE).findAll(safeParentText).lastOrNull()
 
                         val itemSeason = explicitSm?.groupValues?.getOrNull(1)?.toIntOrNull() ?: currentSeason

@@ -45,6 +45,24 @@ object CrashHandler : Thread.UncaughtExceptionHandler {
             // undiagnosable (user-reported log ended abruptly with no trace).
             DebugLog.crashLog(throwable)
 
+            // Track 6: the same crash snapshot to the OTA-routed sink, so a
+            // fleet-wide fatality is visible without waiting for users to
+            // manually share log files. Synchronous on purpose: the process
+            // dies the moment this handler returns, so an async dispatch
+            // would never run. Caps itself at ~4 KB; silent no-op when the
+            // sink is unconfigured or unreachable.
+            RemoteLogger.report(
+                type = "fatal_crash",
+                message = "${throwable::class.java.name}: ${throwable.message ?: "no message"}",
+                context = mapOf(
+                    "thread" to thread.name,
+                    "device" to "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}",
+                    "api_level" to android.os.Build.VERSION.SDK_INT
+                ),
+                stackTrace = stackTrace,
+                waitForDelivery = true
+            )
+
             // Save to Downloads folder if accessible
             try {
                 val dlDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)

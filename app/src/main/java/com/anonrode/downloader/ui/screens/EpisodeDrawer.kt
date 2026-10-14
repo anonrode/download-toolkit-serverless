@@ -39,6 +39,8 @@ import com.anonrode.downloader.ui.theme.*
 import com.anonrode.downloader.viewmodel.MainViewModel
 import com.anonrode.downloader.ui.util.confirmHaptic
 import com.anonrode.downloader.ui.util.tick
+import com.anonrode.downloader.ui.util.pressScale
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -48,7 +50,12 @@ import kotlinx.coroutines.withContext
 fun EpisodeDrawer(
     show: ShowCard,
     viewModel: MainViewModel,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    /** Track 4 ("Download Remaining"): launched from a Downloads-series card
+     *  with the explicit intent to grab the rest of the show. The first load
+     *  auto-selects exactly the un-downloaded episodes — the user confirms via
+     *  the normal sticky Queue bar, and any manual deselection wins. */
+    preselectRemaining: Boolean = false
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val episodes = uiState.drawerEpisodes
@@ -70,6 +77,29 @@ fun EpisodeDrawer(
     var enqueued by remember { mutableStateOf(false) }
     var isEnqueuing by remember { mutableStateOf(false) }
     var showBatchConfirmation by rememberSaveable { mutableStateOf(false) }
+
+    val allTasks by viewModel.engine.tasks.collectAsState()
+    val downloadedOrQueuedUrls = remember(allTasks, show.title) {
+        val cleanTitle = show.title.trim().lowercase()
+        allTasks.filter { task ->
+            task.showTitle.trim().lowercase() == cleanTitle ||
+            (cleanTitle.isNotBlank() && task.showTitle.contains(show.title, ignoreCase = true))
+        }.map { it.sourceUrl }.filter { it.isNotBlank() }.toSet()
+    }
+    val remainingEpisodes = remember(episodes, downloadedOrQueuedUrls) {
+        episodes.filter { it.url !in downloadedOrQueuedUrls }
+    }
+
+    // One-shot auto-selection: fires once the drawer's live scrape lands. The
+    // applied flag keeps a later episodes emission (provider refresh, cache
+    // update) from re-selecting episodes the user manually deselected.
+    var autoApplied by remember(show.url) { mutableStateOf(false) }
+    LaunchedEffect(preselectRemaining, episodes, downloadedOrQueuedUrls) {
+        if (preselectRemaining && !autoApplied && !enqueued && remainingEpisodes.isNotEmpty()) {
+            autoApplied = true
+            selectedUrlsList = remainingEpisodes.map { it.url }
+        }
+    }
 
     // Parse range string (e.g. "1-5, 8, 10-12", "all", "none")
     fun applyRange(input: String) {
@@ -162,7 +192,9 @@ fun EpisodeDrawer(
                         backend = "aria2c",
                         site = ep.site.ifBlank { show.site },
                         parallelSockets = viewModel.engine.parallelSocketsPerFile,
-                        verifiedDirectUrl = com.anonrode.downloader.pipeline.ResultVerifier.verifiedDirect(ep.url)
+                        verifiedDirectUrl = com.anonrode.downloader.pipeline.ResultVerifier.verifiedDirect(ep.url),
+                        seriesUrl = show.url,
+                        seriesTotal = episodes.size
                     )
                 }
                 withContext(Dispatchers.Main) { onDismiss() }
@@ -176,8 +208,11 @@ fun EpisodeDrawer(
         }
     }
 
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+
     ModalBottomSheet(
         onDismissRequest = onDismiss,
+        sheetState = sheetState,
         containerColor = SurfaceElevated,
         contentColor = TextPrimary,
         shape = RoundedCornerShape(topStart = Radius.xl, topEnd = Radius.xl),
@@ -206,19 +241,82 @@ fun EpisodeDrawer(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = show.title,
-                        fontSize = Type.screenTitle.fontSize,
-                        fontWeight = FontWeight.Bold,
-                        color = TextPrimary,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Text(
-                        text = "${show.site.uppercase()} • ${episodes.size} Total Episodes",
-                        fontSize = Type.label.fontSize,
-                        color = TextSecondary
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        // 44x60 poster — the show's face anchors the header the
+                        // moment the sheet lands; the outline is exactly
+                        // 1dp white-10% (images read as objects, not holes).
+                        val posterMod = Modifier
+                            .size(width = 44.dp, height = 60.dp)
+                            .clip(RoundedCornerShape(Radius.sm))
+                        if (show.posterUrl.isNotBlank()) {
+                            coil.compose.AsyncImage(
+                                model = show.posterUrl,
+                                contentDescription = null,
+                                contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                                modifier = posterMod
+                                    .border(1.dp, Color.White.copy(alpha = 0.1f), RoundedCornerShape(Radius.sm))
+                            )
+                        } else {
+                            Box(
+                                modifier = posterMod
+                                    .background(SurfaceCard)
+                                    .border(1.dp, Color.White.copy(alpha = 0.1f), RoundedCornerShape(Radius.sm)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = show.title.trim().split(Regex("\\s+")).take(2)
+                                        .mapNotNull { it.firstOrNull()?.uppercaseChar() }
+                                        .joinToString(""),
+                                    fontSize = 14.sp, fontWeight = FontWeight.Black, color = TextSecondary
+                                )
+                            }
+                        }
+                        Spacer(modifier = Modifier.width(Spacing.md))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = show.title,
+                                fontSize = 17.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = TextPrimary,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                // Opened from a Downloads-series card, the show
+                                // card is synthetic (site often unknown) — blank
+                                // parts never join the line.
+                                text = listOf(
+                                    show.site.uppercase(),
+                                    if (episodes.isEmpty()) null else "${episodes.size} eps"
+                                ).filterNotNull().filter { it.isNotBlank() }
+                                    .joinToString(" • "),
+                                fontSize = Type.label.fontSize,
+                                color = TextSecondary
+                            )
+                        }
+                    }
+                    // Selection meter: an honest little progress of the person's
+                    // own choice — total → selected. Only when the list landed.
+                    if (episodes.isNotEmpty()) {
+                        Spacer(modifier = Modifier.height(Spacing.sm))
+                        val selFraction = if (episodes.isEmpty()) 0f
+                            else selectedUrls.size.toFloat() / episodes.size
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(4.dp)
+                                .clip(RoundedCornerShape(2.dp))
+                                .background(SurfaceCard)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth(selFraction.coerceIn(0f, 1f))
+                                    .fillMaxHeight()
+                                    .clip(RoundedCornerShape(2.dp))
+                                    .background(AccentPrimary)
+                            )
+                        }
+                    }
                 }
 
                 IconButton(
@@ -284,6 +382,43 @@ fun EpisodeDrawer(
                             selected = isAllSelected
                         )
                     )
+
+                    // Remaining Episodes Chip (when some episodes are already downloaded/queued)
+                    if (downloadedOrQueuedUrls.isNotEmpty() && remainingEpisodes.isNotEmpty()) {
+                        val isRemainingSelected = remainingEpisodes.all { it.url in selectedUrls }
+                        FilterChip(
+                            selected = isRemainingSelected,
+                            onClick = {
+                                updateSelected(if (isRemainingSelected) emptySet() else remainingEpisodes.map { it.url }.toSet())
+                            },
+                            label = {
+                                Text(
+                                    "Remaining (${remainingEpisodes.size})",
+                                    fontSize = Type.caption.fontSize,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            },
+                            leadingIcon = {
+                                Icon(
+                                    Icons.Rounded.Download,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                            },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = AccentPrimary,
+                                selectedLabelColor = BackgroundDark,
+                                containerColor = SurfaceCard,
+                                labelColor = TextPrimary
+                            ),
+                            border = FilterChipDefaults.filterChipBorder(
+                                borderColor = BorderHairline,
+                                selectedBorderColor = AccentPrimary,
+                                enabled = true,
+                                selected = isRemainingSelected
+                            )
+                        )
+                    }
 
                     // Individual Season Chips
                     if (seasonGroups.size > 1) {
@@ -429,8 +564,7 @@ fun EpisodeDrawer(
                 LazyColumn(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .weight(1f, fill = false)
-                        .heightIn(max = 380.dp),
+                        .weight(1f),
                     verticalArrangement = Arrangement.spacedBy(Spacing.xs)
                 ) {
                     seasonGroups.forEach { (season, seasonEpisodes) ->
@@ -476,6 +610,7 @@ fun EpisodeDrawer(
                         EpisodeRow(
                             episode = ep,
                             isSelected = isSelected,
+                            isDownloaded = ep.url in downloadedOrQueuedUrls,
                             onToggle = {
                                 hapticView.tick()
                                 updateSelected(if (isSelected) selectedUrls - ep.url else selectedUrls + ep.url)
@@ -498,7 +633,9 @@ fun EpisodeDrawer(
                                         backend = "aria2c",
                                         site = ep.site.ifBlank { show.site },
                                         parallelSockets = viewModel.engine.parallelSocketsPerFile,
-                                        verifiedDirectUrl = com.anonrode.downloader.pipeline.ResultVerifier.verifiedDirect(ep.url)
+                                        verifiedDirectUrl = com.anonrode.downloader.pipeline.ResultVerifier.verifiedDirect(ep.url),
+                                        seriesUrl = show.url,
+                                        seriesTotal = episodes.size
                                     )
                                     onDismiss()
                                 }
@@ -545,6 +682,7 @@ fun EpisodeDrawer(
                             )
                         }
 
+                        val queueSrc = remember { MutableInteractionSource() }
                         Button(
                             onClick = {
                                 val uniqueCount = selectedEpisodes.distinctBy { it.url }.size
@@ -555,6 +693,8 @@ fun EpisodeDrawer(
                                 }
                             },
                             enabled = !isEnqueuing,
+                            interactionSource = queueSrc,
+                            modifier = Modifier.pressScale(queueSrc),
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = AccentPrimary,
                                 contentColor = BackgroundDark
@@ -616,6 +756,7 @@ fun EpisodeRow(
     episode: EpisodeItem,
     isSelected: Boolean,
     onToggle: () -> Unit,
+    isDownloaded: Boolean = false,
     onDownloadSingle: () -> Unit
 ) {
     // Feature #26: details preview BEFORE enqueue — an info toggle that shows
@@ -640,106 +781,163 @@ fun EpisodeRow(
                 RoundedCornerShape(Radius.md)
             )
     ) {
-        Row(
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onToggle)
+            .padding(horizontal = Spacing.md, vertical = Spacing.sm),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        // Episode-number tile: the row's spine. Scanning a 130-row list is a
+        // number-lookup, and a 34dp tile keeps every number on the same
+        // optical left edge — the checkbox never has to do this job.
+        Box(
             modifier = Modifier
-                .fillMaxWidth()
-                .clickable(onClick = onToggle)
-                .padding(horizontal = Spacing.md, vertical = Spacing.sm),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
+                .size(34.dp)
+                .clip(RoundedCornerShape(Radius.sm))
+                .background(if (isSelected) SurfaceCard else SurfaceElevated)
+                .border(1.dp, if (isSelected) AccentPrimary.copy(alpha = 0.5f) else BorderHairline, RoundedCornerShape(Radius.sm)),
+            contentAlignment = Alignment.Center
         ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.weight(1f)
-            ) {
-                Checkbox(
-                    checked = isSelected,
-                    onCheckedChange = { onToggle() },
-                    colors = CheckboxDefaults.colors(
-                        checkedColor = AccentPrimary,
-                        uncheckedColor = TextMuted,
-                        checkmarkColor = BackgroundDark
-                    )
-                    // No size() override (design pass): shrinking the box to
-                    // 24dp shrank the touch target too; the row's own click
-                    // still covers the common path.
-                )
-
-                Spacer(modifier = Modifier.width(Spacing.sm))
-
-                Text(
-                    text = episode.title,
-                    color = if (isSelected) TextPrimary else TextSecondary,
-                    fontSize = Type.body.fontSize,
-                    fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-
-            // 48dp (was 40) with an 8dp gap to the download button: two
-            // adjacent controls below the Android minimum with zero spacing
-            // is how a mis-tap enqueues the wrong action.
-            IconButton(
-                onClick = { expanded = !expanded },
-                modifier = Modifier.size(48.dp)
-            ) {
-                Icon(
-                    imageVector = Icons.Rounded.Info,
-                    contentDescription = "Preview details",
-                    tint = if (expanded) AccentPrimary else TextMuted,
-                    modifier = Modifier.size(18.dp)
-                )
-            }
-
-            Spacer(modifier = Modifier.width(Spacing.sm))
-
-            IconButton(
-                onClick = onDownloadSingle,
-                modifier = Modifier.size(48.dp)
-            ) {
-                Icon(
-                    imageVector = Icons.Rounded.DownloadForOffline,
-                    contentDescription = "Download Single",
-                    tint = if (isSelected) AccentPrimary else TextSecondary,
-                    modifier = Modifier.size(22.dp)
-                )
-            }
+            Text(
+                text = "%02d".format(episode.episodeNum),
+                fontSize = Type.label.fontSize,
+                fontWeight = FontWeight.Bold,
+                color = when {
+                    isSelected -> TextPrimary
+                    isDownloaded -> TextMuted
+                    else -> TextSecondary
+                }
+            )
         }
 
-        AnimatedVisibility(visible = expanded) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(start = Spacing.md, end = Spacing.md, bottom = Spacing.sm)
-            ) {
-                Row(horizontalArrangement = Arrangement.spacedBy(Spacing.sm)) {
-                    PreviewChip(label = "locker", value = lockerHost)
-                    if (lockerFile.isNotBlank()) {
-                        PreviewChip(
-                            label = "file",
-                            value = if (lockerFile.length > 34) lockerFile.takeLast(34) else lockerFile,
-                            modifier = Modifier.weight(1f, fill = false)
-                        )
-                    }
-                }
-                if (episode.sizeText.isNotBlank()) {
-                    Spacer(modifier = Modifier.height(Spacing.xs))
-                    Text(
-                        text = "Site-reported size: ${episode.sizeText}",
-                        color = TextSecondary,
-                        fontSize = Type.label.fontSize
+        Spacer(modifier = Modifier.width(Spacing.md))
+
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = episode.title,
+                // Already-downloaded rows dim (Track 4): still selectable — a
+                // re-download is a legitimate choice — but the muted title +
+                // done-tick makes the state scannable in a 130-row list.
+                color = when {
+                    isSelected -> TextPrimary
+                    isDownloaded -> TextMuted
+                    else -> TextSecondary
+                },
+                fontSize = Type.body.fontSize,
+                fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            // Locker + site-reported size, always visible: the "wait, which
+            // host is this / how big" question disappears from behind the
+            // info toggle. Zero network — parsed from the URL in hand.
+            val (lockerHost, _) = remember(episode.url) { lockerPreview(episode.url) }
+            val subLine = listOf(
+                lockerHost.takeIf { it.isNotBlank() && it != "—" },
+                episode.sizeText.takeIf { it.isNotBlank() }
+            ).filterNotNull().joinToString(" · ")
+            Text(
+                text = subLine.ifBlank { "—" },
+                color = TextMuted,
+                fontSize = Type.micro.fontSize,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+
+        if (isDownloaded) {
+            Spacer(modifier = Modifier.width(Spacing.xs))
+            Icon(
+                imageVector = Icons.Rounded.DownloadDone,
+                contentDescription = "Downloaded or queued",
+                tint = StatusSuccess,
+                modifier = Modifier.size(16.dp)
+            )
+            Spacer(modifier = Modifier.width(Spacing.xs))
+        }
+
+        IconButton(
+            onClick = { expanded = !expanded },
+            modifier = Modifier.size(40.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Rounded.Info,
+                contentDescription = "Preview details",
+                tint = if (expanded) AccentPrimary else TextMuted,
+                modifier = Modifier.size(16.dp)
+            )
+        }
+
+        Checkbox(
+            checked = isSelected,
+            onCheckedChange = { onToggle() },
+            colors = CheckboxDefaults.colors(
+                checkedColor = AccentPrimary,
+                uncheckedColor = TextMuted,
+                checkmarkColor = BackgroundDark
+            )
+        )
+    }
+
+    AnimatedVisibility(visible = expanded) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = Spacing.md, end = Spacing.md, bottom = Spacing.sm)
+        ) {
+            Row(horizontalArrangement = Arrangement.spacedBy(Spacing.sm)) {
+                PreviewChip(label = "locker", value = lockerHost)
+                if (lockerFile.isNotBlank()) {
+                    PreviewChip(
+                        label = "file",
+                        value = if (lockerFile.length > 34) lockerFile.takeLast(34) else lockerFile,
+                        modifier = Modifier.weight(1f, fill = false)
                     )
                 }
-                Spacer(modifier = Modifier.height(2.dp))
+            }
+            if (episode.sizeText.isNotBlank()) {
+                Spacer(modifier = Modifier.height(Spacing.xs))
                 Text(
-                    text = "Queue now, or check this link on a browser first.",
-                    color = TextMuted,
-                    fontSize = Type.micro.fontSize,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
+                    text = "Site-reported size: ${episode.sizeText}",
+                    color = TextSecondary,
+                    fontSize = Type.label.fontSize
                 )
             }
+            Spacer(modifier = Modifier.height(Spacing.sm))
+            // The row's own download action lives here now: three trailing
+            // controls per row (info / download / checkbox) read as noise —
+            // one decision per glance, the heavier action one tap deeper
+            // behind the details it belongs with.
+            val singleSrc = remember { MutableInteractionSource() }
+            FilledTonalButton(
+                onClick = onDownloadSingle,
+                interactionSource = singleSrc,
+                shape = RoundedCornerShape(Radius.sm),
+                colors = ButtonDefaults.filledTonalButtonColors(
+                    containerColor = SurfaceCard,
+                    contentColor = TextPrimary
+                ),
+                border = androidx.compose.foundation.BorderStroke(1.dp, BorderHairline),
+                modifier = Modifier.pressScale(singleSrc)
+            ) {
+                Icon(
+                    Icons.Rounded.DownloadForOffline,
+                    contentDescription = null,
+                    modifier = Modifier.size(15.dp),
+                    tint = AccentPrimary
+                )
+                Spacer(modifier = Modifier.width(Spacing.xs))
+                Text("Queue this episode", fontSize = Type.label.fontSize, fontWeight = FontWeight.SemiBold)
+            }
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = "Queue now, or check this link on a browser first.",
+                color = TextMuted,
+                fontSize = Type.micro.fontSize,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
         }
     }
 }

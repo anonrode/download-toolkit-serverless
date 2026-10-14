@@ -97,5 +97,14 @@ data class DownloadTask(
      *  newest-first, so position still orders them correctly). */
     val createdAt: Long = 0L,
     val mirrorUrls: List<String> = emptyList(),
-    val selectedMirrorUrl: String = ""
+    val selectedMirrorUrl: String = "",
+    /** Series page URL this episode belongs to ("" for direct/one-off
+     *  downloads). Stamped by the episode drawer at enqueue time; powers the
+     *  "Download Remaining (X left)" chip on the Downloads screen. */
+    val seriesUrl: String = "",
+    /** Total episode count the drawer knew for the series at enqueue time
+     *  (0 = unknown: direct downloads or tasks persisted by older builds).
+     *  Only a card-level hint — the drawer recomputes the exact un-downloaded
+     *  set live from the provider when the chip opens it. */
+    val seriesTotal: Int = 0
 )

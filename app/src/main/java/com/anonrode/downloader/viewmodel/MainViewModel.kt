@@ -34,6 +34,10 @@ data class HomeUiState(
     val drawerSynopsis: String = "",
     val isEpisodesLoading: Boolean = false,
     val episodesError: String? = null,
+    // Track 4 ("Download Remaining"): when the drawer was launched from a
+    // Downloads-series card, the un-downloaded episodes auto-select on first
+    // load instead of making the user hunt them out of a 130-row list.
+    val drawerPreselectRemaining: Boolean = false,
     val freeStorageGb: Long = 0L,
     val totalStorageGb: Long = 0L,
     // Trending-on-open row (feature request: show what's trending when the
@@ -1083,7 +1087,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun openEpisodeDrawer(show: ShowCard) {
+    fun openEpisodeDrawer(show: ShowCard, preselectRemaining: Boolean = false) {
         // If the oracle is still verifying this card, move it to the head so
         // its verdict (and the cracked direct URL it caches) lands now — the
         // drawer's own loadEpisodes and the verifier share ProviderRegistry's
@@ -1096,7 +1100,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 drawerEpisodes = emptyList(),
                 drawerSynopsis = "",
                 isEpisodesLoading = true,
-                episodesError = null
+                episodesError = null,
+                drawerPreselectRemaining = preselectRemaining
             )
         }
 
@@ -1132,7 +1137,33 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun closeEpisodeDrawer() {
         episodesJob?.cancel()
-        _uiState.update { it.copy(activeShowForDrawer = null, drawerEpisodes = emptyList(), drawerSynopsis = "") }
+        _uiState.update {
+            it.copy(
+                activeShowForDrawer = null,
+                drawerEpisodes = emptyList(),
+                drawerSynopsis = "",
+                drawerPreselectRemaining = false
+            )
+        }
+    }
+
+    /** Track 4 ("Download Remaining"): open the drawer for a series the user
+     *  is partway through, with the un-downloaded episodes pre-selected and
+     *  the already-queued ones marked. seriesUrl/seriesTotal were stamped on
+     *  tasks by the drawer at enqueue time; a blank seriesUrl (direct pastes,
+     *  tasks from older builds) never reaches here — the chip is only
+     *  rendered for stamped tasks. */
+    fun openRemainingEpisodes(seriesTitle: String, seriesUrl: String, site: String) {
+        if (seriesUrl.isBlank()) return
+        openEpisodeDrawer(
+            show = ShowCard(
+                title = seriesTitle,
+                url = seriesUrl,
+                site = site,
+                category = "Drama"
+            ),
+            preselectRemaining = true
+        )
     }
 
     fun downloadEpisode(episode: EpisodeItem) {

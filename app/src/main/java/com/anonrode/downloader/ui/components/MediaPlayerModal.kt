@@ -80,6 +80,8 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.ripple
 import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
+import coil.compose.AsyncImage
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -166,6 +168,11 @@ internal object PlayerPipState {
 
 private val SIDECAR_SUBTITLE_EXTS = listOf("srt", "vtt", "ass", "ssa")
 private val AUDIO_EXTS = listOf("mp3", "m4a", "aac", "wav", "flac", "opus", "ogg")
+/** Still images (last-resort Instagram photo fallbacks) are NOT playable
+ *  media: handing an .mp4-named-jpg or a .jpg to ExoPlayer renders the
+ *  "error" screen the user got. They render in the same overlay as a zoomed
+ *  picture instead of entering the player pipeline at all. */
+private val IMAGE_EXTS = listOf("jpg", "jpeg", "png", "webp", "gif")
 private val PLAYBACK_SPEEDS = listOf(0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 1.75f, 2.0f)
 
 /**
@@ -379,6 +386,14 @@ private fun MediaPlayerModalImpl(
 
     val ext = file.extension.lowercase()
     val isAudio = ext in AUDIO_EXTS
+
+    // A saved still (Instagram last-resort path) never reaches the player:
+    // it gets an image viewer in the same overlay chrome. ExoPlayer on a
+    // JPEG produced exactly the "shows like error" the user reported.
+    if (ext in IMAGE_EXTS) {
+        MediaImageStill(filePath = ctx.filePath, title = ctx.title, onDismiss = onDismiss)
+        return
+    }
 
     // ---- Persisted prefs ----
     val initialSpeed = remember { MediaPlayerPrefs.getPlaybackSpeed(context) }
@@ -2028,6 +2043,71 @@ internal class PlayerLoudnessEnhancer {
         enhancer = null
         currentSessionId = -1
         isAvailable = false
+    }
+}
+
+/**
+ * ImageView fallback inside the player overlay: chrome (black stage, title
+ * row, close) identical to the video player, but the body is a Coil image
+ * instead of an ExoPlayer surface. This is where the Instagram last-resort
+ * stills land — the successful path now always muxes them into a video, so
+ * this viewer only ever sees genuinely-unmuxable photo saves and must show
+ * the picture, never a player error.
+ */
+@Composable
+private fun MediaImageStill(
+    filePath: String,
+    title: String,
+    onDismiss: () -> Unit
+) {
+    BackHandler { onDismiss() }
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black)
+            .pointerInput(Unit) { detectTapGestures(onTap = { onDismiss() }) }
+    ) {
+        AsyncImage(
+            model = java.io.File(filePath),
+            contentDescription = title,
+            contentScale = ContentScale.Fit,
+            modifier = Modifier.fillMaxSize()
+        )
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(Color.Black.copy(alpha = 0.55f))
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = title,
+                color = Color.White,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(start = 4.dp)
+            )
+            IconButton(onClick = onDismiss, modifier = Modifier.size(40.dp)) {
+                Icon(
+                    imageVector = Icons.Default.Close,
+                    contentDescription = "Close",
+                    tint = Color.White,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+        }
+        Text(
+            text = "Photo • tap anywhere to close",
+            color = Color.White.copy(alpha = 0.6f),
+            fontSize = 11.sp,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 24.dp)
+        )
     }
 }
 

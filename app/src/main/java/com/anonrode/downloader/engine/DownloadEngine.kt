@@ -445,7 +445,14 @@ class DownloadEngine(
          *  re-resolves from scratch if this token aged out between proof and
          *  tap. Null = the normal path, unchanged. */
         verifiedDirectUrl: String? = null,
-        mirrorUrls: List<String> = emptyList()
+        mirrorUrls: List<String> = emptyList(),
+        /** Track 4 ("Download Remaining"): the series page the episode was
+         *  scraped from and the drawer's total episode count. Stamped on the
+         *  task so the Downloads screen can offer a one-tap "grab the rest"
+         *  without re-scraping. Defaults keep every other caller (direct
+         *  pastes, playlists, subtitles) unchanged. */
+        seriesUrl: String = "",
+        seriesTotal: Int = 0
     ): String {
         val downloadFolder = getDownloadDirectory(showTitle, createDirs = false)
 
@@ -455,8 +462,14 @@ class DownloadEngine(
             // same .part concurrently and corrupt the output.
             val active = setOf(TaskStatus.QUEUED, TaskStatus.RESOLVING, TaskStatus.DOWNLOADING, TaskStatus.VALIDATING, TaskStatus.PAUSED)
             val existing = repository.snapshot().firstOrNull { it.sourceUrl == sourceUrl && it.status in active }
+            val failedExisting = if (existing == null) {
+                repository.snapshot().firstOrNull { it.sourceUrl == sourceUrl && it.status == TaskStatus.FAILED }
+            } else null
             if (existing != null) {
                 existing.id
+            } else if (failedExisting != null) {
+                retry(failedExisting.id)
+                failedExisting.id
             } else {
                 // Scraped names get the full noise cut; a DIRECT download's
                 // name is the user's own prose (shared filename / pasted URL)
@@ -502,7 +515,9 @@ class DownloadEngine(
                     audioOnly = audioOnly,
                     quality = quality,
                     createdAt = System.currentTimeMillis(),
-                    mirrorUrls = MirrorPool.sources(sourceUrl, mirrorUrls).filter { it != sourceUrl }
+                    mirrorUrls = MirrorPool.sources(sourceUrl, mirrorUrls).filter { it != sourceUrl },
+                    seriesUrl = seriesUrl,
+                    seriesTotal = seriesTotal
                 )
 
                 repository.addFirst(task)
@@ -769,6 +784,22 @@ class DownloadEngine(
     }
 
     fun retry(taskId: String) {
+        val existingTask = repository.find(taskId)
+        if (existingTask != null) {
+            try {
+                val target = File(existingTask.filePath)
+                val isImg = target.name.lowercase().let { it.endsWith(".jpg") || it.endsWith(".jpeg") || it.endsWith(".png") || it.endsWith(".webp") }
+                val isCorrupt = if (isImg) {
+                    target.length() < 1024L || looksLikeHtml(target) || !isImageValid(target)
+                } else {
+                    target.length() < 50 * 1024L || looksLikeHtml(target) || !decodeCheck(target)
+                }
+                if (target.exists() && isCorrupt) {
+                    target.delete()
+                }
+            } catch (_: Throwable) {}
+        }
+
         // Each tap grants ONE bypass of the host health gate: the next
         // resolution attempt runs even while the host sits in HostHealth
         // backoff (consumed in startTask). Bounded so stale ids cannot grow.
@@ -1288,6 +1319,27 @@ class DownloadEngine(
             }
         } catch (e: Exception) {
             com.anonrode.downloader.util.DebugLog.write("decodeCheck ${file.name}: ${e.message}")
+            false
+        }
+    }
+
+    private fun isImageValid(file: File): Boolean {
+        if (!file.isFile || file.length() < 1024L) return false
+        return try {
+            file.inputStream().use { ins ->
+                val head = ByteArray(16)
+                val read = ins.read(head)
+                if (read < 4) false
+                // JPEG: FF D8 FF
+                else if (head[0] == 0xFF.toByte() && head[1] == 0xD8.toByte() && head[2] == 0xFF.toByte()) true
+                // PNG: 89 50 4E 47 (\x89PNG)
+                else if (head[0] == 0x89.toByte() && head[1] == 0x50.toByte() && head[2] == 0x4E.toByte() && head[3] == 0x47.toByte()) true
+                // WebP: RIFF....WEBP
+                else if (read >= 12 && head[0] == 'R'.code.toByte() && head[1] == 'I'.code.toByte() && head[2] == 'F'.code.toByte() && head[3] == 'F'.code.toByte() &&
+                    head[8] == 'W'.code.toByte() && head[9] == 'E'.code.toByte() && head[10] == 'B'.code.toByte() && head[11] == 'P'.code.toByte()) true
+                else false
+            }
+        } catch (_: Exception) {
             false
         }
     }
@@ -2379,7 +2431,7 @@ class DownloadEngine(
                                 stallKills = 0 // real progress — recovery worked
                             }
                         }
-                        val crawlStalled = now - windowStartTime > STALL_TIMEOUT_MS
+                        val crawlStalled = (now - windowStartTime > STALL_TIMEOUT_MS) && (moved < CRAWL_WINDOW_BYTES)
                         // Zombie cap: far past the stall timeout with almost
                         // nothing moved, the stream is dead — do not relaunch.
                         val totalBytesNow = disk + parsed
@@ -2392,8 +2444,14 @@ class DownloadEngine(
                         val magnetTask = streamUrl.startsWith("magnet:", ignoreCase = true)
                         val attemptBoundary = if (magnetTask) 90_000L else maxOf(stallKills * STALL_TIMEOUT_MS * 2, STALL_TIMEOUT_MS)
                         val stalledLong = now - lastActivity > STALL_TIMEOUT_MS
-                        if (!magnetTask && !throttleGrace && stalledLong && (now - watchdogStart) > attemptBoundary && (stallKills == 0 || now - lastKillTime > STALL_TIMEOUT_MS)) {
+                        val isStalledOrCrawling = stalledLong || crawlStalled
+                        if (!magnetTask && !throttleGrace && isStalledOrCrawling && (now - watchdogStart) > attemptBoundary && (stallKills == 0 || now - lastKillTime > STALL_TIMEOUT_MS)) {
                             stallKills++
+                            lastKillTime = now
+                            windowStartDisk = disk
+                            windowStartParsed = parsed
+                            windowStartTime = now
+                            lastActivity = now
                             com.anonrode.downloader.util.DebugLog.engine(
                                 "task=${task.id} watchdog stall kill #$stallKills (idle=${(now - lastActivity) / 1000}s crawl=$crawlStalled window=${(moved / 1024).toInt()}KiB best=${(bestWindowBps / 1024).toInt()}KiB/s)"
                             )
@@ -2410,6 +2468,26 @@ class DownloadEngine(
                             // play out; only then give up and fail the task.
                             if (stallKills >= MAX_STALL_KILLS) {
                                 val stallMsg = "Download stalled — no progress for ${stallTimeoutSec}s across $stallKills attempts"
+                                // Track 6: the only engine diagnostic that leaves
+                                // the device automatically — a task the watchdog
+                                // gave up on after exhausting every relaunch.
+                                // Sanitized, ~4 KB-capped, async, OTA-routed
+                                // (RemoteLogger); silent no-op until the rules
+                                // provision remote_logging_url.
+                                com.anonrode.downloader.util.RemoteLogger.report(
+                                    type = "stall_watchdog_timeout",
+                                    message = stallMsg,
+                                    context = mapOf(
+                                        "episode" to t.episodeTitle,
+                                        "backend" to t.backend,
+                                        "site" to t.site,
+                                        "host" to (try { java.net.URI(streamUrl).host } catch (_: Exception) { null }),
+                                        "attempts" to stallKills,
+                                        "downloaded_bytes" to t.downloadedBytes,
+                                        "total_bytes" to t.totalBytes,
+                                        "best_window_kib_s" to (bestWindowBps / 1024.0).toInt()
+                                    )
+                                )
                                 // THE RULE: the whole point of the park system.
                                 // A task that banked bytes through these kills
                                 // (the vikingfile 429 case: 64 MiB in, then
@@ -3043,6 +3121,17 @@ class DownloadEngine(
                     // if it was mangled by an extractor backend template.
                     if (!isSocial && producedFile.name != File(task.filePath).name) {
                         val targetDest = File(task.filePath)
+                        if (targetDest.exists()) {
+                            val isImg = targetDest.name.lowercase().let { it.endsWith(".jpg") || it.endsWith(".jpeg") || it.endsWith(".png") || it.endsWith(".webp") }
+                            val isCorrupt = if (isImg) {
+                                targetDest.length() < 1024L || looksLikeHtml(targetDest) || !isImageValid(targetDest)
+                            } else {
+                                targetDest.length() < 50 * 1024L || looksLikeHtml(targetDest) || !decodeCheck(targetDest)
+                            }
+                            if (isCorrupt) {
+                                targetDest.delete()
+                            }
+                        }
                         if (!targetDest.exists() && producedFile.renameTo(targetDest)) {
                             producedFile = targetDest
                         }
@@ -3058,7 +3147,8 @@ class DownloadEngine(
                 }
 
                 val isAudio = task.filePath.lowercase().let { it.endsWith(".mp3") || it.endsWith(".m4a") || it.endsWith(".aac") }
-                val minSize = if (isAudio) 10 * 1024L else 50 * 1024L
+                val isImage = (producedFile?.name ?: task.filePath).lowercase().let { it.endsWith(".jpg") || it.endsWith(".jpeg") || it.endsWith(".png") || it.endsWith(".webp") }
+                val minSize = if (isImage) 1024L else if (isAudio) 10 * 1024L else 50 * 1024L
 
                 // ---- Tiered verification: answer "is it media / complete /
                 // playable" with the strongest evidence available, instead of
@@ -3087,8 +3177,11 @@ class DownloadEngine(
                 val hlsComplete = isHlsStream && hlsSizeEstimate[0] > 0 &&
                     producedFile != null && producedFile.exists() &&
                     producedFile.length() >= 0.9 * hlsSizeEstimate[0]
-                val verified = transferComplete || structuralOk || decodeOk || hlsComplete
+                val imageOk = isImage && producedFile != null && producedFile.exists() &&
+                    producedFile.length() >= minSize && !looksLikeHtml(producedFile) && isImageValid(producedFile)
+                val verified = transferComplete || structuralOk || decodeOk || hlsComplete || imageOk
                 val path = when {
+                    imageOk -> "image"
                     structuralOk -> "structure"
                     transferComplete -> "transfer"
                     decodeOk -> "decode"
@@ -3096,7 +3189,7 @@ class DownloadEngine(
                     else -> "none"
                 }
                 val note = when {
-                    !verified || structuralOk || transferComplete -> null
+                    !verified || structuralOk || transferComplete || imageOk -> null
                     decodeOk -> "Downloaded — format not in the known container list, but the system decoder verified it plays."
                     else -> "Downloaded — file size matches the stream estimate."
                 }
@@ -3201,6 +3294,14 @@ class DownloadEngine(
                     val parked = producedFile == null &&
                         parkInsteadOfFail(live, errReason, forcePark = isRateLimitedError(errReason))
                     if (!parked) {
+                        if (producedFile != null && producedFile.exists() && (looksLikeHtml(producedFile) || fileSize(producedFile) < minSize || !validation.first)) {
+                            try {
+                                producedFile.delete()
+                                File(producedFile.absolutePath + ".part").delete()
+                                File(producedFile.absolutePath + ".turbo").delete()
+                                File(producedFile.absolutePath + ".aria2").delete()
+                            } catch (_: Throwable) {}
+                        }
                         repository.update(task.id) { it.copy(status = TaskStatus.FAILED, errorMessage = errReason) }
                         com.anonrode.downloader.util.DebugLog.write("failed task=${task.id} reason=$errReason")
                         com.anonrode.downloader.service.DownloadService.notifyFailed(context, task.id, task.episodeTitle, errReason)

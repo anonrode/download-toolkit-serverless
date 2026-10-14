@@ -172,10 +172,12 @@ fun HomeScreen(
                     )
                     Spacer(modifier = Modifier.height(Spacing.xxs))
                     Text(
-                        text = "100% Serverless • Native Multi-Provider Engine",
+                        // The one line a visitor reads under the brand — say
+                        // what the app does, not what it's built with.
+                        text = "Search · download · play",
                         fontSize = Type.caption.fontSize,
                         color = TextMuted,
-                        maxLines = 2,
+                        maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
                 }

@@ -37,6 +37,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -46,8 +47,10 @@ import androidx.core.content.ContextCompat
 import com.anonrode.downloader.AnonApp
 import com.anonrode.downloader.data.router.ParsedUrl
 import com.anonrode.downloader.data.router.UrlRouter
-import com.anonrode.downloader.ui.components.QualityChipRow
+import com.anonrode.downloader.ui.components.SegmentBar
+import com.anonrode.downloader.ui.components.SegmentCell
 import com.anonrode.downloader.ui.theme.*
+import com.anonrode.downloader.ui.util.pressScale
 
 class QuickShareActivity : ComponentActivity() {
 
@@ -317,6 +320,17 @@ class QuickShareActivity : ComponentActivity() {
     }
 }
 
+/* ---------------------------------------------------------------------------
+ * The share sheet.
+ *
+ * One decision per glance, per the canonical monochrome system: WHO is
+ * downloading (identity header), WHAT is being downloaded (media card with
+ * poster/title/source), and HOW (three uniform segment bars + the instant
+ * switch), closed by ONE confident primary action. The old sheet stacked six
+ * differently-styled control groups with violet-tinted fills — every group
+ * competing; the redesign speaks the same selection language everywhere
+ * (selected cell = AccentPrimary fill + BackgroundDark ink, everywhere).
+ * ------------------------------------------------------------------------- */
 @Composable
 fun QuickShareCard(
     parsedUrl: ParsedUrl,
@@ -343,6 +357,22 @@ fun QuickShareCard(
         else -> "Web"
     }
 
+    // What is being downloaded — the user's own words for it, not the
+    // router's. Never fabricated beyond what the share actually carries.
+    val mediaTitle = when (parsedUrl) {
+        is ParsedUrl.DramaUrl -> parsedUrl.showCard.title
+        is ParsedUrl.MagnetUrl -> parsedUrl.title
+        is ParsedUrl.DirectMediaUrl -> parsedUrl.filename
+        is ParsedUrl.SocialUrl -> "${parsedUrl.platform} video"
+        else -> "Shared media"
+    }
+    val sourceHost = try {
+        java.net.URI(rawUrl.substringBefore('#')).host ?: platformName
+    } catch (_: Exception) {
+        platformName
+    }
+    val posterUrl = (parsedUrl as? ParsedUrl.DramaUrl)?.showCard?.posterUrl.orEmpty()
+
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -358,12 +388,11 @@ fun QuickShareCard(
             modifier = Modifier
                 .fillMaxWidth()
                 // Full-screen theme now sizes this card to the real screen
-                // height — with the engine selector added the content can
-                // exceed small screens, so the sheet must scroll internally
-                // (the drag handle stays pinned at the top edge).
+                // height — the content can exceed small screens, so the sheet
+                // scrolls internally (the drag handle stays at the top edge).
                 .verticalScroll(rememberScrollState())
-                .padding(horizontal = Spacing.xl)
-                .padding(top = Spacing.lg, bottom = Spacing.xxl)
+                .padding(horizontal = Spacing.lg)
+                .padding(top = Spacing.md, bottom = Spacing.xl)
         ) {
             // Drag handle — signals a bottom sheet, matches Seal's share UI.
             Box(
@@ -374,57 +403,47 @@ fun QuickShareCard(
                     .background(BorderHairline)
                     .align(Alignment.CenterHorizontally)
             )
-            // ---- Header: badge -> title -> close ----
+
+            // ---- Identity: WHO is about to download ----
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(Spacing.md)
             ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(Spacing.md)
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(44.dp)
-                            .clip(RoundedCornerShape(Radius.md))
-                            .background(AccentViolet.copy(alpha = 0.16f)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = when (parsedUrl) {
-                                is ParsedUrl.MagnetUrl -> Icons.Rounded.Bolt
-                                is ParsedUrl.DirectMediaUrl -> Icons.Rounded.Videocam
-                                is ParsedUrl.DramaUrl -> Icons.Rounded.Videocam
-                                else -> Icons.Rounded.Link
-                            },
-                            contentDescription = null,
-                            tint = AccentViolet,
-                            modifier = Modifier.size(22.dp)
-                        )
-                    }
-                    Column {
-                        Text(
-                            text = "Download with Anon",
-                            fontSize = Type.screenTitle.fontSize,
-                            fontWeight = FontWeight.Bold,
-                            color = TextPrimary
-                        )
-                        Text(
-                            text = platformName,
-                            fontSize = Type.label.fontSize,
-                            fontWeight = FontWeight.Medium,
-                            color = TextMuted
-                        )
-                    }
-                }
-
+                // The app mark: ink-on-accent square, the one saturated block
+                // on the sheet — identity, not decoration.
                 Box(
                     modifier = Modifier
-                        .size(48.dp)
-                        .clip(CircleShape)
-                        .clickable(onClick = onDismiss),
+                        .size(42.dp)
+                        .clip(RoundedCornerShape(Radius.md))
+                        .background(AccentPrimary),
                     contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Download,
+                        contentDescription = null,
+                        tint = BackgroundDark,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Anon Downloader",
+                        fontSize = Type.rowTitle.fontSize,
+                        fontWeight = FontWeight.Bold,
+                        color = TextPrimary
+                    )
+                    Text(
+                        text = "Shared link · $platformName",
+                        fontSize = Type.caption.fontSize,
+                        color = TextMuted,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                IconButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.size(44.dp)
                 ) {
                     Box(
                         modifier = Modifier
@@ -443,58 +462,95 @@ fun QuickShareCard(
                 }
             }
 
-            Spacer(modifier = Modifier.height(Spacing.xl))
+            Spacer(modifier = Modifier.height(Spacing.md))
 
-            // ---- URL preview ----
+            // ---- Media: WHAT is being downloaded ----
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(Radius.md))
+                    .clip(RoundedCornerShape(Radius.lg))
                     .background(SurfaceCard)
-                    .border(1.dp, BorderHairline, RoundedCornerShape(Radius.md))
-                    .padding(horizontal = Spacing.md, vertical = Spacing.md),
+                    .border(1.dp, BorderHairline, RoundedCornerShape(Radius.lg))
+                    .padding(Spacing.sm),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(Spacing.sm)
+                horizontalArrangement = Arrangement.spacedBy(Spacing.md)
             ) {
-                Icon(
-                    imageVector = Icons.Rounded.Link,
-                    contentDescription = null,
-                    tint = TextMuted,
-                    modifier = Modifier.size(14.dp)
-                )
-                Text(
-                    text = rawUrl,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = Type.label.fontSize,
-                    color = TextSecondary,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f)
-                )
+                // 64dp thumb: the real poster when the router has one, else a
+                // type tile. 1dp white-10% outline — images read as objects.
+                val thumbShape = RoundedCornerShape(Radius.sm)
+                Box(
+                    modifier = Modifier
+                        .size(64.dp)
+                        .clip(thumbShape)
+                        .background(SurfaceElevated)
+                        .border(1.dp, Color.White.copy(alpha = 0.1f), thumbShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (posterUrl.isNotBlank()) {
+                        coil.compose.AsyncImage(
+                            model = posterUrl,
+                            contentDescription = null,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    } else {
+                        Icon(
+                            imageVector = when (parsedUrl) {
+                                is ParsedUrl.MagnetUrl -> Icons.Rounded.Bolt
+                                is ParsedUrl.DirectMediaUrl -> Icons.Rounded.Videocam
+                                is ParsedUrl.DramaUrl -> Icons.Rounded.Videocam
+                                else -> Icons.Rounded.Link
+                            },
+                            contentDescription = null,
+                            tint = TextSecondary,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+                }
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = mediaTitle,
+                        fontSize = Type.rowTitle.fontSize,
+                        fontWeight = FontWeight.SemiBold,
+                        color = TextPrimary,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = "$sourceHost · ${if (audioOnly) "Audio (MP3)" else selectedQuality}",
+                        fontSize = Type.caption.fontSize,
+                        color = TextSecondary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(top = 2.dp)
+                    )
+                    Text(
+                        text = rawUrl,
+                        // A URL is data, not decoration — the one place mono
+                        // is the honest face (and shrink-on-overflow beats
+                        // truncating the middle of an artifact).
+                        fontSize = Type.micro.fontSize,
+                        fontFamily = FontFamily.Monospace,
+                        color = TextMuted,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(top = 2.dp)
+                    )
+                }
             }
 
-            Spacer(modifier = Modifier.height(Spacing.lg))
+            Spacer(modifier = Modifier.height(Spacing.md))
 
-            // ---- Format: Video / Audio segmented control ----
-            SectionLabel(text = "Format")
-            Spacer(modifier = Modifier.height(Spacing.sm))
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(Radius.md))
-                    .background(SurfaceCard)
-                    .border(1.dp, BorderHairline, RoundedCornerShape(Radius.md))
-                    .padding(Spacing.xs),
-                horizontalArrangement = Arrangement.spacedBy(Spacing.xs)
-            ) {
-                FormatSegment(
+            // ---- Format: Video / Audio ----
+            SegmentBar {
+                SegmentCell(
                     selected = !audioOnly,
                     onClick = { audioOnly = false },
                     icon = Icons.Rounded.Videocam,
                     label = "Video",
                     modifier = Modifier.weight(1f)
                 )
-                FormatSegment(
+                SegmentCell(
                     selected = audioOnly,
                     onClick = { audioOnly = true },
                     icon = Icons.Rounded.Audiotrack,
@@ -504,33 +560,23 @@ fun QuickShareCard(
             }
 
             // ---- Download engine ----
-            Spacer(modifier = Modifier.height(Spacing.lg))
-            SectionLabel(text = "Download engine")
             Spacer(modifier = Modifier.height(Spacing.sm))
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(Radius.md))
-                    .background(SurfaceCard)
-                    .border(1.dp, BorderHairline, RoundedCornerShape(Radius.md))
-                    .padding(Spacing.xs),
-                horizontalArrangement = Arrangement.spacedBy(Spacing.xs)
-            ) {
-                EngineSegment(
+            SegmentBar {
+                SegmentCell(
                     selected = engineOverride == "auto",
                     onClick = { engineOverride = "auto" },
                     icon = Icons.Rounded.Settings,
                     label = "Auto",
                     modifier = Modifier.weight(1f)
                 )
-                EngineSegment(
+                SegmentCell(
                     selected = engineOverride == "aria2c",
                     onClick = { engineOverride = "aria2c" },
                     icon = Icons.Rounded.Bolt,
                     label = "Fast",
                     modifier = Modifier.weight(1f)
                 )
-                EngineSegment(
+                SegmentCell(
                     selected = engineOverride == "yt-dlp",
                     onClick = { engineOverride = "yt-dlp" },
                     icon = Icons.Rounded.PlayArrow,
@@ -548,171 +594,87 @@ fun QuickShareCard(
                         shrinkVertically(animationSpec = tween(Motion.DurationNormal))
             ) {
                 Column {
-                    Spacer(modifier = Modifier.height(Spacing.lg))
-                    SectionLabel(text = "Quality")
                     Spacer(modifier = Modifier.height(Spacing.sm))
-                    QualityChipRow(
-                        options = listOf("480p", "720p", "1080p", "Best"),
-                        selected = selectedQuality,
-                        onSelect = { selectedQuality = it }
-                    )
+                    SegmentBar {
+                        listOf("480p", "720p", "1080p", "Best").forEach { q ->
+                            SegmentCell(
+                                selected = selectedQuality == q,
+                                onClick = { selectedQuality = q },
+                                label = q,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
                 }
             }
 
-            Spacer(modifier = Modifier.height(Spacing.lg))
+            Spacer(modifier = Modifier.height(Spacing.md))
 
-            // ---- Behavior: always download instantly ----
+            // ---- Instant: the skip-this-dialog switch ----
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(Radius.md))
-                    .background(SurfaceCard)
-                    .border(1.dp, BorderHairline, RoundedCornerShape(Radius.md))
                     .clickable { alwaysInstant = !alwaysInstant }
-                    .padding(start = Spacing.xs, end = Spacing.md, top = Spacing.xs, bottom = Spacing.xs),
+                    .padding(horizontal = Spacing.xs, vertical = Spacing.xs),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Checkbox(
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Download instantly",
+                        fontSize = Type.body.fontSize,
+                        fontWeight = FontWeight.SemiBold,
+                        color = TextPrimary
+                    )
+                    Text(
+                        text = "Skip this dialog next time",
+                        fontSize = Type.caption.fontSize,
+                        color = TextMuted
+                    )
+                }
+                Switch(
                     checked = alwaysInstant,
                     onCheckedChange = { alwaysInstant = it },
-                    colors = CheckboxDefaults.colors(checkedColor = AccentViolet)
-                )
-                Text(
-                    text = "Always download instantly",
-                    fontSize = Type.body.fontSize,
-                    fontWeight = FontWeight.Medium,
-                    color = TextSecondary
-                )
-                Spacer(modifier = Modifier.weight(1f))
-                Text(
-                    text = "Skip this dialog",
-                    fontSize = Type.label.fontSize,
-                    color = TextMuted
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = BackgroundDark,
+                        checkedTrackColor = StatusSuccess
+                    )
                 )
             }
 
-            Spacer(modifier = Modifier.height(Spacing.xl))
+            Spacer(modifier = Modifier.height(Spacing.md))
 
-            // ---- Actions ----
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(Spacing.md)
+            // ---- The one action (tap outside or ✕ dismisses) ----
+            val dlSrc = remember { MutableInteractionSource() }
+            Button(
+                onClick = {
+                    if (enqueued) return@Button
+                    enqueued = true
+                    // The storage permission check can block the download
+                    // (sheet stays open): only keep the double-tap guard
+                    // armed when a task was actually queued, so the user
+                    // can retry after granting permission.
+                    val queued = onDownload(selectedQuality, audioOnly, alwaysInstant, engineOverride)
+                    if (!queued) enqueued = false
+                },
+                enabled = !enqueued,
+                interactionSource = dlSrc,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(52.dp)
+                    .pressScale(dlSrc),
+                shape = RoundedCornerShape(Radius.md),
+                colors = ButtonDefaults.buttonColors(containerColor = AccentPrimary, contentColor = BackgroundDark)
             ) {
-                OutlinedButton(
-                    onClick = onDismiss,
-                    modifier = Modifier
-                        .weight(1f)
-                        .height(52.dp),
-                    shape = RoundedCornerShape(Radius.md),
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = TextSecondary),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, BorderHairline)
-                ) {
-                    Text("Cancel", fontWeight = FontWeight.Medium)
-                }
-
-                Button(
-                    onClick = {
-                        if (enqueued) return@Button
-                        enqueued = true
-                        // The storage permission check can block the download
-                        // (sheet stays open): only keep the double-tap guard
-                        // armed when a task was actually queued, so the user
-                        // can retry after granting permission.
-                        val queued = onDownload(selectedQuality, audioOnly, alwaysInstant, engineOverride)
-                        if (!queued) enqueued = false
-                    },
-                    modifier = Modifier
-                        .weight(1.4f)
-                        .height(52.dp),
-                    shape = RoundedCornerShape(Radius.md),
-                    colors = ButtonDefaults.buttonColors(containerColor = AccentPrimary, contentColor = BackgroundDark)
-                ) {
-                    Icon(Icons.Rounded.Download, null, modifier = Modifier.size(18.dp))
-                    Spacer(modifier = Modifier.width(Spacing.sm))
-                    Text("Download", fontWeight = FontWeight.Bold, fontSize = Type.sectionTitle.fontSize)
-                }
+                Icon(Icons.Rounded.Download, null, modifier = Modifier.size(18.dp))
+                Spacer(modifier = Modifier.width(Spacing.sm))
+                Text(
+                    text = if (audioOnly) "Download audio" else "Download ${selectedQuality}",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = Type.sectionTitle.fontSize
+                )
             }
         }
     }
 }
 
-@Composable
-private fun SectionLabel(text: String) {
-    Text(
-        text = text,
-        fontSize = Type.caption.fontSize,
-        fontWeight = FontWeight.SemiBold,
-        letterSpacing = 1.sp,
-        color = TextMuted
-    )
-}
-
-@Composable
-private fun FormatSegment(
-    selected: Boolean,
-    onClick: () -> Unit,
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    label: String,
-    // Weight must come from the caller's RowScope — a composable cannot apply
-    // it to itself.
-    modifier: Modifier = Modifier
-) {
-    Row(
-        modifier = modifier
-            .height(48.dp)
-            .clip(RoundedCornerShape(Radius.sm))
-            .background(if (selected) AccentViolet.copy(alpha = 0.16f) else Color.Transparent)
-            .clickable(onClick = onClick),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.Center
-    ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = null,
-            tint = if (selected) AccentViolet else TextSecondary,
-            modifier = Modifier.size(16.dp)
-        )
-        Spacer(modifier = Modifier.width(Spacing.sm))
-        Text(
-            text = label,
-            fontSize = Type.rowTitle.fontSize,
-            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
-            color = if (selected) AccentViolet else TextSecondary
-        )
-    }
-}
-
-@Composable
-private fun EngineSegment(
-    selected: Boolean,
-    onClick: () -> Unit,
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    label: String,
-    // Weight must come from the caller's RowScope — a composable cannot apply
-    // it to itself.
-    modifier: Modifier = Modifier
-) {
-    Row(
-        modifier = modifier
-            .height(48.dp)
-            .clip(RoundedCornerShape(Radius.sm))
-            .background(if (selected) AccentViolet.copy(alpha = 0.16f) else Color.Transparent)
-            .clickable(onClick = onClick),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.Center
-    ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = null,
-            tint = if (selected) AccentViolet else TextSecondary,
-            modifier = Modifier.size(16.dp)
-        )
-        Spacer(modifier = Modifier.width(Spacing.sm))
-        Text(
-            text = label,
-            fontSize = Type.rowTitle.fontSize,
-            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
-            color = if (selected) AccentViolet else TextSecondary
-        )
-    }
-}

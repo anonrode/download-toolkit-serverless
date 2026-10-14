@@ -142,6 +142,12 @@ object DynamicRulesManager {
     @Volatile private var activeLockerHosts: List<String> = emptyList()
     @Volatile private var activeSearchStrategies: Map<String, List<JSONObject>> = emptyMap()
 
+    // Track 6 (OTA-configured remote error logging): the /api/logs/client-error
+    // sink. Empty string = reporting disabled. Read fresh on every report, so
+    // relocating the server redirects every client on the next OTA sync —
+    // the exact reason this lives in rules and not BuildConfig.
+    @Volatile private var remoteLoggingUrl: String = ""
+
     // Declarative step pipelines: search/episode navigation as OTA data
     // (see PipelineModels.kt). Sites whose provider reads a pipeline here
     // keep their compiled code as per-call fallback.
@@ -221,6 +227,16 @@ object DynamicRulesManager {
 
     fun getLockerHosts(): List<String> =
         activeLockerHosts.ifEmpty { emptyList() }
+
+    /** OTA-configured client-error sink for RemoteLogger; "" = disabled. */
+    fun getRemoteLoggingUrl(): String = remoteLoggingUrl
+
+    /** AES-128 key for RemoteLogger's encrypted report envelopes: the SAME
+     *  hex key that obfuscates the OTA rules payload (RULES_KEY_HEX, mirror
+     *  of scripts/encrypt_rules.py). One secret to hold: whoever can read
+     *  scraper_rules payloads can read telemetry reports, and nobody else —
+     *  the server sink, by design, cannot. */
+    internal fun telemetryCipherKey(): ByteArray = hexToBytes(RULES_KEY_HEX)
 
     fun getTokenTtlMs(): Long = tokenTtlMinutes * 60_000L
 
@@ -530,6 +546,16 @@ object DynamicRulesManager {
                 }
             }
 
+            // Remote error-log sink (Track 6): accepted only as a plausible
+            // http(s) endpoint — anything else is treated as absent rather
+            // than handed to URL.openConnection. Published with the rest of
+            // the state in the atomic-swap block below.
+            val remoteLogCandidate = obj.optString("remote_logging_url", "").trim()
+            val remoteLogSink =
+                if (remoteLogCandidate.startsWith("https://") || remoteLogCandidate.startsWith("http://")) {
+                    remoteLogCandidate
+                } else ""
+
             val ttl = obj.optLong("tokenTtlMinutes", 10L).coerceIn(1L, 240L)
 
             // Ordered search strategy chains: when a site's primary search
@@ -617,6 +643,7 @@ object DynamicRulesManager {
             activeSearchStrategies = searchStrategies
             activePipelines = pipelines
             dynamicProviders = dynProviders
+            remoteLoggingUrl = remoteLogSink
             tokenTtlMinutes = ttl
             _version.value = ver
             true

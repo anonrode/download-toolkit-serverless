@@ -252,6 +252,7 @@ object NameSanitizer {
         }
 
         val rawClean = rawEpisodeLabel.trim()
+        val isZipLabel = rawClean.contains("ZIP", ignoreCase = true) || rawClean.contains("Complete Season", ignoreCase = true)
         val partMatch = Regex("""\b(?:part|cd)\s*(\d+)\b""", RegexOption.IGNORE_CASE).find(rawClean)
         val isMovieLabel = rawClean.matches(
             Regex("""^(full\s*movie|movie|download(\s*\d+)?|server\s*\d+|mirror\s*\d+|link\s*\d+|watch\s*now|watch\s*movie)$""", RegexOption.IGNORE_CASE)
@@ -264,6 +265,15 @@ object NameSanitizer {
 
         val explicitSm = Regex("""\bS(\d{1,2})[-_]?E(\d{1,3})\b""", RegexOption.IGNORE_CASE).find(rawClean)
         val epMatch = Regex("""\b(?:episode|ep|e)\s*(\d{1,3})\b""", RegexOption.IGNORE_CASE).find(rawClean)
+
+        if (isZipLabel) {
+            val explicitZipSeason = Regex("""\bS(\d{1,2})\b""", RegexOption.IGNORE_CASE).find(rawClean)?.groupValues?.get(1)?.toIntOrNull()
+                ?: seasonMatch?.let { m ->
+                    (m.groupValues[1].ifEmpty { m.groupValues[2].ifEmpty { m.groupValues[3] } }).toIntOrNull()
+                } ?: if (episodeNum >= 100) (episodeNum / 100) else 1
+            val zs = explicitZipSeason.toString().padStart(2, '0')
+            return safeComponent("$cleanShow S${zs} Complete Season ZIP", maxChars = 80)
+        }
 
         // Single movie / multi-part movie detection:
         // No season in show title, no explicit season/episode in raw label,

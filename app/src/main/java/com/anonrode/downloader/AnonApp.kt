@@ -45,6 +45,10 @@ class AnonApp : Application(), ImageLoaderFactory {
             }
         } catch (_: Throwable) {}
         com.anonrode.downloader.util.CrashHandler.install(this)
+        // Fatal-crash + watchdog-timeout sink (Track 6). Stores context only;
+        // the endpoint arrives via OTA rules and reporting stays a no-op
+        // until it provisions one.
+        com.anonrode.downloader.util.RemoteLogger.install(this)
         appScope.launch {
             try {
                 // Non-critical startup initializations: disk I/O, AES decryption,
@@ -56,6 +60,9 @@ class AnonApp : Application(), ImageLoaderFactory {
                 initYoutubeDlInternal(this@AnonApp)
                 maybeSyncRules()
                 if (ytdlpReady) maybeUpdateYoutubeDL()
+                // The "logs on the server" half (Wi-Fi-only, once/day, same
+                // kill-switch as the fatal reports; silent when anything's off).
+                com.anonrode.downloader.util.LogUploader.maybeUploadDaily(this@AnonApp)
             } catch (t: Throwable) {
                 Log.e("AnonApp", "Background initialization error", t)
             }
@@ -84,10 +91,16 @@ class AnonApp : Application(), ImageLoaderFactory {
             val last = prefs.getLong(KEY_LAST_YTDLP_UPDATE, 0L)
             val now = System.currentTimeMillis()
             if (now - last < UPDATE_INTERVAL_MS) return
-            val status = YoutubeDL.getInstance()
-                .updateYoutubeDL(this, YoutubeDL.UpdateChannel.STABLE)
-            prefs.edit().putLong(KEY_LAST_YTDLP_UPDATE, now).apply()
-            Log.i("AnonApp", "yt-dlp update: $status")
+            // YtDlpCore owns the channel choice (default MASTER/nightly —
+            // YouTube's bot-check fixes land there first) and the one-shot
+            // fallback onto the other channel.
+            val outcome = com.anonrode.downloader.util.YtDlpCore.updateNow(this)
+            if (outcome.ok) {
+                prefs.edit().putLong(KEY_LAST_YTDLP_UPDATE, now).apply()
+                Log.i("AnonApp", "yt-dlp auto-update: ${outcome.message} (${outcome.channelUsed})")
+            } else {
+                Log.w("AnonApp", "yt-dlp auto-update failed: ${outcome.message}")
+            }
         } catch (t: Throwable) {
             Log.w("AnonApp", "yt-dlp update failed, keeping bundled binary", t)
         }

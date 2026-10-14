@@ -82,7 +82,14 @@ object InstagramPhotoMuxer {
         val artist: String?,
         val caption: String?,
         val hasVideo: Boolean,
-        val carouselPhotoUrls: List<String> = emptyList()
+        val carouselPhotoUrls: List<String> = emptyList(),
+        /** Audio-bearing VIDEO children of a mixed carousel (live-verified on
+         *  post DeALkBtIwSB 2026-10-14: mixed photo/video carousels expose
+         *  `is_video:true, has_audio:true` children with video_versions URLs
+         *  in the logged-out page payload — the ONLY anonymous audio source,
+         *  since REST/GraphQL audio fields are login-gated everywhere). */
+        val carouselVideoUrls: List<String> = emptyList(),
+        val carouselVideoDurationMs: Long = 0L
     )
 
     // ------------------------------------------------------------------ pure
@@ -251,8 +258,11 @@ object InstagramPhotoMuxer {
             ?: m.optString("caption").takeIf { it.isNotBlank() }
             ?: m.optJSONObject("edge_media_to_caption")?.optJSONArray("edges")?.optJSONObject(0)
                 ?.optJSONObject("node")?.optString("text")?.takeIf { it.isNotBlank() }
+        val (videoClips, videoDurationMs) =
+            if (isCarousel) carouselVideoClips(m) else emptyList<String>() to 0L
         return MediaParts(photoUrl, audioUrl, durationMs, title, artist, caption,
-            hasVideo = false, carouselPhotoUrls = carouselPhotos)
+            hasVideo = false, carouselPhotoUrls = carouselPhotos,
+            carouselVideoUrls = videoClips, carouselVideoDurationMs = videoDurationMs)
     }
 
     private fun bestCandidate(candidates: JSONArray?): String? {
@@ -270,6 +280,57 @@ object InstagramPhotoMuxer {
             if (w > bestW) { bestW = w; best = url }
         }
         return best ?: candidates.optJSONObject(0)?.optString("url")?.takeIf { it.isNotBlank() }
+    }
+
+    /** All AUDIO-BEARING VIDEO children of a mixed carousel — each reduced to
+     *  its SMALLEST video candidate (audio extraction is bitrate-blind, so
+     *  only mobile data is conserved). Returns url and the child's declared
+     *  duration (0 when absent) for the slideshow's per-slide math. */
+    private fun carouselVideoClips(m: JSONObject): Pair<List<String>, Long> {
+        val urls = mutableListOf<String>()
+        var durationMs = 0L
+        val collect: (JSONObject) -> Unit = { child ->
+            val isVideo = child.optBoolean("is_video", false) ||
+                (child.optJSONArray("video_versions")?.length() ?: 0) > 0
+            if (isVideo) {
+                val versions = child.optJSONArray("video_versions")
+                val url = versions?.let { arr ->
+                    var best: String? = null
+                    var bestRatio = Long.MAX_VALUE / 2
+                    if (arr != null) {
+                        for (i in 0 until arr.length()) {
+                            val v = arr.optJSONObject(i) ?: continue
+                            val u = v.optString("url").takeIf { it.isNotBlank() } ?: continue
+                            val w = v.optLong("width", 0L).coerceAtLeast(1L)
+                            val h = v.optLong("height", 0L).coerceAtLeast(1L)
+                            val ratio = w * h
+                            if (ratio < bestRatio) { bestRatio = ratio; best = u }
+                        }
+                    }
+                    best
+                } ?: child.optString("video_url").takeIf { it.isNotBlank() }
+                    ?: child.optString("playable_url").takeIf { it.isNotBlank() }
+                if (url != null) {
+                    urls.add(url)
+                    if (durationMs == 0L) {
+                        durationMs = (child.optDouble("duration", 0.0) * 1000).toLong().coerceAtLeast(0L)
+                    }
+                }
+            }
+        }
+        m.optJSONArray("carousel_media")?.let { cm ->
+            for (i in 0 until cm.length()) {
+                cm.optJSONObject(i)?.let(collect)
+            }
+        }
+        if (urls.isEmpty()) {
+            m.optJSONObject("edge_sidecar_to_children")?.optJSONArray("edges")?.let { edges ->
+                for (i in 0 until edges.length()) {
+                    edges.optJSONObject(i)?.optJSONObject("node")?.let(collect)
+                }
+            }
+        }
+        return urls to durationMs
     }
 
     /** ALL PHOTO children of a carousel — video children are skipped on the
@@ -391,7 +452,9 @@ object InstagramPhotoMuxer {
             common.addAll(listOf("-framerate", "1", "-loop", "1", "-i", cover, "-i", audio,
                 "-vf", scale, "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-shortest"))
         } else {
-            common.addAll(listOf("-framerate", "1", "-loop", "1", "-i", cover, "-t", "3",
+            // 5s silent hold when the post carries no music — the monolith's
+            // exact payload (-t 5), so the user still gets a playable video.
+            common.addAll(listOf("-framerate", "1", "-loop", "1", "-i", cover, "-t", "5",
                 "-vf", scale, "-pix_fmt", "yuv420p"))
         }
         val x264 = ArrayList(common).apply { addAll(listOf("-c:v", "libx264", "-preset", "veryfast", "-tune", "stillimage")) }
@@ -627,6 +690,13 @@ object InstagramPhotoMuxer {
         if (cookieFile != null) {
             com.anonrode.downloader.data.net.HttpClient.loadCookiesFromFile(cookieFile)
         }
+        // Audio availability is purely a session question (live-verified on
+        // post DeALkBtIwSB 2026-10-14): REST/GraphQL are login-gated without
+        // cookies and answer HTML shells, so the log must show which world
+        // we are probing in or a missing track is undiagnosable.
+        DebugLog.backend(
+            "task=$taskId ig-mux probe start: cookies=${if (cookieFile != null) "YES" else "NO"} (audio via REST music field or has_audio carousel video siblings)"
+        )
         val parts = try {
             probeMedia(shortcode, isCancelled) ?: return null
         } catch (ce: CancellationException) {
@@ -637,33 +707,73 @@ object InstagramPhotoMuxer {
         }
         if (parts.hasVideo || parts.photoUrl.isBlank()) return null
 
-        // If the post has no audio (still picture without music), save directly as JPG without ffmpeg
-        if (parts.audioUrl.isBlank()) {
-            return deliverStillPhotos(outDir, shortcode, parts)
-        }
-
+        // Monolith parity (src/extractors/instagram_muxer.py): a photo post
+        // is ALWAYS finished as a video — still image + music muxed when the
+        // track was found, a silent still-video / screenshot slideshow when
+        // it was not. The earlier shortcut that handed back raw .jpg files
+        // here is what produced "downloaded pictures that error on tap": a
+        // still image is not a play artifact, and the player rightly refused
+        // it. deliverStillPhotos stays exactly where the monolith puts
+        // success-chances at risk — cover/audio fetch failure, missing
+        // ffmpeg, or a failed encode — as the last resort, not the plan.
         val work = File(outDir, ".igmux-$taskId").apply { mkdirs() }
         val produced = File(outDir, buildFilename(shortcode, parts))
         var delivered = false
         try {
-            // ---------- fetch audio (shared for both single + slideshow)
-            val audio = if (parts.audioUrl.isNotBlank()) {
-                val audExt = guessExt(parts.audioUrl, ".m4a")
-                val a = fetchTo(work, "audio$audExt", parts.audioUrl)
-                if (a == null) {
-                    DebugLog.backend("task=$taskId ig-mux: audio fetch failed, falling back to still photos")
-                    return deliverStillPhotos(outDir, shortcode, parts)
-                }
-                if (isCancelled()) throw CancellationException("IG mux cancelled after audio fetch")
-                a
-            } else null
-
             val lib = File(context.applicationInfo.nativeLibraryDir, "libffmpeg.so")
             if (!lib.exists()) {
                 DebugLog.backend("task=$taskId ig-mux: bundled ffmpeg not found at ${lib.name}, falling back to still photos")
                 return deliverStillPhotos(outDir, shortcode, parts)
             }
             try { lib.setExecutable(true) } catch (_: Exception) {}
+
+            // ---------- audio ladder (shared for both single + slideshow):
+            // 1) the licensed music track when the (login-gated) REST surface
+            //    answered; 2) the sound borrowed from a VIDEO sibling of a
+            //    mixed carousel — anonymous, extracted from the smallest
+            //    video_versions candidate; 3) silent slideshow. The old
+            //    behaviour (music fetch fail -> stills) threw away a perfectly
+            //    good video for one bad hop.
+            val audio: File? = when {
+                parts.audioUrl.isNotBlank() -> {
+                    val audExt = guessExt(parts.audioUrl, ".m4a")
+                    val a = fetchTo(work, "audio$audExt", parts.audioUrl)
+                    if (a == null) {
+                        DebugLog.backend("task=$taskId ig-mux: music fetch failed — continuing silent")
+                        null
+                    } else {
+                        if (isCancelled()) throw CancellationException("IG mux cancelled after audio fetch")
+                        a
+                    }
+                }
+                parts.carouselVideoUrls.isNotEmpty() -> {
+                    // smallest sibling — audio extraction is bitrate-blind
+                    val clip = fetchTo(work, "audio_source.mp4", parts.carouselVideoUrls.first())
+                    if (clip == null) {
+                        DebugLog.backend("task=$taskId ig-mux: video sibling fetch failed — continuing silent")
+                        null
+                    } else {
+                        if (isCancelled()) throw CancellationException("IG mux cancelled after sibling clip fetch")
+                        val extracted = File(work, "audio.m4a")
+                        val ok = runFffmpeg(
+                            listOf(lib.absolutePath, "-hide_banner", "-loglevel", "error", "-y",
+                                "-i", clip.absolutePath, "-vn", "-acodec", "aac", "-b:a", "192k",
+                                extracted.absolutePath),
+                            context.cacheDir, isCancelled
+                        ) && extracted.exists() && extracted.length() > 0
+                        if (ok) {
+                            DebugLog.backend("task=$taskId ig-mux: audio recovered from video sibling (${extracted.length() / 1024} KiB)")
+                            extracted
+                        } else {
+                            DebugLog.backend("task=$taskId ig-mux: sibling audio extraction failed — continuing silent")
+                            null
+                        }
+                    }
+                }
+                else -> null
+            }
+            val effectiveDurationMs = parts.durationMs.takeIf { it > 0L }
+                ?: (if (audio?.name == "audio.m4a") parts.carouselVideoDurationMs else 0L)
 
             // ---------- slideshow path: 2+ carousel photos
             val isSlideshow = parts.carouselPhotoUrls.size >= 2
@@ -680,8 +790,10 @@ object InstagramPhotoMuxer {
                     DebugLog.backend("task=$taskId ig-mux: slideshow slide fetch failed, falling back to still photos")
                     return deliverStillPhotos(outDir, shortcode, parts)
                 }
-                // duration per slide: song length / num slides (min 3s per slide)
-                val durationMs = if (parts.durationMs > 0) parts.durationMs else (slideFiles.size * 5000L)
+                // duration per slide: audio length / num slides (min 3s per
+                // slide). The sibling-borrowed audio carries the clip's
+                // declared duration when the REST surface never answered.
+                val durationMs = if (effectiveDurationMs > 0) effectiveDurationMs else (slideFiles.size * 5000L)
                 val perSlideSec = (durationMs.toDouble() / slideFiles.size / 1000.0).coerceAtLeast(3.0)
                 // build concat list file
                 val concatFile = File(work, "slides.txt")

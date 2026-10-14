@@ -1,5 +1,6 @@
 package com.anonrode.downloader.ui.screens
 
+import androidx.compose.animation.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -20,12 +21,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.anonrode.downloader.ui.components.QualityChipRow
+import com.anonrode.downloader.ui.components.SegmentBar
+import com.anonrode.downloader.ui.components.SegmentCell
 import com.anonrode.downloader.ui.theme.*
+import com.anonrode.downloader.ui.util.pressScale
 import com.anonrode.downloader.viewmodel.MainViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -66,43 +70,47 @@ fun SocialModal(
                 .fillMaxWidth()
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = Spacing.lg)
-                .padding(bottom = Spacing.xxl)
+                .padding(bottom = Spacing.xl)
         ) {
-            // Header with badge & Close button
+            // ---- Identity: WHO is downloading (mirrors the rebuilt
+            //      QuickShare sheet — ink-on-accent mark, no violet badge). ----
             Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = Spacing.xs),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(Spacing.md)
             ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(Spacing.sm)
+                Box(
+                    modifier = Modifier
+                        .size(42.dp)
+                        .clip(RoundedCornerShape(Radius.md))
+                        .background(AccentPrimary),
+                    contentAlignment = Alignment.Center
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .background(AccentViolet.copy(alpha = 0.15f), RoundedCornerShape(Radius.sm))
-                            .padding(horizontal = Spacing.sm, vertical = Spacing.xs)
-                    ) {
-                        Text(
-                            text = cleanPlatform,
-                            color = AccentViolet,
-                            fontSize = Type.label.fontSize,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
+                    Icon(
+                        imageVector = Icons.Rounded.Download,
+                        contentDescription = null,
+                        tint = BackgroundDark,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+                Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "Quick Download",
-                        fontSize = Type.screenTitle.fontSize,
+                        text = "Anon Downloader",
+                        fontSize = Type.rowTitle.fontSize,
                         fontWeight = FontWeight.Bold,
                         color = TextPrimary
                     )
+                    Text(
+                        text = "Shared link · $cleanPlatform",
+                        fontSize = Type.caption.fontSize,
+                        color = TextMuted,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
                 }
-
                 IconButton(
                     onClick = onDismiss,
-                    modifier = Modifier.size(48.dp)
+                    modifier = Modifier.size(44.dp)
                 ) {
                     Box(
                         modifier = Modifier
@@ -121,133 +129,123 @@ fun SocialModal(
                 }
             }
 
-            Spacer(modifier = Modifier.height(Spacing.sm))
+            Spacer(modifier = Modifier.height(Spacing.md))
 
-            // URL Preview Box
-            Box(
+            // ---- Media: the shared artifact, URL shown as data ----
+            Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(Radius.md))
+                    .clip(RoundedCornerShape(Radius.lg))
                     .background(SurfaceCard)
-                    .border(1.dp, BorderHairline, RoundedCornerShape(Radius.md))
-                    .padding(Spacing.md)
+                    .border(1.dp, BorderHairline, RoundedCornerShape(Radius.lg))
+                    .padding(Spacing.sm),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(Spacing.md)
             ) {
+                Box(
+                    modifier = Modifier
+                        .size(56.dp)
+                        .clip(RoundedCornerShape(Radius.sm))
+                        .background(SurfaceElevated)
+                        .border(1.dp, Color.White.copy(alpha = 0.1f), RoundedCornerShape(Radius.sm)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = cleanPlatform.take(2).uppercase(),
+                        fontSize = Type.label.fontSize,
+                        fontWeight = FontWeight.Black,
+                        color = TextSecondary
+                    )
+                }
                 Text(
                     text = url,
-                    fontSize = Type.label.fontSize,
+                    fontSize = Type.micro.fontSize,
+                    fontFamily = FontFamily.Monospace,
                     color = TextSecondary,
                     maxLines = 2,
-                    overflow = TextOverflow.Ellipsis
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
                 )
             }
 
             Spacer(modifier = Modifier.height(Spacing.md))
 
-            // Unified Segmented Control (Video vs Audio)
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(Radius.full))
-                    .background(SurfaceCard)
-                    .border(1.dp, BorderHairline, RoundedCornerShape(Radius.full))
-                    .padding(Spacing.xxs),
-                horizontalArrangement = Arrangement.spacedBy(Spacing.xxs)
-            ) {
-                // Video Tab
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .clip(RoundedCornerShape(Radius.full))
-                        .background(if (!audioOnly) AccentPrimary else Color.Transparent)
-                        .clickable { audioOnly = false }
-                        // 48dp tall like QuickShare's identical segment control
-                        // (design pass): the ~36dp padding-only version was
-                        // the sub-minimum half of a two-implementations bug.
-                        .height(48.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(Spacing.xs)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Videocam,
-                            contentDescription = null,
-                            tint = if (!audioOnly) BackgroundDark else TextSecondary,
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Text(
-                            text = "Video (MP4)",
-                            fontSize = Type.label.fontSize,
-                            fontWeight = if (!audioOnly) FontWeight.Bold else FontWeight.Normal,
-                            color = if (!audioOnly) BackgroundDark else TextSecondary
-                        )
-                    }
-                }
-
-                // Audio Tab
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .clip(RoundedCornerShape(Radius.full))
-                        .background(if (audioOnly) AccentPrimary else Color.Transparent)
-                        .clickable { audioOnly = true }
-                        .height(48.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(Spacing.xs)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Audiotrack,
-                            contentDescription = null,
-                            tint = if (audioOnly) BackgroundDark else TextSecondary,
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Text(
-                            text = "Audio Only (MP3)",
-                            fontSize = Type.label.fontSize,
-                            fontWeight = if (audioOnly) FontWeight.Bold else FontWeight.Normal,
-                            color = if (audioOnly) BackgroundDark else TextSecondary
-                        )
-                    }
-                }
-            }
-
-            if (!audioOnly) {
-                Spacer(modifier = Modifier.height(Spacing.sm))
-                // Quality Chips
-                QualityChipRow(
-                    options = listOf("480p", "720p", "1080p", "Best"),
-                    selected = selectedQuality,
-                    onSelect = { selectedQuality = it }
+            // ---- Format ----
+            SegmentBar {
+                SegmentCell(
+                    selected = !audioOnly,
+                    onClick = { audioOnly = false },
+                    icon = Icons.Rounded.Videocam,
+                    label = "Video (MP4)",
+                    modifier = Modifier.weight(1f)
+                )
+                SegmentCell(
+                    selected = audioOnly,
+                    onClick = { audioOnly = true },
+                    icon = Icons.Rounded.Audiotrack,
+                    label = "Audio (MP3)",
+                    modifier = Modifier.weight(1f)
                 )
             }
 
-            Spacer(modifier = Modifier.height(Spacing.sm))
+            // ---- Quality (video only) ----
+            AnimatedVisibility(
+                visible = !audioOnly,
+                enter = fadeIn() + expandVertically(),
+                exit = fadeOut() + shrinkVertically()
+            ) {
+                Column {
+                    Spacer(modifier = Modifier.height(Spacing.sm))
+                    SegmentBar {
+                        listOf("480p", "720p", "1080p", "Best").forEach { q ->
+                            SegmentCell(
+                                selected = selectedQuality == q,
+                                onClick = { selectedQuality = q },
+                                label = q,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
+                }
+            }
 
-            // Remember instant download toggle
+            Spacer(modifier = Modifier.height(Spacing.md))
+
+            // ---- Instant: the skip-this-dialog switch ----
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable { alwaysInstant = !alwaysInstant },
+                    .clickable { alwaysInstant = !alwaysInstant }
+                    .padding(horizontal = Spacing.xs, vertical = Spacing.xs),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Checkbox(
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Download instantly",
+                        fontSize = Type.body.fontSize,
+                        fontWeight = FontWeight.SemiBold,
+                        color = TextPrimary
+                    )
+                    Text(
+                        text = "Skip this dialog next time",
+                        fontSize = Type.caption.fontSize,
+                        color = TextMuted
+                    )
+                }
+                Switch(
                     checked = alwaysInstant,
                     onCheckedChange = { alwaysInstant = it },
-                    colors = CheckboxDefaults.colors(checkedColor = AccentViolet)
-                )
-                Text(
-                    text = "Always download instantly (skip this dialog)",
-                    fontSize = Type.label.fontSize,
-                    color = TextSecondary
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = BackgroundDark,
+                        checkedTrackColor = StatusSuccess
+                    )
                 )
             }
 
             Spacer(modifier = Modifier.height(Spacing.md))
 
+            // ---- The one action ----
+            val dlSrc = remember { MutableInteractionSource() }
             Button(
                 onClick = {
                     if (enqueued) return@Button
@@ -274,13 +272,22 @@ fun SocialModal(
                     )
                     onDismiss()
                 },
-                modifier = Modifier.fillMaxWidth().height(48.dp),
+                enabled = !enqueued,
+                interactionSource = dlSrc,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(52.dp)
+                    .pressScale(dlSrc),
                 shape = RoundedCornerShape(Radius.md),
                 colors = ButtonDefaults.buttonColors(containerColor = AccentPrimary, contentColor = BackgroundDark)
             ) {
                 Icon(Icons.Rounded.Download, contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(modifier = Modifier.width(Spacing.xs))
-                Text("Download Now", fontWeight = FontWeight.Bold)
+                Spacer(modifier = Modifier.width(Spacing.sm))
+                Text(
+                    text = if (audioOnly) "Download audio" else "Download ${selectedQuality}",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = Type.sectionTitle.fontSize
+                )
             }
         }
     }

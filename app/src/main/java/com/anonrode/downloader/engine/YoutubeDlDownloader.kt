@@ -29,14 +29,18 @@ object YoutubeDlDownloader {
     // (no reply / DNS fail); explodie.org and anirena.com verified alive.
     // anirena is an anime tracker -- relevant for this app's content.
     private val TIER1_TRACKERS = listOf(
+        "https://tracker.foreverpirates.co:443/announce",
+        "http://tracker.opentrackr.org:1337/announce",
+        "http://tracker.anirena.com:80/announce",
+        "http://tracker.dler.org:6969/announce",
+        "http://tracker.mywaifu.best:6969/announce",
         "udp://tracker.opentrackr.org:1337/announce",
         "udp://open.stealth.si:80/announce",
         "udp://tracker.bittor.pw:1337/announce",
         "udp://tracker.dler.org:6969/announce",
         "udp://exodus.desync.com:6969/announce",
         "udp://open.demonii.com:1337/announce",
-        "udp://explodie.org:6969/announce",
-        "http://tracker.anirena.com:80/announce"
+        "udp://explodie.org:6969/announce"
     ).joinToString(",")
 
     /** File extensions that are never the produced media artifact (subtitle
@@ -332,10 +336,10 @@ object YoutubeDlDownloader {
                 addOption("--buffer-size", "1M")
                 addOption("--http-chunk-size", "2M")
                 addOption("--socket-timeout", "15")
-                addOption("--retries", "10")
-                addOption("--fragment-retries", "10")
-                addOption("--retry-sleep", "10")
-                addOption("--retry-sleep", "fragment:exp=1:20")
+                addOption("--retries", "5")
+                addOption("--fragment-retries", "5")
+                addOption("--retry-sleep", "3")
+                addOption("--retry-sleep", "fragment:3")
                 // Fail loudly instead of letting yt-dlp skip missing fragments
                 // and silently produce a video with gaps in it.
                 addOption("--abort-on-unavailable-fragments")
@@ -366,10 +370,10 @@ object YoutubeDlDownloader {
                 addOption("--buffer-size", "1M")
                 addOption("--http-chunk-size", "2M")
                 addOption("--socket-timeout", "15")
-                addOption("--retries", "10")
-                addOption("--fragment-retries", "10")
-                addOption("--retry-sleep", "10")
-                addOption("--retry-sleep", "fragment:exp=1:20")
+                addOption("--retries", "5")
+                addOption("--fragment-retries", "5")
+                addOption("--retry-sleep", "3")
+                addOption("--retry-sleep", "fragment:3")
                 addOption("--abort-on-unavailable-fragments")
                 if (speedLimitKbs > 0) addOption("--limit-rate", "${speedLimitKbs}K")
             } else {
@@ -666,7 +670,12 @@ object YoutubeDlDownloader {
                 errors.contains("only still photos", ignoreCase = true)
             )
             val friendlyError = if (isIgPhoto) {
-                "Unable to extract Instagram photo or media stream. Please verify the post is public."
+                // Photo post saved; audio recovery depends on an anonymous
+                // audio source (video carousel sibling) or the login-gated
+                // REST music surface. Live-verified 2026-10-14 on
+                // DeALkBtIwSB — mixed carousels recover the audio from their
+                // has_audio video children, logged out, no session needed.
+                "Photo post saved. Instagram hides this post's music from every logged-out surface, so it could not be included."
             } else {
                 "yt-dlp failed after $attempts attempt(s): ${errors.toString().trim()}"
             }
@@ -707,6 +716,25 @@ object YoutubeDlDownloader {
             }
 
             var dest = File(targetDir, "$baseStem.$finalExt")
+            if (dest.exists()) {
+                val isBogus = dest.length() == 0L || run {
+                    try {
+                        dest.inputStream().use { ins ->
+                            val buf = ByteArray(256)
+                            val n = ins.read(buf)
+                            if (n <= 0) true
+                            else {
+                                val head = String(buf, 0, n, Charsets.US_ASCII).trimStart().lowercase()
+                                head.startsWith("<!doctype html") || head.startsWith("<html") ||
+                                    head.startsWith("<head") || head.startsWith("<body") || head.startsWith("{")
+                            }
+                        }
+                    } catch (_: Exception) { false }
+                }
+                if (isBogus) {
+                    try { dest.delete() } catch (_: Throwable) {}
+                }
+            }
             var n = 1
             while (dest.exists()) {
                 dest = File(targetDir, "$baseStem ($n).$finalExt")

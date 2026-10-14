@@ -3,7 +3,10 @@
 package com.anonrode.downloader.ui.screens
 
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
@@ -11,6 +14,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
@@ -41,7 +45,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.anonrode.downloader.BuildConfig
 import com.anonrode.downloader.data.rules.DynamicRulesManager
+import com.anonrode.downloader.ui.components.MediaPlayerPrefs
 import com.anonrode.downloader.ui.theme.*
+import com.anonrode.downloader.ui.util.pressScale
+import com.anonrode.downloader.util.YtDlpCore
 import com.anonrode.downloader.util.UpdateCheckResult
 import com.anonrode.downloader.util.UpdateChecker
 import com.anonrode.downloader.viewmodel.MainViewModel
@@ -107,6 +114,10 @@ internal class SettingsState(
     var isUpdatingYtDlp by mutableStateOf(false)
     var isSyncingRules by mutableStateOf(false)
     var updateState by mutableStateOf<UpdateUiState>(UpdateUiState.Idle)
+    // yt-dlp core transparency (user directive: the sync button must work and
+    // the nightly channel must be reachable): the installed extractor version
+    // is surfaced right in the row; the channel choice rides YtDlpCore.
+    var ytdlpVersion by mutableStateOf<String?>(null)
 
     fun snapshot() = SettingsStateSnapshot(
         maxConcurrent = maxConcurrent,
@@ -215,6 +226,20 @@ private fun rememberSettingsState(
  *  LazyColumn so off-screen categories do not compose at all — the structural
  *  fix for the "first open is slow" symptom that the sheet had. */
 @Composable
+/** The five settings drawers (approved re-group, 2026-10-14). Pure
+ *  re-grouping: every existing control renders inside exactly one of these —
+ *  none added except the two player defaults that already had stored prefs,
+ *  and the remote-reporting switch that wires RemoteLogger's real kill-switch. */
+internal enum class SettingsDrawer(val label: String, val sub: String, val count: Int) {
+    PLAYBACK("Playback", "Quality · subtitles · player defaults", 5),
+    DOWNLOADS("Downloads", "Parallelism · organize · limits", 9),
+    CONNECTIONS("Connections", "Stall · retries · torrents · Wi-Fi", 8),
+    UPDATES("Updates & Reliability", "Site logic · yt-dlp core · reporting", 5),
+    LOGS("Privacy & Logs", "Content filter · logging · diagnostics", 4)
+}
+
+private val SettingsEasing = CubicBezierEasing(0.2f, 0f, 0f, 1f)
+
 fun SettingsScreen(
     viewModel: MainViewModel,
     themeMode: String,
@@ -233,12 +258,14 @@ fun SettingsScreen(
     // Auto night flip), not just the chips in this screen.
     LaunchedEffect(themeMode) { state.themeMode = themeMode }
 
-    // Advanced starts collapsed (UI research round): retry counts, log
-    // retention and the OTA/diagnostic tools are the controls almost nobody
-    // opens weekly, and folding them away removes roughly 40% of the scroll
-    // length. rememberSaveable so a rotation or a tab switch doesn't re-hide
-    // a section the user just opened.
-    var advancedExpanded by rememberSaveable { mutableStateOf(false) }
+    // Drawer navigation: null = hub. The top-bar back arrow and system back
+    // both close the open drawer first — system back never leaps out of
+    // Settings while the user is inside a drawer.
+    var openDrawerName by rememberSaveable { mutableStateOf<String?>(null) }
+    val currentDrawer = openDrawerName?.let { name ->
+        SettingsDrawer.entries.firstOrNull { it.name == name }
+    }
+    BackHandler(enabled = currentDrawer != null) { openDrawerName = null }
 
     val lifecycleOwner = LocalLifecycleOwner.current
     // Two jobs on one observer:
@@ -266,302 +293,95 @@ fun SettingsScreen(
 
     Scaffold(
         containerColor = BackgroundDark,
-        // The outer MainScaffold already excludes the system bars around the
-        // tab content; the default here folded them into `padding` AGAIN
-        // (dead band above "Settings", extra nav-height gap at the bottom).
-        // The TopAppBar still self-insets the status bar — that one stays
-        // correct because the inner content now starts at the very top.
-        contentWindowInsets = WindowInsets(0.dp),
-        topBar = {
-            TopAppBar(
-                title = {
-                    Text(
-                        text = "Settings",
-                        fontWeight = FontWeight.Black,
-                        fontSize = Type.screenTitle.fontSize,
-                        color = TextPrimary
-                    )
-                },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(
-                            imageVector = Icons.Default.ArrowBack,
-                            contentDescription = "Back to Search",
-                            tint = TextPrimary
-                        )
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = BackgroundDark,
-                    titleContentColor = TextPrimary,
-                    navigationIconContentColor = TextPrimary
-                )
-            )
-        }
+        contentWindowInsets = WindowInsets(0.dp)
     ) { padding ->
-        // The back arrow is always visible: this is the only way to reach
-        // Settings in the new design, but a deep link / external launch that
-        // lands on Settings still needs a way out that doesn't exit the app.
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
                 .background(BackgroundDark)
+                .statusBarsPadding()
         ) {
-            LazyColumn(
+            // Header: the back arrow closes a drawer first — the only way out
+            // of Settings itself stays on the hub (onBack).
+            Row(
                 modifier = Modifier
-                    .fillMaxSize()
-                    .padding(horizontal = Spacing.lg),
-                contentPadding = PaddingValues(bottom = Spacing.xxl)
+                    .fillMaxWidth()
+                    .padding(horizontal = Spacing.lg, vertical = Spacing.md),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                // Order is frequency of use, not developer concern (UI research
-                // round): the behaviour settings people touch weekly come
-                // first, the once-a-year OTA/diagnostic tools fold into
-                // Advanced, and About goes last — it used to sit between Media
-                // and Network, which made the page read as unordered.
-                item {
-                    SettingsGeneralSection(state = state)
-                    Spacer(modifier = Modifier.height(Spacing.lg))
-                }
-                item {
-                    SettingsAppearanceSection(
-                        state = state,
-                        onThemeChanged = onThemeChanged
+                IconButton(onClick = { if (currentDrawer != null) openDrawerName = null else onBack() }) {
+                    Icon(
+                        imageVector = Icons.Default.ArrowBack,
+                        contentDescription = if (currentDrawer != null) "Back to Settings" else "Back to Search",
+                        tint = TextPrimary,
+                        modifier = Modifier.size(20.dp)
                     )
-                    Spacer(modifier = Modifier.height(Spacing.lg))
                 }
-                item {
-                    SettingsEngineSection(state = state)
-                    Spacer(modifier = Modifier.height(Spacing.lg))
-                }
-                item {
-                    SettingsMediaSection(state = state)
-                    Spacer(modifier = Modifier.height(Spacing.lg))
-                }
-                item {
-                    SettingsTorrentsSection(state = state)
-                    Spacer(modifier = Modifier.height(Spacing.lg))
-                }
-                item {
-                    SettingsNetworkSection(state = state)
-                    Spacer(modifier = Modifier.height(Spacing.lg))
-                }
-                item {
-                    SettingsAdvancedSection(
-                        expanded = advancedExpanded,
-                        onToggle = { advancedExpanded = !advancedExpanded },
-                        state = state,
-                        rulesVersion = rulesVersion,
-                        scope = scope
-                    )
-                    Spacer(modifier = Modifier.height(Spacing.lg))
-                }
-                item {
-                    SettingsAboutSection(
-                        state = state,
-                        uiState = uiState,
-                        viewModel = viewModel,
-                        scope = scope,
-                        onDismiss = onBack
-                    )
-                    Spacer(modifier = Modifier.height(Spacing.xl))
-                    // No Save button: every control instant-persists via
-                    // SettingsState.persist (see the sheet host above).
+                Spacer(modifier = Modifier.width(Spacing.sm))
+                Text(
+                    text = currentDrawer?.label?.uppercase() ?: "SETTINGS",
+                    fontWeight = FontWeight.Black,
+                    fontSize = Type.screenTitle.fontSize,
+                    color = TextPrimary,
+                    letterSpacing = 1.sp
+                )
+            }
+
+            AnimatedContent(
+                targetState = currentDrawer,
+                transitionSpec = {
+                    val forward = targetState != null
+                    (slideInHorizontally(
+                        animationSpec = tween(Motion.DurationSlow, easing = SettingsEasing)
+                    ) { full -> if (forward) full else -full / 3 } +
+                        fadeIn(tween(Motion.DurationSlow, easing = SettingsEasing))) togetherWith
+                        (slideOutHorizontally(
+                            animationSpec = tween(Motion.DurationSlow, easing = SettingsEasing)
+                        ) { full -> if (forward) -full / 3 else full } +
+                            fadeOut(tween(Motion.DurationSlow, easing = SettingsEasing)))
+                },
+                label = "settingsDrawer"
+            ) { drawer ->
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .verticalScroll(rememberScrollState())
+                        .padding(horizontal = Spacing.lg, bottom = Spacing.xl)
+                ) {
+                    when (drawer) {
+                        SettingsDrawer.PLAYBACK -> SettingsPlaybackSection(state = state)
+                        SettingsDrawer.DOWNLOADS -> SettingsDownloadsSection(state = state)
+                        SettingsDrawer.CONNECTIONS -> SettingsConnectionsSection(state = state)
+                        SettingsDrawer.UPDATES -> SettingsUpdatesSection(
+                            state = state,
+                            rulesVersion = rulesVersion,
+                            scope = scope,
+                            uiState = uiState,
+                            viewModel = viewModel
+                        )
+                        SettingsDrawer.LOGS -> SettingsLogsSection(state = state)
+                        null -> SettingsHub(
+                            state = state,
+                            uiState = uiState,
+                            onThemeChanged = onThemeChanged,
+                            onOpen = { drawer -> openDrawerName = drawer.name }
+                        )
+                    }
                 }
             }
         }
     }
 }
 
-// ============================================================
-//                     SECTION COMPOSABLES
-// ============================================================
-
+/** Theme tri-cell: clipped VERBATIM from the old Appearance section (same
+ *  selected-state, same callback) and promoted to the hub — the one control
+ *  people change at arm's length never belongs two taps deep. */
 @Composable
-internal fun SettingsAdvancedSection(
-    expanded: Boolean,
-    onToggle: () -> Unit,
-    state: SettingsState,
-    rulesVersion: String,
-    scope: kotlinx.coroutines.CoroutineScope
-) {
-    val chevronRotation by animateFloatAsState(
-        targetValue = if (expanded) 180f else 0f,
-        animationSpec = tween(Motion.DurationFast),
-        label = "advancedChevron"
-    )
-    // Same visual language as SettingsCategoryHeader (uppercase caption,
-    // muted, tracked) plus a chevron — this row IS the disclosure control, so
-    // it is one ≥48dp tap target rather than a label with a small icon.
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(Radius.sm))
-            .clickable(role = Role.Button, onClick = onToggle)
-            .padding(vertical = Spacing.xs),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Text(
-            text = "ADVANCED",
-            fontSize = Type.caption.fontSize,
-            fontWeight = FontWeight.Bold,
-            color = TextMuted,
-            letterSpacing = 0.8.sp,
-            modifier = Modifier
-                .weight(1f)
-                .semantics { heading() }
-                .padding(start = Spacing.xs)
-        )
-        Text(
-            text = if (expanded) "HIDE" else "SYNC · LOGS · DIAGNOSTICS",
-            fontSize = Type.micro.fontSize,
-            fontWeight = FontWeight.Bold,
-            color = TextMuted,
-            letterSpacing = 0.8.sp
-        )
-        Icon(
-            imageVector = Icons.Rounded.ArrowDropDown,
-            contentDescription = null,
-            tint = TextMuted,
-            modifier = Modifier.size(20.dp).rotate(chevronRotation)
-        )
-    }
-    AnimatedVisibility(visible = expanded) {
-        Column {
-            Spacer(modifier = Modifier.height(Spacing.sm))
-            SettingsSelfHealingSection(
-                state = state,
-                rulesVersion = rulesVersion,
-                scope = scope
-            )
-            Spacer(modifier = Modifier.height(Spacing.lg))
-            SettingsDiagnosticsSection(state = state)
-        }
-    }
-}
-
-@Composable
-internal fun SettingsSelfHealingSection(
-    state: SettingsState,
-    rulesVersion: String,
-    scope: kotlinx.coroutines.CoroutineScope
-) {
-    val context = LocalContext.current
-    SettingsCategoryHeader(title = "Self-Healing & Core Updates")
-    SettingsCard {
-        SettingsActionRow(
-            icon = Icons.Rounded.CloudDownload,
-            title = "Sync Scraper & Site Logic",
-            subtitle = "Version: $rulesVersion",
-            action = {
-                if (state.isSyncingRules) {
-                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = AccentPrimary)
-                } else {
-                    FilledTonalButton(
-                        onClick = {
-                            state.isSyncingRules = true
-                            scope.launch {
-                                val (ok, ver) = DynamicRulesManager.syncFromGitHub(context)
-                                state.isSyncingRules = false
-                                if (ok) {
-                                    Toast.makeText(context, "Synced fresh logic: $ver", Toast.LENGTH_SHORT).show()
-                                } else {
-                                    Toast.makeText(context, "Sync error: $ver", Toast.LENGTH_SHORT).show()
-                                }
-                            }
-                        },
-                        colors = ButtonDefaults.filledTonalButtonColors(
-                            containerColor = AccentPrimary.copy(alpha = 0.16f),
-                            contentColor = AccentPrimary
-                        ),
-                        border = BorderStroke(1.dp, AccentPrimary.copy(alpha = 0.45f)),
-                        shape = RoundedCornerShape(Radius.sm)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Refresh,
-                            contentDescription = null,
-                            modifier = Modifier.size(14.dp)
-                        )
-                        Spacer(Modifier.width(6.dp))
-                        Text("Sync Now", fontSize = Type.caption.fontSize, fontWeight = FontWeight.Bold)
-                    }
-                }
-            }
-        )
-
-        HorizontalDivider(color = BorderHairline, modifier = Modifier.padding(horizontal = Spacing.md))
-
-        SettingsActionRow(
-            icon = Icons.Rounded.Refresh,
-            title = "yt-dlp Core Engine",
-            subtitle = "Over-the-air extractor fixes for IG/TikTok/FB",
-            action = {
-                if (state.isUpdatingYtDlp) {
-                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = AccentPrimary)
-                } else {
-                    FilledTonalButton(
-                        onClick = {
-                            state.isUpdatingYtDlp = true
-                            scope.launch(Dispatchers.IO) {
-                                try {
-                                    val status = YoutubeDL.getInstance().updateYoutubeDL(context, YoutubeDL.UpdateChannel.STABLE)
-                                    withContext(Dispatchers.Main) {
-                                        state.isUpdatingYtDlp = false
-                                        // Match on .name (never a guessed
-                                        // constant) so this compiles against
-                                        // every library version's enum.
-                                        val msg = when (status?.name) {
-                                            "UP_TO_DATE", "NO_UPDATE", "UNDEFINED" -> "Core is already up to date"
-                                            "NEW_VERSION_AVAILABLE" -> "Core updated to the latest build"
-                                            "ERROR" -> "Core update failed (yt-dlp reported an error)"
-                                            null -> "Core update finished — the library reported no status"
-                                            else -> "Core update: $status"
-                                        }
-                                        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
-                                    }
-                                } catch (t: Throwable) {
-                                    withContext(Dispatchers.Main) {
-                                        state.isUpdatingYtDlp = false
-                                        // The old catch said "Core is up to
-                                        // date" for EVERY failure — a dead
-                                        // network or a failed download wore
-                                        // the costume of good news.
-                                        Toast.makeText(
-                                            context,
-                                            "Core update failed: ${t.message ?: t.javaClass.simpleName}",
-                                            Toast.LENGTH_LONG
-                                        ).show()
-                                    }
-                                }
-                            }
-                        },
-                        colors = ButtonDefaults.filledTonalButtonColors(
-                            containerColor = AccentPrimary.copy(alpha = 0.16f),
-                            contentColor = AccentPrimary
-                        ),
-                        border = BorderStroke(1.dp, AccentPrimary.copy(alpha = 0.45f)),
-                        shape = RoundedCornerShape(Radius.sm)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Refresh,
-                            contentDescription = null,
-                            modifier = Modifier.size(14.dp)
-                        )
-                        Spacer(Modifier.width(6.dp))
-                        Text("Update Core", fontSize = Type.caption.fontSize, fontWeight = FontWeight.Bold)
-                    }
-                }
-            }
-        )
-    }
-}
-
-@Composable
-internal fun SettingsAppearanceSection(
+private fun SettingsThemeControl(
     state: SettingsState,
     onThemeChanged: (String) -> Unit
 ) {
-    SettingsCategoryHeader(title = "Appearance & Theme")
     SettingsCard {
         Row(
             modifier = Modifier
@@ -663,98 +483,422 @@ internal fun SettingsAppearanceSection(
     }
 }
 
+/** The hub: theme, then five drawer cards, then the quiet footer. */
 @Composable
-internal fun SettingsGeneralSection(
-    state: SettingsState
+private fun SettingsHub(
+    state: SettingsState,
+    uiState: com.anonrode.downloader.viewmodel.HomeUiState,
+    onThemeChanged: (String) -> Unit,
+    onOpen: (SettingsDrawer) -> Unit
 ) {
-    SettingsCategoryHeader(title = "Downloads & Automation")
+    SettingsThemeControl(state = state, onThemeChanged = onThemeChanged)
+
+    Spacer(modifier = Modifier.height(Spacing.lg))
+
+    val iconFor: (SettingsDrawer) -> androidx.compose.ui.graphics.vector.ImageVector = {
+        when (it) {
+            SettingsDrawer.PLAYBACK -> Icons.Rounded.PlayArrow
+            SettingsDrawer.DOWNLOADS -> Icons.Rounded.Download
+            SettingsDrawer.CONNECTIONS -> Icons.Rounded.Hub
+            SettingsDrawer.UPDATES -> Icons.Rounded.SystemUpdate
+            SettingsDrawer.LOGS -> Icons.Rounded.BugReport
+        }
+    }
+    val chipColorFor: (SettingsDrawer) -> Color = {
+        when (it) {
+            SettingsDrawer.PLAYBACK -> AccentViolet
+            SettingsDrawer.DOWNLOADS -> StatusSuccess
+            SettingsDrawer.CONNECTIONS -> Color(0xFF22D3EE)
+            SettingsDrawer.UPDATES -> StatusWarning
+            SettingsDrawer.LOGS -> StatusError
+        }
+    }
+    SettingsDrawer.entries.forEach { drawer ->
+        val src = remember { MutableInteractionSource() }
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .pressScale(src)
+                .clip(RoundedCornerShape(Radius.lg))
+                .background(SurfaceCard)
+                .border(1.dp, BorderHairline, RoundedCornerShape(Radius.lg))
+                .clickable(interactionSource = src, indication = null) { onOpen(drawer) }
+                .padding(horizontal = Spacing.md, vertical = Spacing.md),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(Spacing.md)
+        ) {
+            val chipColor = chipColorFor(drawer)
+            Box(
+                modifier = Modifier
+                    .size(40.dp)
+                    .clip(RoundedCornerShape(Radius.md))
+                    .background(chipColor.copy(alpha = 0.14f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = iconFor(drawer),
+                    contentDescription = null,
+                    tint = chipColor,
+                    modifier = Modifier.size(19.dp)
+                )
+            }
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = drawer.label,
+                    fontSize = Type.rowTitle.fontSize,
+                    fontWeight = FontWeight.Bold,
+                    color = TextPrimary
+                )
+                Text(
+                    text = drawer.sub,
+                    fontSize = Type.caption.fontSize,
+                    color = TextMuted,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            Text(
+                text = "${drawer.count}",
+                fontSize = Type.label.fontSize,
+                fontWeight = FontWeight.Bold,
+                color = TextMuted,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(Radius.xs))
+                    .background(SurfaceElevated)
+                    .border(1.dp, BorderHairline, RoundedCornerShape(Radius.xs))
+                    .padding(horizontal = 8.dp, vertical = 3.dp)
+            )
+            Text(
+                text = "›",
+                fontSize = Type.rowTitle.fontSize,
+                fontWeight = FontWeight.Bold,
+                color = TextMuted
+            )
+        }
+        Spacer(modifier = Modifier.height(Spacing.sm))
+    }
+
+    Spacer(modifier = Modifier.height(Spacing.md))
+
+    Text(
+        text = "Anonrode v${BuildConfig.VERSION_NAME} · " +
+            "${uiState.freeStorageGb} GB free of ${uiState.totalStorageGb} GB",
+        fontSize = Type.micro.fontSize,
+        color = Color(0xFF3D4453),
+        modifier = Modifier.fillMaxWidth(),
+        textAlign = androidx.compose.ui.text.style.TextAlign.Center
+    )
+}
+
+/** Playback drawer: the old Media & Quality section (quality chips, subtitles,
+ *  language — verbatim controls) plus the player defaults that previously had
+ *  stored prefs but no home on this screen. */
+@Composable
+internal fun SettingsPlaybackSection(state: SettingsState) {
+    val context = LocalContext.current
+
+    // Player defaults live outside SettingsState (they persist straight into
+    // MediaPlayerPrefs — same file the player reads at open).
+    var playbackSpeed by rememberSaveable { mutableFloatStateOf(MediaPlayerPrefs.getPlaybackSpeed(context)) }
+    var allowBoost by rememberSaveable { mutableStateOf(MediaPlayerPrefs.getAllowVolumeBoost(context)) }
+
+    SettingsCategoryHeader(title = "Video")
+    SettingsCard {
+        Column(modifier = Modifier.padding(Spacing.md)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Rounded.HighQuality, contentDescription = null, tint = AccentPrimary, modifier = Modifier.size(18.dp))
+                Spacer(modifier = Modifier.width(Spacing.sm))
+                Column {
+                    Text("Preferred Stream Resolution", fontSize = Type.body.fontSize, fontWeight = FontWeight.SemiBold, color = TextPrimary)
+                    Text("Default video quality for drama & anime streams", fontSize = Type.caption.fontSize, color = TextMuted)
+                }
+            }
+
+            Spacer(modifier = Modifier.height(Spacing.sm))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(Spacing.sm)
+            ) {
+                listOf("480p", "720p", "1080p").forEach { q ->
+                    val isSel = state.quality == q
+                    FilterChip(
+                        selected = isSel,
+                        onClick = {
+                            state.quality = q
+                            state.persist()
+                        },
+                        label = { Text(q, fontSize = Type.label.fontSize, fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal) },
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = AccentPrimary,
+                            selectedLabelColor = BackgroundDark,
+                            containerColor = SurfaceElevated
+                        ),
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
+        }
+    }
+
+    Spacer(modifier = Modifier.height(Spacing.md))
+
+    SettingsCategoryHeader(title = "Subtitles")
     SettingsCard {
         SettingsSwitchRow(
-            icon = Icons.Rounded.FolderOpen,
-            title = "Auto-Organize Folders",
-            subtitle = "Creates /Download/Anon/<ShowName>/ structure",
-            checked = state.autoOrganize,
-            onCheckedChange = { state.autoOrganize = it; state.persist() }
+            icon = Icons.Rounded.Subtitles,
+            title = "Download Subtitles",
+            subtitle = "Fetches captions for YouTube & social video downloads and embeds them in the file",
+            checked = state.downloadSubs,
+            onCheckedChange = { state.downloadSubs = it; state.persist() }
         )
 
         HorizontalDivider(color = BorderHairline, modifier = Modifier.padding(horizontal = Spacing.md))
 
-        SettingsSwitchRow(
-            icon = Icons.Rounded.FlashOn,
-            title = "Instant Social Download",
-            subtitle = "1-tap download when shared from Instagram/TikTok",
-            checked = state.instantSocial,
-            onCheckedChange = { state.instantSocial = it; state.persist() }
-        )
-
-        HorizontalDivider(color = BorderHairline, modifier = Modifier.padding(horizontal = Spacing.md))
-
-        SettingsSwitchRow(
-            icon = Icons.Rounded.Image,
-            title = "Show Posters in Results",
-            subtitle = "Off saves data: results show a lettered tile instead",
-            checked = state.showPosters,
-            onCheckedChange = {
-                state.showPosters = it
-                // Instant-apply: persisted + live in one write, so the next
-                // search reflects it immediately.
-                state.persist()
+        Column(modifier = Modifier.padding(Spacing.md)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Rounded.Translate, contentDescription = null, tint = AccentPrimary, modifier = Modifier.size(18.dp))
+                Spacer(modifier = Modifier.width(Spacing.sm))
+                Column {
+                    Text("Subtitle Language", fontSize = Type.body.fontSize, fontWeight = FontWeight.SemiBold, color = TextPrimary)
+                    Text("Also picks which embedded track the player shows by default", fontSize = Type.caption.fontSize, color = TextMuted)
+                }
             }
-        )
+            Spacer(modifier = Modifier.height(Spacing.sm))
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(Spacing.sm)
+            ) {
+                SUBTITLE_LANGS.forEach { (code, label) ->
+                    val isSel = state.subLang == code
+                    FilterChip(
+                        selected = isSel,
+                        onClick = {
+                            state.subLang = code
+                            state.persist()
+                        },
+                        label = { Text(label, fontSize = Type.label.fontSize, fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal) },
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = AccentPrimary,
+                            selectedLabelColor = BackgroundDark,
+                            containerColor = SurfaceElevated
+                        )
+                    )
+                }
+            }
+        }
+    }
 
-        HorizontalDivider(color = BorderHairline, modifier = Modifier.padding(horizontal = Spacing.md))
+    Spacer(modifier = Modifier.height(Spacing.md))
 
+    SettingsCategoryHeader(title = "Player Defaults")
+    SettingsCard {
+        Column(modifier = Modifier.padding(Spacing.md)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Rounded.Speed, contentDescription = null, tint = AccentPrimary, modifier = Modifier.size(18.dp))
+                Spacer(modifier = Modifier.width(Spacing.sm))
+                Column {
+                    Text("Default Playback Speed", fontSize = Type.body.fontSize, fontWeight = FontWeight.SemiBold, color = TextPrimary)
+                    Text("The player opens at this speed", fontSize = Type.caption.fontSize, color = TextMuted)
+                }
+            }
+            Spacer(modifier = Modifier.height(Spacing.sm))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(Spacing.sm)
+            ) {
+                listOf(0.75f, 1.0f, 1.25f, 1.5f).forEach { s ->
+                    val isSel = playbackSpeed == s
+                    FilterChip(
+                        selected = isSel,
+                        onClick = {
+                            playbackSpeed = s
+                            MediaPlayerPrefs.setPlaybackSpeed(context, s)
+                        },
+                        label = { Text("${s}×", fontSize = Type.label.fontSize, fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal) },
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = AccentPrimary,
+                            selectedLabelColor = BackgroundDark,
+                            containerColor = SurfaceElevated
+                        ),
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
+        }
+    }
+
+    Spacer(modifier = Modifier.height(Spacing.md))
+
+    SettingsCard {
         SettingsSwitchRow(
-            icon = Icons.Rounded.Shield,
-            title = "Filter Explicit Content",
-            subtitle = "Hide adult, nude, and x-rated titles from Trending and Genre feeds (search is never filtered)",
-            checked = state.filterExplicit,
+            icon = Icons.Rounded.VolumeUp,
+            title = "Allow 150% Volume Boost",
+            subtitle = "Enables the loudness-enhancer boost above 100% in the player",
+            checked = allowBoost,
             onCheckedChange = {
-                state.filterExplicit = it
-                state.persist()
+                allowBoost = it
+                MediaPlayerPrefs.setAllowVolumeBoost(context, it)
             }
         )
     }
 }
 
 @Composable
-internal fun SettingsEngineSection(state: SettingsState) {
-    SettingsCategoryHeader(title = "Engine & Performance")
+internal fun SettingsSelfHealingSection(
+    state: SettingsState,
+    rulesVersion: String,
+    scope: kotlinx.coroutines.CoroutineScope
+) {
+    val context = LocalContext.current
+    SettingsCategoryHeader(title = "Self-Healing & Core Updates")
     SettingsCard {
-        Column(modifier = Modifier.padding(Spacing.md)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Rounded.Speed, contentDescription = null, tint = AccentPrimary, modifier = Modifier.size(18.dp))
-                    Spacer(modifier = Modifier.width(Spacing.sm))
-                    Column {
-                        Text("Parallel Sockets (Turbo & Aria2c)", fontSize = Type.body.fontSize, fontWeight = FontWeight.SemiBold, color = TextPrimary)
-                        Text("High-speed segmented CDN connections (1–16)", fontSize = Type.caption.fontSize, color = TextMuted)
+        SettingsActionRow(
+            icon = Icons.Rounded.CloudDownload,
+            title = "Sync Scraper & Site Logic",
+            subtitle = "Version: $rulesVersion",
+            action = {
+                if (state.isSyncingRules) {
+                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = AccentPrimary)
+                } else {
+                    FilledTonalButton(
+                        onClick = {
+                            state.isSyncingRules = true
+                            scope.launch {
+                                val (ok, ver) = DynamicRulesManager.syncFromGitHub(context)
+                                state.isSyncingRules = false
+                                if (ok) {
+                                    Toast.makeText(context, "Synced fresh logic: $ver", Toast.LENGTH_SHORT).show()
+                                } else {
+                                    Toast.makeText(context, "Sync error: $ver", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        },
+                        colors = ButtonDefaults.filledTonalButtonColors(
+                            containerColor = AccentPrimary.copy(alpha = 0.16f),
+                            contentColor = AccentPrimary
+                        ),
+                        border = BorderStroke(1.dp, AccentPrimary.copy(alpha = 0.45f)),
+                        shape = RoundedCornerShape(Radius.sm)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Refresh,
+                            contentDescription = null,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text("Sync Now", fontSize = Type.caption.fontSize, fontWeight = FontWeight.Bold)
                     }
                 }
-                Text("${state.sockets} conns", fontSize = Type.label.fontSize, fontWeight = FontWeight.Bold, color = AccentPrimary)
             }
-
-            Slider(
-                value = state.sockets.toFloat(),
-                onValueChange = { state.sockets = it.toInt() },
-                onValueChangeFinished = { state.persist() },
-                valueRange = 1f..16f,
-                steps = 15,
-                thumb = { SettingsSliderThumb() },
-                colors = SliderDefaults.colors(
-                    thumbColor = AccentPrimary,
-                    activeTrackColor = AccentPrimary,
-                    inactiveTrackColor = SurfaceElevated
-                )
-            )
-        }
+        )
 
         HorizontalDivider(color = BorderHairline, modifier = Modifier.padding(horizontal = Spacing.md))
 
+        // Core channel: MASTER (nightly) gets YouTube's bot-check/client fixes
+        // weeks before a tagged release ships them (upstream checked 2026-10-14:
+        // latest STABLE was 2026.08.19 — two months of player-client maintenance
+        // behind master). The choice persists and drives BOTH this button and
+        // the engine's daily auto-update (YtDlpCore), with an automatic
+        // cross-channel fallback whenever the chosen channel errors out.
+        var ytdlpChannel by rememberSaveable { mutableStateOf(YtDlpCore.savedChannelName(context)) }
+        LaunchedEffect(Unit) {
+            state.ytdlpVersion = YtDlpCore.currentVersion(context)
+        }
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = Spacing.md, vertical = Spacing.xs),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "Core channel",
+                color = TextSecondary,
+                fontSize = Type.caption.fontSize,
+                modifier = Modifier.weight(1f)
+            )
+            listOf("master" to "Nightly", "stable" to "Stable").forEach { (name, label) ->
+                val selected = ytdlpChannel == name
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(Radius.full))
+                        .background(if (selected) AccentPrimary else SurfaceElevated)
+                        .border(1.dp, if (selected) AccentPrimary else BorderHairline, RoundedCornerShape(Radius.full))
+                        .clickable {
+                            if (!selected) {
+                                ytdlpChannel = name
+                                YtDlpCore.setChannel(context, name)
+                            }
+                        }
+                        .padding(horizontal = 10.dp, vertical = 5.dp)
+                ) {
+                    Text(
+                        text = label,
+                        color = if (selected) BackgroundDark else TextSecondary,
+                        fontSize = Type.caption.fontSize,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+                Spacer(Modifier.width(Spacing.xs))
+            }
+        }
+
+        SettingsActionRow(
+            icon = Icons.Rounded.Refresh,
+            title = "yt-dlp Core Engine",
+            subtitle = state.ytdlpVersion?.let { "Installed version: $it • IG/TikTok/FB fixes" }
+                ?: "Over-the-air extractor fixes for IG/TikTok/FB",
+            action = {
+                if (state.isUpdatingYtDlp) {
+                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = AccentPrimary)
+                } else {
+                    FilledTonalButton(
+                        onClick = {
+                            state.isUpdatingYtDlp = true
+                            scope.launch(Dispatchers.IO) {
+                                // YtDlpCore: saved channel first, automatic
+                                // fallback to the other channel on error, and
+                                // the post-update version in the toast. The
+                                // old inline call reported a guessed message
+                                // and never confirmed what actually landed.
+                                val outcome = YtDlpCore.updateNow(context)
+                                withContext(Dispatchers.Main) {
+                                    state.isUpdatingYtDlp = false
+                                    state.ytdlpVersion = outcome.version
+                                    Toast.makeText(context, outcome.message, Toast.LENGTH_LONG).show()
+                                }
+                            }
+                        },
+                        colors = ButtonDefaults.filledTonalButtonColors(
+                            containerColor = AccentPrimary.copy(alpha = 0.16f),
+                            contentColor = AccentPrimary
+                        ),
+                        border = BorderStroke(1.dp, AccentPrimary.copy(alpha = 0.45f)),
+                        shape = RoundedCornerShape(Radius.sm)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Refresh,
+                            contentDescription = null,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text("Update Core", fontSize = Type.caption.fontSize, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        )
+    }
+}
+
+/** Downloads drawer: parallelism/limits (sliders lifted verbatim from the old
+ *  Engine + Network sections) and the download-flow switches from General +
+ *  Network — all instant-persisting exactly as before. */
+@Composable
+internal fun SettingsDownloadsSection(state: SettingsState) {
+    SettingsCategoryHeader(title = "Tasks & Speed")
+    SettingsCard {
         Column(modifier = Modifier.padding(Spacing.md)) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -778,6 +922,39 @@ internal fun SettingsEngineSection(state: SettingsState) {
                 onValueChangeFinished = { state.persist() },
                 valueRange = 1f..5f,
                 steps = 3,
+                thumb = { SettingsSliderThumb() },
+                colors = SliderDefaults.colors(
+                    thumbColor = AccentPrimary,
+                    activeTrackColor = AccentPrimary,
+                    inactiveTrackColor = SurfaceElevated
+                )
+            )
+        }
+
+        HorizontalDivider(color = BorderHairline, modifier = Modifier.padding(horizontal = Spacing.md))
+
+        Column(modifier = Modifier.padding(Spacing.md)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Rounded.Speed, contentDescription = null, tint = AccentPrimary, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(Spacing.sm))
+                    Column {
+                        Text("Global Speed Limit", fontSize = Type.body.fontSize, fontWeight = FontWeight.SemiBold, color = TextPrimary)
+                        Text("Per-task transfer cap (0 = unlimited)", fontSize = Type.caption.fontSize, color = TextMuted)
+                    }
+                }
+                Text(if (state.speedLimit > 0) "${state.speedLimit} KB/s" else "∞", fontSize = Type.label.fontSize, fontWeight = FontWeight.Bold, color = AccentPrimary)
+            }
+            Slider(
+                value = state.speedLimit.toFloat(),
+                onValueChange = { state.speedLimit = it.toInt() },
+                onValueChangeFinished = { state.persist() },
+                valueRange = 0f..50000f,
+                steps = 19,
                 thumb = { SettingsSliderThumb() },
                 colors = SliderDefaults.colors(
                     thumbColor = AccentPrimary,
@@ -820,122 +997,105 @@ internal fun SettingsEngineSection(state: SettingsState) {
                 )
             )
         }
+    }
 
-        HorizontalDivider(color = BorderHairline, modifier = Modifier.padding(horizontal = Spacing.md))
+    Spacer(modifier = Modifier.height(Spacing.md))
 
+    SettingsCategoryHeader(title = "Behavior & Intake")
+    SettingsCard {
         SettingsSwitchRow(
-            icon = Icons.Rounded.Wifi,
-            title = "Download Torrents Only on Wi-Fi",
-            subtitle = "Protects cellular mobile data balance",
-            checked = state.wifiOnlyTorrents,
-            onCheckedChange = { state.wifiOnlyTorrents = it; state.persist() }
+            icon = Icons.Rounded.FolderOpen,
+            title = "Auto-Organize Folders",
+            subtitle = "Creates /Download/Anon/<ShowName>/ structure",
+            checked = state.autoOrganize,
+            onCheckedChange = { state.autoOrganize = it; state.persist() }
         )
 
         HorizontalDivider(color = BorderHairline, modifier = Modifier.padding(horizontal = Spacing.md))
 
         SettingsSwitchRow(
-            icon = Icons.Rounded.WifiOff,
-            title = "Download Only on Wi-Fi (All)",
-            subtitle = "Gates every download to Wi-Fi, not just torrents",
-            checked = state.wifiOnlyAll,
-            onCheckedChange = { state.wifiOnlyAll = it; state.persist() }
+            icon = Icons.Rounded.FlashOn,
+            title = "Instant Social Download",
+            subtitle = "1-tap download when shared from Instagram/TikTok",
+            checked = state.instantSocial,
+            onCheckedChange = { state.instantSocial = it; state.persist() }
+        )
+
+        HorizontalDivider(color = BorderHairline, modifier = Modifier.padding(horizontal = Spacing.md))
+
+        SettingsSwitchRow(
+            icon = Icons.Rounded.Image,
+            title = "Show Posters in Results",
+            subtitle = "Off saves data: results show a lettered tile instead",
+            checked = state.showPosters,
+            onCheckedChange = {
+                state.showPosters = it
+                state.persist()
+            }
+        )
+
+        HorizontalDivider(color = BorderHairline, modifier = Modifier.padding(horizontal = Spacing.md))
+
+        SettingsSwitchRow(
+            icon = Icons.Rounded.ContentPaste,
+            title = "Auto-Detect Clipboard Links",
+            subtitle = "Shows a snippet when a URL or magnet is copied",
+            checked = state.clipboardDetect,
+            onCheckedChange = { state.clipboardDetect = it; state.persist() }
+        )
+
+        HorizontalDivider(color = BorderHairline, modifier = Modifier.padding(horizontal = Spacing.md))
+
+        SettingsSwitchRow(
+            icon = Icons.Rounded.Notifications,
+            title = "Completion Notifications",
+            subtitle = "Post a notification when a download finishes",
+            checked = state.completionNotifications,
+            onCheckedChange = { state.completionNotifications = it; state.persist() }
         )
     }
 }
 
+/** Privacy & Logs drawer: content filter, the debug switch (state existed but
+ *  had no UI anywhere — an orphan now homed), then the verbatim Diagnostics
+ *  card (retention + log share). */
 @Composable
-internal fun SettingsMediaSection(state: SettingsState) {
-    SettingsCategoryHeader(title = "Media & Quality Formats")
-    SettingsCard {
-        Column(modifier = Modifier.padding(Spacing.md)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Rounded.HighQuality, contentDescription = null, tint = AccentPrimary, modifier = Modifier.size(18.dp))
-                Spacer(modifier = Modifier.width(Spacing.sm))
-                Column {
-                    Text("Preferred Stream Resolution", fontSize = Type.body.fontSize, fontWeight = FontWeight.SemiBold, color = TextPrimary)
-                    Text("Default video quality for drama & anime streams", fontSize = Type.caption.fontSize, color = TextMuted)
-                }
-            }
-
-            Spacer(modifier = Modifier.height(Spacing.sm))
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(Spacing.sm)
-            ) {
-                listOf("480p", "720p", "1080p").forEach { q ->
-                    val isSel = state.quality == q
-                    FilterChip(
-                        selected = isSel,
-                        onClick = {
-                            state.quality = q
-                            // Instant-apply: the very next download picks up
-                            // the new resolution without a Save tap.
-                            state.persist()
-                        },
-                        label = { Text(q, fontSize = Type.label.fontSize, fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal) },
-                        colors = FilterChipDefaults.filterChipColors(
-                            selectedContainerColor = AccentPrimary,
-                            selectedLabelColor = BackgroundDark,
-                            containerColor = SurfaceElevated
-                        ),
-                        modifier = Modifier.weight(1f)
-                    )
-                }
-            }
-        }
-    }
-
+internal fun SettingsLogsSection(state: SettingsState) {
+    SettingsCategoryHeader(title = "Privacy")
     SettingsCard {
         SettingsSwitchRow(
-            icon = Icons.Rounded.Subtitles,
-            title = "Download Subtitles",
-            subtitle = "Fetches captions for YouTube & social video downloads and embeds them in the file",
-            checked = state.downloadSubs,
-            onCheckedChange = { state.downloadSubs = it; state.persist() }
+            icon = Icons.Rounded.Shield,
+            title = "Filter Explicit Content",
+            subtitle = "Hide adult, nude, and x-rated titles from Trending and Genre feeds (search is never filtered)",
+            checked = state.filterExplicit,
+            onCheckedChange = {
+                state.filterExplicit = it
+                state.persist()
+            }
         )
 
         HorizontalDivider(color = BorderHairline, modifier = Modifier.padding(horizontal = Spacing.md))
 
-        Column(modifier = Modifier.padding(Spacing.md)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Rounded.Translate, contentDescription = null, tint = AccentPrimary, modifier = Modifier.size(18.dp))
-                Spacer(modifier = Modifier.width(Spacing.sm))
-                Column {
-                    Text("Subtitle Language", fontSize = Type.body.fontSize, fontWeight = FontWeight.SemiBold, color = TextPrimary)
-                    // 2026-09-14: the same code also drives the player's
-                    // AUTO-selection of an embedded/subtitle track, so an
-                    // English-subbed MKV shows English without a manual pick.
-                    Text("Also picks which embedded track the player shows by default", fontSize = Type.caption.fontSize, color = TextMuted)
-                }
-            }
-            Spacer(modifier = Modifier.height(Spacing.sm))
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(Spacing.sm)
-            ) {
-                SUBTITLE_LANGS.forEach { (code, label) ->
-                    val isSel = state.subLang == code
-                    FilterChip(
-                        selected = isSel,
-                        onClick = {
-                            state.subLang = code
-                            state.persist()
-                        },
-                        label = { Text(label, fontSize = Type.label.fontSize, fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal) },
-                        colors = FilterChipDefaults.filterChipColors(
-                            selectedContainerColor = AccentPrimary,
-                            selectedLabelColor = BackgroundDark,
-                            containerColor = SurfaceElevated
-                        )
-                    )
-                }
-            }
-        }
+        SettingsSwitchRow(
+            icon = Icons.Rounded.BugReport,
+            title = "Debug Logging",
+            subtitle = "Verbose engine internals in the activity log (off = normal level)",
+            checked = state.debugLogging,
+            onCheckedChange = { state.debugLogging = it; state.persist() }
+        )
     }
+
+    Spacer(modifier = Modifier.height(Spacing.md))
+
+    SettingsDiagnosticsSection(state = state)
 }
+
+// Engine & Performance section retired 2026-10-14: its sliders moved to the
+// Downloads drawer (parallel / sockets / storage guard), its Wi-Fi gates moved
+// to the Connections drawer (see SettingsConnectionsSection).
+
+// Media & Quality section retired 2026-10-14: quality chips, subtitle
+// download and language moved to the Playback drawer (SettingsPlaybackSection).
 
 /** Language codes fed to yt-dlp --sub-langs and matched against embedded
  *  track languages in the player ("all" is a valid yt-dlp selector). */
@@ -945,48 +1105,59 @@ internal val SUBTITLE_LANGS = listOf(
     "ko" to "Korean", "all" to "All languages"
 )
 
+/** Updates & Reliability drawer: the self-healing card (sync + yt-dlp core,
+ *  verbatim), the remote-reporting kill-switch wired to RemoteLogger's real
+ *  pref, and the app-update rows lifted verbatim from the old About section
+ *  (its device-storage/version rows became the hub footer). */
 @Composable
-internal fun SettingsAboutSection(
+internal fun SettingsUpdatesSection(
     state: SettingsState,
-    uiState: com.anonrode.downloader.viewmodel.HomeUiState,
-    viewModel: MainViewModel,
-    scope: kotlinx.coroutines.CoroutineScope,
-    onDismiss: () -> Unit
+    rulesVersion: String,
+    scope: kotlinx.coroutines.CoroutineScope
 ) {
     val context = LocalContext.current
-    SettingsCategoryHeader(title = "Storage & About")
-
-    // Manual update check against GitHub Releases (public repo, no
-    // token). Never runs at startup — only when the row is tapped.
-    val runUpdateCheck: () -> Unit = {
-        state.updateState = UpdateUiState.Checking
-        scope.launch {
-            state.updateState = when (val r = UpdateChecker.check()) {
-                is UpdateCheckResult.Available -> UpdateUiState.Available(r.latestTag, r.releaseUrl)
-                is UpdateCheckResult.UpToDate -> UpdateUiState.UpToDate
-                UpdateCheckResult.Error -> UpdateUiState.Error
-            }
-        }
+    var remoteReporting by rememberSaveable {
+        mutableStateOf(com.anonrode.downloader.util.RemoteLogger.isEnabled(context))
     }
 
+    SettingsSelfHealingSection(
+        state = state,
+        rulesVersion = rulesVersion,
+        scope = scope
+    )
+
+    Spacer(modifier = Modifier.height(Spacing.md))
+
+    SettingsCategoryHeader(title = "Remote Error Reporting")
     SettingsCard {
-        SettingsActionRow(
-            icon = Icons.Rounded.Storage,
-            title = "Device Storage",
-            subtitle = "${uiState.freeStorageGb} GB free of ${uiState.totalStorageGb} GB total",
-            action = {}
+        SettingsSwitchRow(
+            icon = Icons.Rounded.CloudUpload,
+            title = "Send Fatal Error Reports",
+            subtitle = "Fatal crashes & stall dumps only — AES-encrypted, capped at 4 KB, sent to our own server. The server stores ciphertext it cannot read.",
+            checked = remoteReporting,
+            onCheckedChange = {
+                remoteReporting = it
+                com.anonrode.downloader.util.RemoteLogger.setEnabled(context, it)
+            }
         )
+    }
 
-        HorizontalDivider(color = BorderHairline, modifier = Modifier.padding(horizontal = Spacing.md))
+    Spacer(modifier = Modifier.height(Spacing.md))
 
-        SettingsActionRow(
-            icon = Icons.Rounded.Info,
-            title = "Anonrode v${BuildConfig.VERSION_NAME}",
-            subtitle = "Serverless 100% On-Device Engine (libaria2c + yt-dlp)",
-            action = {}
-        )
-
-        HorizontalDivider(color = BorderHairline, modifier = Modifier.padding(horizontal = Spacing.md))
+    SettingsCategoryHeader(title = "App Updates")
+    SettingsCard {
+        // Manual update check against GitHub Releases (public repo, no
+        // token). Never runs at startup — only when the row is tapped.
+        val runUpdateCheck: () -> Unit = {
+            state.updateState = UpdateUiState.Checking
+            scope.launch {
+                state.updateState = when (val r = UpdateChecker.check()) {
+                    is UpdateCheckResult.Available -> UpdateUiState.Available(r.latestTag, r.releaseUrl)
+                    is UpdateCheckResult.UpToDate -> UpdateUiState.UpToDate
+                    UpdateCheckResult.Error -> UpdateUiState.Error
+                }
+            }
+        }
 
         val checkState = state.updateState
         SettingsActionRow(
@@ -1007,10 +1178,6 @@ internal fun SettingsAboutSection(
                             color = AccentPrimary,
                             fontSize = Type.caption.fontSize,
                             fontWeight = FontWeight.SemiBold,
-                            // 11sp text + 12dp padding is a ~39dp target; the
-                            // modifier raises it to the 48dp minimum without
-                            // changing how the pill looks (same idiom as the
-                            // Downloads sort chips).
                             modifier = Modifier
                                 .clip(RoundedCornerShape(Radius.xs))
                                 .clickable { UpdateChecker.openInBrowser(context, checkState.url) }
@@ -1077,66 +1244,16 @@ internal fun SettingsAboutSection(
     }
 }
 
+// Network & Privacy section retired 2026-10-14: clipboard detection and
+// completion notifications moved to the Downloads drawer, the global speed
+// limit slider too (SettingsDownloadsSection).
+
+/** Connections drawer: the wire — retries, stall behavior, HLS, torrents and
+ *  the Wi-Fi gates (Wi-Fi switches lifted verbatim from the old Engine
+ *  section; everything else is the retired Torrents section verbatim). */
 @Composable
-internal fun SettingsNetworkSection(state: SettingsState) {
-    SettingsCategoryHeader(title = "Network & Privacy")
-    SettingsCard {
-        SettingsSwitchRow(
-            icon = Icons.Rounded.ContentPaste,
-            title = "Auto-Detect Clipboard Links",
-            subtitle = "Shows a snippet when a URL or magnet is copied",
-            checked = state.clipboardDetect,
-            onCheckedChange = { state.clipboardDetect = it; state.persist() }
-        )
-
-        HorizontalDivider(color = BorderHairline, modifier = Modifier.padding(horizontal = Spacing.md))
-
-        SettingsSwitchRow(
-            icon = Icons.Rounded.Notifications,
-            title = "Completion Notifications",
-            subtitle = "Post a notification when a download finishes",
-            checked = state.completionNotifications,
-            onCheckedChange = { state.completionNotifications = it; state.persist() }
-        )
-
-        HorizontalDivider(color = BorderHairline, modifier = Modifier.padding(horizontal = Spacing.md))
-
-        Column(modifier = Modifier.padding(Spacing.md)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Rounded.Speed, contentDescription = null, tint = AccentPrimary, modifier = Modifier.size(18.dp))
-                    Spacer(modifier = Modifier.width(Spacing.sm))
-                    Column {
-                        Text("Global Speed Limit", fontSize = Type.body.fontSize, fontWeight = FontWeight.SemiBold, color = TextPrimary)
-                        Text("Per-task transfer cap (0 = unlimited)", fontSize = Type.caption.fontSize, color = TextMuted)
-                    }
-                }
-                Text(if (state.speedLimit > 0) "${state.speedLimit} KB/s" else "∞", fontSize = Type.label.fontSize, fontWeight = FontWeight.Bold, color = AccentPrimary)
-            }
-            Slider(
-                value = state.speedLimit.toFloat(),
-                onValueChange = { state.speedLimit = it.toInt() },
-                onValueChangeFinished = { state.persist() },
-                valueRange = 0f..50000f,
-                steps = 19,
-                thumb = { SettingsSliderThumb() },
-                colors = SliderDefaults.colors(
-                    thumbColor = AccentPrimary,
-                    activeTrackColor = AccentPrimary,
-                    inactiveTrackColor = SurfaceElevated
-                )
-            )
-        }
-    }
-}
-
-@Composable
-internal fun SettingsTorrentsSection(state: SettingsState) {
-    SettingsCategoryHeader(title = "Torrents & Peer Limits")
+internal fun SettingsConnectionsSection(state: SettingsState) {
+    SettingsCategoryHeader(title = "Torrents & Peers")
     SettingsCard {
         Column(modifier = Modifier.padding(Spacing.md)) {
             Row(
@@ -1178,9 +1295,12 @@ internal fun SettingsTorrentsSection(state: SettingsState) {
             checked = state.torrentPrivacy,
             onCheckedChange = { state.torrentPrivacy = it; state.persist() }
         )
+    }
 
-        HorizontalDivider(color = BorderHairline, modifier = Modifier.padding(horizontal = Spacing.md))
+    Spacer(modifier = Modifier.height(Spacing.md))
 
+    SettingsCategoryHeader(title = "Retry & Stall")
+    SettingsCard {
         Column(modifier = Modifier.padding(Spacing.md)) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -1260,9 +1380,12 @@ internal fun SettingsTorrentsSection(state: SettingsState) {
                 )
             )
         }
+    }
 
-        HorizontalDivider(color = BorderHairline, modifier = Modifier.padding(horizontal = Spacing.md))
+    Spacer(modifier = Modifier.height(Spacing.md))
 
+    SettingsCategoryHeader(title = "Streams & Data")
+    SettingsCard {
         Column(modifier = Modifier.padding(Spacing.md)) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -1293,8 +1416,32 @@ internal fun SettingsTorrentsSection(state: SettingsState) {
                 )
             )
         }
+
+        HorizontalDivider(color = BorderHairline, modifier = Modifier.padding(horizontal = Spacing.md))
+
+        SettingsSwitchRow(
+            icon = Icons.Rounded.Wifi,
+            title = "Download Torrents Only on Wi-Fi",
+            subtitle = "Protects cellular mobile data balance",
+            checked = state.wifiOnlyTorrents,
+            onCheckedChange = { state.wifiOnlyTorrents = it; state.persist() }
+        )
+
+        HorizontalDivider(color = BorderHairline, modifier = Modifier.padding(horizontal = Spacing.md))
+
+        SettingsSwitchRow(
+            icon = Icons.Rounded.WifiOff,
+            title = "Download Only on Wi-Fi (All)",
+            subtitle = "Gates every download to Wi-Fi, not just torrents",
+            checked = state.wifiOnlyAll,
+            onCheckedChange = { state.wifiOnlyAll = it; state.persist() }
+        )
     }
 }
+
+// Network & Privacy section retired 2026-10-14: clipboard detection, completion
+// notifications and the global speed limit moved to the Downloads drawer
+// (SettingsDownloadsSection) — filter moves to Privacy & Logs.
 
 @Composable
 internal fun SettingsDiagnosticsSection(state: SettingsState) {
