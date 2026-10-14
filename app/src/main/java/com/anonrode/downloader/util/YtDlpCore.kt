@@ -44,13 +44,14 @@ object YtDlpCore {
         } catch (_: Exception) {}
     }
 
-    /** Parses "master"/"stable" into the library enum WITHOUT naming the
-     *  constants — a library whose enum lacks MASTER yields null here and
-     *  the caller silently gets STABLE instead of a compile error. */
-    private fun channel(name: String): YoutubeDL.UpdateChannel {
-        return YoutubeDL.UpdateChannel.values()
-            .firstOrNull { it.name.equals(name, ignoreCase = true) }
-            ?: YoutubeDL.UpdateChannel.STABLE
+    /** Maps the saved channel name onto the library's channel objects —
+     *  direct references (they are stable `object`s in the lib source, not an
+     *  enum): STABLE = GitHub latest release, NIGHTLY = yt-dlp nightly builds,
+     *  MASTER = every-commit builds where the YouTube bot-check work lands. */
+    private fun channel(name: String): YoutubeDL.UpdateChannel = when (name) {
+        STABLE -> YoutubeDL.UpdateChannel.STABLE
+        "nightly" -> YoutubeDL.UpdateChannel.NIGHTLY
+        else -> YoutubeDL.UpdateChannel.MASTER
     }
 
     private fun channelLabel(name: String): String = when (name) {
