@@ -372,11 +372,6 @@ fun QuickShareCard(
         is ParsedUrl.SocialUrl -> "${parsedUrl.platform} video"
         else -> "Shared media"
     }
-    val sourceHost = try {
-        java.net.URI(rawUrl.substringBefore('#')).host ?: platformName
-    } catch (_: Exception) {
-        platformName
-    }
     val posterUrl = (parsedUrl as? ParsedUrl.DramaUrl)?.showCard?.posterUrl.orEmpty()
 
     Card(
@@ -523,7 +518,11 @@ fun QuickShareCard(
                         overflow = TextOverflow.Ellipsis
                     )
                     Text(
-                        text = "$sourceHost · ${if (audioOnly) "Audio (MP3)" else selectedQuality}",
+                        // User directive 2026-10-15 — the meta line identifies by
+                        // KIND ("Drama · 720p"), never by the parsed URL's host;
+                        // the neutral platformName already covers the fallback
+                        // role the old sourceHost derivation tried to play.
+                        text = "$platformName · ${if (audioOnly) "Audio (MP3)" else selectedQuality}",
                         fontSize = Type.caption.fontSize,
                         color = TextSecondary,
                         maxLines = 1,

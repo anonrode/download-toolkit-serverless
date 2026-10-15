@@ -1046,8 +1046,16 @@ private fun taskMetaText(task: DownloadTask): AnnotatedString {
 // itself is untouched in the journal, ℹ️ sheet and the engine's own records.
 private val resolverClassName = Regex("""\b[A-Z][a-zA-Z]*Resolver\b""")
 private val lockerStepName = Regex("""\bDynamicLocker\w*\b""")
+private val failureSiteLabels = Regex(
+    // Site-label prefixes that name no "*Resolver" class ("Vidsrc: mirror
+    // list exhausted") — same plain-words rule as the class names.
+    """\b(?:Vidsrc|Vidsrme|LightDL|FivePlay|Vidmoly|Streamwish|Vidhide|Doodstream|Mixdrop|Streamtape|PixelDrain|Pluto)\b""",
+    RegexOption.IGNORE_CASE
+)
 private val resolverChainPhrase = Regex("""resolver chain""", RegexOption.IGNORE_CASE)
+private val bareResolverWord = Regex("""\bresolvers?\b""", RegexOption.IGNORE_CASE)
 private val otaPipelinePhrase = Regex("""OTA pipeline""")
+private val engineClassName = Regex("""\bDownloadEngine\w*\b""")
 private val failureCrackWord = Regex("""\bcrack(ed|ing)?\b""", RegexOption.IGNORE_CASE)
 private val engineFrameFragment = Regex("""\bengine[/\\]\S*?\.kt:\d+""")
 private val urlInFailureMessage = Regex("""https?://([^/\s]+)\S*""")
@@ -1057,10 +1065,17 @@ private fun humanizeFailure(raw: String): String {
     // keeps the cause a single line. Applied first so no later rule ever
     // rewrites a fragment of the URL itself.
     var s = urlInFailureMessage.replace(raw) { it.groupValues[1] }
-    s = resolverClassName.replace(s, "stream finder")
+    // Locker step BEFORE the class-name rule: "DynamicLockerResolver" matches
+    // BOTH shapes and must speak as its specific step, not the generic
+    // stream finder ("AttemptBudget: DynamicLockerResolver exceeded 12s"
+    // used to lose the locker context entirely).
     s = lockerStepName.replace(s, "locker step")
+    s = resolverClassName.replace(s, "stream finder")
+    s = failureSiteLabels.replace(s, "stream finder")
     s = resolverChainPhrase.replace(s, "stream chain")
+    s = bareResolverWord.replace(s, "stream finder")
     s = otaPipelinePhrase.replace(s, "site playbook")
+    s = engineClassName.replace(s, "downloader")
     // crack / cracked / cracking → the resolv- word-shape equivalent,
     // preserving the sentence's capitalization.
     s = failureCrackWord.replace(s) { m ->

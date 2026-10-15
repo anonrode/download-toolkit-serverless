@@ -703,20 +703,20 @@ private fun MediaPlayerModalImpl(
                         // none persisted): MKV/MP4 embedded tracks surface
                         // here DISABLED by ExoPlayer default — auto-enable
                         // the preferred-language one so subtitles "just
-                        // read" (2026-09-14 request).
+                        // read" (2026-09-14 request). Candidates are kept in
+                        // ONE list shared by the pick and the label: SubRip
+                        // sidecars (converted by the downloader, position-free
+                        // → always render at the bottom) outrank embedded ASS
+                        // tracks whose release-group typesetting can carry
+                        // top-positioned cues (Break Clause 2026-10-15:
+                        // dialogue jumped to the screen top).
+                        val candidates = subGroups
+                            .sortedByDescending {
+                                (it.mediaTrackGroup.getFormat(0).label ?: "")
+                                    .endsWith(".srt", ignoreCase = true)
+                            }
                         val pick = autoPickSubtitleIndex(
-                            subGroups
-                                // SubRip sidecars (converted by the downloader,
-                                // position-free → always render at the bottom)
-                                // outrank embedded ASS tracks whose release-group
-                                // typesetting can carry top-positioned cues
-                                // (Break Clause 2026-10-15: dialogue jumped to
-                                // the screen top).
-                                .sortedByDescending {
-                                    (it.mediaTrackGroup.getFormat(0).label ?: "")
-                                        .endsWith(".srt", ignoreCase = true)
-                                }
-                                .map { g ->
+                            candidates.map { g ->
                                 val f = g.mediaTrackGroup.getFormat(0)
                                 SubTrackInfo(
                                     language = f.language,
@@ -727,9 +727,16 @@ private fun MediaPlayerModalImpl(
                             preferredSubLang
                         )
                         if (pick >= 0) {
-                            val label = subLabels[pick + 1] // +1: "Off" is index 0
-                            currentSubtitleLabel = label
-                            applySubtitleByLabel(exoPlayer, tracks, label, enable = true)
+                            // The label MUST come from the same sorted list
+                            // `pick` indexes into — reading the unsorted sheet
+                            // list desynced pick and override whenever an
+                            // embedded track preceded the .srt sidecar.
+                            val f = candidates[pick].mediaTrackGroup.getFormat(0)
+                            val label = f.label ?: f.language?.uppercase() ?: "Track ${f.id}"
+                            if (label in subLabels) {
+                                currentSubtitleLabel = label
+                                applySubtitleByLabel(exoPlayer, tracks, label, enable = true)
+                            }
                         }
                     }
                 }

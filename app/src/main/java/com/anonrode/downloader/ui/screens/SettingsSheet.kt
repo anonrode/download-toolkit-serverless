@@ -229,7 +229,7 @@ private fun rememberSettingsState(
  *  and the remote-reporting switch that wires RemoteLogger's real kill-switch. */
 internal enum class SettingsDrawer(val label: String, val sub: String, val count: Int) {
     PLAYBACK("Playback", "Quality · subtitles · player defaults", 5),
-    DOWNLOADS("Downloads", "Parallelism · organize · limits", 9),
+    DOWNLOADS("Downloads", "Parallelism · organize · limits", 8),
     CONNECTIONS("Connections", "Stall · retries · torrents · Wi-Fi", 8),
     UPDATES("Updates & Reliability", "Site logic · yt-dlp core · reporting", 5),
     LOGS("Privacy & Logs", "Content filter · logging · diagnostics", 4)
