@@ -16,6 +16,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.anonrode.downloader.ui.theme.*
 import com.anonrode.downloader.ui.util.pressScale
@@ -30,6 +31,10 @@ import com.anonrode.downloader.ui.util.pressScale
 @Composable
 fun SegmentBar(
     modifier: Modifier = Modifier,
+    // v5 Downloads sort rail (notebook §3 "Sort & Segmented Bars"): the
+    // canonical container insets its cells by 3dp. Drawer/sheet bars keep
+    // their historical 4dp (Spacing.xs) via the default.
+    innerPadding: Dp = Spacing.xs,
     content: @Composable androidx.compose.foundation.layout.RowScope.() -> Unit
 ) {
     Row(
@@ -38,7 +43,7 @@ fun SegmentBar(
             .clip(RoundedCornerShape(Radius.md))
             .background(SurfaceCard)
             .border(1.dp, BorderHairline, RoundedCornerShape(Radius.md))
-            .padding(Spacing.xs),
+            .padding(innerPadding),
         horizontalArrangement = Arrangement.spacedBy(Spacing.xs),
         content = content
     )
@@ -50,12 +55,15 @@ fun SegmentCell(
     onClick: () -> Unit,
     label: String,
     modifier: Modifier = Modifier,
-    icon: ImageVector? = null
+    icon: ImageVector? = null,
+    // Canon (notebook §2): the Downloads sort bar is EXACTLY 32dp tall;
+    // drawer/sheet cells keep their 42dp look via the default.
+    cellHeight: Dp = 42.dp
 ) {
     val src = remember { MutableInteractionSource() }
     Row(
         modifier = modifier
-            .height(42.dp)
+            .height(cellHeight)
             .pressScale(src, 0.97f)
             .clip(RoundedCornerShape(Radius.sm))
             .background(if (selected) AccentPrimary else Color.Transparent)

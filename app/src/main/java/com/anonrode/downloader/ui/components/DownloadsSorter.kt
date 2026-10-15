@@ -54,6 +54,27 @@ object DownloadsSorter {
         }
     }
 
+    // -- v5 "Social & Media" offline shelf (zero-chroma Downloads redesign) --
+
+    /**
+     * v5 shelf rule: a FINISHED direct-media download tiles out of the
+     * date/status/size row zones onto the horizontal Social & Media shelf.
+     * The enqueue paths (main VM + QuickShare) stamp social/one-off files
+     * with the showTitle label "Direct Downloads"; show episodes always keep
+     * their real (non-"Direct Downloads") title, so they never shelf and the
+     * Library grouping is untouched. In-flight direct files stay rows until
+     * they complete.
+     */
+    fun isShelfItem(task: DownloadTask): Boolean =
+        task.status == TaskStatus.COMPLETED && task.showTitle == "Direct Downloads"
+
+    /**
+     * Splits the engine snapshot into (shelf tiles, activity rows) per
+     * [isShelfItem]. Pure so JVM tests can pin the grouping rule.
+     */
+    fun splitShelf(tasks: List<DownloadTask>): Pair<List<DownloadTask>, List<DownloadTask>> =
+        tasks.partition { isShelfItem(it) }
+
     // -- Order matters: it's the visible order of the group headers in each mode.
 
     private val DATE_ORDER = listOf("TODAY", "YESTERDAY", "THIS WEEK", "THIS MONTH", "EARLIER")

@@ -209,8 +209,13 @@ class EmulatorGatingSmokeTest {
                 .fetchSemanticsNodes().isNotEmpty()
         }
         composeRule.onNodeWithText("Persisted Task Episode").assertIsDisplayed()
-        // Sanity: the card body reports its PAUSED state.
-        composeRule.onNodeWithText("PAUSED").assertIsDisplayed()
+        // Sanity: the row's mono meta types the state as a plain word (v5
+        // zero-chroma rows have no uppercase badge — injected 0 bytes means
+        // the meta renders exactly "Paused").
+        composeRule.waitUntil(timeoutMillis = 5_000) {
+            composeRule.onAllNodesWithText("Paused").fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNodeWithText("Paused").assertIsDisplayed()
         assertNotNull(repo.find(task.id))
     }
 
@@ -244,7 +249,7 @@ class EmulatorGatingSmokeTest {
             )
         }
         composeRule.waitUntil(timeoutMillis = 10_000) {
-            composeRule.onAllNodesWithText("1.0 MB/s", substring = true)
+            composeRule.onAllNodesWithText("Active", substring = true)
                 .fetchSemanticsNodes().isNotEmpty()
         }
         // Click the Pause button. The button's contentDescription is "Pause"
@@ -252,13 +257,15 @@ class EmulatorGatingSmokeTest {
         // is the right one.
         val tClickNanos = System.nanoTime()
         composeRule.onNodeWithContentDescription("Pause").performClick()
-        // After click, assert that within 1.5s the speed readout is gone AND
-        // the PAUSED badge has replaced the DOWNLOADING one. The 1.5s number
-        // is the user's hard requirement: pause must look instant.
+        // After click, within 1.5s the meta line must have flipped
+        // "Active · …" → "Paused · …". The 1.5s number is the user's hard
+        // requirement: pause must look instant. v5 rows carry no speed
+        // readout — the state word IS the contract.
         composeRule.waitUntil(timeoutMillis = 1_500) {
-            composeRule.onAllNodesWithText("1.0 MB/s", substring = true)
-                .fetchSemanticsNodes().isEmpty() &&
-                composeRule.onAllNodesWithText("PAUSED").fetchSemanticsNodes().isNotEmpty()
+            composeRule.onAllNodesWithText("Paused", substring = true)
+                .fetchSemanticsNodes().isNotEmpty() &&
+                composeRule.onAllNodesWithText("Active", substring = true)
+                    .fetchSemanticsNodes().isEmpty()
         }
         val tElapsedMs = (System.nanoTime() - tClickNanos) / 1_000_000
         // Belt-and-braces: record the elapsed time so a CI run that squeaks
@@ -299,7 +306,8 @@ class EmulatorGatingSmokeTest {
                 .fetchSemanticsNodes().isNotEmpty()
         }
         composeRule.waitUntil(timeoutMillis = 5_000) {
-            composeRule.onAllNodesWithText("PAUSED").fetchSemanticsNodes().isNotEmpty()
+            composeRule.onAllNodesWithText("Paused", substring = true)
+                .fetchSemanticsNodes().isNotEmpty()
         }
         // Belt: a DOWNLOADING affordance (Pause button) must not be present.
         assertEquals(
