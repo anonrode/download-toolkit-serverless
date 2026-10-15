@@ -131,7 +131,7 @@ class TrendingFeedParseTest {
     fun `wpRestUrl pins the live-verified param order`() {
         assertEquals(
             "https://nk.test/wp-json/wp/v2/posts?per_page=15&search=sci-fi&orderby=relevance&_embed=1",
-            TrendingFeed.wpRestUrl("https://nk.test/", "sci-fi", 15, "&orderby=relevance")
+            TrendingFeed.wpRestUrl("https://nk.test/", "sci-fi", 15, extraParams = "&orderby=relevance")
         )
         // Discovery feeds keep date order (no extra params, query null).
         assertEquals(

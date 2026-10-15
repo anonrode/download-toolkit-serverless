@@ -7,6 +7,7 @@ import com.anonrode.downloader.engine.Aria2Control
 import com.anonrode.downloader.engine.FlickerFreeEtaCalculator
 import com.anonrode.downloader.engine.HlsMonotonicProgressReconciler
 import com.anonrode.downloader.engine.ProgressTick
+import com.anonrode.downloader.engine.TurboChunk
 import com.anonrode.downloader.engine.parseEtaString
 import com.anonrode.downloader.providers.AsianCProvider
 import com.anonrode.downloader.providers.DramaKeyProvider
@@ -202,10 +203,25 @@ class FullAppPipelineSimulationTest {
         bitfield[1] = 0xC0.toByte() // pieces 8..9
 
         val inFlightBytes = 512 * 1024L // 512 KB in flight
-        val ctrl = Aria2Control(totalLength, List(pieceCount) { it }, inFlightBytes)
-        
-        // Verified landed bytes must be ~10.5 MB, strictly NOT 100 MB
+        // TurboChunk DNA: pieces 0..9 carry their landed bytes (current > start),
+        // the 90 preallocated-but-empty pieces carry current == start — so a raw
+        // sparse disk read would say 100 MB while verified landed is 10.5 MB.
+        val ctrl = Aria2Control(
+            fileLength = totalLength,
+            pieces = List(pieceCount) { i ->
+                TurboChunk(
+                    start = i.toLong() * pieceSize,
+                    end = (i + 1).toLong() * pieceSize,
+                    current = if (i < 10) (i + 1).toLong() * pieceSize else i.toLong() * pieceSize
+                )
+            },
+            inFlightBytes = inFlightBytes
+        )
+        // The API must agree with the bitfield math below.
         val verified = 10L * pieceSize + inFlightBytes
+        assertEquals(verified, ctrl.verifiedLandedBytes())
+
+        // Verified landed bytes must be ~10.5 MB, strictly NOT 100 MB
         val truePct = (verified.toDouble() / totalLength) * 100.0
         assertTrue("Verified landed percent must be ~10.5%", truePct in 10.0..11.0)
 
@@ -219,12 +235,12 @@ class FullAppPipelineSimulationTest {
         assertEquals(-1L, parseEtaString("NA"))
 
         // 3. Flicker-free ETA smoothing
-        val etaCalc = FlickerFreeEtaCalculator(initialTime = 1000.0)
+        val etaCalc = FlickerFreeEtaCalculator(initialTimeMs = 1000L)
         val initialEta = etaCalc.update(
             currentBytes = 1_000_000L,
             totalBytes = 100_000_000L,
-            speedBytesPerSec = 4_000_000.0,
-            now = 1001.0
+            currentSpeedBps = 4_000_000.0,
+            nowMs = 1001L
         )
         assertTrue("Initial smoothed ETA should be ~25s", initialEta in 20..30)
 
@@ -232,27 +248,23 @@ class FullAppPipelineSimulationTest {
         val dropEta = etaCalc.update(
             currentBytes = 1_000_000L,
             totalBytes = 100_000_000L,
-            speedBytesPerSec = 0.0,
-            now = 1002.0
+            currentSpeedBps = 0.0,
+            nowMs = 1002L
         )
         assertTrue("ETA during temporary zero-speed must remain bounded", dropEta in 20..35)
 
         // 4. HLS Monotonic Progress Reconciler
         val reconciler = HlsMonotonicProgressReconciler(
             estimatedTotal = 100L * 1024L * 1024L,
-            totalSegments = 100
+            segmentCount = 100
         )
 
         var lastPct = 0.0
         for (seg in 1..100) {
             val landed = seg * 1_200_000L // 1.2 MB per segment (underestimated)
-            val tick = reconciler.reconcile(
-                landedBytes = landed,
-                segmentIndex = seg,
-                wireSpeedBps = 3_000_000.0
-            )
-            assertTrue("HLS progress percent must be strictly monotonic", tick.percent >= lastPct)
-            lastPct = tick.percent
+            val tick = reconciler.update(currentSeg = seg, landedBytes = landed)
+            assertTrue("HLS progress percent must be strictly monotonic", tick.third >= lastPct)
+            lastPct = tick.third
         }
         assertEquals("HLS reconciliation must converge to 100% on final segment", 100.0, lastPct, 0.01)
     }
