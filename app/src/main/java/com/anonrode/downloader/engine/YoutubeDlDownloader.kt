@@ -22,6 +22,35 @@ object YoutubeDlDownloader {
             message.contains("read interrupted by close() on another thread")
     }
 
+    /**
+     * Terminal yt-dlp errors: the extractor answered with a condition that
+     * retrying IDENTICAL arguments cannot change. Substring matches, all
+     * lowercase, chosen from live-log failures:
+     *  - "sign in to confirm" — YouTube/YouTube Music bot wall (activity log
+     *    29: all 3 retries of the same task re-hit the identical wall, 48-61s
+     *    wasted per task, plus two 61s watchdog stall kills on silent crawls).
+     *  - "login required" / "log in required" / "private video" /
+     *    "members-only" — platform gates that never clear mid-ladder.
+     *  - "unsupported url" — extractor has no handler for the page shape.
+     * NOT terminal on purpose: transient player/extraction failures, network
+     * errors, and rate limits (those legitimately recover on retry; the
+     * 14-10-23:22 session downloaded a Music video that the bot wall blocked
+     * the day before — so the wall is per-SESSION state, not per-video).
+     */
+    private val TERMINAL_YTDLP_MARKERS = listOf(
+        "sign in to confirm",
+        "login required",
+        "log in required",
+        "private video",
+        "members-only",
+        "unsupported url"
+    )
+
+    private fun isTerminalYtDlpError(message: String?): Boolean {
+        val low = message?.lowercase() ?: return false
+        return TERMINAL_YTDLP_MARKERS.any { low.contains(it) }
+    }
+
     // Task-level retry counts are now AppSettings-backed (pref_magnet_retries /
     // pref_ytdlp_retries), threaded in via download()'s maxAttempts params.
 
@@ -487,6 +516,9 @@ object YoutubeDlDownloader {
         val errors = StringBuilder()
         var produced: File? = null
         var attempts = 0
+        // Last attempt's raw error text, for the terminal-error fail-fast below.
+        var lastErrorMessage: String? = null
+        var terminalErrorHit = false
 
         suspend fun attemptOnce(): File? {
             var lastDl = 0L
@@ -566,6 +598,7 @@ object YoutubeDlDownloader {
                     throw BackendInterruptedException("yt-dlp backend interrupted; preserving partial data")
                 }
                 errors.append("run ").append(attempts).append(": ").append(e.message ?: e.javaClass.simpleName).append('\n')
+                lastErrorMessage = e.message ?: e.javaClass.simpleName
                 // Per-attempt visibility: the aggregate error only lands after
                 // ALL attempts, and an HLS stall gave the log nothing to work
                 // with (audit finding).
@@ -636,6 +669,22 @@ object YoutubeDlDownloader {
                     com.anonrode.downloader.util.DebugLog.backend("task=$taskId yt-dlp: Instagram photo post detected (no video in post) — skipping retry to run photo muxer immediately")
                     break
                 }
+                // Terminal-error fail-fast: the extractor answered with a
+                // bot-check / login wall / unsupported-URL condition. Re-running
+                // the same arguments cannot clear it (activity log 2026-10-29:
+                // music.youtube tasks spent 48-234s re-hitting the identical
+                // "Sign in to confirm you're not a bot" wall, 61.2s on a second
+                // video, including two 61s watchdog stall kills between runs).
+                // Abort the ladder now; the honest reason flows through the
+                // existing failure channel below. A manual retry starts a FRESH
+                // session and is unaffected.
+                if (isTerminalYtDlpError(lastErrorMessage)) {
+                    terminalErrorHit = true
+                    com.anonrode.downloader.util.DebugLog.backend(
+                        "task=$taskId yt-dlp: terminal error (platform bot-check/login wall) — aborting retry ladder after $attempts attempt(s)"
+                    )
+                    break
+                }
                 cancellableRetryWait(2_000L * attempts)
             }
         }
@@ -676,6 +725,12 @@ object YoutubeDlDownloader {
                 // DeALkBtIwSB — mixed carousels recover the audio from their
                 // has_audio video children, logged out, no session needed.
                 "Photo post saved. Instagram hides this post's music from every logged-out surface, so it could not be included."
+            } else if (terminalErrorHit) {
+                // The platform refused anonymous access (bot-check/login wall)
+                // or the extractor has no handler for this page. State the real
+                // reason — the pre-fix aggregate read "failed after N attempt(s)"
+                // with identical wall text three times, which reads like a bug.
+                "The platform is requiring sign-in for this link (bot-check/login wall), so the download cannot proceed anonymously. ${errors.toString().trim().lineSequence().lastOrNull()?.take(200) ?: ""}"
             } else {
                 "yt-dlp failed after $attempts attempt(s): ${errors.toString().trim()}"
             }

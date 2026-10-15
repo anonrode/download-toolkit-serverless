@@ -929,6 +929,17 @@ object VidsrcResolver : BaseResolver {
                 "https://data.vidsrcme.ru/api.php?type=movie&tmdb=$tmdb&stream_urls"
             }
 
+            if (com.anonrode.downloader.data.net.HttpClient.isOriginCoolingDown(apiUrl)) {
+                // The data.vidsrcme.ru API is shared by EVERY embed mirror
+                // (vidsrc.mov/.fyi/vidrock/vidnest/...): once it trips its
+                // Retry-After cooldown, walking more mirrors only re-fetches
+                // embed pages to fail at the same gate. Live log 29: 17 serial
+                // mirror attempts x ~1.6s AFTER the API had gone 429 — the
+                // origin cooldown must cut the walk short (and ResultVerifier's
+                // trending fan-out must not re-queue against it).
+                lastFailure = "Vidsrc: API origin rate-limited (cooldown active) for tmdb=$tmdb"
+                return null
+            }
             val json = HttpClient.getText(apiUrl, referer = "https://cloudorchestranova.com/") ?: run {
                 lastFailure = "Vidsrc: API request failed for $apiUrl"
                 return null

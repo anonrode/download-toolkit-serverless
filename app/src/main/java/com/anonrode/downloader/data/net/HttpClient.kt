@@ -193,6 +193,20 @@ object HttpClient {
     }
 
     /**
+     * True when [url]'s origin is inside an active Retry-After cooldown. Used
+     * by probe paths (that bypass [admitRequest]) so a rate-limited origin is
+     * NEVER re-requested within its cooldown window: activity log 29 showed
+     * data.vidsrcme.ru answering 429/403 to 62 requests (1.5-8.6s of network
+     * time each, ~238s burned across sessions) because only the getText/post
+     * admission gate honored the recorded window — probeTerminal/probe and
+     * the VidsrcResolver mirror walk kept firing through it.
+     */
+    fun isOriginCoolingDown(url: String): Boolean {
+        val safe = try { safeUrl(url) } catch (_: Exception) { return false }
+        return retryAfterCooldown.remainingMs(safe) > 0L
+    }
+
+    /**
      * Hybrid Smart-DNS:
      * 1. Primary: System DNS (fast, geo-routes CDN IPs for max video speeds).
      *    Capped at 3 s — on some Nigerian ISPs the carrier DNS server goes
@@ -1043,6 +1057,14 @@ object HttpClient {
             com.anonrode.downloader.util.DebugLog.net("PROBE refused by isSafeTarget: ${url.take(140)}")
             return false
         }
+        // Never re-request an origin inside its recorded 429/503 cooldown —
+        // the probe would burn its full timeout re-triggering the rate limit
+        // (see isOriginCoolingDown doc). "Not reachable" is the honest answer
+        // for a host that has asked us to back off.
+        if (isOriginCoolingDown(url)) {
+            com.anonrode.downloader.util.DebugLog.net("PROBE ${url.take(140)} skipped — origin in Retry-After cooldown")
+            return false
+        }
         // Request construction (Builder.url, newCall) sits INSIDE the try on
         // purpose: okhttp3 throws IllegalArgumentException for a malformed
         // URL, and probe's contract is "answer true/false, never throw" —
@@ -1124,6 +1146,14 @@ object HttpClient {
     ): TerminalProbe? {
         if (!isSafeTarget(url)) {
             com.anonrode.downloader.util.DebugLog.net("TERMINAL refused by isSafeTarget: ${url.take(140)}")
+            return null
+        }
+        // Origin in its recorded 429/503 cooldown: null (network failure class)
+        // without touching the wire. Resolvers read null as "no proof, defer"
+        // and the download path revalidates after the window — a live host that
+        // asked us to back off is never re-hit inside the window.
+        if (isOriginCoolingDown(url)) {
+            com.anonrode.downloader.util.DebugLog.net("TERMINAL ${url.take(140)} skipped — origin in Retry-After cooldown")
             return null
         }
         // Request construction inside the try, exactly as in [probe]: "returns
