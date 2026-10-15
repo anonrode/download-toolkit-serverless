@@ -3,12 +3,14 @@ package com.anonrode.downloader.ui.screens
 import android.content.Context
 import android.content.Intent
 import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -27,11 +29,14 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.Layout
+import androidx.compose.ui.layout.layoutId
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.LocalView
@@ -39,18 +44,19 @@ import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.progressBarRangeInfo
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import coil.compose.SubcomposeAsyncImage
 import com.anonrode.downloader.data.models.DownloadTask
 import com.anonrode.downloader.data.models.TaskStatus
 import com.anonrode.downloader.ui.components.DownloadsSorter
@@ -65,13 +71,32 @@ import java.io.File
 private const val PREF_SORT = "downloader_settings"
 private const val PREF_SORT_KEY = "pref_downloads_sort"
 
-// ─── Downloads v5 "mature" constants (mock: downloads_mature_v5.html) ───────────
-// Zero-chroma doctrine (mock token card): every surface/text is a Theme.kt
-// token; progress is neutral gray; state is typed as plain words. The ONE
-// non-gray pixel on the whole screen is the muted rust on the single word
-// "Failed" — mock: "one color constant added: failRust = 0xFFC25B52".
-private val FailRust = Color(0xFFC25B52)          // the word "Failed" only (mock --rust)
-private val ProgressFillGray = Color(0xFF9AA0A8)  // meter + row pins (mock --fill; no amber)
+// ─── Downloads v6 status chroma (mock: ui-proposal-downloads-v6-drawer.html) ─────
+// The light paper theme stays; state colour is defined HERE (Theme.kt colors
+// untouched). State is ALWAYS colour + WORD + GLYPH — never colour alone
+// (see downloadStatusStyle below). Mock :root tokens:
+//   --live:#0E7490 --live-tint:#E0F2F7 --live-fill:#1591B3
+//   --done:#1F7A4D --done-tint:#E6F4EC
+//   --paused:#92610F --paused-tint:#FBF1DE
+//   --failed:#A84A42 --failed-tint:#F9E9E7 --failed-acc:#C25B52
+private val LiveWord = Color(0xFF0E7490)
+private val LiveTint = Color(0xFFE0F2F7)
+private val LiveFill = Color(0xFF1591B3)
+private val DoneWord = Color(0xFF1F7A4D)
+private val DoneTint = Color(0xFFE6F4EC)
+private val PausedWord = Color(0xFF92610F)
+private val PausedTint = Color(0xFFFBF1DE)
+private val FailedWord = Color(0xFFA84A42)
+private val FailedTint = Color(0xFFF9E9E7)
+// Mock --failed-acc: the filled RETRY circle, the rust stall meter and the
+// dashed rule above the failure reason (the one non-chrome hue on a card).
+private val FailRust = Color(0xFFC25B52)
+private val MeterTrack = Color(0xFFE2E8EF)        // live meter track (mock .meter)
+private val ChipNeutralBg = Color(0xFFEEF2F6)     // neutral site tag (mock --chipbg)
+private val SiteTagInk = Color(0xFF475569)        // neutral site tag text (mock --sub)
+private val ThumbTile = Color(0xFFE9EFF5)         // initials tile well (mock .thumb .init)
+private val DashRust = Color(0xFFEFD5D2)          // dashed rule (mock .errline border-top)
+private val ProgressFillGray = Color(0xFF9AA0A8)  // whole-screen storage meter pin (unchanged)
 private val ShelfTileDeep = Color(0xFF0C0E11)     // offline-shelf tile well (mock --deep)
 // Glass scrims & hairlines, cited from the mock CSS (.back / .pl / .thumb):
 private val GlassBackScrim = Color(0xB8000000)    // header back circle: black at 72% (0xB8)
@@ -178,7 +203,30 @@ fun DownloadsScreen(
                 }
                 DownloadsSorter.setAgeOverride(task.id, daysAgo)
             }
-            DownloadsSorter.sortDownloads(snapshot, sortMode)
+            val sorted = DownloadsSorter.sortDownloads(snapshot, sortMode)
+            if (sortMode != DownloadsSorter.SORT_DATE) sorted else {
+                // v6 mock frame 1: the transferring set leads the date view in
+                // its own "ACTIVE" section (mock .sect ACTIVE), above the date
+                // buckets — the same active set the summary line counts
+                // (DOWNLOADING / RESOLVING / VALIDATING; QUEUED stays parked in
+                // its date bucket). Pure screen-level regrouping: the sorter
+                // and its tests are untouched.
+                val activeIds = snapshot.asSequence()
+                    .filter {
+                        it.status == TaskStatus.DOWNLOADING ||
+                            it.status == TaskStatus.RESOLVING ||
+                            it.status == TaskStatus.VALIDATING
+                    }
+                    .mapTo(mutableSetOf()) { it.id }
+                if (activeIds.isEmpty()) sorted
+                else buildList {
+                    add("ACTIVE" to sorted.flatMap { it.second }.filter { it.id in activeIds })
+                    sorted.forEach { (header, items) ->
+                        val rest = items.filterNot { it.id in activeIds }
+                        if (rest.isNotEmpty()) add(header to rest)
+                    }
+                }
+            }
         }
     }
 
@@ -223,25 +271,39 @@ fun DownloadsScreen(
         }
     }
 
-    // Header meta line (v5): ONE mono line under the title. Storage part is
-    // whole-GB (the Settings footer exposes whole-GB Longs — mock shows a
-    // decimal, we degrade to the spec's fallback format "X GB of Y GB");
-    // counts-only when StatFs has not reported yet (total == 0).
+    // Header summary line (v6 mock .dl-sub): "X GB of Y GB · N active · N done
+    // · N failed" — each count (number AND word) in that state's colour; the
+    // words keep the state readable, so colour is never the only signal.
+    // Storage part is whole-GB (the Settings footer exposes whole-GB Longs —
+    // mock shows a decimal, we degrade to the spec's fallback format "X GB of
+    // Y GB"); counts-only when StatFs has not reported yet (total == 0).
     val storagePart = if (uiState.totalStorageGb > 0L) {
         val usedGb = (uiState.totalStorageGb - uiState.freeStorageGb).coerceAtLeast(0L)
         "$usedGb GB of ${uiState.totalStorageGb} GB"
     } else null
-    val metaLine = listOfNotNull(
-        storagePart,
-        "${stats.done} done",
-        "${stats.active} active",
-        "${stats.failed} failed"
-    ).joinToString(" · ")
+    val summaryLine = buildAnnotatedString {
+        if (storagePart != null) {
+            append(storagePart)
+            append(" · ")
+        }
+        withStyle(SpanStyle(color = LiveWord, fontWeight = FontWeight.Bold)) {
+            append("${stats.active} active")
+        }
+        append(" · ")
+        withStyle(SpanStyle(color = DoneWord, fontWeight = FontWeight.Bold)) {
+            append("${stats.done} done")
+        }
+        append(" · ")
+        withStyle(SpanStyle(color = FailedWord, fontWeight = FontWeight.Bold)) {
+            append("${stats.failed} failed")
+        }
+    }
 
-    // Toolbar actions (v5): "Resume all" shows when something is paused;
-    // "Retry failed (N)" only when failures exist.
+    // Actions rail (v6): "Resume all" keeps its existing behaviour (shows only
+    // when something is paused); the v5 "Retry failed (N)" toolbar pill is
+    // superseded by the mock's per-card RETRY circle — every failed row now
+    // carries its own filled retry affordance.
     val hasPaused = tasks.any { it.status == TaskStatus.PAUSED }
-    val failedCount = stats.failed
 
     Column(
         modifier = Modifier
@@ -287,11 +349,10 @@ fun DownloadsScreen(
                 )
                 Spacer(modifier = Modifier.height(6.dp))
                 Text(
-                    text = metaLine,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 10.5.sp,
+                    text = summaryLine,
+                    fontSize = 11.sp,
                     color = TextMuted,
-                    maxLines = 2,
+                    maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
             }
@@ -334,38 +395,26 @@ fun DownloadsScreen(
             modifier = Modifier.padding(top = 16.dp)
         )
 
-        // ── TOOLBAR ACTION PILLS (mock .pill: 30dp, hairline, right-aligned) ──
-        if (hasPaused || failedCount > 0) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 16.dp),
-                horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                if (hasPaused) {
-                    ToolbarPill(
-                        label = "Resume all",
-                        icon = Icons.Rounded.PlayArrow,
-                        iconTint = TextPrimary,
-                        labelColor = TextPrimary,
-                        onClick = { viewModel.engine.resumeAll() }
-                    )
-                }
-                if (failedCount > 0) {
-                    ToolbarPill(
-                        label = "Retry failed ($failedCount)",
-                        icon = Icons.Rounded.Refresh,
-                        iconTint = TextSecondary,
-                        labelColor = TextSecondary,
-                        onClick = {
-                            tasks.filter { it.status == TaskStatus.FAILED }.forEach {
-                                viewModel.engine.retry(it.id)
-                            }
-                        }
-                    )
-                }
+        // ── ACTIONS RAIL (mock .actions): "Resume all" ghost on the left, the
+        // right-aligned status legend riding the same single-line row —
+        // everything one line, nothing wraps. ──
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            if (hasPaused) {
+                ToolbarPill(
+                    label = "Resume all",
+                    icon = Icons.Rounded.PlayArrow,
+                    iconTint = TextPrimary,
+                    labelColor = TextPrimary,
+                    onClick = { viewModel.engine.resumeAll() }
+                )
             }
+            Spacer(modifier = Modifier.weight(1f))
+            DownloadsStatusLegend()
         }
 
         if (tasks.isEmpty()) {
@@ -491,25 +540,30 @@ fun DownloadsScreen(
         }
     }
 
-    // Shelf/kebab actions dialog (long-press or ⋮). Finished items get
-    // share-or-delete — both reuse the screen's existing flows (shareMedia's
-    // ACTION_SEND chooser and the gated pendingDeleteTask confirm below).
-    // FAILED rows carry a ⋮ too ("⋮ only" in the v5 spec), but nothing is on
-    // disk to share, so their actions are Retry / Remove via the same
-    // engine callbacks the row itself uses.
+    // ⋮ / kebab actions dialog. Finished items get share-or-delete — both
+    // reuse the screen's existing flows (shareMedia's ACTION_SEND chooser and
+    // the gated pendingDeleteTask confirm below). FAILED rows keep Retry /
+    // Remove via the same engine callbacks the row itself uses. v6: the mock's
+    // cards carry no visible cancel circle, so in-flight/paused/queued rows
+    // reach cancel HERE ("Cancel this download?") — same engine cancel, one
+    // confirm gate, no dead ends.
     pendingActionsTask?.let { target ->
         val failedTarget = target.status == TaskStatus.FAILED
+        val finishedTarget = target.status == TaskStatus.COMPLETED
         AlertDialog(
             onDismissRequest = { pendingActionsTask = null },
             shape = RoundedCornerShape(Radius.lg),
             containerColor = SurfaceCard,
             titleContentColor = TextPrimary,
             textContentColor = TextSecondary,
-            title = { Text(if (failedTarget) "Retry or remove?" else "Share or delete?") },
+            title = { Text(if (failedTarget) "Retry or remove?" else if (finishedTarget) "Share or delete?" else "Cancel this download?") },
             text = {
                 Text(
-                    if (failedTarget) "\"${target.episodeTitle}\" did not finish. Retry now, or remove the dead task?"
-                    else "\"${target.episodeTitle}\" is finished and on this device.",
+                    when {
+                        failedTarget -> "\"${target.episodeTitle}\" did not finish. Retry now, or remove the dead task?"
+                        finishedTarget -> "\"${target.episodeTitle}\" is finished and on this device."
+                        else -> "\"${target.episodeTitle}\" has not finished yet. Cancel it and remove the task?"
+                    },
                     color = TextSecondary,
                     fontSize = Type.body.fontSize,
                     maxLines = 4,
@@ -518,24 +572,35 @@ fun DownloadsScreen(
             },
             confirmButton = {
                 Row(horizontalArrangement = Arrangement.spacedBy(Spacing.xs)) {
-                    if (failedTarget) {
-                        TextButton(onClick = {
-                            pendingActionsTask = null
-                            viewModel.engine.retry(target.id)
-                        }) { Text("Retry", color = TextPrimary) }
-                        TextButton(onClick = {
-                            pendingActionsTask = null
-                            viewModel.engine.cancel(target.id)
-                        }) { Text("Remove", color = TextPrimary) }
-                    } else {
-                        TextButton(onClick = {
-                            pendingActionsTask = null
-                            shareMedia(context, target.filePath)
-                        }) { Text("Share", color = TextPrimary) }
-                        TextButton(onClick = {
-                            pendingActionsTask = null
-                            pendingDeleteTask = target
-                        }) { Text("Delete", color = TextPrimary) }
+                    when {
+                        failedTarget -> {
+                            TextButton(onClick = {
+                                pendingActionsTask = null
+                                viewModel.engine.retry(target.id)
+                            }) { Text("Retry", color = TextPrimary) }
+                            TextButton(onClick = {
+                                pendingActionsTask = null
+                                viewModel.engine.cancel(target.id)
+                            }) { Text("Remove", color = TextPrimary) }
+                        }
+                        finishedTarget -> {
+                            TextButton(onClick = {
+                                pendingActionsTask = null
+                                shareMedia(context, target.filePath)
+                            }) { Text("Share", color = TextPrimary) }
+                            TextButton(onClick = {
+                                pendingActionsTask = null
+                                pendingDeleteTask = target
+                            }) { Text("Delete", color = TextPrimary) }
+                        }
+                        else -> {
+                            // The lost row-level Cancel affordance (v6 cards
+                            // carry Pause/Resume + ⋮ only) — same engine call.
+                            TextButton(onClick = {
+                                pendingActionsTask = null
+                                viewModel.engine.cancel(target.id)
+                            }) { Text("Remove", color = TextPrimary) }
+                        }
                     }
                 }
             },
@@ -650,9 +715,22 @@ private fun ToolbarPill(
     }
 }
 
-/** Group header (mock .gh): 11sp/900 caps in textSecondary, count in muted
- *  gray, optional trailing "Download remaining N" inline action — the
- *  Track-4 chip, restyled inline: 11sp/600 textSecondary, count white/700. */
+/** Group-header count colour (mock .sect .cnt): the mock's CSS paints every
+ *  count live-cyan by default, and status-sorted headers override to their
+ *  own state. Date/size/"Social & Media" headers therefore carry the live
+ *  hue too — cited straight from the approved frame. */
+internal fun groupCountColor(header: String): Color = when (header) {
+    "PAUSED" -> PausedWord
+    "FAILED" -> FailedWord
+    "DONE", "COMPLETED" -> DoneWord
+    else -> LiveWord
+}
+
+/** Group header (mock .sect): 11sp/800 caps, count in the matching state
+ *  colour, then a trailing 1dp hairline rule flexing the remaining width.
+ *  A custom measure keeps the mock's flex: a plain weight() pair would cap
+ *  the header text at half the row and truncate long show titles far too
+ *  early. Optional "Download remaining N" inline action sits before the rule. */
 @Composable
 private fun DownloadsGroupHeader(
     title: String,
@@ -660,30 +738,82 @@ private fun DownloadsGroupHeader(
     remainingCount: Int = 0,
     onDownloadRemaining: (() -> Unit)? = null
 ) {
-    Row(
+    val countColor = groupCountColor(title)
+    val action: (() -> Unit)? = onDownloadRemaining?.takeIf { remainingCount > 0 }
+    Layout(
         modifier = Modifier
             .fillMaxWidth()
             .padding(top = Spacing.sm),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Text(
-            text = title.uppercase(),
-            fontSize = 11.sp,
-            fontWeight = FontWeight.Black,
-            color = TextSecondary,
-            letterSpacing = 1.2.sp,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
+        content = {
+            Text(
+                text = title.uppercase(),
+                fontSize = 11.sp,
+                fontWeight = FontWeight.ExtraBold,
+                color = TextMuted,
+                letterSpacing = 1.2.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.layoutId("title")
+            )
+            Text(
+                text = " · $count",
+                fontSize = 11.sp,
+                fontWeight = FontWeight.ExtraBold,
+                color = countColor,
+                maxLines = 1,
+                modifier = Modifier.layoutId("count")
+            )
+            if (action != null) {
+                Box(modifier = Modifier.layoutId("action")) {
+                    InlineRemainingAction(count = remainingCount, onClick = action)
+                }
+            }
+            Box(
+                modifier = Modifier
+                    .layoutId("rule")
+                    .height(1.dp)
+                    .background(BorderHairline)
+            )
+        }
+    ) { measurables, constraints ->
+        val titleM = measurables.first { it.layoutId == "title" }
+        val countM = measurables.first { it.layoutId == "count" }
+        val ruleM = measurables.first { it.layoutId == "rule" }
+        val actionM = measurables.firstOrNull { it.layoutId == "action" }
+
+        val gap = 6.dp.roundToPx()
+        val loose = Constraints(minWidth = 0, minHeight = 0, maxWidth = constraints.maxWidth)
+        val countP = countM.measure(loose)
+        val actionP = actionM?.measure(loose)
+        // Measure the title against everything except a 16dp rule sliver, so a
+        // pathologically long show title still ellipsizes instead of pushing
+        // the rule out; the rule then flexes whatever the text didn't use.
+        val titleMax = (
+            constraints.maxWidth - countP.width - gap - gap -
+                (actionP?.width?.plus(gap) ?: 0) - 16.dp.roundToPx()
+            ).coerceAtLeast(0)
+        val titleP = titleM.measure(
+            Constraints(minWidth = 0, minHeight = 0, maxWidth = titleMax)
         )
-        Text(
-            text = " · $count",
-            fontSize = 11.sp,
-            color = TextMuted,
-            maxLines = 1
+        val ruleWidth = (
+            constraints.maxWidth - titleP.width - gap - countP.width - gap -
+                (actionP?.width?.plus(gap) ?: 0)
+            ).coerceAtLeast(0)
+        val ruleP = ruleM.measure(
+            Constraints(minWidth = ruleWidth, maxWidth = ruleWidth, minHeight = 0)
         )
-        if (onDownloadRemaining != null && remainingCount > 0) {
-            Spacer(modifier = Modifier.weight(1f))
-            InlineRemainingAction(count = remainingCount, onClick = onDownloadRemaining)
+        val height = maxOf(titleP.height, countP.height, ruleP.height, actionP?.height ?: 0)
+        layout(constraints.maxWidth, height) {
+            var x = 0
+            titleP.placeRelative(0, (height - titleP.height) / 2)
+            x += titleP.width + gap
+            countP.placeRelative(x, (height - countP.height) / 2)
+            x += countP.width + gap
+            if (actionP != null) {
+                actionP.placeRelative(x, (height - actionP.height) / 2)
+                x += actionP.width + gap
+            }
+            ruleP.placeRelative(x, (height - ruleP.height) / 2)
         }
     }
 }
@@ -721,16 +851,21 @@ private fun InlineRemainingAction(count: Int, onClick: () -> Unit) {
     }
 }
 
-/** v5 activity row (mock .row): radius 13 SurfaceCard, min-height 66dp,
- *  40×56 monogram thumb, 11.5sp/700 title + 9.5sp mono meta, 2dp bottom
- *  progress pin on PAUSED/active rows, 32dp trailing circles. Zero chroma —
- *  the only hue allowed is FailRust on the word "Failed". */
+/** v6 activity card (mock .card): white card on the paper background, hairline
+ *  border, radius 18, padding 12/14; 46×58 poster/initials thumb, 13sp/700
+ *  single-line title, 11sp/600 status line (glyph dot + coloured word + grey
+ *  detail — never colour alone), 10sp source chip, 5dp meter (cyan live fill,
+ *  rust stall on failed), failed rows add a dashed rule + the humanized reason
+ *  line. Trailing: 38dp ink circle action + ⋮ (mock .iconbtn/.kebab); failed
+ *  rows carry the filled RETRY circle (mock .iconbtn.fretry). */
 @Composable
 private fun ActivityRow(
     task: DownloadTask,
     onPlay: () -> Unit,
     onPause: () -> Unit,
     onRetry: () -> Unit,
+    // Kept for call-site parity: row-level cancel moved into the ⋮ actions
+    // dialog ("Cancel this download?"), matching the mock's two-control cards.
     onCancel: () -> Unit,
     onOpenActions: () -> Unit
 ) {
@@ -743,29 +878,32 @@ private fun ActivityRow(
     // Performance guard: the monogram is remembered per item (title pair), so
     // progress ticks re-render text but never re-derive the initials.
     val monogram = remember(task.showTitle, task.episodeTitle) { monogramFor(task) }
+    val style = downloadStatusStyle(task.status, neutralInk = TextMuted)
 
     val totalKnown = task.totalBytes > 0
-    val pinTarget = if (totalKnown) {
+    // Failed rows freeze at the last known percentage (rust stall meter); live
+    // rows animate toward the current byte ratio (350ms, as before).
+    val meterTarget = if (totalKnown) {
         (task.downloadedBytes.toFloat() / task.totalBytes.toFloat()).coerceIn(0f, 1f)
     } else 0f
-    val pinFraction by animateFloatAsState(
-        targetValue = pinTarget,
+    val meterFraction by animateFloatAsState(
+        targetValue = if (isDone) 1f else meterTarget,
         animationSpec = tween(durationMillis = 350),
         label = "rowProgress"
     )
     // Unknown total + bytes in flight: indeterminate sweep (same honest signal
-    // the old wide bar used — a static 0% pin would read as a hang).
-    val indeterminate = !totalKnown && task.downloadedBytes > 0 && isActive
+    // as the v5 pin — a static 0% meter would read as a hang).
+    val indeterminate = isActive && !totalKnown && task.downloadedBytes > 0
+    val detail = statusDetailText(task)
 
-    Box(
+    Column(
         modifier = Modifier
             .fillMaxWidth()
-            .heightIn(min = 66.dp)
-            .clip(RoundedCornerShape(13.dp))
+            .clip(RoundedCornerShape(18.dp))
             .background(SurfaceCard)
-            .border(1.dp, BorderHairline, RoundedCornerShape(13.dp))
+            .border(1.dp, BorderHairline, RoundedCornerShape(18.dp))
             // DONE rows open in the player; FAILED rows retry ("tap to retry"
-            // per the v5 spec) — the failed row keeps its normal card, no red.
+            // behavior kept from v5) on top of the primary RETRY circle.
             .clickable(
                 enabled = isDone || isFailed,
                 onClickLabel = if (isFailed) "Retry" else "Play"
@@ -775,57 +913,79 @@ private fun ActivityRow(
                     isDone -> onPlay()
                 }
             }
+            .padding(horizontal = 14.dp, vertical = 12.dp)
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(start = 13.dp, end = 13.dp, top = 11.dp, bottom = 11.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            // Thumb (mock .thumb): 40×56, radius 8, flat monogram tile on a
-            // blend of SurfaceElevated (the task model carries no artwork).
-            Box(
-                modifier = Modifier
-                    .size(width = 40.dp, height = 56.dp)
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(lerp(SurfaceElevated, BackgroundDark, 0.35f))
-                    .border(1.dp, BorderHairline, RoundedCornerShape(8.dp)),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = monogram,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Black,
-                    color = TextMuted
-                )
-            }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            // POSTER GAP (frame 1 renders real art where the source gave it):
+            // DownloadTask (data/models/Models.kt) carries NO artwork field,
+            // and stamping one at enqueue must cross engine.enqueue
+            // (DownloadEngine.kt:428) plus the journal-persisted model —
+            // outside this change's authorized scope. Every card therefore
+            // falls back to the initials tile today; DownloadThumb renders
+            // Coil art the moment a poster URL rides along (single switching
+            // point, right here).
+            DownloadThumb(posterUrl = "", initials = monogram)
 
-            Spacer(modifier = Modifier.width(12.dp))
+            Spacer(modifier = Modifier.width(11.dp))
 
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = task.episodeTitle,
-                    fontSize = 11.5.sp,
+                    fontSize = 13.sp,
                     fontWeight = FontWeight.Bold,
                     color = TextPrimary,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
-                Spacer(modifier = Modifier.height(3.dp))
-                Text(
-                    text = taskMetaText(task),
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 9.5.sp,
-                    color = TextMuted,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                // Honest verification note, if any (rare): rendered as a plain
-                // gray second line — amber warnings are gone under zero-chroma.
+                Spacer(modifier = Modifier.height(4.dp))
+                // Status line (mock .stat): glyph dot 6dp + coloured word +
+                // grey detail — always colour + WORD + GLYPH, single line.
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (style.kind == DownloadStateKind.LIVE) {
+                        StatusDot(color = style.accent, pulse = true)
+                    } else {
+                        Text(
+                            text = style.glyph,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = style.accent
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(5.dp))
+                    Text(
+                        text = style.word,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = style.accent,
+                        maxLines = 1
+                    )
+                    if (detail.isNotEmpty()) {
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = detail,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = TextMuted,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false)
+                        )
+                    }
+                }
+                // Site/source tag (mock .sitetag): only when the record knows
+                // its source — tinted for live/failed, neutral grey otherwise.
+                if (task.site.isNotBlank()) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Row {
+                        SiteTagChip(site = task.site.uppercase(), kind = style.kind)
+                    }
+                }
+                // Honest verification note, if any (rare): plain grey line,
+                // completed cards only (kept from the v5 contract).
                 if (isDone && task.validationNote != null) {
                     Text(
                         text = task.validationNote,
-                        fontSize = 9.5.sp,
+                        fontSize = 10.sp,
                         color = TextMuted,
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
@@ -836,57 +996,56 @@ private fun ActivityRow(
 
             Spacer(modifier = Modifier.width(12.dp))
 
-            // Trailing controls (mock .gho / .solid / .kebab), 12dp apart.
+            // Trailing controls (mock .iconbtn / .fretry / .kebab), 10dp apart.
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 when {
                     isActive -> {
-                        // Behavior guard: pause/resume/cancel must survive, so the
-                        // active row's solid circle is Pause (same solid geometry
-                        // the mock draws for the paused row's Resume).
+                        // Behavior guard: pause/resume must survive — the active
+                        // card's solid circle is Pause (same geometry the mock
+                        // draws for the paused card's Resume).
                         SolidActionButton(icon = Icons.Rounded.Pause, description = "Pause", onClick = onPause)
-                        GhostActionButton(icon = Icons.Rounded.Close, description = "Cancel", onClick = onCancel)
+                        KebabButton(onClick = onOpenActions)
                     }
                     isPaused -> {
                         SolidActionButton(icon = Icons.Rounded.PlayArrow, description = "Resume", onClick = onRetry)
-                        GhostActionButton(icon = Icons.Rounded.Close, description = "Cancel", onClick = onCancel)
+                        KebabButton(onClick = onOpenActions)
                     }
                     isDone -> {
                         SolidActionButton(icon = Icons.Rounded.PlayArrow, description = "Play", onClick = onPlay)
                         KebabButton(onClick = onOpenActions)
                     }
                     isFailed -> {
-                        // Kebab only: the row itself is the retry affordance.
+                        // Primary failed action (mock .iconbtn.fretry): filled
+                        // rust circle, white RETRY label.
+                        RetryCircleButton(onClick = onRetry)
                         KebabButton(onClick = onOpenActions)
                     }
-                    // QUEUED / VALIDATING: cancel is the only live affordance
-                    // (matches the legacy card's contract — nothing is pausable
-                    // before bytes fly or while the file is being checked).
-                    else -> {
-                        GhostActionButton(icon = Icons.Rounded.Close, description = "Cancel", onClick = onCancel)
-                    }
+                    // QUEUED / VALIDATING: no transfer affordance is real yet —
+                    // the ⋮ dialog ("Cancel this download?") stays reachable.
+                    else -> KebabButton(onClick = onOpenActions)
                 }
             }
         }
 
-        // 2dp bottom progress pin (mock .pr) — PAUSED + active states only.
-        if (isPaused || isActive) {
+        // 5dp meter (mock .meter): cyan live fill on the #E2E8EF track; the
+        // failed card keeps a rust stall meter at the last known percentage.
+        if (isActive || isFailed) {
             BoxWithConstraints(
                 modifier = Modifier
-                    .align(Alignment.BottomCenter)
                     .fillMaxWidth()
-                    .padding(horizontal = 13.dp)
-                    .height(2.dp)
-                    .clip(RoundedCornerShape(2.dp))
-                    .background(SurfaceElevated)
-                    // A hand-drawn pin is invisible to TalkBack: expose it as a
-                    // real progress range (kept from the legacy card).
+                    .padding(top = 10.dp)
+                    .height(5.dp)
+                    .clip(RoundedCornerShape(999.dp))
+                    .background(MeterTrack)
+                    // A hand-drawn meter is invisible to TalkBack: expose it as
+                    // a real progress range (kept from the v5 pin).
                     .semantics {
                         progressBarRangeInfo =
                             if (indeterminate) ProgressBarRangeInfo.Indeterminate
-                            else ProgressBarRangeInfo(pinFraction, 0f..1f)
+                            else ProgressBarRangeInfo(meterFraction, 0f..1f)
                         contentDescription = "Download progress"
                     }
             ) {
@@ -902,66 +1061,247 @@ private fun ActivityRow(
                         modifier = Modifier
                             .width(sweepWidth)
                             .fillMaxHeight()
-                            .clip(RoundedCornerShape(2.dp))
+                            .clip(RoundedCornerShape(999.dp))
                             .offset(x = (maxWidth - sweepWidth) * sweep)
-                            .background(ProgressFillGray)
+                            .background(LiveFill)
                     )
                 } else {
                     Box(
                         modifier = Modifier
-                            .fillMaxWidth(pinFraction)
+                            .fillMaxWidth(if (isFailed) meterTarget else meterFraction)
                             .fillMaxHeight()
-                            .clip(RoundedCornerShape(2.dp))
-                            .background(ProgressFillGray)
+                            .clip(RoundedCornerShape(999.dp))
+                            .background(if (isFailed) FailRust else LiveFill)
                     )
                 }
             }
         }
+
+        // Failed extras (mock .errline): dashed rust rule, then the humanized
+        // failure reason on one clipped line, in the failed word colour.
+        // SWITCH SITE pill intentionally OMITTED — the pipeline exposes no
+        // source-preference / retry-with-different-source knob a card could
+        // call (AppSettings has none; DownloadEngine.retry re-resolves the
+        // same sourceUrl), and a dead button would be worse than none.
+        if (isFailed) {
+            Spacer(modifier = Modifier.height(10.dp))
+            DashedSeparator()
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = humanizeFailure(task.errorMessage ?: "").ifBlank { "Download failed" },
+                fontSize = 11.sp,
+                color = FailedWord,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
     }
 }
 
-/** Solid 32dp circle (mock .gho.solid): AccentPrimary fill + background ink. */
+/** Solid 38dp ink circle (mock .iconbtn): ink fill, white glyph — the card's
+ *  primary control (Pause / Resume / Play). */
 @Composable
 private fun SolidActionButton(icon: ImageVector, description: String, onClick: () -> Unit) {
     Box(
         modifier = Modifier
-            .size(32.dp)
+            .size(38.dp)
             .clip(CircleShape)
-            .background(AccentPrimary)
+            .background(TextPrimary)
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center
     ) {
         Icon(
             imageVector = icon,
             contentDescription = description,
-            tint = BackgroundDark,
-            modifier = Modifier.size(12.dp)
+            tint = Color.White,
+            modifier = Modifier.size(13.dp)
         )
     }
 }
 
-/** Ghost 32dp circle (mock .gho): SurfaceElevated + hairline, gray icon. */
+/** Filled rust RETRY circle (mock .iconbtn.fretry): 38dp, FailRust fill,
+ *  white 10sp/800 label — the failed card's primary verb (mock pins the
+ *  font smaller, this change's 10sp hard floor governs). */
 @Composable
-private fun GhostActionButton(icon: ImageVector, description: String, onClick: () -> Unit) {
+private fun RetryCircleButton(onClick: () -> Unit) {
     Box(
         modifier = Modifier
-            .size(32.dp)
+            .size(38.dp)
             .clip(CircleShape)
-            .background(SurfaceElevated)
-            .border(1.dp, BorderHairline, CircleShape)
+            .background(FailRust)
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center
     ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = description,
-            tint = TextSecondary,
-            modifier = Modifier.size(11.dp)
+        Text(
+            text = "RETRY",
+            color = Color.White,
+            fontSize = 10.sp,
+            fontWeight = FontWeight.ExtraBold,
+            letterSpacing = 0.3.sp,
+            maxLines = 1,
+            softWrap = false
         )
     }
 }
 
-/** Trailing ⋮ (mock .kebab): text glyph, gray, opens share-or-delete. */
+/** Status dot (mock .dot): 6dp circle; the live dot pulses between full and
+ *  25% alpha (mock @keyframes pulse, 1.6s). */
+@Composable
+private fun StatusDot(color: Color, pulse: Boolean = false) {
+    val background = if (pulse) {
+        val alpha by rememberInfiniteTransition(label = "liveDot").animateFloat(
+            initialValue = 1f,
+            targetValue = 0.25f,
+            animationSpec = infiniteRepeatable(
+                tween(durationMillis = 800, easing = LinearEasing),
+                RepeatMode.Reverse
+            ),
+            label = "liveDotAlpha"
+        )
+        color.copy(alpha = alpha)
+    } else {
+        color
+    }
+    Box(
+        modifier = Modifier
+            .size(6.dp)
+            .clip(CircleShape)
+            .background(background)
+    )
+}
+
+/** Site/source chip (mock .sitetag): 10sp/700 with 0.8sp tracking in a soft
+ *  rounded chip — tinted for live/failed cards, neutral grey otherwise. */
+@Composable
+private fun SiteTagChip(site: String, kind: DownloadStateKind) {
+    val tinted = when (kind) {
+        DownloadStateKind.LIVE -> LiveTint to LiveWord
+        DownloadStateKind.FAILED -> FailedTint to FailedWord
+        else -> ChipNeutralBg to SiteTagInk
+    }
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(5.dp))
+            .background(tinted.first)
+            // Neutral tags keep the mock's hairline border; tinted ones drop it.
+            .then(
+                if (tinted.first == ChipNeutralBg) {
+                    Modifier.border(1.dp, BorderHairline, RoundedCornerShape(5.dp))
+                } else {
+                    Modifier
+                }
+            )
+            .padding(horizontal = 6.dp, vertical = 2.dp)
+    ) {
+        Text(
+            text = site,
+            fontSize = 10.sp,
+            fontWeight = FontWeight.Bold,
+            color = tinted.second,
+            letterSpacing = 0.8.sp,
+            maxLines = 1
+        )
+    }
+}
+
+/** Status legend (mock .legend / .lg): four tinted chips, dot + word,
+ *  10sp/800 — the same chroma the cards use. */
+@Composable
+private fun DownloadsStatusLegend() {
+    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        LegendChip("Live", LiveWord, LiveTint, pulse = true)
+        LegendChip("Done", DoneWord, DoneTint)
+        LegendChip("Paused", PausedWord, PausedTint)
+        LegendChip("Failed", FailedWord, FailedTint)
+    }
+}
+
+@Composable
+private fun LegendChip(label: String, accent: Color, tint: Color, pulse: Boolean = false) {
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(Radius.full))
+            .background(tint)
+            .padding(horizontal = 9.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        StatusDot(color = accent, pulse = pulse)
+        Text(
+            text = label,
+            fontSize = 10.sp,
+            fontWeight = FontWeight.ExtraBold,
+            color = accent,
+            maxLines = 1,
+            softWrap = false
+        )
+    }
+}
+
+/** Card thumbnail (mock .thumb): 46×58, radius 9, hairline border. POSTER ART
+ *  through the app's existing Coil pipeline whenever the record carries a
+ *  poster URL (HomeScreen's SubcomposeAsyncImage pattern — initials while it
+ *  loads, initials on error); initials tile (12sp/800, mock .thumb .init) is
+ *  the explicit last-resort fallback. */
+@Composable
+private fun DownloadThumb(posterUrl: String, initials: String) {
+    Box(
+        modifier = Modifier
+            .size(width = 46.dp, height = 58.dp)
+            .clip(RoundedCornerShape(9.dp))
+            .background(ThumbTile)
+            .border(1.dp, BorderHairline, RoundedCornerShape(9.dp)),
+        contentAlignment = Alignment.Center
+    ) {
+        if (posterUrl.isNotBlank()) {
+            SubcomposeAsyncImage(
+                model = posterUrl,
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+                loading = { ThumbInitials(initials) },
+                error = { ThumbInitials(initials) }
+            )
+        } else {
+            ThumbInitials(initials)
+        }
+    }
+}
+
+@Composable
+private fun ThumbInitials(initials: String) {
+    Text(
+        text = initials,
+        fontSize = 12.sp,
+        fontWeight = FontWeight.ExtraBold,
+        color = TextMuted
+    )
+}
+
+/** 1dp dashed rule (mock .errline border-top: 1px dashed #EFD5D2) — Compose
+ *  has no dashed-line modifier primitive, so the mock's dash/gap rhythm
+ *  (6dp/4dp) is drawn segment by segment. */
+@Composable
+private fun DashedSeparator() {
+    Canvas(modifier = Modifier.fillMaxWidth().height(1.dp)) {
+        val dash = 6.dp.toPx()
+        val gap = 4.dp.toPx()
+        var x = 0f
+        while (x < size.width) {
+            drawLine(
+                color = DashRust,
+                start = Offset(x, 0f),
+                end = Offset(minOf(x + dash, size.width), 0f),
+                strokeWidth = size.height
+            )
+            x += dash + gap
+        }
+    }
+}
+
+/** Trailing ⋮ (mock .kebab): text glyph, gray, opens the row actions dialog
+ *  (share-or-delete on finished items, retry-or-remove on failed, cancel on
+ *  in-flight). */
 @Composable
 private fun KebabButton(onClick: () -> Unit) {
     Box(
@@ -981,59 +1321,94 @@ private fun KebabButton(onClick: () -> Unit) {
     }
 }
 
-/** Mono row meta per status (mock: "Paused · 0% · 160.0 KB / 49.0 MB",
- *  "Failed · … — tap to retry", "Done · 49.0 MB"). Plain words — the single
- *  colored span is the word "Failed" in FailRust; nothing else has a hue. */
-private fun taskMetaText(task: DownloadTask): AnnotatedString {
+// ─── v6 status vocabulary (mock .stat + :root state chroma) ──────────────────
+// State is ALWAYS colour + WORD + GLYPH (never colour alone): live pulses a
+// 6dp dot before "Downloading", done / paused / failed lead their words with
+// ✓ / ❚❚ / ✕. Mock tokens: live #0E7490 on #E0F2F7 (fill #1591B3), done
+// #1F7A4D on #E6F4EC, paused #92610F on #FBF1DE, failed #A84A42 on #F9E9E7.
+// Pure + internal so JVM unit tests can pin the mapping without Robolectric
+// (see DownloadStatusStyleTest); QUEUED / VALIDATING are not mock states and
+// keep neutral chrome but still carry word + glyph.
+
+internal enum class DownloadStateKind { LIVE, DONE, PAUSED, FAILED, NEUTRAL }
+
+internal data class DownloadStatusStyle(
+    val kind: DownloadStateKind,
+    val word: String,
+    val glyph: String,
+    val accent: Color,
+    val tint: Color
+)
+
+internal fun downloadStatusStyle(
+    status: TaskStatus,
+    neutralInk: Color = Color(0xFF55627A),
+    neutralTint: Color = Color(0xFFEEF2F6)
+): DownloadStatusStyle = when (status) {
+    TaskStatus.DOWNLOADING, TaskStatus.RESOLVING ->
+        DownloadStatusStyle(DownloadStateKind.LIVE, "Downloading", "●", LiveWord, LiveTint)
+    TaskStatus.COMPLETED ->
+        DownloadStatusStyle(DownloadStateKind.DONE, "Done", "✓", DoneWord, DoneTint)
+    TaskStatus.PAUSED ->
+        DownloadStatusStyle(DownloadStateKind.PAUSED, "Paused", "❚❚", PausedWord, PausedTint)
+    TaskStatus.FAILED ->
+        DownloadStatusStyle(DownloadStateKind.FAILED, "Failed", "✕", FailedWord, FailedTint)
+    TaskStatus.QUEUED ->
+        DownloadStatusStyle(DownloadStateKind.NEUTRAL, "Queued", "○", neutralInk, neutralTint)
+    TaskStatus.VALIDATING ->
+        DownloadStatusStyle(DownloadStateKind.NEUTRAL, "Checking", "●", neutralInk, neutralTint)
+}
+
+/** Grey detail after the status word (mock .stat .x), single line: percent,
+ *  bytes, speed and ETA only where the record really knows them. Speed/ETA
+ *  render while actually transferring only — paused rows never show a stale
+ *  rate (v5 rule kept), failed rows freeze at the last known percentage. */
+internal fun statusDetailText(task: DownloadTask): String {
     val totalKnown = task.totalBytes > 0
-    val pctText: String? = if (totalKnown) {
+    val pctText = if (totalKnown) {
         ((task.downloadedBytes.toFloat() / task.totalBytes.toFloat()).coerceIn(0f, 1f) * 100)
             .toInt()
             .coerceIn(0, 100)
             .toString() + "%"
     } else null
-    // Clamp the downloaded side to the total (aria2c's no-total wire bytes
-    // can overshoot the inferred total — kept from the legacy card).
     val dlText = if (totalKnown) formatBytes(minOf(task.downloadedBytes, task.totalBytes))
     else formatBytes(task.downloadedBytes)
 
+    val transferring = task.status == TaskStatus.DOWNLOADING
+    val speedMb = task.speedBytesPerSec / (1024.0 * 1024.0)
+    val speedText = when {
+        !transferring -> null
+        speedMb >= 0.1 -> "%.1f MB/s".format(java.util.Locale.US, speedMb)
+        task.speedBytesPerSec >= 1024.0 -> "%.0f KB/s".format(java.util.Locale.US, task.speedBytesPerSec / 1024.0)
+        task.speedBytesPerSec > 0.0 -> "%.0f B/s".format(java.util.Locale.US, task.speedBytesPerSec)
+        else -> null
+    }
+    val etaText = if (transferring && task.etaSeconds > 0) formatEta(task.etaSeconds) else null
+
     return when (task.status) {
-        TaskStatus.PAUSED -> buildAnnotatedString {
-            append(
-                when {
-                    totalKnown -> "Paused · $pctText · $dlText / ${formatBytes(task.totalBytes)}"
-                    task.downloadedBytes > 0 -> "Paused · $dlText"
-                    else -> "Paused"
-                }
-            )
+        TaskStatus.PAUSED -> when {
+            totalKnown -> "· $pctText · $dlText / ${formatBytes(task.totalBytes)}"
+            task.downloadedBytes > 0 -> "· $dlText"
+            else -> ""
         }
-        TaskStatus.DOWNLOADING -> buildAnnotatedString {
-            append(
-                when {
-                    totalKnown -> "Active · $pctText · $dlText / ${formatBytes(task.totalBytes)}"
-                    task.downloadedBytes > 0 -> "Active · $dlText"
-                    else -> "Starting..."
-                }
-            )
+        TaskStatus.DOWNLOADING -> {
+            val parts = mutableListOf<String>()
+            if (totalKnown) parts.add(pctText!!)
+            parts.add(dlText + if (totalKnown) " / ${formatBytes(task.totalBytes)}" else "")
+            speedText?.let { parts.add(it) }
+            etaText?.let { parts.add(it) }
+            if (parts.isEmpty()) "" else "· " + parts.joinToString(" · ")
         }
-        TaskStatus.RESOLVING -> buildAnnotatedString {
-            // Bytes can land during the engine's fallback chain while the
-            // status is still RESOLVING — surface them instead of a hang.
-            append(if (task.downloadedBytes > 0) "Resolving · $dlText" else "Resolving stream link...")
+        TaskStatus.RESOLVING -> if (task.downloadedBytes > 0) "· $dlText" else ""
+        TaskStatus.VALIDATING -> ""
+        TaskStatus.QUEUED -> "· waiting to start"
+        TaskStatus.FAILED -> {
+            val stuck = if (totalKnown && task.downloadedBytes > 0) "· stuck at $pctText" else ""
+            stuck.ifBlank { "· tap to retry" }
         }
-        TaskStatus.VALIDATING -> buildAnnotatedString { append("Checking downloaded file...") }
-        TaskStatus.QUEUED -> buildAnnotatedString { append("Queued · waiting to start") }
-        TaskStatus.FAILED -> buildAnnotatedString {
-            withStyle(SpanStyle(color = FailRust)) { append("Failed") }
-            // One-line cause: humanized (no machinery vocabulary, no raw locker
-            // URLs — see humanizeFailure) and collapsed to a single line. The
-            // machine truth stays in the journal + ℹ️ sheet for triage.
-            val cause = humanizeFailure(task.errorMessage ?: "")
-            append(" · ${cause.ifBlank { "Download failed" }} — tap to retry")
-        }
-        TaskStatus.COMPLETED -> buildAnnotatedString {
+        TaskStatus.COMPLETED -> {
             val sizeText = formatBytes(if (task.totalBytes > 0) task.totalBytes else task.downloadedBytes)
-            append("Done · $sizeText")
+            "· $sizeText"
         }
     }
 }

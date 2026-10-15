@@ -32,6 +32,11 @@ object Motion {
     const val DurationNormal = 350
     const val DurationSlow = 500
 
+    /** Nav exit duration (Nav speed contract, ui-proposal-downloads-v6-drawer.html):
+     *  screen-level transitions cap at 200ms entrance / 120ms exit — one third
+     *  of the old 500ms wait, same easing curve. */
+    const val DurationNavExit = 120
+
     // M3 "standard" spring parameters (copied from material3's
     // StandardMotionTokens — MotionScheme itself only exists from
     // material3 1.5.0-alpha, so the numbers live here as constants).

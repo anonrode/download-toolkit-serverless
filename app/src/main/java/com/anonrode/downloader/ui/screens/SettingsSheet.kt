@@ -335,14 +335,20 @@ fun SettingsScreen(
                 targetState = currentDrawer,
                 transitionSpec = {
                     val forward = targetState != null
+                    // Nav speed contract (ui-proposal-downloads-v6-drawer.html):
+                    // the 500ms slide+fade read as slow motion before the page
+                    // appeared. Entrance caps at DurationFast (200ms), exit at
+                    // DurationNavExit (120ms) — same SettingsEasing curve, one
+                    // third of the wait; the destination's first frame paints
+                    // immediately and the animation only decorates it.
                     (slideInHorizontally(
-                        animationSpec = tween(Motion.DurationSlow, easing = SettingsEasing)
+                        animationSpec = tween(Motion.DurationFast, easing = SettingsEasing)
                     ) { full -> if (forward) full else -full / 3 } +
-                        fadeIn(tween(Motion.DurationSlow, easing = SettingsEasing))) togetherWith
+                        fadeIn(tween(Motion.DurationFast, easing = SettingsEasing))) togetherWith
                         (slideOutHorizontally(
-                            animationSpec = tween(Motion.DurationSlow, easing = SettingsEasing)
+                            animationSpec = tween(Motion.DurationNavExit, easing = SettingsEasing)
                         ) { full -> if (forward) -full / 3 else full } +
-                            fadeOut(tween(Motion.DurationSlow, easing = SettingsEasing)))
+                            fadeOut(tween(Motion.DurationNavExit, easing = SettingsEasing)))
                 },
                 label = "settingsDrawer"
             ) { drawer ->

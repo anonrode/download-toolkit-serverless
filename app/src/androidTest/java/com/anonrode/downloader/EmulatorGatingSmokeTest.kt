@@ -209,9 +209,9 @@ class EmulatorGatingSmokeTest {
                 .fetchSemanticsNodes().isNotEmpty()
         }
         composeRule.onNodeWithText("Persisted Task Episode").assertIsDisplayed()
-        // Sanity: the row's mono meta types the state as a plain word (v5
-        // zero-chroma rows have no uppercase badge — injected 0 bytes means
-        // the meta renders exactly "Paused").
+        // Sanity: the row's status line types the state as a plain word +
+        // glyph (v6 rows have no uppercase badge — injected 0 bytes means the
+        // status renders the word "Paused"; the grey detail stays empty).
         composeRule.waitUntil(timeoutMillis = 5_000) {
             composeRule.onAllNodesWithText("Paused").fetchSemanticsNodes().isNotEmpty()
         }
@@ -248,8 +248,10 @@ class EmulatorGatingSmokeTest {
                 totalBytes = 100L * MB
             )
         }
+        // v6 status word: the live state speaks "Downloading" (mock frame 1
+        // vocabulary "● Downloading"), the v5 word "Active" is gone.
         composeRule.waitUntil(timeoutMillis = 10_000) {
-            composeRule.onAllNodesWithText("Active", substring = true)
+            composeRule.onAllNodesWithText("Downloading", substring = true)
                 .fetchSemanticsNodes().isNotEmpty()
         }
         // Click the Pause button. The button's contentDescription is "Pause"
@@ -257,14 +259,14 @@ class EmulatorGatingSmokeTest {
         // is the right one.
         val tClickNanos = System.nanoTime()
         composeRule.onNodeWithContentDescription("Pause").performClick()
-        // After click, within 1.5s the meta line must have flipped
-        // "Active · …" → "Paused · …". The 1.5s number is the user's hard
-        // requirement: pause must look instant. v5 rows carry no speed
-        // readout — the state word IS the contract.
+        // After click, within 1.5s the status line must have flipped
+        // "Downloading · …" → "Paused · …". The 1.5s number is the user's hard
+        // requirement: pause must look instant. v5/v6 rows carry no stale speed
+        // while paused — the state word IS the contract.
         composeRule.waitUntil(timeoutMillis = 1_500) {
             composeRule.onAllNodesWithText("Paused", substring = true)
                 .fetchSemanticsNodes().isNotEmpty() &&
-                composeRule.onAllNodesWithText("Active", substring = true)
+                composeRule.onAllNodesWithText("Downloading", substring = true)
                     .fetchSemanticsNodes().isEmpty()
         }
         val tElapsedMs = (System.nanoTime() - tClickNanos) / 1_000_000
@@ -340,9 +342,11 @@ class EmulatorGatingSmokeTest {
             composeRule.onAllNodesWithText("Cancel Test Episode")
                 .fetchSemanticsNodes().isNotEmpty()
         }
-        // The Cancel button is the only one rendered on a PAUSED card
-        // alongside the Resume button.
-        composeRule.onNodeWithContentDescription("Cancel").performClick()
+        // v6 paused cards carry ▶ (Resume) + the ⋮ kebab (mock two-control
+        // layout); cancel moved into the actions dialog the kebab opens
+        // ("Cancel this download?" → Remove — same engine cancel, one gate).
+        composeRule.onNodeWithContentDescription("More actions").performClick()
+        composeRule.onNodeWithText("Remove").performClick()
         // Repository must drop it within the UI tick.
         composeRule.waitUntil(timeoutMillis = 5_000) {
             repo.find(task.id) == null
