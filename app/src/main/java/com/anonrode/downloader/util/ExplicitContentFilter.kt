@@ -27,14 +27,19 @@ object ExplicitContentFilter {
 
     /**
      * The mainstream ABC show "Scandal" only: the word 'scandal' may head a
-     * title when everything after it is season/episode/year/quality metadata.
+     * title when everything after it is season/episode/year/quality metadata
+     * OR nothing but punctuation/space ("Scandal!", "Scandal:").
      * Adult Ullu-style titles that put a real word after 'scandal'
      * ("Scandal Queen Season 2") stay blocklisted — the broad whitelist form
      * used before let the filter exempt its own must-block titles.
-     * Matched with .matches() so the show name must lead the title.
+     * Matched with .matches(), so the show name must lead the title; the
+     * trailing separator-star sits OUTSIDE the metadata group because the
+     * tokens inside it all demand at least one real token — a bare
+     * punctuation tail would otherwise fail the full match and wrongly block
+     * the show.
      */
     private val SCANDAL_SHOW_WHITELIST = Regex(
-        """(?:the\s+)?scandal(?:(?:[\s\-–—:.|,+!()\[\]]*(?:(?:19|20)\d{2}|\d{1,3}|s\d{1,2}(?:e\d{1,3})?|seasons?|episodes?|complete|extended|standard|unrated|1080p|1080i|720p|720i|480p|web-?dl|web-?rip|hdtv|hdrip|hevc|x26[45]|nf|amzn|mkv|mp4|avi))+[\s\-–—:.|,+!()\[\]]*)?""",
+        """(?:the\s+)?scandal(?:(?:[\s\-–—:.|,+!()\[\]]*(?:(?:19|20)\d{2}|\d{1,3}|s\d{1,2}(?:e\d{1,3})?|seasons?|episodes?|complete|extended|standard|unrated|1080p|1080i|720p|720i|480p|web-?dl|web-?rip|hdtv|hdrip|hevc|x26[45]|nf|amzn|mkv|mp4|avi))+[\s\-–—:.|,+!()\[\]]*)?[\s\-–—:.|,+!()\[\]]*""",
         RegexOption.IGNORE_CASE
     )
 
