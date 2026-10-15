@@ -71,7 +71,16 @@ class ProgressParserTest {
 
     @Test
     fun unparseableLineUsesLibraryPercent() {
-        val t = parseProgressTick("[download] some unknown line", 0.5f, 0L, 100L * 1024 * 1024)
+        // TRIAGE (A) TEST DRIFT: 0ec969c (2026-10-01 progress-jump hardening)
+        // added the startup-leap guard — with ZERO bytes landed and a pct > 5,
+        // the library percent must NOT fabricate bytes (the library reports
+        // drawer-item fractions, not this file's progress). The fill invariant
+        // applies once the transfer has begun:
+        assertEquals(
+            0L,
+            parseProgressTick("[download] some unknown line", 0.5f, 0L, 100L * 1024 * 1024).downloadedBytes
+        )
+        val t = parseProgressTick("[download] some unknown line", 0.5f, 25L * 1024 * 1024, 100L * 1024 * 1024)
         assertEquals(50L * 1024 * 1024, t.downloadedBytes)
         assertEquals(100L * 1024 * 1024, t.totalBytes)
     }
@@ -86,15 +95,20 @@ class ProgressParserTest {
 
     @Test
     fun libraryFractionFillsMissingSize() {
-        // No line, known total, library reports a 0..1 fraction.
-        val t = parseProgressTick(null, 0.5f, 0L, 100L * 1024 * 1024)
+        // TRIAGE (A) TEST DRIFT: with the 0ec969c startup-leap guard active,
+        // the 0..1 fraction only fills the byte counter once bytes have begun
+        // moving (lastDl > 0) — see unparseableLineUsesLibraryPercent.
+        // No line, known total, library reports a 0..1 fraction:
+        val t = parseProgressTick(null, 0.5f, 25L * 1024 * 1024, 100L * 1024 * 1024)
         assertEquals(50L * 1024 * 1024, t.downloadedBytes)
         assertEquals(100L * 1024 * 1024, t.totalBytes)
     }
 
     @Test
     fun libraryPercentageFillsMissingSize() {
-        val t = parseProgressTick(null, 37f, 0L, 100L * 1024 * 1024)
+        // TRIAGE (A) TEST DRIFT: same guard — the fill applies with a transfer
+        // already underway (lastDl > 0):
+        val t = parseProgressTick(null, 37f, 1024L * 1024L, 100L * 1024 * 1024)
         assertEquals((100L * 1024 * 1024 * 37) / 100, t.downloadedBytes)
     }
 

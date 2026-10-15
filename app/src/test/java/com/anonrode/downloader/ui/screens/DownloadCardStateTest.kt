@@ -85,7 +85,9 @@ class DownloadCardStateTest {
         )
         // Half-way: the fraction must surface as a real percentage (the
         // progress bar is driven by the same ratio) alongside size/speed/ETA.
-        composeRule.onNodeWithText("50% • 50.0 MB / 100.0 MB • 2.0 MB/s • 00:30 left").assertExists()
+        // TRIAGE (A) TEST DRIFT: v3.2.6 (a425fba) reformatted the sub-minute
+        // ETA segment from zero-padded "00:30 left" to honest "30s left".
+        composeRule.onNodeWithText("50% • 50.0 MB / 100.0 MB • 2.0 MB/s • 30s left").assertExists()
         composeRule.onNodeWithContentDescription("Pause").assertExists()
     }
 
@@ -93,8 +95,7 @@ class DownloadCardStateTest {
     fun downloadingOvershotTotal_clampsDisplayedBytes() {
         // aria2c's no-total wire bytes can overshoot the inferred total
         // (re-downloaded pieces + chunk overhead). The card must not render
-        // "105.0 MB / 100.0 MB" — the downloaded side clamps to the total,
-        // matching the progress bar which already clamps to 100%.
+        // "105.0 MB / 100.0 MB" — the downloaded side clamps to the total.
         setCard(
             task(
                 downloadedBytes = 105L * MB,
@@ -102,7 +103,10 @@ class DownloadCardStateTest {
                 status = TaskStatus.DOWNLOADING
             )
         )
-        composeRule.onNodeWithText("100% • 100.0 MB / 100.0 MB").assertExists()
+        // TRIAGE (A) TEST DRIFT: 972fc85 "Fix download stuck at 100%" capped
+        // the in-flight percent (maxInFlightProgress = 0.99, bar included) so
+        // only COMPLETED ever shows 100% — the clamp ceiling is now 99%.
+        composeRule.onNodeWithText("99% • 100.0 MB / 100.0 MB").assertExists()
     }
 
     @Test

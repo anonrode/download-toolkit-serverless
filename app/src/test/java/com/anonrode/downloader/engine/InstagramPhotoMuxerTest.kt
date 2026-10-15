@@ -332,7 +332,10 @@ class InstagramPhotoMuxerTest {
         assertEquals(2, v.size)
         val x264 = v[0]
         assertEquals("/x/libffmpeg.so", x264[0])
-        assertTrue(x264.containsAll(listOf("-loop", "1", "-t", "3")))
+        // TRIAGE (A) TEST DRIFT: v3.2.7 (a099465) extended the no-music silent
+        // hold from 3s to 5s — the Python monolith's exact payload — so the
+        // user still gets a playable video without audio.
+        assertTrue(x264.containsAll(listOf("-loop", "1", "-t", "5")))
         assertFalse(x264.contains("-shortest"))
         assertEquals("/out/final.mp4", x264.last())
     }

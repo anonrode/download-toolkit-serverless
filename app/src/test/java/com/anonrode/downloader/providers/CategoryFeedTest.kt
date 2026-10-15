@@ -73,10 +73,17 @@ class CategoryFeedTest {
 
     @Test
     fun mixCards_capsAtGridCap() {
+        // TRIAGE (A) TEST DRIFT: v3.2.6's infinite-feed rework (a425fba) made
+        // the mix cap a parameter (limit) — the genre VM now pages with
+        // loadMoreCategory() instead of one internally-capped grid, so an
+        // uncapped mixCards returns everything. The surviving invariant: an
+        // explicit GRID_CAP limit still caps the mix exactly.
         val pairs = listOf("nepu", "nkiri").map { site ->
             site to (1..30).map { card(site, "$site title $it") }
         }
-        assertEquals(CategoryFeed.GRID_CAP, CategoryFeed.mixCards(pairs).size)
+        assertEquals(CategoryFeed.GRID_CAP, CategoryFeed.mixCards(pairs, limit = CategoryFeed.GRID_CAP).size)
+        // The production default (uncapped) returns the full interleave:
+        assertEquals(60, CategoryFeed.mixCards(pairs).size)
     }
 
     @Test
@@ -158,9 +165,11 @@ class CategoryFeedTest {
     }
 
     @Test
-    fun feedSources_coverSixSites_withProbeVerifiedKinds() {
-        // The 2026-09-14 WP/RSS probe + the 2026-09-15 API discovery. Every
-        // RSS template must carry the query placeholder.
+    fun feedSources_coverSevenSites_withProbeVerifiedKinds() {
+        // TRIAGE (A) TEST DRIFT: the Anime feed added a 7th source — anitaku
+        // via the ANIME_PROVIDER kind (AnitakuProvider.search) — next to the
+        // 2026-09-14 WP/RSS probe set and the 2026-09-15 API discovery
+        // (nepu, asianc). Every RSS template must carry the query placeholder.
         assertEquals(
             mapOf(
                 "nkiri" to CategoryFeed.FeedKind.WP_REST,
@@ -168,7 +177,8 @@ class CategoryFeedTest {
                 "naijaprey" to CategoryFeed.FeedKind.RSS,
                 "naijavault" to CategoryFeed.FeedKind.WP_REST,
                 "nepu" to CategoryFeed.FeedKind.API_JSON,
-                "asianc" to CategoryFeed.FeedKind.API_JSON
+                "asianc" to CategoryFeed.FeedKind.API_JSON,
+                "anitaku" to CategoryFeed.FeedKind.ANIME_PROVIDER
             ),
             CategoryFeed.FEED_SOURCES.mapValues { it.value.first }
         )

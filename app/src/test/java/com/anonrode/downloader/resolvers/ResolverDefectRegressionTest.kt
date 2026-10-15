@@ -66,10 +66,27 @@ class ResolverDefectRegressionTest {
 
     private fun resolverSource(): String = sourceAt("app/src/main/java/com/anonrode/downloader/resolvers/Resolvers.kt")
 
+    // TRIAGE (A) TEST DRIFT: the stall watchdog re-reads the freshest state as
+    // `val t = repository.find(task.id)` (DownloadEngine.kt), so its
+    // `bytesLanded(t)` IS the live variable — banning all `bytesLanded(t)` text
+    // would now ban the anti-stale pattern itself. Restated invariant: the
+    // failover banking decision uses the live re-read state and hands that same
+    // state to attemptCrossProviderFailover; no other `bytesLanded(t)` use
+    // (stale lambda variables anywhere else) is allowed.
     @Test fun queueSourceDoesNotUseStaleTaskVariable() {
         val source = sourceAt("app/src/main/java/com/anonrode/downloader/engine/DownloadEngine.kt")
         assertTrue(source.contains("bytesLanded(task)"))
-        assertFalse(source.contains("bytesLanded(t)"))
+        source.lineSequence().forEachIndexed { idx, line ->
+            if (line.contains("bytesLanded(t)")) {
+                assertTrue(
+                    "stale bytesLanded(t) at line ${idx + 1}: $line",
+                    line.contains("t.downloadedBytes == 0L") && line.contains("attemptCrossProviderFailover(t)")
+                )
+            }
+        }
+        // The watchdog must re-read state from the repository per tick — that is
+        // what makes its `t` live rather than stale:
+        assertTrue(source.contains("val t = repository.find(task.id) ?: break"))
     }
 
     @Test fun concurrencyDefaultsAndBoundsStayBounded() {
@@ -79,16 +96,26 @@ class ResolverDefectRegressionTest {
         assertTrue(settings.contains("""pref_max_downloads", 4).coerceIn(1, 6"""))
         assertTrue(settings.contains("""pref_parallel_sockets", 16).coerceIn(1, 16"""))
         assertTrue(engine.contains("var maxConcurrentDownloads: Int = 4"))
-        assertTrue(engine.contains("val startingActive = startingTaskIds.size"))
-        assertTrue(engine.contains("jobActive + startingActive"))
+        // TRIAGE (A) TEST DRIFT: processQueue now builds a UNION guard
+        // (status counts ∪ live activeJobs ∪ startingTaskIds) instead of the old
+        // `jobActive + startingActive` sum; the union is the stronger bound.
+        // Restated invariant: starting-but-not-yet-running launches are still
+        // counted into THE concurrency choke-point.
+        assertTrue(engine.contains("addAll(startingTaskIds)"))
+        assertTrue(engine.contains("if (activeCount >= maxConcurrentDownloads) return"))
     }
 
+    // TRIAGE (A) TEST DRIFT: the OTA handoff call grew named bypassHealth /
+    // recordHealth / visitedSites args and the recursion cap was tightened from
+    // `depth >` to `depth >=` (strictly safer). Restated invariant: depth is
+    // still carried +1 through the registry handoff and both sides refuse past
+    // RESOLVE_DEPTH_LIMIT.
     @Test fun otaHandoffCarriesResolverDepth() {
         val source = sourceAt("app/src/main/java/com/anonrode/downloader/providers/RulesPipeline.kt")
         val engine = sourceAt("app/src/main/java/com/anonrode/downloader/resolvers/DynamicLockerEngine.kt")
-        assertTrue(source.contains("ResolverRegistry.resolve(cand, quality, depth + 1)"))
-        assertTrue(source.contains("depth > ResolverRegistry.RESOLVE_DEPTH_LIMIT"))
-        assertTrue(engine.contains("runResolveForSite(siteKey, url, quality, depth)"))
+        assertTrue(Regex("ResolverRegistry\\.resolve\\(\\s*cand,\\s*quality,\\s*depth \\+ 1,").containsMatchIn(source))
+        assertTrue(source.contains("depth >= ResolverRegistry.RESOLVE_DEPTH_LIMIT"))
+        assertTrue(engine.contains("runResolveForSite(siteKey, url, quality, depth + 1,"))
     }
 
     @Test fun recursiveFailureGuardStaysBeforeIntermediarySuccess() {
@@ -113,9 +140,13 @@ class ResolverDefectRegressionTest {
             .substringBefore("private suspend fun probeEffectiveUrl")
         assertTrue(source.contains("val pageBeforeStep = currUrl"))
         assertTrue(Regex("if \\(currUrl == pageBeforeStep\\) \\{[^}]*\\bbreak\\b").containsMatchIn(source))
-        assertTrue(source.contains("for (step in 1..8)"))
+        // TRIAGE (A) TEST DRIFT: the hop budget was widened 8 → 10 (still a
+        // bounded `1..N` loop; expanded budget for longer token chains).
+        assertTrue(source.contains("for (step in 1..10)"))
         // Existing terminal/header-first behavior must not be lost to a loop rewrite.
-        assertTrue(source.contains("if (ptHops >= 1)"))
+        // TRIAGE (A) TEST DRIFT: the branch gained more exempt shapes after the
+        // ptHops check (mirror TLD, direct-media, /d/ links) — invariant intact.
+        assertTrue(source.contains("if (ptHops >= 1 ||"))
         assertTrue(source.contains("safeLoc.contains(\"/token/download/\")"))
         val mediaHeader = source.indexOf("ct.startsWith(\"video/\")")
         val bodyRead = source.indexOf("val body = HttpClient.cappedText(res)")

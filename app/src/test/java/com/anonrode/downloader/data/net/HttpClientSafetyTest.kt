@@ -145,8 +145,11 @@ class HttpClientSafetyTest {
         assertEquals("fd00::5", HttpClient.parsedHost("http://[fd00::5]:8080/x"))
         // hostname URLs keep the old stray-bracket/space encoding:
         assertEquals("https://ex.com/a%5Bb%5D.mkv", HttpClient.safeUrl("https://ex.com/a[b].mkv"))
-        // query part is passed through untouched (only the base is encoded):
-        assertEquals("https://ex.com/f?x=1 [2]",
+        // TRIAGE (A) TEST DRIFT: 73ad53c's network hardening also encodes
+        // spaces INSIDE the query (%20) — a raw space breaks the CLI
+        // subprocess URL handoff (yt-dlp/aria2c argument splitting). Stray
+        // brackets are still left untouched in the query part:
+        assertEquals("https://ex.com/f?x=1%20[2]",
             HttpClient.safeUrl("https://ex.com/f?x=1 [2]"))
     }
 

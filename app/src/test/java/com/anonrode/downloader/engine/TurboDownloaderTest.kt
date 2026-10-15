@@ -127,9 +127,25 @@ class TurboDownloaderTest {
         val html = "<!doctype html><html><body>not a video</body></html>"
         server.dispatcher = object : Dispatcher() {
             override fun dispatch(request: RecordedRequest): MockResponse {
-                return MockResponse()
-                    .setHeader("Content-Type", "text/html; charset=UTF-8")
-                    .setBody(html)
+                // TRIAGE (C): MockWebServer answers a HEAD by writing the BODY
+                // bytes verbatim — an HTTP violation. The 52 unread bytes get
+                // read as the NEXT response on the reused keep-alive
+                // connection, so BOTH probe attempts throw before the
+                // Content-Type evidence is ever seen, the probe gives
+                // Unreachable, and single() writes the HTML page blind as the
+                // "media file" (exactly what this test guards against). Real
+                // servers never send a HEAD body; answer HEAD with the
+                // GET-shaped headers but no body so the range-GET step —
+                // where the HTML refusal actually fires — is reached.
+                return if (request.method == "HEAD") {
+                    MockResponse()
+                        .setHeader("Content-Type", "text/html; charset=UTF-8")
+                        .addHeader("Content-Length", html.length.toString())
+                } else {
+                    MockResponse()
+                        .setHeader("Content-Type", "text/html; charset=UTF-8")
+                        .setBody(html)
+                }
             }
         }
         val result = downloadTo("video.mp4")

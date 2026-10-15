@@ -78,7 +78,13 @@ class TurboStateTest {
         assertEquals(listOf(49L, 99L), restored.map { it.end })
         assertEquals(listOf(50L, 75L), restored.map { it.current })
         assertEquals(75L, state.writtenBytes())
-        assertEquals(50L, state.contiguousPrefixBytes())
+        // TRIAGE (A) TEST DRIFT: `current` is the next UNWRITTEN offset (the
+        // TurboChunk DNA the 7ef11ec Aria2 preallocation proof pins: landed
+        // pieces carry current > start, preallocated-but-empty carry current
+        // == start), so the in-flight piece's landed run (bytes 0..74) IS
+        // fully-downloaded contiguous content — the prefix is 75, which is
+        // also what writtenBytes() honestly reports.
+        assertEquals(75L, state.contiguousPrefixBytes())
     }
 
     @Test

@@ -126,7 +126,14 @@ class RelevanceScorerTest {
         val urls = ranked.map { it.url }
 
         assertEquals(20, ranked.size)
-        assertEquals("https://nepu.gd/watch/tv/456", urls[0])
+        // TRIAGE (A) TEST DRIFT: collection/complete bundles carry orderKey 0
+        // by design (87840ea show-ranking, preserved by d9b83cf's "preserve
+        // distinct media kinds" rework), so the "Complete Series" pack LEADS
+        // the TV_SHOW block; the plain series pages then follow in
+        // provider-priority insertion order. Every boundary the test guards
+        // still holds below it.
+        assertEquals("https://complete.test/the-pitt", urls[0])
+        assertEquals("https://nepu.gd/watch/tv/456", urls[1])
         val firstSeries = urls.indexOf("https://nepu.gd/watch/tv/456")
         val lastSeries = urls.indexOf("https://dramarain.test/the-pitt/")
         val seasonOne = urls.indexOf("https://season-one.test/the-pitt-season-1")
@@ -143,9 +150,23 @@ class RelevanceScorerTest {
     }
     @Test
     fun scoreKeepsExactTitleAbovePartial() {
+        // TRIAGE (A) TEST DRIFT: score() saturates at 1.0 for any title
+        // containing the query (the +0.5 containment bonus, present since
+        // c28aa3b "security layer" rework), so exact and season-qualified
+        // titles TIE at exactly 1.0 — the exact-above-partial guarantee was
+        // deliberately moved into the ranking (kind-rank sorts the plain show
+        // above its season hub). Encode both halves of that contract:
         val exact = RelevanceScorer.score("The Pitt", "The Pitt")
         val partial = RelevanceScorer.score("The Pitt", "The Pitt Season 2")
-        assertTrue(exact > partial)
+        assertEquals(1.0, exact, 0.0)
+        assertTrue(exact >= partial)
+        // Ranking-level invariant: the exact series page outranks its
+        // season-qualified sibling even when the sibling is offered first.
+        val ranked = RelevanceScorer.filterAndSort("The Pitt", listOf(
+            card("The Pitt Season 2", "https://site.test/watch/tv/5"),
+            card("The Pitt", "https://site.test/watch/tv/1")
+        ))
+        assertEquals("https://site.test/watch/tv/1", ranked.first().url)
     }
 
     @Test

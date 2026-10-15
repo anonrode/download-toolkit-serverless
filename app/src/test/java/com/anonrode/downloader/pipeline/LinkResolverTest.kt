@@ -34,9 +34,16 @@ class LinkResolverTest {
 
     @Test
     fun `provably-direct token outputs are exempt from locker treatment`() {
-        assertTrue(LinkResolver.isProvablyDirectFile("https://cdn.x/Show.mkv?pt=abc%3D"))
+        // TRIAGE (A) TEST DRIFT: 5b0a903 (2026-09-28 engine hardening) narrowed
+        // the resolver-output exemption from the blanket "?pt= / ?token= /
+        // ?download" match to the dedicated output params (download_token= /
+        // media_token= / direct_download=1) — ?pt= is Loadedfiles' INTERNAL
+        // hop marker, and mid-chain pages carry it, so it must never exempt
+        // (same hardening also inverted accept()'s guard order).
+        assertTrue(LinkResolver.isProvablyDirectFile("https://cdn.x/Show.mkv?download_token=abc%3D"))
         assertTrue(LinkResolver.isProvablyDirectFile("https://pixeldrain.com/api/file/xyz"))
-        assertTrue(LinkResolver.isProvablyDirectFile("https://x.f/cd?token=123"))
+        assertTrue(LinkResolver.isProvablyDirectFile("https://x.f/cd?media_token=123"))
+        assertTrue(LinkResolver.isProvablyDirectFile("https://x.f/cd?direct_download=1"))
         assertTrue(LinkResolver.isProvablyDirectFile("https://west-eu-upload.04b3d96d52475741e6b10f97f0a84a16.r2.cloudflarestorage.com/RBNNj1sIT2?response-content-disposition=attachment"))
         assertTrue(LinkResolver.isProvablyDirectFile("https://vikingfile.04b3d96d52475741e6b10f97f0a84a16.r2.cloudflarestorage.com/DMFZgz5wue?X-Amz-Signature=xyz"))
         assertTrue(LinkResolver.isProvablyDirectFile("https://3static.gfrdaseazzs.com/token/download/tempuser/83e68101e3976ae8/All.American.Homecoming"))
@@ -49,6 +56,11 @@ class LinkResolverTest {
         assertFalse(LinkResolver.isProvablyDirectFile("https://downloadwella.com/f/12345"))
         assertTrue(LinkResolver.isKnownLockerHost("https://downloadwella.com/f/12345"))
 
+        // ?pt= never proves directness by itself — Loadedfiles mid-chain hop
+        // pages carry it and must keep being cracked as the locker pages they are:
+        assertFalse(LinkResolver.isProvablyDirectFile("https://loadedfiles.net/f/x?pt=abc%3D"))
+        assertTrue(LinkResolver.isKnownLockerHost("https://loadedfiles.net/f/x?pt=abc%3D"))
+
         // kissorgrab.com/dl/ is the direct cracked media endpoint (live-verified
         // 2026-09-19: HTTP 206, MKV magic header). A POST to this URL returned
         // HTTP 405 when DownloadwellaResolver mistakenly claimed it (activity log
@@ -58,6 +70,10 @@ class LinkResolverTest {
         // wetafiles.com/d/ is also a direct CDN endpoint:
         assertTrue(LinkResolver.isProvablyDirectFile("https://wetafiles.com/d/abc/movie.mkv"))
         assertFalse(LinkResolver.isKnownLockerHost("https://wetafiles.com/d/abc/movie.mkv"))
+        // vikingfile.com/d/ is NOT direct — it 302-hops to R2 and the Viking
+        // resolver must crack it (429 lesson, commit 0a5b1df):
+        assertFalse(LinkResolver.isProvablyDirectFile("https://vikingfile.com/d/wtKpY7FHW2/Lanterns.S01E01.mkv"))
+        assertTrue(LinkResolver.isKnownLockerHost("https://vikingfile.com/d/wtKpY7FHW2/Lanterns.S01E01.mkv"))
     }
 
     @Test
