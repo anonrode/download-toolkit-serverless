@@ -21,7 +21,20 @@ object ExplicitContentFilter {
      * but are legitimate non-pornographic studio releases.
      */
     private val MAINSTREAM_WHITELIST = Regex(
-        """\bxxx(?::\s*|\s+)(?:return of\s+)?xander\s*cage\b|\bxxx(?::\s*|\s+)state of the union\b|\bxxx\s*\((?:19\d\d|2002)\)|\byoung\s*adult\b|\badult\s*beginners?\b|\bthe\s*adults\b|\bgame\s*of\s*thrones\b|\bthe\s*boys\b|\bsaw\s*x\b|\bjourney\s*of\s*love\b|\baction\s*hero\b|\blove\s*story\b|\b(?:the\s+)?scandal\b|\bsungkyunkwan\s*scandal\b|\b(?:a\s+)?streetcar\s*named\s*desire\b""",
+        """\bxxx(?::\s*|\s+)(?:return of\s+)?xander\s*cage\b|\bxxx(?::\s*|\s+)state of the union\b|\bxxx\s*\((?:19\d\d|2002)\)|\byoung\s*adult\b|\badult\s*beginners?\b|\bthe\s*adults\b|\bgame\s*of\s*thrones\b|\bthe\s*boys\b|\bsaw\s*x\b|\bjourney\s*of\s*love\b|\baction\s*hero\b|\blove\s*story\b|\bsungkyunkwan\s*scandal\b|\b(?:a\s+)?streetcar\s*named\s*desire\b""",
+        RegexOption.IGNORE_CASE
+    )
+
+    /**
+     * The mainstream ABC show "Scandal" only: the word 'scandal' may head a
+     * title when everything after it is season/episode/year/quality metadata.
+     * Adult Ullu-style titles that put a real word after 'scandal'
+     * ("Scandal Queen Season 2") stay blocklisted — the broad whitelist form
+     * used before let the filter exempt its own must-block titles.
+     * Matched with .matches() so the show name must lead the title.
+     */
+    private val SCANDAL_SHOW_WHITELIST = Regex(
+        """(?:the\s+)?scandal(?:(?:[\s\-–—:.|,+!()\[\]]*(?:(?:19|20)\d{2}|\d{1,3}|s\d{1,2}(?:e\d{1,3})?|seasons?|episodes?|complete|extended|standard|unrated|1080p|1080i|720p|720i|480p|web-?dl|web-?rip|hdtv|hdrip|hevc|x26[45]|nf|amzn|mkv|mp4|avi))+[\s\-–—:.|,+!()\[\]]*)?""",
         RegexOption.IGNORE_CASE
     )
 
@@ -30,7 +43,11 @@ object ExplicitContentFilter {
      */
     private val EXPLICIT_URL_REGEX = Regex(
         """/(?:18-section|18-plus|18plus|\+18|full-adult-video|adult|adult-movies?|erotic|erotica|erotic-stories|uncut|xxx|nsfw)/""" +
-            """|[-_](?:18|18plus|\+18|xxx|uncut|adult)(?:-movie|-series|-video)?/?$""" +
+            // TRIAGE (B): the bare "18" alternative here also matched generic
+            // numeric CMS ids (e.g. ".../item-18" = "Series Episode 18"), a
+            // mainstream false positive the fix was never meant to catch —
+            // only the explicit 18plus/+18 slug forms stay.
+            """|[-_](?:18plus|\+18|xxx|uncut|adult)(?:-movie|-series|-video)?/?$""" +
             """|[-_]adult-(?:movie|series|video)/?$""" +
             """|/(?:ullu|kooku|voovi|primeplay|hotshots|cineprime|hunters|bigshots|moodx)/""",
         RegexOption.IGNORE_CASE
@@ -130,6 +147,7 @@ object ExplicitContentFilter {
      */
     fun isExplicit(title: String, categories: Collection<String>? = null): Boolean {
         if (MAINSTREAM_WHITELIST.containsMatchIn(title)) return false
+        if (SCANDAL_SHOW_WHITELIST.matches(title.trim())) return false
         if (EXPLICIT_TITLE_REGEX.containsMatchIn(title)) return true
 
         if (!categories.isNullOrEmpty()) {
@@ -175,6 +193,9 @@ object ExplicitContentFilter {
     fun isExplicit(card: ShowCard): Boolean {
         // Mainstream whitelist check takes precedence
         if (MAINSTREAM_WHITELIST.containsMatchIn(card.title)) return false
+        // Canonical "Scandal" series (title + metadata only) — the adult
+        // 'Scandal <word>' compounds must NOT reach this whitelist.
+        if (SCANDAL_SHOW_WHITELIST.matches(card.title.trim())) return false
 
         // 1. Fast URL check (blocks 18-section, -18/ slugs, adult directories, /adult/, /erotic/, /uncut/)
         if (card.url.isNotBlank() && EXPLICIT_URL_REGEX.containsMatchIn(card.url)) return true

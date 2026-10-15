@@ -375,12 +375,20 @@ object TrendingFeed {
             val lowerTerm = term.lowercase().trim()
             val normTerm = normalizeGenre(term)
             if (normTerm.isNotBlank() && normTerm in normalizedAliases) return true
+            // WP taxonomies ship compound names ("Science Fiction & Fantasy")
+            // whose space-collapsed phrase IS the stored alias ("scifi",
+            // "sciencefiction"). Mirror the title-path phrase collapse below:
+            // word boundaries are preserved, so the substring collisions this
+            // rewrite killed (satisfaction/action, beloved/love) stay dead.
+            val termPhrased = lowerTerm
+                .replace(Regex("""\bmartial\s+arts\b""", RegexOption.IGNORE_CASE), "martialarts")
+                .replace(Regex("""\bscience\s+fiction\b""", RegexOption.IGNORE_CASE), "sciencefiction")
             for (alias in aliases) {
                 if (alias.isBlank()) continue
                 val cleanAlias = alias.lowercase().trim()
                 if (lowerTerm == cleanAlias) return true
                 val wordRegex = Regex("(?i)\\b" + Regex.escape(cleanAlias) + "\\b")
-                if (wordRegex.containsMatchIn(lowerTerm)) return true
+                if (wordRegex.containsMatchIn(lowerTerm) || wordRegex.containsMatchIn(termPhrased)) return true
             }
         }
 

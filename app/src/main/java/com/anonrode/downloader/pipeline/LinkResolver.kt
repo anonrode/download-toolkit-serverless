@@ -66,10 +66,13 @@ object LinkResolver {
     /**
      * A URL that is provably a direct file rather than a page to crack, even
      * when its host appears in [isKnownLockerHost]'s list: pixeldrain's API
-     * endpoint and token-carrying CDN links (?pt= / ?token= / ?download) are
-     * resolver *outputs* — the cracking already happened — so exempting them
-     * lets genuine direct links through instead of discarding them (the probe
+     * endpoint and dedicated resolver-output token params
+     * (?download_token= / ?media_token= / ?direct_download=1) are resolver
+     * *outputs* — the cracking already happened — so exempting them lets
+     * genuine direct links through instead of discarding them (the probe
      * in TurboDownloader still rejects any server that lies and serves HTML).
+     * NOTE: ?pt= is Loadedfiles' INTERNAL hop marker — mid-chain pages carry
+     * it, so it must never exempt (5b0a903 hardening).
      */
     fun isProvablyDirectFile(url: String): Boolean {
         if (url.isBlank()) return false
@@ -88,7 +91,10 @@ object LinkResolver {
 
         // Direct CDN locker endpoints
         if ((host.contains("downloadwella.com") || host.contains("wetafiles.com")) && path.contains("/d/")) return true
-        if (host.contains("vikingfile.com") && path.contains("/d/")) return true
+        // vikingfile.com /d/ is NOT here on purpose: it 302-hops to the R2
+        // storage URL and VikingFileResolver must crack it — treating /d/ as
+        // already-direct sent parallel sockets at the Nginx front (429s,
+        // commit 0a5b1df).
         if (host.contains("wildshare.net") && (lower.contains("download_token=") || path.contains("/d/"))) return true
         if (host.contains("gfrdaseazzs.com")) return true
         if (host.contains("loadedfiles") && (path.contains("/token/download/") || path.contains("/d/"))) return true
@@ -97,6 +103,14 @@ object LinkResolver {
         // are a real MKV file (live-verified 2026-09-19: HTTP 206,
         // Content-Disposition: attachment; filename=".mkv", MKV magic header).
         if (host.contains("kissorgrab.com") && path.contains("/dl/")) return true
+        // nkiserv.com is nkiri's own CDN (the host was de-listed from the
+        // locker list for exactly this — see KNOWN_LOCKER_HOSTS): naijavault
+        // drawers hand out direct ds2.nkiserv.com/TV/*.mkv files. Its media
+        // paths are finished direct files, never pages to crack
+        // (live log 23:23:03).
+        if (host.contains("nkiserv.com") &&
+            (path.endsWith(".mkv") || path.endsWith(".mp4") || path.endsWith(".avi") || path.endsWith(".webm") || path.contains("/tv/"))
+        ) return true
         // waffi.cloud direct CDN stream endpoints (japa.waffi.cloud, drip.waffi.cloud)
         // Never treat ?preview as direct file: ?preview serves an HTML landing page!
         if (host.contains("waffi.cloud")) {

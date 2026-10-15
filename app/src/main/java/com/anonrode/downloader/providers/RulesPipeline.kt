@@ -1669,7 +1669,11 @@ object RulesPipeline {
                 matched = true
                 sb.append(template, cursor, m.range.first)
                 val value = resolve(m.groupValues[1])
-                if (value == null || value == "null") return null
+                // TRIAGE (C) tightened to the documented contract: a BLANK
+                // bound var must fail the whole render exactly like a missing
+                // one — otherwise a multi-var terminal template silently
+                // ships a partial URL (host without its path) to the probe.
+                if (value.isNullOrBlank() || value == "null") return null
                 sb.append(value)
                 cursor = m.range.last + 1
             }
