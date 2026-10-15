@@ -61,7 +61,12 @@ jobs:
           gradle-version: '8.8'
 
       - name: Run Unit Tests
+        # pipefail is load-bearing: without it the `| tee` swallows gradle's
+        # exit code and a FAILED compileDebugKotlin reports job success
+        # (2026-10-15 release-compile incident ran the full pipeline green
+        # against code that never compiled).
         run: |
+          set -o pipefail
           gradle :app:testDebugUnitTest --no-daemon 2>&1 | tee test_run.log || {
             echo "::error::Unit tests failed! Finding failure details:"
             for f in $(find app/build -name "*.xml" 2>/dev/null); do
