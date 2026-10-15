@@ -1071,6 +1071,9 @@ class DownloadEngine(
                     (if (origEpNum > 0) " (S${origSeason}E${origEpNum})" else "")
             )
             failoverSites[task.id] = tried // keep the tried-set for the next cycle
+            // The task is re-pointed at a different source: its previous
+            // source's dead-URL marks must not answer for the new one.
+            ResolveBudget.forgetTask(task.id)
 
             // Safe to delete partial files ONLY after verifying task is actively continuing (not user paused)
             try {
@@ -1714,16 +1717,28 @@ class DownloadEngine(
      *  semantic: "fetch a FRESH link" — invalidate-first, never serve a
      *  cached (possibly dead-token) URL on the refresh path. All four
      *  call sites (startTask + the 401/403/404 self-heal re-resolves) get
-     *  identical behavior to before the move. */
+     *  identical behavior to before the move.
+     *
+     *  [memoTaskId] is NON-NULL only on the resolve-phase call in startTask:
+     *  it arms the per-task dead-URL memory (engine.ResolveBudget) + per-
+     *  mirror attempt budgets for the engine-driven walk. The mid-download
+     *  self-heal re-resolves deliberately stay memo-less — a 403-refresh
+     *  re-mints a rotating token and must never be refused by a stale mark.
+     *  (Attempt budgets still apply registry-wide, self-heal included:
+     *  a hung refresh is clipped and moves on, while a healthy refresh on
+     *  a proven-history host keeps the generous 40s cap. Budget expiry is
+     *  a discarded result inside the chain — it never cancels a task.) */
     private suspend fun resolveStreamUrl(
         permUrl: String,
         site: String,
         defaultQual: String,
         bypassHealth: Boolean = false,
-        allowCacheHit: Boolean = false
+        allowCacheHit: Boolean = false,
+        memoTaskId: String? = null
     ): String? =
         com.anonrode.downloader.pipeline.LinkResolver.resolveChain(
-            permUrl, site, defaultQual, bypassHealth = bypassHealth, allowCacheHit = allowCacheHit
+            permUrl, site, defaultQual, bypassHealth = bypassHealth, allowCacheHit = allowCacheHit,
+            memoTaskId = memoTaskId
         )
 
     /**
@@ -2101,7 +2116,11 @@ class DownloadEngine(
                 // for this start's FIRST resolution attempt (consume-on-use;
                 // the stale-token / yt-dlp re-resolves later in this coroutine
                 // must NOT bypass, so the flag is read here and not re-derived).
+                // The tap also resets this task's dead-URL memory: the user
+                // explicitly demanded a fresh crack, so no url spent earlier
+                // in this task may be answered from ResolveBudget.
                 val bypassHealth = retryBypassTasks.remove(task.id)
+                if (bypassHealth) ResolveBudget.forgetTask(task.id)
 
                 // Zero-Latency Resume: Check if streamUrl is already direct
                 val isAlreadyDirect = isDirectMediaUrl(streamUrl) && !isKnownLockerHost(streamUrl)
@@ -2113,25 +2132,62 @@ class DownloadEngine(
                     // Hard ceiling on link cracking: the resolver chain walks many
                     // hosts with retries, and without a timeout a slow site pinned
                     // the task in RESOLVING forever (user-reported).
+                    //
+                    // SERIAL VERSION (this pass) of the mirror walk, with three
+                    // speed mechanisms from the share-29 log evidence (233 crack
+                    // hops, ~690s — serial dead-mirror walks were the single
+                    // biggest waste):
+                    //   1. PER-TASK DEAD-URL MEMORY (ResolveBudget.memoTaskId):
+                    //      a url that consumed one full crack pass is refused
+                    //      without any request on every later pass/re-entry of
+                    //      this task (memoTaskId arms it inside the chain).
+                    //   2. PER-MIRROR ATTEMPT BUDGETS: boundedResolverAttempt
+                    //      caps one resolver attempt at 12s (40s for hosts with
+                    //      proven crack history) — the 25-30s dead hangs are gone.
+                    //   3. EMPIRICAL ORDERING: mirrors whose host struck out
+                    //      twice this session walk last; hosts with a session
+                    //      success walk first (selected mirror keeps priority
+                    //      inside its tier; MirrorPool cooldown order survives).
+                    // FUTURE PARALLEL VERSION (documented, intentionally NOT
+                    // this pass): swap the serial for-loop for a bounded race —
+                    // `boundedFirstSuccess`-style: take the ordered candidates,
+                    // launch resolveStreamUrl(candidate, ..., memoTaskId) for
+                    // the first K, await any, on success cancel the losers and
+                    // adopt the winner's mirror exactly as the loop does now.
+                    // Constraints to honor in that version: (a) the memo must
+                    // be consulted at RACE-ENTRY too so a known-dead mirror
+                    // never occupies a race slot; (b) per-host race width is
+                    // 1 for capped hosts (wetafiles/downloadwella/loadedfiles/
+                    // kissorgrab socket caps — see effectiveSockets below —
+                    // and aria2c's own socket caps) so K-lanes don't multiply
+                    // sockets at the same front; (c) budgets stay per-attempt,
+                    // so a racing lane losing its budget frees the slot instead
+                    // of stalling the winner.
                     val resolved = try {
                         kotlinx.coroutines.withTimeout(RESOLVE_TIMEOUT_MS) {
                             val candidates = if (task.mirrorUrls.isEmpty()) listOf(permUrl) else
                                 MirrorPool.eligible(task.sourceUrl, task.mirrorUrls, permUrl, bytesLanded(task) > 0L)
+                            val ordered = ResolveBudget.orderCandidates(candidates)
                             var result: String? = null
-                            for (candidate in candidates) {
+                            for (candidate in ordered) {
                                 coroutineContext.ensureActive()
                                 val output = try {
-                                    resolveStreamUrl(candidate, task.site, task.quality ?: defaultQuality, bypassHealth = bypassHealth, allowCacheHit = true)
+                                    resolveStreamUrl(candidate, task.site, task.quality ?: defaultQuality, bypassHealth = bypassHealth, allowCacheHit = true, memoTaskId = task.id)
                                 } catch (e: CancellationException) {
                                     throw e
                                 } catch (_: Exception) { null }
                                 if (!output.isNullOrBlank()) {
+                                    ResolveBudget.recordHostOk(candidate)
                                     permUrl = candidate
                                     if (task.mirrorUrls.isNotEmpty()) repository.update(task.id) {
                                         it.copy(selectedMirrorUrl = candidate)
                                     }
                                     result = output
                                     break
+                                } else {
+                                    // Session form for ordering: this mirror's host
+                                    // consumed a full crack pass with nothing to show.
+                                    ResolveBudget.recordHostFullPassFail(candidate)
                                 }
                             }
                             result
@@ -2149,11 +2205,14 @@ class DownloadEngine(
                         // A successful resolve resets the parking bookkeeping:
                         // park-cycle counting starts fresh for the NEXT host
                         // trouble, and the failover tried-set is retired (the
-                        // task found a working source).
+                        // task found a working source). The dead-URL memo dies
+                        // with the resolve phase too — the download itself is
+                        // memo-less (token rotation must never see old marks).
                         parkCycleCounts.remove(task.id)
                         parkedAtStamp.remove(task.id)
                         failoverSites.remove(task.id)
                         requeueNotBefore.remove(task.id)
+                        ResolveBudget.forgetTask(task.id)
                         streamUrl = if (resolved.contains("?preview", ignoreCase = true)) resolved.substringBefore("?preview") else resolved
                     } else if (isKnownLockerHost(streamUrl) || !isDirectMediaUrl(streamUrl)) {
                         if (task.site.isNotBlank()) {
@@ -2209,6 +2268,11 @@ class DownloadEngine(
                                 parkCycleCounts[task.id] = cycles
                                 parkedAtStamp.putIfAbsent(task.id, System.currentTimeMillis())
                                 requeueNotBefore[task.id] = System.currentTimeMillis() + parkFloorMs(cycles)
+                                // Park = the backoff window owns the retry rhythm;
+                                // wipe the dead-URL memo so the re-queued cycle gets
+                                // a genuinely fresh pass (a host that recovered inside
+                                // its backoff window must not be answered from memory).
+                                ResolveBudget.forgetTask(task.id)
                                 val saved = if (landed > 0) " — ${(landed / (1024L * 1024L)).coerceAtLeast(1)} MB already saved, it will resume" else ""
                                 repository.update(task.id) {
                                     it.copy(

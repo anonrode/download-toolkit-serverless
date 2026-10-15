@@ -10,6 +10,8 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import com.anonrode.downloader.engine.ResolveBudget
 import okhttp3.FormBody
 import okhttp3.Request
 import org.json.JSONArray
@@ -126,7 +128,43 @@ object ResolverRegistry {
         depth: Int = 0,
         bypassHealth: Boolean = false,
         recordHealth: Boolean = true,
-        visitedSites: Set<String> = emptySet()
+        visitedSites: Set<String> = emptySet(),
+        memoTaskId: String? = null
+    ): String? = withContext(Dispatchers.IO) {
+        currentCoroutineContext().ensureActive()
+        // Per-task dead-URL memory (engine.ResolveBudget — engine-owned). The
+        // download engine passes its task id at the resolve phase entrance;
+        // resolver-internal re-entries of the registry (gateway handoffs,
+        // embed walks, depth-1 recursion) inherit the ambient memo through
+        // the coroutine context, so OTA and non-OTA resolvers both stop
+        // re-walking a url that already consumed one FULL crack pass in
+        // this task. Marks die with the task (forgetTask), with the TTL,
+        // and at the engine's fresh-chance reset points (park / manual
+        // retry / failover switch) — nothing global or permanent forms.
+        val memoTid = memoTaskId ?: currentCoroutineContext()[ResolveBudget.TaskMemo]?.taskId
+        if (memoTid != null && ResolveBudget.isDead(memoTid, url)) {
+            com.anonrode.downloader.util.DebugLog.resolve(
+                "task-memo: ${url.take(90)} already failed a full crack pass in this task — skipped without a request"
+            )
+            return@withContext null
+        }
+        if (memoTid != null) {
+            withContext(ResolveBudget.TaskMemo(memoTid)) {
+                resolveCore(url, quality, depth, bypassHealth, recordHealth, visitedSites, memoTid)
+            }
+        } else {
+            resolveCore(url, quality, depth, bypassHealth, recordHealth, visitedSites, null)
+        }
+    }
+
+    private suspend fun resolveCore(
+        url: String,
+        quality: String,
+        depth: Int,
+        bypassHealth: Boolean,
+        recordHealth: Boolean,
+        visitedSites: Set<String>,
+        memoTaskId: String?
     ): String? = withContext(Dispatchers.IO) {
         currentCoroutineContext().ensureActive()
         // Cache + health apply ONCE per user-facing resolve (depth==0); the
@@ -150,9 +188,19 @@ object ResolverRegistry {
                 return@withContext null
             }
         }
-        val outcome = resolveInternal(url, quality, depth, visitedSites)
+        val outcome = resolveInternal(url, quality, depth, visitedSites, memoTaskId)
         currentCoroutineContext().ensureActive()
         val result = (outcome as? ResolverOutcome.Success)?.url
+        if (memoTaskId != null) {
+            // Success here PROVES the host can still crack — a dead mark for
+            // this url (e.g. left from a gateway handoff) must not survive it.
+            if (result != null) ResolveBudget.markAlive(memoTaskId, url)
+            else if (outcome is ResolverOutcome.Failure &&
+                // Same content-vs-transport rule as the registry loop-end mark:
+                // a transport-sick pass re-walks next pass; a proven-dead page skips.
+                !ResolveBudget.isTransportLevelFailure(outcome.reason)
+            ) ResolveBudget.markDead(memoTaskId, url)
+        }
         if (depth == 0 && recordHealth) {
             // Health must be keyed on the TRUE host (same source of truth as
             // hostClaim/the terminal gate): the old string-split host recorded
@@ -195,7 +243,8 @@ object ResolverRegistry {
         url: String,
         quality: String = "720p",
         depth: Int = 0,
-        visitedSites: Set<String> = emptySet()
+        visitedSites: Set<String> = emptySet(),
+        memoTaskId: String? = null
     ): ResolverOutcome {
         currentCoroutineContext().ensureActive()
         if (depth > RESOLVE_DEPTH_LIMIT) {
@@ -206,13 +255,26 @@ object ResolverRegistry {
             return ResolverOutcome.Failure("depth limit")
         }
         val trimmed = url.trim()
+        // Per-task dead-URL memory, registry side: a recursion or handoff that
+        // re-enters a url whose full crack pass already failed in this task is
+        // refused BEFORE any resolver claims it or any byte is fetched.
+        if (memoTaskId != null && ResolveBudget.isDead(memoTaskId, trimmed)) {
+            com.anonrode.downloader.util.DebugLog.resolve(
+                "task-memo: chain re-entered ${trimmed.take(90)} — already failed a full crack pass in this task, skipping subtree"
+            )
+            return ResolverOutcome.Failure("task memo: url already burned a full crack pass in this task")
+        }
         var failure: ResolverOutcome = ResolverOutcome.NoMatch
+        var anyClaim = false
         for (resolver in RESOLVERS) {
             currentCoroutineContext().ensureActive()
             if (resolver.canResolve(trimmed)) {
+                anyClaim = true
                 val start = System.currentTimeMillis()
                 val outcome = if (resolver === DynamicLockerResolver) {
-                    DynamicLockerResolver.resolveOutcome(trimmed, quality, depth, visitedSites)
+                    boundedResolverAttempt(trimmed, "DynamicLockerResolver") {
+                        DynamicLockerResolver.resolveOutcome(trimmed, quality, depth, visitedSites)
+                    }
                 } else {
                     resolveWithRetry(resolver, trimmed, quality, depth)
                 }
@@ -245,7 +307,7 @@ object ResolverRegistry {
                         // guard now covers all future cross-provider handoffs).
                         if (!com.anonrode.downloader.pipeline.LinkResolver.isProvablyDirectFile(direct) &&
                             !(sameResolverReclaims && mediaPath)) {
-                            val deeper = resolveInternal(direct, quality, depth + 1, visitedSites)
+                            val deeper = resolveInternal(direct, quality, depth + 1, visitedSites, memoTaskId)
                             if (deeper is ResolverOutcome.Success) return deeper
                             // Reference parity (resolvers.py:2473-2475): a failed
                             // deeper pass must NOT fall back to returning the
@@ -274,7 +336,20 @@ object ResolverRegistry {
                 failure = if (outcome is ResolverOutcome.Failure) outcome else ResolverOutcome.Failure(failureDetail)
             }
         }
-        return failure
+        return failure.also {
+            // Full crack pass consumed without any resolver producing anything:
+            // this url is dead for the remainder of THIS task (engine.ResolveBudget
+            // owns the marks and their reset points; per-session, never global).
+            // CONTENT-level failures only: transport failures (DNS/connect/
+            // socket/timeout — the network was sick, not the page) must not
+            // poison the memo, or one Wi-Fi blink converts later passes into
+            // no-op skips. HostHealth owns sick networks; the memo owns dead pages.
+            if (memoTaskId != null && anyClaim && it !is ResolverOutcome.Success &&
+                !ResolveBudget.isTransportLevelFailure((it as? ResolverOutcome.Failure)?.reason)
+            ) {
+                ResolveBudget.markDead(memoTaskId, trimmed)
+            }
+        }
     }
 
     // Retry only request-local connectivity evidence, never singleton diagnostic strings.
@@ -283,10 +358,16 @@ object ResolverRegistry {
         while (true) {
             currentCoroutineContext().ensureActive()
             HttpClient.awaitOriginCooldown(url)
-            val outcome = if (resolver === LoadedfilesResolver) {
-                LoadedfilesResolver.resolveOutcome(url, quality, depth)
-            } else {
-                captureResolverOutcome { resolver.resolve(url, quality, depth) }
+            val attemptStart = System.currentTimeMillis()
+            val outcome = boundedResolverAttempt(url, resolver::class.simpleName ?: "Resolver") {
+                if (resolver === LoadedfilesResolver) {
+                    LoadedfilesResolver.resolveOutcome(url, quality, depth)
+                } else {
+                    captureResolverOutcome { resolver.resolve(url, quality, depth) }
+                }
+            }
+            if (outcome !is ResolverOutcome.Success) {
+                ResolveBudget.noteFailedBurn(url, System.currentTimeMillis() - attemptStart)
             }
             currentCoroutineContext().ensureActive()
             val cooldownUrl = (outcome as? ResolverOutcome.Failure)?.cooldownUrl
@@ -298,6 +379,39 @@ object ResolverRegistry {
             delay(NETWORK_RETRY_DELAY_MS)
             if (cooldownUrl != null && cooldownUrl != url) HttpClient.awaitOriginCooldown(cooldownUrl)
         }
+    }
+
+    /**
+     * Per-mirror time budget for ONE resolver attempt on ONE url
+     * (engine.ResolveBudget). VERIFIED SEMANTICS (deliverable to review):
+     * withTimeoutOrNull cancels the attempt, and because the HTTP transport
+     * below the resolvers is blocking (HttpClient executes okhttp calls
+     * synchronously, no invokeOnCancellation hooks), cancellation is
+     * honored at the attempt's next suspension point — the budget can
+     * always STOP FURTHER CHAIN WORK (later steps of a multi-fetch
+     * resolver, later resolvers, later hops) and always DISCARDS the late
+     * result, but it cannot hard-kill a socket already in flight; the
+     * worst wall time for one hop is therefore budget + the tail of one
+     * in-flight call (socket timeouts 10-30s), never unbounded series.
+     * ...
+     * (share-29 log: vidbasic 25.4s/27.9s ERR, dood 13.7s ERR, Downloadwella
+     * 26.2s ERR). Budget sizing is evidence-based: hosts with proven crack
+     * history and known slow-but-legit resolvers get the generous cap so
+     * Loadedfiles 14.3/19.1s OK and the naijavault gateway 30.0s OK are
+     * never clipped — only unproven hosts. Budget expiry is a synthetic
+     * NON-retryable failure: a hopeless attempt is not re-run at full cost;
+     * the burn ledger instead prices any later look at 8s.
+     */
+    private suspend fun <T : ResolverOutcome> boundedResolverAttempt(
+        url: String,
+        resolverName: String,
+        block: suspend () -> T
+    ): ResolverOutcome {
+        val budget = ResolveBudget.attemptBudgetMs(url, resolverName)
+        return withTimeoutOrNull(budget) { block() } ?: ResolverOutcome.Failure(
+            reason = "AttemptBudget: $resolverName exceeded ${budget / 1000}s on $url",
+            retryable = false
+        )
     }
 }
 
@@ -756,6 +870,145 @@ object VidsrcResolver : BaseResolver {
     private const val AVAILABLE_TMDB_TTL_MS = 60 * 60_000L
     @Volatile private var lastFailure: String? = null
 
+    // ------------------------------------------------------------------
+    // LIVE vidsrc extraction path — recreated from the working site
+    // (probe-verified 2026-10-15, ~4-10s total to a playable playlist):
+    //   GET vidsrc.buzz/embed/{movie|tv}/{tmdb}[/{s}/{e}]
+    //        -> the embed page ships its bootstrap OBJECT inline:
+    //           Q = {"type":..,"id":"tt..","t":"<signed token>",
+    //                "ssr":{"status":"ok","servers":[
+    //                  {"ref":"<signed mint ref>","name":"Server VNH",..}]}}
+    //   GET vidsrc.buzz/pl/api.php?a=play&ref=<ref>&t=<t>
+    //        -> 200 {"url":"/_stream?id=<id>","type":"hls"}
+    //        -> GET vidsrc.buzz/_stream?id=<id> = live #EXTM3U (VOD).
+    // NOTE: /pl/ is the player's <base href>; a bare /api.php 404s — the
+    // browser resolves api.php relative to that base, we must match.
+    // The old data.vidsrcme.ru upstream (691 ConnectExceptions vs 31 OK
+    // in log 29 — TCP-refused from the device AND desktop networks) is
+    // kept only as a dead-flagged legacy fallback below, and availability
+    // checks fail open against it without any request while dead.
+    // ------------------------------------------------------------------
+    private const val BUZZ_HOST = "https://vidsrc.buzz"
+    private val Q_BLOCK = Pattern.compile("""Q\s*=\s*(\{.*?\});""", Pattern.DOTALL)
+
+    // OTA escape hatch — same channel as the Downloadwella/Loadedfiles
+    // resolver configs (getResolverConfig): scraper_rules.json can carry a
+    // "vidsrc" resolver config and re-point this flow when the family
+    // rotates domains or the player base path again. A rules-file push,
+    // no APK. Keys (all https origins or origin+path, length-capped):
+    //   "embedBase"    — default https://vidsrc.buzz           (page host)
+    //   "mintBase"     — default https://vidsrc.buzz/pl        (/pl/ = the
+    //                     player's <base href>; api.php resolves under it)
+    //   "legacyApiHost"— default https://data.vidsrcme.ru      (legacy intake)
+    private fun otaStr(key: String, default: String): String = try {
+        DynamicRulesManager.getResolverConfig("vidsrc")?.optString(key)
+            ?.takeIf { it.isNotBlank() && it.length <= 200 && it.startsWith("https://") && !it.contains(' ') }
+            ?: default
+    } catch (_: Exception) { default }
+
+    private fun otaEmbedBase(): String = otaStr("embedBase", BUZZ_HOST)
+    private fun otaMintBase(): String = otaStr("mintBase", "$BUZZ_HOST/pl")
+    private fun otaLegacyApiHost(): String = otaStr("legacyApiHost", "https://data.vidsrcme.ru")
+
+    /** One transport failure of data.vidsrcme.ru parks legacy-API probes
+     *  for this long; availability and the legacy resolve path honor it. */
+    private val LEGACY_API_DEAD_TTL_MS = 10 * 60_000L
+
+    @Volatile private var legacyApiDeadUntilMs: Long = 0L
+
+    private fun legacyApiUsable(): Boolean = System.currentTimeMillis() >= legacyApiDeadUntilMs
+
+    private fun markLegacyApiDead() {
+        legacyApiDeadUntilMs = System.currentTimeMillis() + LEGACY_API_DEAD_TTL_MS
+    }
+
+    /**
+     * Primary extraction: mint from the vidsrc.buzz player's own relay
+     * (live-verified flow above). Failure reasons are deliberate:
+     * null-with-content-reason ("no mintable sources") is memo-eligible per
+     * the task dead-URL memory; page/bootstrap transport misses return
+     * without a content verdict so network hiccups re-walk next pass.
+     */
+    private suspend fun resolveViaBuzz(mediaType: String, tmdb: String, season: String?, episode: String?): String? {
+        val embedBase = otaEmbedBase()
+        val mintBase = otaMintBase()
+        val pageUrl = if (mediaType == "tv")
+            "$embedBase/embed/tv/$tmdb/${season ?: "1"}/${episode ?: "1"}"
+        else
+            "$embedBase/embed/movie/$tmdb"
+        // vidsrc.buzz 429s are recorded by HttpClient (log 29 lesson: walk
+        // all mirrors into a 429'd origin = 17 x ~1.6s of nothing) — honor
+        // the cooldown before any fetch.
+        if (com.anonrode.downloader.data.net.HttpClient.isOriginCoolingDown(pageUrl)) {
+            lastFailure = "Vidsrc: vidsrc.buzz origin rate-limited (cooldown active) for tmdb=$tmdb"
+            return null
+        }
+        val html = try {
+            HttpClient.getText(pageUrl, referer = "https://www.2embed.cc/")
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            null
+        } ?: run {
+            // Page miss without a body: NOT a content verdict (could be the
+            // network or a 4xx) — mirrors still walk next pass.
+            lastFailure = "Vidsrc.buzz: embed page not served for tmdb=$tmdb"
+            return null
+        }
+        val qm = Q_BLOCK.matcher(html)
+        if (!qm.find()) {
+            // Page answered but carries no player bootstrap: layout change or
+            // interstitial. Content-level, memo-eligible.
+            lastFailure = "Vidsrc: bootstrap object missing on vidsrc.buzz embed page (tmdb=$tmdb)"
+            return null
+        }
+        var token: String? = null
+        var servers: org.json.JSONArray? = null
+        try {
+            val q = JSONObject(qm.group(1))
+            token = q.optString("t").takeIf { it.isNotBlank() }
+            servers = q.optJSONObject("ssr")?.optJSONArray("servers")
+        } catch (_: Exception) {}
+        if (token == null || servers == null || servers.length() == 0) {
+            // The machine around the content is alive (page + bootstrap +
+            // signature) but no source server exists for this title: a
+            // proven-dead content verdict.
+            missingTmdb["$mediaType:$tmdb:${season.orEmpty()}:${episode.orEmpty()}"] = System.currentTimeMillis()
+            lastFailure = "Vidsrc: vidsrc.buzz has no mintable sources for tmdb=$tmdb (ssr empty)"
+            return null
+        }
+        for (i in 0 until minOf(3, servers.length())) {
+            val sv = servers.optJSONObject(i) ?: continue
+            val ref = sv.optString("ref").takeIf { it.isNotBlank() } ?: continue
+            val mintUrl = "$mintBase/api.php?a=play&ref=" +
+                URLEncoder.encode(ref, "UTF-8") + "&t=" + URLEncoder.encode(token, "UTF-8")
+            val mintJson = try {
+                HttpClient.getText(mintUrl, referer = pageUrl)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                null
+            } ?: continue
+            val streamUrl = try {
+                JSONObject(mintJson).optString("url")
+            } catch (_: Exception) { "" }
+            if (streamUrl.isNotBlank()) {
+                // The player sets video.src to this URL directly (ip-gated by
+                // the mint) — no generate.php restamp; a token-bearing input
+                // must flow through untouched (same doctrine as below).
+                val absolute = if (streamUrl.startsWith("/")) "$embedBase$streamUrl" else streamUrl
+                if (absolute.contains("_stream") || absolute.contains(".m3u8") ||
+                    absolute.contains(".mpd") || absolute.contains(".mp4") ||
+                    isDirectMediaUrl(absolute)
+                ) {
+                    return absolute
+                }
+            }
+        }
+        lastFailure = "Vidsrc: vidsrc.buzz mint refused to produce a playable url for tmdb=$tmdb"
+        return null
+    }
+
     override fun lastResolveFailure(): String? = lastFailure
 
     fun isKnownUnavailable(mediaType: String, tmdbId: String, season: String = "", episode: String = ""): Boolean {
@@ -792,12 +1045,19 @@ object VidsrcResolver : BaseResolver {
         if (tmdbId.isBlank()) return false
         if (isKnownUnavailable(mediaType, tmdbId)) return false
         if (isKnownAvailable(mediaType, tmdbId)) return true
+        // data.vidsrcme.ru dead-flag: log 29 burned 691 ConnectExceptions
+        // (1-5s each) re-proving a TCP-refused host on every trending item.
+        // While dead, fail open WITHOUT any request — availability is never
+        // proven offline anyway, so the semantic is unchanged except the cost.
+        if (!legacyApiUsable()) return true
 
         val cacheKey = "$mediaType:$tmdbId::"
         return try {
-            val apiUrl = "https://data.vidsrcme.ru/api.php?type=$mediaType&tmdb=$tmdbId&stream_urls"
-            val json = HttpClient.getText(apiUrl, referer = "https://cloudorchestranova.com/", tag = tag)
-                ?: return true // Fail open on network/timeout error so offline/flaky connection doesn't drop items
+            val apiUrl = "${otaLegacyApiHost()}/api.php?type=$mediaType&tmdb=$tmdbId&stream_urls"
+            val json = HttpClient.getText(apiUrl, referer = "https://cloudorchestranova.com/", tag = tag) ?: run {
+                markLegacyApiDead()
+                return true // Fail open on network/timeout error so offline/flaky connection doesn't drop items
+            }
             val root = JSONObject(json)
             val sc = root.optInt("status_code", 0)
             val data = root.optJSONObject("data")
@@ -813,6 +1073,7 @@ object VidsrcResolver : BaseResolver {
         } catch (ce: CancellationException) {
             throw ce
         } catch (_: Exception) {
+            markLegacyApiDead()
             true // Fail open on transient error
         }
     }
@@ -921,26 +1182,34 @@ object VidsrcResolver : BaseResolver {
                 }
                 missingTmdb.remove(cacheKey, cachedMissingAt)
             }
+            // LIVE PATH FIRST — vidsrc.buzz player's own relay, verified live
+            // 2026-10-15 (~4-10s to a playable playlist; page carries the SSR
+            // servers + signed token, /pl/api.php mints, /_stream serves HLS).
+            // The dead legacy API below only runs when the live path cannot.
+            resolveViaBuzz(mediaType, tmdb, season, episode)?.let { minted ->
+                availableTmdb[cacheKey] = System.currentTimeMillis()
+                return minted
+            }
+            val legacyApi = otaLegacyApiHost()
             val apiUrl = if (mediaType == "tv") {
                 val s = season ?: "1"
                 val ep = episode ?: "1"
-                "https://data.vidsrcme.ru/api.php?type=tv&tmdb=$tmdb&season=$s&episode=$ep&stream_urls"
+                "$legacyApi/api.php?type=tv&tmdb=$tmdb&season=$s&episode=$ep&stream_urls"
             } else {
-                "https://data.vidsrcme.ru/api.php?type=movie&tmdb=$tmdb&stream_urls"
+                "$legacyApi/api.php?type=movie&tmdb=$tmdb&stream_urls"
             }
 
-            if (com.anonrode.downloader.data.net.HttpClient.isOriginCoolingDown(apiUrl)) {
-                // The data.vidsrcme.ru API is shared by EVERY embed mirror
-                // (vidsrc.mov/.fyi/vidrock/vidnest/...): once it trips its
-                // Retry-After cooldown, walking more mirrors only re-fetches
-                // embed pages to fail at the same gate. Live log 29: 17 serial
-                // mirror attempts x ~1.6s AFTER the API had gone 429 — the
-                // origin cooldown must cut the walk short (and ResultVerifier's
-                // trending fan-out must not re-queue against it).
-                lastFailure = "Vidsrc: API origin rate-limited (cooldown active) for tmdb=$tmdb"
+            // Dead-flag (TCP-refused host) + origin cooldown both cut the walk
+            // short WITHOUT a request. The live path's own failure reason is
+            // preserved above this legacy gate — it is the informative one.
+            if (!legacyApiUsable() || com.anonrode.downloader.data.net.HttpClient.isOriginCoolingDown(apiUrl)) {
+                if (lastFailure == null) {
+                    lastFailure = "Vidsrc: legacy API skipped (dead-flagged/cooldown) for tmdb=$tmdb"
+                }
                 return null
             }
             val json = HttpClient.getText(apiUrl, referer = "https://cloudorchestranova.com/") ?: run {
+                markLegacyApiDead()
                 lastFailure = "Vidsrc: API request failed for $apiUrl"
                 return null
             }

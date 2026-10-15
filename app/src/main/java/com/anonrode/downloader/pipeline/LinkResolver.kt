@@ -184,6 +184,13 @@ object LinkResolver {
      * re-hands a dead token (the mid-download 403 self-heal depends on it).
      * true (the oracle): consume cache — re-cracking pages the app already
      * cracked minutes ago is exactly the mobile data this design must not burn.
+     *
+     * [memoTaskId] threads the download engine's per-task dead-URL memory
+     * (engine.ResolveBudget) down to the registry. Null (the oracle and every
+     * other non-engine caller) leaves this chain's behavior byte-identical
+     * to pre-memo semantics; with a task id, a url that already failed one
+     * FULL crack pass in that task is refused without any request, and every
+     * nested registry re-entry inherits the memo via its coroutine context.
      */
     suspend fun resolveChain(
         permUrl: String,
@@ -191,7 +198,8 @@ object LinkResolver {
         defaultQual: String,
         bypassHealth: Boolean = false,
         allowCacheHit: Boolean = false,
-        recordHealth: Boolean = true
+        recordHealth: Boolean = true,
+        memoTaskId: String? = null
     ): String? {
         fun accept(out: String?): Boolean {
             if (out.isNullOrBlank()) return false
@@ -207,7 +215,7 @@ object LinkResolver {
             ResolveCache.invalidate(ResolveCache.keyFor(permUrl, defaultQual))
         }
         var resolved = ResolverRegistry.resolve(
-            permUrl, defaultQual, bypassHealth = bypassHealth, recordHealth = recordHealth
+            permUrl, defaultQual, bypassHealth = bypassHealth, recordHealth = recordHealth, memoTaskId = memoTaskId
         )
         if (accept(resolved)) {
             return resolved
@@ -243,7 +251,7 @@ object LinkResolver {
         // straight to yt-dlp.
         if (!accept(resolved) && !resolved.isNullOrBlank() && isKnownLockerHost(resolved)) {
             try {
-                val inner = ResolverRegistry.resolve(resolved, defaultQual)
+                val inner = ResolverRegistry.resolve(resolved, defaultQual, memoTaskId = memoTaskId)
                 if (accept(inner)) {
                     resolved = inner
                 }
