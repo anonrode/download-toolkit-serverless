@@ -346,29 +346,68 @@ fun SettingsScreen(
                 },
                 label = "settingsDrawer"
             ) { drawer ->
+                // Footer pinning, scroll-safe (vertical-rhythm fix, 2026-10-14):
+                // each page is an OUTER bounded Column (fillMaxSize) whose
+                // scroll lane is a weight(1f) child and whose footer caption is
+                // pinned below the lane. The other way round — Spacer(weight(1f))
+                // INSIDE a self-scrolling column — collapses to 0dp, because a
+                // scroll container measures children against an unbounded max
+                // height. Here the weight is resolved by the bounded outer
+                // column, so the lane gets exactly "the height left over after
+                // the footer"; it scrolls only when the cards overflow that
+                // height, and on short content the shortfall lands INSIDE the
+                // lane (above the caption) instead of under a floating footer.
                 Column(
                     modifier = Modifier
                         .fillMaxSize()
-                        .verticalScroll(rememberScrollState())
-                        .padding(start = hubGutter, end = hubGutter, bottom = Spacing.xl)
+                        // One gutter for cards AND caption (24dp hub / 16dp
+                        // drawer, hubGutter above) so the caption centers on
+                        // the same grid as the cards.
+                        .padding(start = hubGutter, end = hubGutter)
+                        // The Scaffold below opts out of window insets
+                        // (WindowInsets(0.dp)), so the pinned caption claims the
+                        // navigation-bar inset itself. On the page column, not
+                        // the footer, so the scroll lane also clips above the
+                        // bar instead of showing rows behind the gesture area.
+                        .navigationBarsPadding()
                 ) {
-                    when (drawer) {
-                        SettingsDrawer.PLAYBACK -> SettingsPlaybackSection(state = state)
-                        SettingsDrawer.DOWNLOADS -> SettingsDownloadsSection(state = state)
-                        SettingsDrawer.CONNECTIONS -> SettingsConnectionsSection(state = state)
-                        SettingsDrawer.UPDATES -> SettingsUpdatesSection(
-                            state = state,
-                            rulesVersion = rulesVersion,
-                            scope = scope
-                        )
-                        SettingsDrawer.LOGS -> SettingsLogsSection(state = state)
-                        null -> SettingsHub(
-                            state = state,
-                            uiState = uiState,
-                            onThemeChanged = onThemeChanged,
-                            onOpen = { drawer -> openDrawerName = drawer.name }
-                        )
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth()
+                            // Exactly 20dp between the 56dp back-row zone above
+                            // and the first card. Chained BEFORE verticalScroll
+                            // so it is a fixed viewport inset — scrolled content
+                            // vanishes at the 20dp line instead of jamming
+                            // against the header.
+                            .padding(top = 20.dp)
+                            .verticalScroll(rememberScrollState()),
+                        // One uniform 12dp beat between every direct child
+                        // (Arithmetic: 12 = Spacing.md). Was looser elsewhere:
+                        // 16dp under the theme card, 8dp between hub entries,
+                        // plus ad-hoc Spacer(12dp) group separators on the
+                        // drawer pages — all removed; the column now owns the
+                        // gap, so header/card pairs must sit back-to-back here.
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        when (drawer) {
+                            SettingsDrawer.PLAYBACK -> SettingsPlaybackSection(state = state)
+                            SettingsDrawer.DOWNLOADS -> SettingsDownloadsSection(state = state)
+                            SettingsDrawer.CONNECTIONS -> SettingsConnectionsSection(state = state)
+                            SettingsDrawer.UPDATES -> SettingsUpdatesSection(
+                                state = state,
+                                rulesVersion = rulesVersion,
+                                scope = scope
+                            )
+                            SettingsDrawer.LOGS -> SettingsLogsSection(state = state)
+                            null -> SettingsHub(
+                                state = state,
+                                onThemeChanged = onThemeChanged,
+                                onOpen = { drawer -> openDrawerName = drawer.name }
+                            )
+                        }
                     }
+                    SettingsPinnedFooter(uiState = uiState)
                 }
             }
         }
@@ -387,6 +426,12 @@ private fun SettingsThemeControl(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                // Card floor, rhythm contract: 76dp (tri-cell control row).
+                // The 12dp vertical padding rides INSIDE the floor, so the
+                // tri-cell children center across the remaining 52dp — enough
+                // for the 48dp chip touch targets — and the card is exactly
+                // 76dp at default font scale, growing only if content does.
+                .heightIn(min = 76.dp)
                 .padding(horizontal = Spacing.md, vertical = Spacing.md),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
@@ -484,17 +529,22 @@ private fun SettingsThemeControl(
     }
 }
 
-/** The hub: theme, then five drawer cards, then the quiet footer. */
+/** The hub: theme, then the drawer entry cards — every entry on one 64dp
+ *  floor with a uniform 12dp beat (content column's spacedBy). The version/
+ *  storage caption used to close this column after a Spacer ladder; it moved
+ *  to [SettingsPinnedFooter] below the scroll lane, so the dead space after
+ *  the last card now lives INSIDE the lane instead of under a floating
+ *  footer. */
 @Composable
 private fun SettingsHub(
     state: SettingsState,
-    uiState: com.anonrode.downloader.viewmodel.HomeUiState,
     onThemeChanged: (String) -> Unit,
     onOpen: (SettingsDrawer) -> Unit
 ) {
     SettingsThemeControl(state = state, onThemeChanged = onThemeChanged)
 
-    Spacer(modifier = Modifier.height(Spacing.lg))
+    // (Spacer(Spacing.lg) removed — the content column runs
+    // Arrangement.spacedBy(12.dp): one uniform 12dp beat between cards.)
 
     // NOTE: Accent*/Status* tokens are @Composable getters — their when()
     // must run in composable scope, never inside a plain lambda.
@@ -522,6 +572,13 @@ private fun SettingsHub(
                 .background(SurfaceCard)
                 .border(1.dp, BorderHairline, RoundedCornerShape(Radius.lg))
                 .clickable(interactionSource = src, indication = null) { onOpen(drawer) }
+                // Entry floor, rhythm contract: 64dp = 40dp icon box + two
+                // text lines (18sp title + 15sp caption ≈ 33dp — the icon box
+                // is the tallest child). The 12dp vertical padding rides
+                // INSIDE the floor so children center across the remaining
+                // 40dp, and the entry is exactly 64dp at default font scale,
+                // growing only if scaled text pushes past the floor.
+                .heightIn(min = 64.dp)
                 .padding(horizontal = Spacing.md, vertical = Spacing.md),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(Spacing.md)
@@ -573,17 +630,41 @@ private fun SettingsHub(
                 color = TextMuted
             )
         }
-        Spacer(modifier = Modifier.height(Spacing.sm))
+        // (Trailing Spacer(Spacing.sm) removed — the content column's
+        // spacedBy(12.dp) owns the beat between entries.)
     }
+}
 
-    Spacer(modifier = Modifier.height(Spacing.md))
-
+/**
+ * Pinned page footer — shared by the hub AND every drawer page, so no page on
+ * this screen ends in dead space under a floating caption.
+ *
+ * Rhythm contract (2026-10-14 vertical-rhythm fix), top to bottom:
+ *   scroll lane [weight(1f)]   → any shortfall between the last card and the
+ *                                  caption resolves HERE, inside the lane,
+ *                                  never below it;
+ *   + 12.dp (Spacing.md)       → lane-to-caption breathing, so fully-scrolled
+ *                                  content never abuts the caption;
+ *   + caption line             → 11sp (Type.caption), centered, same string
+ *                                  source as the old in-hub footer;
+ *   + 24.dp (Spacing.xl)       → below the caption;
+ *   + navigationBarsPadding    → claimed by the page column above, so the
+ *                                  24dp is measured from the top of the
+ *                                  navigation-bar inset — the caption always
+ *                                  clears the gesture bar.
+ * Color note: keeps the pre-existing dim-slate literal from the old footer —
+ * no new colors introduced (monochrome law, notebook §3).
+ */
+@Composable
+private fun SettingsPinnedFooter(uiState: com.anonrode.downloader.viewmodel.HomeUiState) {
     Text(
         text = "Anonrode v${BuildConfig.VERSION_NAME} · " +
             "${uiState.freeStorageGb} GB free of ${uiState.totalStorageGb} GB",
-        fontSize = Type.micro.fontSize,
+        fontSize = Type.caption.fontSize,
         color = Color(0xFF3D4453),
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = Spacing.md, bottom = Spacing.xl),
         textAlign = androidx.compose.ui.text.style.TextAlign.Center
     )
 }
@@ -639,8 +720,6 @@ internal fun SettingsPlaybackSection(state: SettingsState) {
         }
     }
 
-    Spacer(modifier = Modifier.height(Spacing.md))
-
     SettingsCategoryHeader(title = "Subtitles")
     SettingsCard {
         SettingsSwitchRow(
@@ -689,8 +768,6 @@ internal fun SettingsPlaybackSection(state: SettingsState) {
         }
     }
 
-    Spacer(modifier = Modifier.height(Spacing.md))
-
     SettingsCategoryHeader(title = "Player Defaults")
     SettingsCard {
         Column(modifier = Modifier.padding(Spacing.md)) {
@@ -727,8 +804,6 @@ internal fun SettingsPlaybackSection(state: SettingsState) {
             }
         }
     }
-
-    Spacer(modifier = Modifier.height(Spacing.md))
 
     SettingsCard {
         SettingsSwitchRow(
@@ -997,8 +1072,6 @@ internal fun SettingsDownloadsSection(state: SettingsState) {
         }
     }
 
-    Spacer(modifier = Modifier.height(Spacing.md))
-
     SettingsCategoryHeader(title = "Behavior & Intake")
     SettingsCard {
         SettingsSwitchRow(
@@ -1083,8 +1156,6 @@ internal fun SettingsLogsSection(state: SettingsState) {
         )
     }
 
-    Spacer(modifier = Modifier.height(Spacing.md))
-
     SettingsDiagnosticsSection(state = state)
 }
 
@@ -1124,8 +1195,6 @@ internal fun SettingsUpdatesSection(
         scope = scope
     )
 
-    Spacer(modifier = Modifier.height(Spacing.md))
-
     SettingsCategoryHeader(title = "Remote Error Reporting")
     SettingsCard {
         SettingsSwitchRow(
@@ -1139,8 +1208,6 @@ internal fun SettingsUpdatesSection(
             }
         )
     }
-
-    Spacer(modifier = Modifier.height(Spacing.md))
 
     SettingsCategoryHeader(title = "App Updates")
     SettingsCard {
@@ -1295,8 +1362,6 @@ internal fun SettingsConnectionsSection(state: SettingsState) {
         )
     }
 
-    Spacer(modifier = Modifier.height(Spacing.md))
-
     SettingsCategoryHeader(title = "Retry & Stall")
     SettingsCard {
         Column(modifier = Modifier.padding(Spacing.md)) {
@@ -1379,8 +1444,6 @@ internal fun SettingsConnectionsSection(state: SettingsState) {
             )
         }
     }
-
-    Spacer(modifier = Modifier.height(Spacing.md))
 
     SettingsCategoryHeader(title = "Streams & Data")
     SettingsCard {
