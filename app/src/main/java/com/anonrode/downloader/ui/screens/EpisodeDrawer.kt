@@ -62,7 +62,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.DialogWindowProvider
-import androidx.core.view.isAppearanceLightStatusBars
+import androidx.core.view.WindowCompat
 import coil.compose.AsyncImage
 import androidx.lifecycle.viewModelScope
 import com.anonrode.downloader.data.models.EpisodeItem
@@ -299,7 +299,13 @@ fun EpisodeDrawer(
         // untouched the moment the dialog dismisses.
         val dialogWindow = (LocalView.current.parent as? DialogWindowProvider)?.window
         SideEffect {
-            dialogWindow?.isAppearanceLightStatusBars = false
+            dialogWindow?.let { w ->
+                // WindowCompat (core, not the ktx extension) — the plain
+                // `window.isAppearanceLightStatusBars` property needs a newer
+                // core-ktx than the dependency graph carries.
+                WindowCompat.getInsetsController(w, w.decorView)
+                    .isAppearanceLightStatusBars = false
+            }
         }
         BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
             // W = container width, H = full screen height (MATH CONTRACT inputs).
