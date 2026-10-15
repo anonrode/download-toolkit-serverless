@@ -62,6 +62,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.DialogWindowProvider
+import androidx.core.view.isAppearanceLightStatusBars
 import coil.compose.AsyncImage
 import androidx.lifecycle.viewModelScope
 import com.anonrode.downloader.data.models.EpisodeItem
