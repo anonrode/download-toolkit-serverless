@@ -841,8 +841,30 @@ object YoutubeDlDownloader {
                     "Download finished, but it could not be moved into your folder (storage full or access lost). Free some space, then tap retry."
                 )
             }
-            // Move any remaining files (e.g. carousel sibling images)
+            // Move any remaining files (e.g. carousel sibling images). Subtitle
+            // sidecars get RENAMED to the video's final (sanitized) stem so the
+            // player's "<stem>.<lang>.srt" discovery re-finds them — yt-dlp's
+            // original workdir naming dies with the rename to baseStem above,
+            // and an orphaned sidecar leaves embedded-ASS as the only track
+            // (Break Clause 2026-10-15: release-group typesetting pinned the
+            // dialogue to the screen top).
             outDir.listFiles()?.filter { it.isFile }?.forEach { sibling ->
+                val destBase = dest.nameWithoutExtension
+                val sExt = sibling.extension.lowercase()
+                if (sExt in SUBTITLE_ARTIFACT_EXTS) {
+                    val langTag = sibling.nameWithoutExtension.substringAfterLast('.')
+                        .takeIf { Regex("^[a-zA-Z]{2,3}$").matches(it) } ?: "en"
+                    var sibDest = File(targetDir, "$destBase.$langTag.$sExt")
+                    var sn = 1
+                    while (sibDest.exists()) {
+                        sibDest = File(targetDir, "$destBase ($sn).$langTag.$sExt")
+                        sn++
+                    }
+                    if (!sibling.renameTo(sibDest)) {
+                        runCatching { sibling.copyTo(sibDest, overwrite = true); sibling.delete() }
+                    }
+                    return@forEach
+                }
                 var sibDest = File(targetDir, sibling.name)
                 var sn = 1
                 while (sibDest.exists()) {

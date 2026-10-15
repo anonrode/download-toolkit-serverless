@@ -527,25 +527,33 @@ private fun MediaPlayerModalImpl(
                     .setArtist(file.parentFile?.name ?: "")
                     .build()
             )
-        val sidecars = SIDECAR_SUBTITLE_EXTS.mapNotNull { extName ->
-            val sibling = File(file.parentFile, "${file.nameWithoutExtension}.$extName")
-            if (sibling.exists() && sibling.canRead()) {
-                MediaItem.SubtitleConfiguration.Builder(Uri.fromFile(sibling))
-                    .setMimeType(
-                        when (extName) {
-                            "vtt" -> "text/vtt"
-                            "ass", "ssa" -> "application/x-ssa"
-                            else -> "application/x-subrip"
-                        }
-                    )
-                    // "movie.en.srt" carries a real language tag: feeding it
-                    // lets the auto-pick rule below treat a sidecar exactly
-                    // like an embedded EN track instead of "und".
-                    .setLanguage(sidecarLanguageHint(sibling.name, file.nameWithoutExtension))
-                    .setLabel(sibling.name)
-                    .setSelectionFlags(0)
-                    .build()
-            } else null
+        // Subtitle sidecars found by PREFIX match, not exact: yt-dlp writes
+        // "Name.en.srt" (language-tagged) and the engine's move-along renames
+        // them to the sanitized video stem + lang — exact "Name.srt" matching
+        // silently missed both shapes. Discovery widened, language via
+        // sidecarLanguageHint.
+        val videoStem = file.nameWithoutExtension
+        val sidecarFiles = file.parentFile?.listFiles { s ->
+            s.isFile && s.canRead() &&
+                SIDECAR_SUBTITLE_EXTS.any { s.name.startsWith("$videoStem.") && s.name.endsWith(".$it") }
+        }?.sortedBy { it.name } ?: emptyList()
+        val sidecars = sidecarFiles.mapNotNull { sibling ->
+            val extName = sibling.extension.lowercase()
+            MediaItem.SubtitleConfiguration.Builder(Uri.fromFile(sibling))
+                .setMimeType(
+                    when (extName) {
+                        "vtt" -> "text/vtt"
+                        "ass", "ssa" -> "application/x-ssa"
+                        else -> "application/x-subrip"
+                    }
+                )
+                // "movie.en.srt" carries a real language tag: feeding it
+                // lets the auto-pick rule below treat a sidecar exactly
+                // like an embedded EN track instead of "und".
+                .setLanguage(sidecarLanguageHint(sibling.name, videoStem))
+                .setLabel(sibling.name)
+                .setSelectionFlags(0)
+                .build()
         }
         if (sidecars.isNotEmpty()) builder.setSubtitleConfigurations(sidecars)
         builder.build()
@@ -697,7 +705,18 @@ private fun MediaPlayerModalImpl(
                         // the preferred-language one so subtitles "just
                         // read" (2026-09-14 request).
                         val pick = autoPickSubtitleIndex(
-                            subGroups.map { g ->
+                            subGroups
+                                // SubRip sidecars (converted by the downloader,
+                                // position-free → always render at the bottom)
+                                // outrank embedded ASS tracks whose release-group
+                                // typesetting can carry top-positioned cues
+                                // (Break Clause 2026-10-15: dialogue jumped to
+                                // the screen top).
+                                .sortedByDescending {
+                                    (it.mediaTrackGroup.getFormat(0).label ?: "")
+                                        .endsWith(".srt", ignoreCase = true)
+                                }
+                                .map { g ->
                                 val f = g.mediaTrackGroup.getFormat(0)
                                 SubTrackInfo(
                                     language = f.language,
@@ -906,21 +925,35 @@ private fun MediaPlayerModalImpl(
             }
             .pointerInput(allowVolumeBoost, inPip) {
                 if (inPip) return@pointerInput
+                // Dead-zone accumulators (gesture privacy: nothing scrubs the
+                // mix until the drag is deliberately past the threshold).
+                var volumeArmed = false
+                var pendingDeadZonePx = 0f
                 detectVerticalDragGestures(
                     onDragStart = { offset ->
-                        if (offset.x >= size.width / 2f) {
-                            isVolumeDragging = true
-                            showVolumeHud = true
-                            volumeHudTick++
-                            overdragDistance = 0f
-                            boostDetentBroken = (currentVolumePercent > 100)
-                            showControls = false
+                        // System-gesture zones never start a volume drag:
+                        // left/right 28dp = back gesture ("trying to leave the
+                        // screen"), top 44dp = notification-shade pull. The
+                        // complaint on 2026-10-15 was the surface eating both.
+                        val edgePx = with(density) { 28.dp.toPx() }
+                        val shadePx = with(density) { 44.dp.toPx() }
+                        if (offset.x >= edgePx && offset.x <= size.width - edgePx && offset.y >= shadePx) {
+                            if (offset.x >= size.width / 2f) {
+                                isVolumeDragging = true
+                                showVolumeHud = true
+                                volumeHudTick++
+                                overdragDistance = 0f
+                                boostDetentBroken = (currentVolumePercent > 100)
+                                showControls = false
+                            }
                         }
                     },
                     onDragEnd = {
                         isVolumeDragging = false
                         overdragDistance = 0f
                         boostDetentBroken = false
+                        volumeArmed = false
+                        pendingDeadZonePx = 0f
                         if (currentVolumePercent <= 100) {
                             MediaPlayerPrefs.setMediaVolume(context, currentVolumePercent / 100f)
                         }
@@ -929,15 +962,30 @@ private fun MediaPlayerModalImpl(
                         isVolumeDragging = false
                         overdragDistance = 0f
                         boostDetentBroken = false
+                        volumeArmed = false
+                        pendingDeadZonePx = 0f
                     },
                     onVerticalDrag = { change, dragAmount ->
                         if (!isVolumeDragging) return@detectVerticalDragGestures
+                        // Dead zone: the first ~22dp of a vertical drag arm the
+                        // gesture instead of scrubbing volume — tiny accidental
+                        // movements (going for the shade, hunting a nav edge)
+                        // no longer fire the HUD or shift the mix.
+                        if (!volumeArmed) {
+                            pendingDeadZonePx += kotlin.math.abs(dragAmount)
+                            if (pendingDeadZonePx < with(density) { 22.dp.toPx() }) {
+                                change.consume()
+                                return@detectVerticalDragGestures
+                            }
+                            volumeArmed = true
+                        }
                         change.consume()
                         volumeHudTick++
                         showVolumeHud = true
 
-                        // Upward drag: dragAmount is negative
-                        val delta = (-dragAmount / size.height) * 120f
+                        // Upward drag: dragAmount is negative. Full screen height
+                        // = 100 points (was 120 — the hypersensitivity complaint).
+                        val delta = (-dragAmount / size.height) * 100f
                         val oldVol = currentVolumePercent
 
                         if (oldVol < 100) {
