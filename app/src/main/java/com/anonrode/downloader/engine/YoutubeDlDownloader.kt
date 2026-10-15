@@ -669,23 +669,38 @@ object YoutubeDlDownloader {
                     com.anonrode.downloader.util.DebugLog.backend("task=$taskId yt-dlp: Instagram photo post detected (no video in post) — skipping retry to run photo muxer immediately")
                     break
                 }
-                // Terminal-error fail-fast: the extractor answered with a
-                // bot-check / login wall / unsupported-URL condition. Re-running
-                // the same arguments cannot clear it (activity log 2026-10-29:
-                // music.youtube tasks spent 48-234s re-hitting the identical
-                // "Sign in to confirm you're not a bot" wall, 61.2s on a second
-                // video, including two 61s watchdog stall kills between runs).
-                // Abort the ladder now; the honest reason flows through the
-                // existing failure channel below. A manual retry starts a FRESH
-                // session and is unaffected.
-                if (isTerminalYtDlpError(lastErrorMessage)) {
+                // Bot-check wall: rotate the youtube player client instead of
+                // re-running identical arguments or giving up early. The wall
+                // is per-session state (note in TERMINAL_YTDLP_MARKERS doc)
+                // and a client swap is the field-proven anonymous bypass —
+                // web → android → ios across the ladder's attempts. No
+                // additional latency when the wall doesn't fire, and the
+                // ladder stays at its settings-shaped length (rotations only
+                // happen while the wall holds). Activity log 2026-10:
+                // music.youtube spent 48-234s re-hitting the IDENTICAL wall
+                // with unchanged args, incl. two 61s watchdog kills.
+                val botWall = lastErrorMessage?.contains("sign in to confirm", ignoreCase = true) == true
+                val youtubeFamily = Regex(
+                    """https?://(www\.|m\.|music\.)?(youtube\.com|youtu\.be)/""", RegexOption.IGNORE_CASE
+                ).containsMatchIn(inputUrl)
+                if (botWall && youtubeFamily && attempts < ytdlpMaxAttempts) {
+                    val rotation = listOf("android", "ios")
+                    request.addOption("--extractor-args", "youtube:player_client=${rotation[(attempts - 1).coerceIn(0, rotation.lastIndex)]}")
+                    com.anonrode.downloader.util.DebugLog.backend(
+                        "task=$taskId yt-dlp: bot-check wall — rotating player_client=${rotation[(attempts - 1).coerceIn(0, rotation.lastIndex)]} for attempt ${attempts + 1}"
+                    )
+                    cancellableRetryWait(2_000L * attempts)
+                } else if (isTerminalYtDlpError(lastErrorMessage)) {
+                    // login/private/members-only/unsupported: these never
+                    // clear mid-ladder — abort now with the honest reason.
                     terminalErrorHit = true
                     com.anonrode.downloader.util.DebugLog.backend(
-                        "task=$taskId yt-dlp: terminal error (platform bot-check/login wall) — aborting retry ladder after $attempts attempt(s)"
+                        "task=$taskId yt-dlp: terminal error (platform gate) — aborting retry ladder after $attempts attempt(s)"
                     )
                     break
+                } else {
+                    cancellableRetryWait(2_000L * attempts)
                 }
-                cancellableRetryWait(2_000L * attempts)
             }
         }
         // IG-1 fallback: an Instagram *photo-with-music* post produces NO video
@@ -726,11 +741,16 @@ object YoutubeDlDownloader {
                 // has_audio video children, logged out, no session needed.
                 "Photo post saved. Instagram hides this post's music from every logged-out surface, so it could not be included."
             } else if (terminalErrorHit) {
-                // The platform refused anonymous access (bot-check/login wall)
-                // or the extractor has no handler for this page. State the real
-                // reason — the pre-fix aggregate read "failed after N attempt(s)"
-                // with identical wall text three times, which reads like a bug.
-                "The platform is requiring sign-in for this link (bot-check/login wall), so the download cannot proceed anonymously. ${errors.toString().trim().lineSequence().lastOrNull()?.take(200) ?: ""}"
+                // The platform refused anonymous access (login wall/private/
+                // members-only) or the extractor has no handler for this page.
+                // State the real reason — the pre-fix aggregate read "failed
+                // after N attempt(s)" with identical wall text three times,
+                // which reads like a bug.
+                "The platform is requiring sign-in for this link, so the download cannot proceed anonymously. ${errors.toString().trim().lineSequence().lastOrNull()?.take(200) ?: ""}"
+            } else if (produced == null && errors.toString().contains("sign in to confirm", ignoreCase = true)) {
+                // Bot-check wall that player-client rotation could not clear
+                // this session. Honest + actionable, not a generic ladder dump.
+                "YouTube/Google flagged this session for sign-in (bot-check) even across player-client rotation. A manual retry in a little while usually clears it as the session rotates. ${errors.toString().trim().lineSequence().lastOrNull()?.take(200) ?: ""}"
             } else {
                 "yt-dlp failed after $attempts attempt(s): ${errors.toString().trim()}"
             }

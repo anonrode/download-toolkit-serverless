@@ -19,8 +19,10 @@ import java.util.zip.GZIPOutputStream
  *  - gzip POST to `/api/v1/telemetry/full-log` on the SAME origin the fatal
  *    reports use (OTA-routed), with `X-Client-Id` (the anonymous diagnostics
  *    id) + `X-Log-Date` headers — exactly what the endpoint validates.
- *  - **Wi-Fi-only by design**: the payload can be megabytes and the user's
- *    mobile data is sacred. Unmetered check hard-gates every attempt.
+ *  - **Any connection (user directive, 2026-10-15)**: uploads ride normal
+ *    mobile data too — the once/day, redacted, ≤8 MB payload makes the cost
+ *    a rounding error next to one video thumbnail, and journal visibility
+ *    was never something to hold hostage for a clean Wi-Fi.
  *  - **Once per day**, gated by the same kill-switch as the fatal reports,
  *    off-thread, silent no-op on any failure — a failed journal upload must
  *    never matter to the person using the app.
@@ -39,8 +41,8 @@ object LogUploader {
             val now = System.currentTimeMillis()
             if (now - last < 24L * 60 * 60 * 1000) return
 
-            if (!isOnUnmetered(context)) {
-                DebugLog.user("log upload: skipped — waiting for Wi-Fi")
+            if (!hasInternet(context)) {
+                DebugLog.user("log upload: skipped — waiting for a usable connection")
                 return
             }
             val origin = RemoteLogger.sinkOrigin() ?: return
@@ -61,11 +63,10 @@ object LogUploader {
         }
     }
 
-    private fun isOnUnmetered(context: Context): Boolean = try {
+    private fun hasInternet(context: Context): Boolean = try {
         val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
         val caps = cm?.getNetworkCapabilities(cm.activeNetwork)
-        caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true &&
-            caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)
+        caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
     } catch (_: Exception) {
         false
     }

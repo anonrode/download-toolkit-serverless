@@ -60,7 +60,7 @@ class AnonApp : Application(), ImageLoaderFactory {
                 initYoutubeDlInternal(this@AnonApp)
                 maybeSyncRules()
                 if (ytdlpReady) maybeUpdateYoutubeDL()
-                // The "logs on the server" half (Wi-Fi-only, once/day, same
+                // The "logs on the server" half (any connection, once/day, same
                 // kill-switch as the fatal reports; silent when anything's off).
                 com.anonrode.downloader.util.LogUploader.maybeUploadDaily(this@AnonApp)
             } catch (t: Throwable) {
