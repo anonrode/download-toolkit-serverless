@@ -402,7 +402,7 @@ class CdramaKdramaSimulator:
 
     def run_simulation(self):
         print("==========================================================================")
-        print("    ANON DOWNLOADER: C-DRAMA & K-DRAMA ENGINE SIMULATOR HARNESS           ")
+        print("    ANONRODE: C-DRAMA & K-DRAMA ENGINE SIMULATOR HARNESS           ")
         print("==========================================================================")
         print(f"Sample limit per site: {self.sample_limit} shows")
         print("Discovering live feeds across AsianC, DramaRain, and DramaKey...\n")

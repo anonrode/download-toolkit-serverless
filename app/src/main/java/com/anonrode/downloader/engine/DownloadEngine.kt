@@ -2599,7 +2599,7 @@ class DownloadEngine(
                 if (!targetFolder.isDirectory || !targetFolder.canWrite()) {
                     throw Exception(
                         "Storage permission missing — downloads are saved to your Downloads folder. " +
-                            "Enable \"All files access\" for Anon Downloader (Settings > Apps > Anon Downloader > Permissions)."
+                            "Enable \"All files access\" for Anonrode (Settings > Apps > Anonrode > Permissions)."
                     )
                 }
                 // var: recomputed whenever a token refresh swaps streamUrl,

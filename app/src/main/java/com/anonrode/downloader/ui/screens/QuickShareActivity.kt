@@ -92,7 +92,7 @@ class QuickShareActivity : ComponentActivity() {
             } else {
                 Toast.makeText(
                     this,
-                    "Enable 'All files access' for Anon Downloader in Settings",
+                    "Enable 'All files access' for Anonrode in Settings",
                     Toast.LENGTH_SHORT
                 ).show()
                 try {
@@ -429,7 +429,7 @@ fun QuickShareCard(
                 }
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "Anon Downloader",
+                        text = "Anonrode",
                         fontSize = Type.rowTitle.fontSize,
                         fontWeight = FontWeight.Bold,
                         color = TextPrimary

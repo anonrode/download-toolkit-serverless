@@ -1,7 +1,7 @@
 """
 True Full-App Pipeline Simulator & Conformance Harness (1,000 Series Suite)
 
-Simulates the complete 7-stage Anon Downloader lifecycle across all 11 providers:
+Simulates the complete 7-stage Anonrode lifecycle across all 11 providers:
   Phase 1: Category & Feed Discovery (C-Drama, K-Drama, Western, Anime)
   Phase 2: Taxonomy Retention & Explicit Content Filter (0 Adult Leaks across 1,000 series)
   Phase 3: Show Card Selection & Episode Drawer Extraction

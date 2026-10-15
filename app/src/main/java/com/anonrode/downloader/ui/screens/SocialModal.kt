@@ -95,7 +95,7 @@ fun SocialModal(
                 }
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "Anon Downloader",
+                        text = "Anonrode",
                         fontSize = Type.rowTitle.fontSize,
                         fontWeight = FontWeight.Bold,
                         color = TextPrimary

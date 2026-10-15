@@ -444,7 +444,7 @@ def resolve_and_probe_show(show):
 
 def main():
     print("=====================================================================")
-    print("ANON DOWNLOADER: FULL-SPECTRUM END-TO-END VERIFICATION HARNESS")
+    print("ANONRODE: FULL-SPECTRUM END-TO-END VERIFICATION HARNESS")
     print("=====================================================================")
 
     # 1. Audit all 10 provider sites

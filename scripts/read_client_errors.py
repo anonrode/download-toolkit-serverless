@@ -1,4 +1,4 @@
-"""read_client_errors.py — the ONLY reader for Anon Downloader's remote
+"""read_client_errors.py — the ONLY reader for Anonrode's remote
 client-error reports (Track 6).
 
 The devices post AES-128-CBC-encrypted diagnostics to
@@ -10,8 +10,9 @@ whoever can run this script reads; the VPS, wire sniffers and datacenter
 techs cannot.
 
 Usage (Windows PowerShell / Git Bash):
-  # decrypt a downloaded copy of the server's jsonl (scp it off the VPS):
-  scp ops@REDACTED:~/REDACTED-DIR/logs/client_errors.jsonl .
+  # decrypt a downloaded copy of the server's jsonl (pull it with your own
+  # ssh/scp invocation — no server address is hardcoded here):
+  scp user@server:~/path/logs/client_errors.jsonl .
   python scripts/read_client_errors.py client_errors.jsonl
 
   # pipe a single envelope through stdin:

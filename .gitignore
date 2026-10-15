@@ -39,3 +39,22 @@ scratch/
 ORIGINAL_REQUEST.md
 probe/*_audit_results.json
 probe/*_audit.py
+
+# ── go-public hardening (2026-10-15): internal docs stay local, never tracked ──
+.agents/
+scratch/
+probe/
+ORIGINAL_REQUEST.md
+Anon Road Pre-launch Document.md
+HANDOVER.md
+HANDOVER_AUDIT.md
+MASTER_ISSUES_AND_COMPLAINTS_NOTEBOOK.md
+REVIEW_PROMPTS.md
+
+# signing material never enters the tree
+*.jks
+*.keystore
+*.p12
+*.pem
+anon-release.*
+NUL

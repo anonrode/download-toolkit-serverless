@@ -11,7 +11,7 @@ usually can't know its own real address behind carrier NAT / VPN), so a
 device is identified by anonymous client id AND by the set of IPs it
 appeared from.
 
-Usage (from the repo root; ssh key + defaults match the VPS):
+Usage (from the repo root; connection flags are always explicit):
   # timeline across ALL clients (newest first): every upload, its IP, size
   python scripts/read_client_logs.py list
 
@@ -26,8 +26,8 @@ Usage (from the repo root; ssh key + defaults match the VPS):
   # bulk-copy one client's whole folder to a local dir for offline digging
   python scripts/read_client_logs.py pull --client 8f0e...36 --out ./client-logs
 
-Options for key/host overrides (only if the VPS moves):
-  --host ops@REDACTED --key ~/.ssh/REDACTED-KEYNAME
+Connection (always explicit — nothing is hardcoded):
+  --host user@server --key ~/.ssh/your_key
 """
 import argparse
 import base64
@@ -37,13 +37,15 @@ import os
 import subprocess
 import sys
 
-DEFAULT_HOST = "ops@REDACTED"
-DEFAULT_KEY = "~/.ssh/REDACTED-KEYNAME"
+DEFAULT_HOST = ""
+DEFAULT_KEY = ""
 DEFAULT_REMOTE_DIR = "~/REDACTED-DIR/logs/clients"
 
 
 def ssh(host: str, key: str, remote_cmd: str, timeout: int = 60) -> str:
     """Runs a command on the VPS, returns stdout. Keyed ssh, batch mode."""
+    if not host or not key:
+        raise SystemExit("connection not set: pass --host user@server and --key ~/.ssh/your_key")
     key = os.path.expanduser(key)
     cmd = [
         "ssh", "-i", key, "-o", "BatchMode=yes",

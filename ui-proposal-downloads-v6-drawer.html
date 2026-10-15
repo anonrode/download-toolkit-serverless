@@ -1,0 +1,607 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ANON · Proposal v2 — Downloads v6 &amp; Episode Drawer (Plex-style)</title>
+<style>
+  :root{
+    /* ── paper world (unchanged app theme) ── */
+    --paper:#F4F7FA; --card:#FFFFFF; --hairline:#D8E0E8; --ink:#07131A;
+    --sub:#475569; --muted:#55627A; --chipbg:#EEF2F6;
+    /* ── state chroma ── */
+    --live:#0E7490; --live-tint:#E0F2F7; --live-fill:#1591B3;
+    --done:#1F7A4D; --done-tint:#E6F4EC;
+    --paused:#92610F; --paused-tint:#FBF1DE;
+    --failed:#A84A42; --failed-tint:#F9E9E7; --failed-acc:#C25B52;
+    /* ── drawer dark (pinned, theme-proof) ── */
+    --d-bg:#171B23; --d-card:#1D222C; --d-sunk:#12141A; --d-head:#1B2129;
+    --d-hair:rgba(255,255,255,.09); --d-text:#F2F5F9;
+    --d-sub:rgba(226,232,240,.66); --d-mut:rgba(226,232,240,.42); --d-skel:#2A303C;
+    /* ── GRID: gutter 16 · gap 8 · radius 14/12/999 ── */
+    --gut:16px; --gap:8px;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{background:#0D0F13;color:#E7ECF3;padding:48px 40px 80px;
+    font-family:-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+    -webkit-font-smoothing:antialiased;}
+  .mono{font-family:ui-monospace,"Cascadia Mono",Consolas,monospace;}
+  h1{font-size:26px;font-weight:800;}
+  h1 span{color:#7DD3E8;}
+  .lede{color:#9AA6B6;max-width:1100px;margin-top:10px;line-height:1.55;font-size:14px;}
+  .lede b{color:#E7ECF3;}
+
+  .mathbar{margin:26px 0 4px;border:1px solid rgba(255,255,255,.10);background:#141720;
+    border-radius:14px;max-width:1240px;padding:16px 18px;}
+  .mathbar h2{font-size:13px;font-weight:800;letter-spacing:.6px;text-transform:uppercase;color:#7DD3E8;margin-bottom:10px;}
+  .mathbar .eq{display:flex;flex-wrap:wrap;gap:8px 22px;font-family:ui-monospace,Consolas,monospace;
+    font-size:12px;line-height:1.7;color:#C9D4E2;}
+  .mathbar .eq b{color:#F2F5F9;font-weight:600;}
+  .mathbar .eq i{color:#7DD3E8;font-style:normal;}
+
+  .gallery{display:flex;flex-wrap:wrap;gap:44px 34px;margin-top:34px;align-items:flex-start;}
+  figure{width:393px;}
+  figcaption{margin-bottom:14px;}
+  figcaption .t{font-size:14.5px;font-weight:700;color:#F2F5F9;}
+  figcaption .t em{font-style:normal;color:#7DD3E8;}
+  figcaption .s{font-size:12px;color:#9AA6B6;margin-top:4px;line-height:1.5;}
+  figcaption .m{font-family:ui-monospace,Consolas,monospace;font-size:10.5px;color:#6FB9CF;margin-top:5px;line-height:1.55;}
+  .phone{width:393px;height:852px;border-radius:46px;overflow:hidden;position:relative;
+    border:9px solid #22262F;box-shadow:0 30px 60px rgba(0,0,0,.55);}
+  .pstats{height:34px;display:flex;justify-content:space-between;align-items:center;
+    padding:0 20px;font-size:11.5px;font-weight:600;position:relative;z-index:40;}
+
+  /* ══════ 1 · DOWNLOADS v6 ══════ */
+  .dl{background:var(--paper);height:100%;overflow:hidden;color:var(--ink);}
+  .dl .pstats{color:var(--ink);}
+  .dl-head{padding:10px 18px 12px;display:flex;align-items:center;gap:12px;}
+  .avatar{width:44px;height:44px;border-radius:50%;background:var(--ink);color:#fff;flex:none;
+    display:flex;align-items:center;justify-content:center;font-weight:800;font-size:15px;}
+  .dl-title{font-size:21px;font-weight:800;letter-spacing:.2px;line-height:1.15;}
+  .dl-sub{font-size:11px;color:var(--muted);margin-top:3px;line-height:1.4;}
+  .dl-sub .c-live{color:var(--live);font-weight:700;}
+  .dl-sub .c-done{color:var(--done);font-weight:700;}
+  .dl-sub .c-fail{color:var(--failed);font-weight:700;}
+  .rule{height:1px;background:var(--hairline);margin:12px 18px 0;}
+  .seg{display:flex;margin:14px 18px 0;background:var(--card);border:1px solid var(--hairline);
+    border-radius:16px;padding:4px;}
+  .seg .opt{flex:1;text-align:center;font-size:12px;font-weight:600;color:var(--muted);padding:9px 0;border-radius:12px;}
+  .seg .opt.on{background:var(--ink);color:#fff;}
+  .actions{display:flex;justify-content:space-between;align-items:center;gap:8px;
+    margin:12px 18px 0;white-space:nowrap;}
+  .ghost{border:1px solid var(--hairline);background:var(--card);border-radius:999px;
+    padding:7px 13px;font-size:11.5px;font-weight:700;color:var(--sub);flex:none;}
+  .legend{display:flex;gap:6px;}
+  .lg{display:flex;align-items:center;gap:4px;font-size:10px;font-weight:800;border-radius:999px;padding:4px 9px;}
+  .lg.i{color:var(--live);background:var(--live-tint);}
+  .lg.d{color:var(--done);background:var(--done-tint);}
+  .lg.p{color:var(--paused);background:var(--paused-tint);}
+  .lg.f{color:var(--failed);background:var(--failed-tint);}
+  .dot{width:6px;height:6px;border-radius:50%;background:currentColor;flex:none;}
+  .dot.live{animation:pulse 1.6s ease-in-out infinite;}
+  .sect{font-size:10.5px;font-weight:800;letter-spacing:1.2px;color:var(--muted);
+    margin:16px 18px 8px;display:flex;align-items:center;gap:6px;}
+  .sect .ln{flex:1;height:1px;background:var(--hairline);}
+  .sect .cnt{color:var(--live);} .sect .cnt.done{color:var(--done);} .sect .cnt.fail{color:var(--failed);}
+  .card{background:var(--card);border:1px solid var(--hairline);border-radius:18px;margin:0 18px 10px;padding:12px 14px;}
+  .card .body{display:flex;align-items:center;gap:11px;}
+  .thumb{width:46px;height:58px;border-radius:9px;border:1px solid var(--hairline);flex:none;overflow:hidden;}
+  .thumb .init{width:100%;height:100%;background:#E9EFF5;display:flex;align-items:center;justify-content:center;
+    font-weight:800;font-size:12px;color:var(--muted);}
+  .thumb.art-th{border-color:rgba(7,19,26,.08);}
+  .thumb.art-th .art-fill{width:100%;height:100%;}
+  .af1{background:linear-gradient(155deg,#3E5C7E 0%,#1E2C3E 45%,#4FB3D9 115%),radial-gradient(80% 60% at 30% 20%,rgba(255,214,150,.5),transparent 60%);}
+  .af2{background:linear-gradient(155deg,#6E4A2E 0%,#2E2238 55%,#C98A2D 120%),radial-gradient(70% 50% at 70% 15%,rgba(255,255,255,.25),transparent 55%);}
+  .af3{background:linear-gradient(155deg,#79303B 0%,#1D2430 55%,#E4908A 125%),radial-gradient(75% 55% at 25% 80%,rgba(255,235,205,.35),transparent 60%);}
+  .af4{background:linear-gradient(155deg,#2F5C48 0%,#101B22 55%,#5FA97F 120%),radial-gradient(70% 50% at 65% 25%,rgba(220,255,235,.25),transparent 55%);}
+  .af5{background:linear-gradient(155deg,#37424F 0%,#12151C 60%,#8B96A6 125%),radial-gradient(75% 50% at 40% 30%,rgba(255,190,120,.45),transparent 60%);}
+  .info{flex:1;min-width:0;}
+  .ttl{font-size:13px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .stat{font-size:10.5px;margin-top:4px;color:var(--muted);display:flex;align-items:center;gap:5px;
+    white-space:nowrap;overflow:hidden;}
+  .stat .w{font-weight:800;display:inline-flex;align-items:center;gap:5px;flex:none;}
+  .stat .x{overflow:hidden;text-overflow:ellipsis;}
+  .stat.live .w{color:var(--live);} .stat.done .w{color:var(--done);}
+  .stat.paused .w{color:var(--paused);} .stat.failed .w{color:var(--failed);}
+  .tags{display:flex;gap:6px;margin-top:6px;white-space:nowrap;}
+  .sitetag{font-size:8.5px;font-weight:700;letter-spacing:.8px;color:var(--sub);
+    background:var(--chipbg);border:1px solid var(--hairline);border-radius:5px;padding:2px 6px;}
+  .sitetag.live{color:var(--live);background:var(--live-tint);border-color:transparent;}
+  .sitetag.fail{color:var(--failed);background:var(--failed-tint);border-color:transparent;}
+  .iconbtn{width:38px;height:38px;border-radius:50%;background:var(--ink);color:#fff;flex:none;
+    display:flex;align-items:center;justify-content:center;font-size:11px;}
+  .iconbtn.fretry{background:var(--failed-acc);font-size:8.5px;font-weight:800;letter-spacing:.5px;}
+  .kebab{color:var(--muted);font-size:14px;flex:none;width:14px;text-align:center;}
+  .meter{height:5px;border-radius:99px;background:#E2E8EF;margin-top:10px;overflow:hidden;}
+  .meter i{display:block;height:100%;border-radius:99px;}
+  .meter .live-m{width:42%;background:var(--live-fill);animation:creep 3.5s linear infinite alternate;}
+  .meter .stall{width:71%;background:var(--failed-acc);}
+  .errline{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:9px;
+    border-top:1px dashed #EFD5D2;padding-top:8px;}
+  .errline .r{font-size:10.5px;color:var(--failed);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .swsite{font-size:9.5px;font-weight:800;letter-spacing:.5px;color:var(--failed);
+    border:1px solid var(--failed-acc);border-radius:999px;padding:5px 10px;white-space:nowrap;flex:none;}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
+  @keyframes creep{from{width:42%}to{width:49%}}
+  @media (prefers-reduced-motion: reduce){*{animation:none!important;transition:none!important;}}
+
+  /* ══════ DRAWER WORLD ══════ */
+  .dk{background:var(--d-sunk);height:100%;position:relative;color:var(--d-text);overflow:hidden;}
+  .home-dim{position:absolute;inset:0;background:linear-gradient(180deg,#5A6270 0%,#4A515D 35%,#39404B 100%);}
+  .home-dim .fake{padding:64px 20px 0;}
+  .home-dim .fake .bar{height:12px;border-radius:6px;background:rgba(255,255,255,.30);margin-bottom:10px;width:44%;}
+  .home-dim .fake .bar.w2{width:62%;} .home-dim .fake .bar.w3{width:36%;margin-bottom:16px;}
+  .wallrow{display:flex;gap:10px;}
+  .wall{width:106px;height:152px;border-radius:10px;background:rgba(255,255,255,.24);}
+
+  /* blurred-poster art fill, emulated */
+  .art{background:
+    radial-gradient(150% 130% at 18% 0%, rgba(150,98,44,.95) 0%, rgba(150,98,44,0) 62%),
+    radial-gradient(130% 120% at 85% 18%, rgba(64,104,150,.95) 0%, rgba(64,104,150,0) 66%),
+    radial-gradient(90% 70% at 50% 108%, rgba(214,222,232,.30) 0%, rgba(214,222,232,0) 55%),
+    linear-gradient(180deg,#3A4254 0%,#242B39 68%,#1B2029 100%);}
+
+  .poster{border-radius:12px;overflow:hidden;position:relative;flex:none;
+    box-shadow:0 18px 42px rgba(0,0,0,.62);border:1px solid rgba(255,255,255,.10);
+    background:linear-gradient(160deg,#7A5430 0%,#2E4460 55%,#DDE4EC 100%);}
+  .poster span{position:absolute;bottom:6px;left:8px;font-size:10.5px;font-weight:800;color:#fff;
+    text-shadow:0 1px 4px rgba(0,0,0,.7);letter-spacing:.5px;}
+  .closex{width:38px;height:38px;border-radius:50%;flex:none;
+    background:rgba(0,0,0,.72);border:1px solid rgba(255,255,255,.12);
+    display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,.9);font-size:13px;}
+
+  .grip{display:flex;flex-direction:column;align-items:center;padding-top:9px;}
+  .grip .bar{width:36px;height:4px;border-radius:2px;background:rgba(255,255,255,.32);}
+  .grip .lbl{font-size:8.5px;font-weight:700;letter-spacing:1.8px;color:rgba(255,255,255,.55);margin-top:7px;text-transform:uppercase;}
+
+  /* header block: art band + overlapping poster + title */
+  .dhead{position:relative;}
+  .dhead .art-band{position:absolute;inset:0;}
+  .dhead .art-band::before{content:"";position:absolute;inset:0;background:rgba(0,0,0,.38);}
+  .dhead .art-band::after{content:"";position:absolute;left:0;right:0;bottom:0;height:64px;
+    background:linear-gradient(180deg,rgba(23,27,35,0),var(--d-bg));}
+  .dhead .row{position:relative;display:flex;align-items:flex-start;gap:16px;}
+  .dtitle .tt{font-size:20px;font-weight:800;line-height:1.2;color:#fff;text-shadow:0 1px 8px rgba(0,0,0,.45);}
+  .dtitle .mm{font-size:11px;color:var(--d-sub);margin-top:6px;}
+  .dtitle .sel{display:inline-flex;align-items:center;gap:6px;margin-top:10px;font-size:10px;font-weight:800;
+    color:var(--d-sub);border:1px solid var(--d-hair);background:rgba(0,0,0,.35);border-radius:999px;padding:5px 10px;}
+  .dtitle .sel b{color:#fff;}
+
+  .chips{display:flex;gap:8px;overflow:hidden;}
+  .chip{border:1px solid var(--d-hair);background:var(--d-card);color:var(--d-sub);
+    border-radius:999px;padding:8px 14px;font-size:11.5px;font-weight:600;white-space:nowrap;}
+  .chip.on{background:#F2F5F9;color:#0B0E13;border-color:#F2F5F9;font-weight:700;}
+  .range{height:42px;border:1px solid var(--d-hair);border-radius:12px;background:var(--d-card);
+    display:flex;align-items:center;padding:0 14px;color:var(--d-mut);font-size:12.5px;}
+  .slab{font-size:10px;font-weight:800;letter-spacing:1.4px;color:var(--d-mut);text-transform:uppercase;
+    display:flex;align-items:center;gap:8px;}
+  .slab .ln{flex:1;height:1px;background:var(--d-hair);}
+  .erow{display:flex;align-items:center;gap:12px;background:var(--d-card);
+    border:1px solid var(--d-hair);border-radius:14px;padding:0 12px;height:64px;flex:none;}
+  .enum{width:34px;height:34px;border-radius:9px;background:var(--d-sunk);border:1px solid var(--d-hair);
+    display:flex;align-items:center;justify-content:center;font-size:11.5px;font-weight:800;color:var(--d-sub);flex:none;}
+  .erow .et{flex:1;min-width:0;}
+  .erow .et .n{font-size:12px;font-weight:700;color:var(--d-text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .erow .et .q{font-size:9.5px;color:var(--d-mut);margin-top:3px;white-space:nowrap;}
+  .info-c{width:24px;height:24px;border-radius:50%;border:1px solid var(--d-hair);color:var(--d-mut);
+    display:flex;align-items:center;justify-content:center;font-size:9px;font-style:italic;flex:none;}
+  .cbox{width:19px;height:19px;border-radius:6px;border:1.5px solid rgba(255,255,255,.35);flex:none;}
+  .cbox.on{background:#F2F5F9;border-color:#F2F5F9;position:relative;}
+  .cbox.on::after{content:"✓";position:absolute;inset:0;display:flex;align-items:center;
+    justify-content:center;color:#0B0E13;font-size:11px;font-weight:900;}
+  .footer{position:absolute;left:0;right:0;background:rgba(18,20,26,.97);border-top:1px solid var(--d-hair);
+    display:flex;align-items:center;justify-content:space-between;padding:12px 16px 18px;}
+  .footer .sum{font-size:11.5px;color:var(--d-sub);}
+  .footer .sum b{color:#fff;font-size:12.5px;}
+  .dlbtn{background:#F2F5F9;color:#0B0E13;font-size:12.5px;font-weight:800;border-radius:999px;padding:12px 20px;}
+  .hint{font-size:9px;font-weight:700;letter-spacing:1.4px;color:rgba(255,255,255,.45);
+    text-transform:uppercase;text-align:center;}
+  .pstats.dkp{color:#fff;}
+
+  /* feedback phone */
+  .stage{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--d-sub);font-weight:600;
+    white-space:nowrap;overflow:hidden;}
+  .stage .spin{width:12px;height:12px;border-radius:50%;flex:none;
+    border:2px solid rgba(255,255,255,.18);border-top-color:#7DD3E8;animation:rot 1s linear infinite;}
+  .stage b{color:#fff;font-weight:700;}
+  @keyframes rot{to{transform:rotate(360deg)}}
+  .skel{display:flex;align-items:center;gap:12px;background:var(--d-card);
+    border:1px solid var(--d-hair);border-radius:14px;padding:0 12px;height:64px;}
+  .skel .b1{width:34px;height:34px;border-radius:9px;background:var(--d-skel);flex:none;}
+  .skel .col{flex:1;}
+  .skel .b2{height:10px;border-radius:5px;background:var(--d-skel);width:66%;}
+  .skel .b3{height:7px;border-radius:4px;background:var(--d-skel);width:38%;margin-top:7px;}
+  .skel .b2,.skel .b3{position:relative;overflow:hidden;}
+  .skel .b2::after,.skel .b3::after{content:"";position:absolute;inset:0;
+    background:linear-gradient(90deg,transparent,rgba(255,255,255,.07),transparent);
+    animation:shim 1.4s ease-in-out infinite;}
+  @keyframes shim{from{transform:translateX(-100%)}to{transform:translateX(100%)}}
+  .statebox{border:1px solid var(--d-hair);border-radius:16px;background:var(--d-bg);padding:14px;}
+  .statebox .h{font-size:10px;font-weight:800;letter-spacing:1.4px;text-transform:uppercase;
+    color:var(--d-mut);margin-bottom:12px;}
+  .statebox .failrow{display:flex;align-items:center;justify-content:space-between;gap:12px;}
+  .statebox .failrow .why{font-size:11.5px;color:var(--d-sub);line-height:1.5;min-width:0;}
+  .statebox .failrow .why b{color:#E4908A;}
+  .retry-d{background:rgba(194,91,82,.14);border:1px solid rgba(194,91,82,.5);color:#E4908A;
+    font-size:10px;font-weight:800;letter-spacing:.5px;border-radius:999px;padding:8px 14px;flex:none;}
+
+  /* tokens + type */
+  .tokens{margin-top:56px;max-width:1240px;display:flex;gap:56px;flex-wrap:wrap;}
+  .tokens h2{font-size:15px;font-weight:800;color:#F2F5F9;margin-bottom:14px;}
+  .swatches{display:flex;flex-wrap:wrap;gap:10px;max-width:640px;}
+  .sw{width:150px;border:1px solid rgba(255,255,255,.09);border-radius:12px;overflow:hidden;background:#141720;}
+  .sw .c{height:44px;}
+  .sw .l{padding:7px 10px;font-size:10px;color:#9AA6B6;line-height:1.45;}
+  .sw .l b{display:block;color:#F2F5F9;font-size:10.5px;margin-bottom:2px;}
+  .typestrip .tr{display:flex;align-items:baseline;gap:14px;padding:9px 0;border-bottom:1px solid rgba(255,255,255,.07);}
+  .typestrip .sp{width:118px;flex:none;font-family:ui-monospace,Consolas,monospace;font-size:10px;color:#7DD3E8;}
+  .note{max-width:1240px;margin-top:36px;border-left:3px solid #7DD3E8;padding:4px 0 4px 16px;
+    color:#B9C4D2;font-size:13px;line-height:1.65;}
+  .note b{color:#F2F5F9;}
+</style>
+</head>
+<body>
+
+<h1>ANON — <span>proposal v2</span> · Plex-style drawer geometry &amp; aligned Downloads</h1>
+<p class="lede">
+  Redraft. The sheet now follows a <b>Plex-style anatomy</b> with a written grid: HALF trades the empty
+  banner for a <b>compact art header</b> (poster raised to y=38 — closer up — with the title beside it) and puts
+  four episode rows on screen immediately; FULL grows the cinematic 216dp banner and scrolls story →
+  chips → range → seasons → all episodes under a sticky selection bar. Every offset below is a
+  <b>computed expression</b> of W (393) and the 16/8 grid — no eyeballed placements. Type is a fixed
+  five-step scale; numerals are mono; nothing wraps.
+</p>
+
+<div class="mathbar">
+  <h2>Drawer geometry — one surface, two detents (W = 393dp)</h2>
+  <div class="eq">
+    <span><i>both</i> gutter G = 16 · row gap = 8 · row H = 64 · radius 14</span>
+    <span><i>both</i> compact header: art band 104 · poster 76×112 left 20 · title x = 112</span>
+    <span><i>HALF</i> sheetH = 0.60H = 511 · header at sheet top (grip 30 → art 134) · poster @ (20, 38)</span>
+    <span><i>HALF</i> chips @ y=166 · range hidden · rows @ y=214</span>
+    <span><i>HALF</i> rows visible: ⌊(511−214)/72⌋ = 4 + peek</span>
+    <span><i>FULL</i> same header pinned under the status bar: art 34→138 · poster @ (20, 48) · ✕ @ 48</span>
+    <span><i>FULL</i> chips y=176 · range y=224 · season label y=282 · rows y=300 · footer 76</span>
+    <span><i>FULL</i> list viewport = 852−168−76 = 608 = 6.6 rows · one continuous scroll</span>
+  </div>
+</div>
+
+<div class="mathbar">
+  <h2>Nav speed contract — settings folders (“playback and all”), sheets, every tap</h2>
+  <div class="eq">
+    <span><i>found</i> settings folder taps animate <b>500ms</b> slide + fade — that’s the slow-motion you feel before the screen shows</span>
+    <span><i>fix</i> screen-level transitions capped at <b>200ms</b> · exit 120ms · same easing curve, one third of the wait</span>
+    <span><i>rule</i> a tap acknowledges in ≤ 1 frame — the destination’s first frame paints immediately, animation only decorates it</span>
+    <span><i>rule</i> no entrance ever blocks content · heavy screens compose their first row before the transition begins</span>
+  </div>
+</div>
+
+<div class="gallery">
+
+  <!-- ═══════════ 1 · DOWNLOADS ═══════════ -->
+  <figure>
+    <figcaption>
+      <div class="t">1 · Downloads &amp; Media — <em>aligned, colour-coded</em></div>
+      <div class="s">Portrait <b>poster art on every card</b> where the source provided one — initials tile
+      only as last-resort fallback (bottom card). Status word + glyph + tint per state (never colour
+      alone); failed row keeps its reason on one clipped line and a fixed-size RETRY + SWITCH SITE;
+      legend on its own right-aligned rail — no wraps, no ragged edges.</div>
+    </figcaption>
+    <div class="phone"><div class="dl">
+      <div class="pstats"><span>2:36 PM</span><span>◉ ⌁ ▮ 32</span></div>
+      <div class="dl-head">
+        <div class="avatar">A</div>
+        <div>
+          <div class="dl-title">DOWNLOADS &amp; MEDIA</div>
+          <div class="dl-sub">110 GB of 112 GB · <span class="c-live">1 active</span> ·
+            <span class="c-done">46 done</span> · <span class="c-fail">2 failed</span></div>
+        </div>
+      </div>
+      <div class="rule"></div>
+      <div class="seg">
+        <div class="opt on">Date</div><div class="opt">By Show</div>
+        <div class="opt">Status</div><div class="opt">Size</div>
+      </div>
+      <div class="actions">
+        <span class="ghost">▶ Resume all</span>
+        <span class="legend">
+          <span class="lg i"><span class="dot live"></span>Live</span>
+          <span class="lg d"><span class="dot"></span>Done</span>
+          <span class="lg p"><span class="dot"></span>Paused</span>
+          <span class="lg f"><span class="dot"></span>Failed</span>
+        </span>
+      </div>
+
+      <div class="sect">ACTIVE · <span class="cnt">1</span><span class="ln"></span></div>
+      <div class="card">
+        <div class="body">
+          <div class="thumb art-th"><div class="art-fill af1"></div></div>
+          <div class="info">
+            <div class="ttl">The Pitt S02E16</div>
+            <div class="stat live"><span class="w"><span class="dot live"></span>Downloading</span>
+              <span class="x">· 42% · 3.1 MB/s</span></div>
+            <div class="tags"><span class="sitetag live">ASIANC</span></div>
+          </div>
+          <div class="iconbtn">❚❚</div><div class="kebab">⋮</div>
+        </div>
+        <div class="meter"><i class="live-m"></i></div>
+      </div>
+
+      <div class="sect">TODAY · <span class="cnt">2</span><span class="ln"></span></div>
+      <div class="card">
+        <div class="body">
+          <div class="thumb art-th"><div class="art-fill af5"></div></div>
+          <div class="info">
+            <div class="ttl">155K views · 667 reactions | Remote Control…</div>
+            <div class="stat done"><span class="w">✓ Done</span><span class="x">· 4.2 MB</span></div>
+            <div class="tags"><span class="sitetag">YOUTUBE</span></div>
+          </div>
+          <div class="iconbtn">▶</div><div class="kebab">⋮</div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="body">
+          <div class="thumb art-th"><div class="art-fill af3"></div></div>
+          <div class="info">
+            <div class="ttl">War S01E01</div>
+            <div class="stat failed"><span class="w">✕ Failed</span><span class="x">· retry 2× · stuck 71%</span></div>
+            <div class="tags"><span class="sitetag fail">VIDSRC</span></div>
+          </div>
+          <div class="iconbtn fretry">RETRY</div><div class="kebab">⋮</div>
+        </div>
+        <div class="meter"><i class="stall"></i></div>
+        <div class="errline">
+          <span class="r">Stream finder stopped responding after 3 jumps</span>
+          <span class="swsite">SWITCH SITE</span>
+        </div>
+      </div>
+
+      <div class="sect">THIS WEEK · <span class="cnt">6</span><span class="ln"></span></div>
+      <div class="card">
+        <div class="body">
+          <div class="thumb art-th"><div class="art-fill af2"></div></div>
+          <div class="info">
+            <div class="ttl">The Promised Neverland S01E01</div>
+            <div class="stat paused"><span class="w">❚❚ Paused</span><span class="x">· 0% · battery saver</span></div>
+            <div class="tags"><span class="sitetag">ASIANC</span></div>
+          </div>
+          <div class="iconbtn">▶</div><div class="kebab">⋮</div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="body">
+          <div class="thumb"><div class="init">WS</div></div>
+          <div class="info">
+            <div class="ttl">War S01E02</div>
+            <div class="stat done"><span class="w">✓ Done</span><span class="x">· 1.8 GB</span></div>
+            <div class="tags"><span class="sitetag">VIDSRC</span></div>
+          </div>
+          <div class="iconbtn">▶</div><div class="kebab">⋮</div>
+        </div>
+      </div>
+    </div></div>
+  </figure>
+
+  <!-- ═══════════ 2 · DRAWER HALF ═══════════ -->
+  <figure>
+    <figcaption>
+      <div class="t">2 · Drawer — <em>HALF (0.60H)</em></div>
+      <div class="s">Plex-style compact header: the blurred poster art <b>is</b> the header band, the crisp
+      poster card overlaps it at (20, 38) — raised, never floating in void — title at x=112, glass ✕ top-right.
+      Below: chips at y=166, then four episode rows with a fifth peeking. Zero dead space.</div>
+      <div class="m">sheet 341→852 · head 104 → chips 166 → rows 214 · (511−214)/72 = 4.1 rows</div>
+    </figcaption>
+    <div class="phone"><div class="dk">
+      <div class="home-dim">
+        <div class="fake">
+          <div class="bar"></div><div class="bar w2"></div><div class="bar w3"></div>
+          <div class="wallrow"><div class="wall"></div><div class="wall"></div><div class="wall"></div></div>
+        </div>
+      </div>
+      <div style="position:absolute;left:0;right:0;top:341px;bottom:0;background:var(--d-bg);
+        border-radius:24px 24px 0 0;overflow:hidden;">
+        <div class="grip"><div class="bar"></div><div class="lbl">Pull up for the full view</div></div>
+        <div class="dhead" style="margin-top:0;">
+          <div class="art-band art" style="inset:auto;top:30px;height:104px;"></div>
+          <div class="row" style="padding:8px 16px 0 20px;padding-top:8px;">
+            <div class="poster" style="width:76px;height:112px;position:relative;z-index:2;">
+              <span>THE STORM</span>
+            </div>
+            <div class="dtitle" style="flex:1;min-width:0;padding-top:16px;">
+              <div class="tt">The Storm (2026)</div>
+              <div class="mm">Drama · 2 seasons · 16 eps</div>
+              <div class="sel"><b>7 selected</b> · 4.2 GB</div>
+            </div>
+            <div class="closex" style="margin-top:-2px;">✕</div>
+          </div>
+        </div>
+        <div class="chips" style="margin:14px 16px 0;">
+          <div class="chip on">All (16)</div><div class="chip">S1 (10)</div><div class="chip">S2 (6)</div>
+        </div>
+        <div style="margin:12px 16px 0;display:flex;flex-direction:column;gap:8px;">
+          <div class="erow">
+            <div class="enum">01</div>
+            <div class="et"><div class="n">Episode 1 — pilot</div><div class="q">2160p · H.265 · 2.8 GB</div></div>
+            <div class="info-c">i</div><div class="cbox on"></div>
+          </div>
+          <div class="erow">
+            <div class="enum">02</div>
+            <div class="et"><div class="n">Episode 2</div><div class="q">2160p · H.265 · 2.6 GB</div></div>
+            <div class="info-c">i</div><div class="cbox on"></div>
+          </div>
+          <div class="erow">
+            <div class="enum">03</div>
+            <div class="et"><div class="n">Episode 3</div><div class="q">1080p · H.264 · 1.5 GB</div></div>
+            <div class="info-c">i</div><div class="cbox"></div>
+          </div>
+          <div class="erow">
+            <div class="enum">04</div>
+            <div class="et"><div class="n">Episode 4</div><div class="q">1080p · H.264 · 1.4 GB</div></div>
+            <div class="info-c">i</div><div class="cbox on"></div>
+          </div>
+          <div class="erow" style="height:32px;opacity:.55;border-bottom:none;border-radius:14px 14px 0 0;">
+            <div class="enum">05</div>
+            <div class="et"><div class="n">Episode 5</div></div>
+          </div>
+        </div>
+      </div>
+    </div></div>
+  </figure>
+
+  <!-- ═══════════ 3 · DRAWER FULL ═══════════ -->
+  <figure>
+    <figcaption>
+      <div class="t">3 · Drawer — <em>FULL (100% · scrollable)</em></div>
+      <div class="s">Identical compact header to HALF, pinned right under the status bar — poster at
+      (20, 48), title at x=112, ✕ at 48 — exactly like frame 4. The old cinematic banner is gone;
+      its space goes to the list: chips → range → Season 1 → Season 2 → … scrolling under the
+      sticky selection footer.</div>
+      <div class="m">art 34→138 · poster (20, 48) · chips 176 · range 224 · label 282 ·
+        rows 300 · footer 76 · viewport 608 = 6.6 rows</div>
+    </figcaption>
+    <div class="phone"><div class="dk">
+      <!-- same compact header as HALF, anchored under the status bar -->
+      <div class="art" style="position:absolute;left:0;right:0;top:34px;height:104px;"></div>
+      <div style="position:absolute;left:0;right:0;top:34px;height:104px;background:rgba(0,0,0,.38);"></div>
+      <div style="position:absolute;left:0;right:0;top:90px;height:48px;
+        background:linear-gradient(180deg,rgba(23,27,35,0),var(--d-bg));"></div>
+      <div class="pstats dkp" style="position:absolute;top:0;left:0;right:0;"><span>2:36 PM</span><span>◉ ⌁ ▮ 32</span></div>
+      <div class="poster" style="position:absolute;left:20px;top:48px;width:76px;height:112px;z-index:4;">
+        <span>THE STORM</span>
+      </div>
+      <div class="dtitle" style="position:absolute;left:112px;top:64px;width:216px;z-index:4;">
+        <div class="tt">The Storm (2026)</div>
+        <div class="mm">Drama · 2 seasons · 16 eps</div>
+      </div>
+      <div class="closex" style="position:absolute;right:16px;top:48px;z-index:4;">✕</div>
+      <div style="position:absolute;left:0;right:0;top:168px;bottom:76px;overflow:hidden;">
+        <div class="chips" style="margin:8px 16px 0;">
+          <div class="chip on">All (16)</div><div class="chip">S1 (10)</div><div class="chip">S2 (6)</div><div class="chip">Range</div>
+        </div>
+        <div class="range" style="margin:12px 16px 0;">Range (e.g. 1-5, 8, 10)</div>
+        <div class="slab" style="margin:16px 16px 8px;">Season 1 · 10 episodes<span class="ln"></span></div>
+        <div style="margin:0 16px;display:flex;flex-direction:column;gap:8px;">
+          <div class="erow">
+            <div class="enum">01</div>
+            <div class="et"><div class="n">Episode 1 — pilot</div><div class="q">2160p · H.265 · 2.8 GB</div></div>
+            <div class="info-c">i</div><div class="cbox on"></div>
+          </div>
+          <div class="erow">
+            <div class="enum">02</div>
+            <div class="et"><div class="n">Episode 2</div><div class="q">2160p · H.265 · 2.6 GB</div></div>
+            <div class="info-c">i</div><div class="cbox on"></div>
+          </div>
+          <div class="erow">
+            <div class="enum">03</div>
+            <div class="et"><div class="n">Episode 3</div><div class="q">1080p · H.264 · 1.5 GB</div></div>
+            <div class="info-c">i</div><div class="cbox"></div>
+          </div>
+          <div class="erow">
+            <div class="enum">04</div>
+            <div class="et"><div class="n">Episode 4</div><div class="q">1080p · H.264 · 1.4 GB</div></div>
+            <div class="info-c">i</div><div class="cbox on"></div>
+          </div>
+          <div class="slab" style="margin:14px 0 8px;">Season 2 · 6 episodes<span class="ln"></span></div>
+          <div class="erow">
+            <div class="enum">05</div>
+            <div class="et"><div class="n">Episode 5</div><div class="q">1080p · H.264 · 1.3 GB</div></div>
+            <div class="info-c">i</div><div class="cbox"></div>
+          </div>
+        </div>
+      </div>
+      <div class="footer" style="bottom:0;">
+        <div class="sum">Selected <b>7 episodes</b> · 4.2 GB</div>
+        <div class="dlbtn">Download ↓</div>
+      </div>
+    </div></div>
+  </figure>
+
+  <!-- ═══════════ 4 · FEEDBACK ═══════════ -->
+  <figure>
+    <figcaption>
+      <div class="t">4 · Loading &amp; failure — <em>staged, visible</em></div>
+      <div class="s">Skeleton rows use the exact episode-row geometry (64px, same gutters) in a
+      real shimmer; the stage line names the step and counts progress; failure states cap at 30s
+      with a reason and always offer a way out.</div>
+      <div class="m">skeleton = row geometry (64/14r) · stage = 12/600 · cap 30s</div>
+    </figcaption>
+    <div class="phone"><div class="dk">
+      <div class="pstats dkp" style="position:absolute;top:0;left:0;right:0;"><span>2:36 PM</span><span>◉ ⌁ ▮ 32</span></div>
+      <div class="closex" style="position:absolute;right:16px;top:48px;z-index:5;">✕</div>
+      <div class="poster" style="position:absolute;left:20px;top:48px;width:76px;height:112px;z-index:4;">
+        <span>THE STORM</span>
+      </div>
+      <div class="dtitle" style="position:absolute;left:112px;top:64px;width:200px;z-index:4;">
+        <div class="tt">The Storm (2026)</div>
+        <div class="mm">Scraping episodes…</div>
+      </div>
+      <div style="position:absolute;left:16px;right:16px;top:196px;">
+        <div class="stage"><span class="spin"></span><span><b>Unlocking stream locker…</b> · 2 of 4 jump targets</span></div>
+        <div class="meter" style="margin:12px 0 14px;"><i style="width:34%;background:var(--live-fill);"></i></div>
+        <div style="display:flex;flex-direction:column;gap:8px;">
+          <div class="skel"><div class="b1"></div><div class="col"><div class="b2"></div><div class="b3"></div></div></div>
+          <div class="skel"><div class="b1"></div><div class="col"><div class="b2"></div><div class="b3"></div></div></div>
+          <div class="skel"><div class="b1"></div><div class="col"><div class="b2"></div><div class="b3"></div></div></div>
+          <div class="skel"><div class="b1"></div><div class="col"><div class="b2"></div><div class="b3"></div></div></div>
+        </div>
+      </div>
+      <div style="position:absolute;left:16px;right:16px;bottom:20px;display:flex;flex-direction:column;gap:12px;">
+        <div class="statebox">
+          <div class="h">If the scrape dies — 30s cap</div>
+          <div class="failrow">
+            <div class="why"><b>Couldn’t reach the episode locker.</b><br>All 4 jump targets timed out.</div>
+            <span class="retry-d">RETRY</span>
+          </div>
+        </div>
+        <div class="statebox">
+          <div class="h">If the show has no streams</div>
+          <div class="failrow">
+            <div class="why">No playable streams found.<br><i>Search another source instead.</i></div>
+            <span class="retry-d">SEARCH</span>
+          </div>
+        </div>
+      </div>
+    </div></div>
+  </figure>
+</div>
+
+<!-- ═══════════ TOKENS + TYPE ═══════════ -->
+<div class="tokens">
+  <div>
+    <h2>Palette — pinned hexes</h2>
+    <div class="swatches">
+      <div class="sw"><div class="c" style="background:#F4F7FA"></div><div class="l"><b>Paper</b>#F4F7FA app stays light</div></div>
+      <div class="sw"><div class="c" style="background:#07131A"></div><div class="l"><b>Ink</b>#07131A main text</div></div>
+      <div class="sw"><div class="c" style="background:#1591B3"></div><div class="l"><b>Live</b>fill #1591B3 · word #0E7490</div></div>
+      <div class="sw"><div class="c" style="background:#1F7A4D"></div><div class="l"><b>Done</b>#1F7A4D on tint</div></div>
+      <div class="sw"><div class="c" style="background:#C98A2D"></div><div class="l"><b>Paused</b>word #92610F on tint</div></div>
+      <div class="sw"><div class="c" style="background:#C25B52"></div><div class="l"><b>Failed</b>word #A84A42 · accent rust</div></div>
+      <div class="sw"><div class="c" style="background:#171B23"></div><div class="l"><b>Sheet</b>#171B23 pinned dark</div></div>
+      <div class="sw"><div class="c" style="background:#1D222C"></div><div class="l"><b>Card</b>#1D222C · hairline 9%</div></div>
+      <div class="sw"><div class="c" style="background:#2A303C"></div><div class="l"><b>Skeleton</b>#2A303C shimmer</div></div>
+      <div class="sw"><div class="c" style="background:#F2F5F9"></div><div class="l"><b>Drawer ink</b>#F2F5F9 titles/checks</div></div>
+    </div>
+  </div>
+  <div class="typestrip">
+    <h2>Type — five steps, no drips</h2>
+    <div class="tr"><span class="sp">20 / 24 · 800</span><span style="font-size:20px;font-weight:800;">The Storm (2026)</span></div>
+    <div class="tr"><span class="sp">13 / 18 · 700</span><span style="font-size:13px;font-weight:700;">155K views · 667 reactions</span></div>
+    <div class="tr"><span class="sp">12 / 16 · 700</span><span style="font-size:12px;font-weight:700;">Episode 1 — pilot</span></div>
+    <div class="tr"><span class="sp">11 / 14 · 500</span><span style="font-size:11px;color:#B9C4D2;">Drama · 2 seasons · 16 eps</span></div>
+    <div class="tr"><span class="sp">10 / 13 · 800 +1.4ls</span><span style="font-size:10px;font-weight:800;letter-spacing:1.4px;color:#9AA6B6;">SEASON 1 · 10 EPISODES</span></div>
+    <div class="tr" style="border:none;"><span class="sp">9.5 mono</span><span class="mono" style="font-size:9.5px;color:#8B96A6;">1080p · H.264 · 1.4 GB</span></div>
+  </div>
+</div>
+
+<div class="note">
+  <b>Mapped to this round’s notes:</b> FULL drops the cinematic banner and pins the exact compact
+  top-anchored header from the loading frame — art 34→138, poster (20, 48), ✕ 48, title x=112 —
+  so ~6.6 episode rows lead the screen. Download cards carry portrait poster art (real artwork
+  through the existing image pipeline whenever the source gave it; initials only as fallback).
+  Settings folder taps (“playback and all”) snap: the 500ms slide-fade becomes a 200ms contract where
+  the first frame paints immediately and animation only decorates. Everything else — detent math,
+  status colours, feedback states — stands as shown.
+</div>
+
+</body>
+</html>

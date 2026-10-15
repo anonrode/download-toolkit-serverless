@@ -328,7 +328,11 @@ jobs:
             echo "KEY_PASSWORD=$KEY_PASSWORD" >> "$GITHUB_ENV"
             echo "Release signing key prepared ($(wc -c < "$RUNNER_TEMP/anon-release.p12") bytes)."
           else
-            echo "ANDROID_KEYSTORE_B64 not set — release will be debug-signed."
+            if [ "${GITHUB_REF#refs/tags/}" != "$GITHUB_REF" ]; then
+              echo "::error::Refusing to publish a release: ANDROID_KEYSTORE_B64 is unset, artifacts would be debug-signed."
+              exit 1
+            fi
+            echo "ANDROID_KEYSTORE_B64 not set — branch build stays debug-signed (allowed off-tags)."
           fi
         env:
           ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
@@ -366,9 +370,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          name: "Anon Downloader ${{ github.ref_name }} (Serverless 100% On-Device Edition)"
+          name: "Anonrode ${{ github.ref_name }} (Serverless 100% On-Device Edition)"
           body: |
-            ## Anon Downloader — Serverless ${{ github.ref_name }}
+            ## Anonrode — Serverless ${{ github.ref_name }}
 
             100% on-device drama scraping, episode search, stream resolution, and multi-socket parallel downloads directly on Android.
 

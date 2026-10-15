@@ -321,11 +321,11 @@ class MainActivity : ComponentActivity() {
                         text = {
                             Text(
                                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R)
-                                    "Anon Downloader saves downloads to your Downloads folder. " +
+                                    "Anonrode saves downloads to your Downloads folder. " +
                                         "On this Android version that needs \"All files access\" — " +
                                         "tap Grant and switch it on. Downloads will fail until then."
                                 else
-                                    "Anon Downloader saves downloads to your Downloads folder. " +
+                                    "Anonrode saves downloads to your Downloads folder. " +
                                         "Grant storage permission so downloads can be written there.",
                                 fontSize = Type.body.fontSize
                             )
