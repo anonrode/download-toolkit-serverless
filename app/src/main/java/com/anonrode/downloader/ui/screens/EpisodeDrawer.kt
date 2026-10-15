@@ -86,7 +86,7 @@ import kotlin.math.roundToInt
  *   • Poster:   96×144dp (2:3), radius 12, shadow 0/18/42 black-62%, outline 1dp white-10%;
  *               anchored left 16dp, top = bannerH − 66dp.
  *   • Title:    x = 16+96+16 = 128dp, aligned to poster's upper third; title 20sp/800;
- *               meta 11sp (site · seasons · eps).
+ *               meta 11sp (seasons · eps — the site never paints here).
  *   • Close ✕:  38dp glass circle (black-72% bg, white-9% outline, blur 6 approximated — no stock
  *               backdrop-blur in Compose) at top-right 16dp, y = 52dp.
  *   • Story:    top = (bannerH − 66 + 144) + 24; 2-line clamp with inline "Read more"; card 76dp.
@@ -94,8 +94,8 @@ import kotlin.math.roundToInt
  *               canonical #181B22 + hairline; SELECTED = AccentPrimary fill + background ink.
  *   • Range:    top = chipsTop + 65dp, height 42dp, full-width gutter.
  *   • Season:   top = rangeTop + 59dp; then rows every 74dp (row 66dp + 8 gap); row = number tile
- *               34dp + title 11.5sp/700 + mono host 9.5sp + 24dp info circle + 19dp checkbox
- *               (selected = AccentPrimary fill + check in background color).
+ *               34dp + title 11.5sp/700 + mono quality·codec·size 9.5sp + 24dp info circle +
+ *               19dp checkbox (selected = AccentPrimary fill + check in background color).
  *   • DETENTS:  HALF = 0.60 × H visible. FULL = H (full-bleed; scrim under clock). Detent switch:
  *               a drag of > 0.12 × H between detents or velocity > ~1000dp/s commits the next
  *               state, otherwise springs back. Spring = Motion.Spatial settings (Tokens.kt).
@@ -632,10 +632,11 @@ fun EpisodeDrawer(
                             maxLines = 2,
                             overflow = TextOverflow.Ellipsis
                         )
-                        // Meta line: site · seasons · eps — blank parts (synthetic
+                        // Meta line: seasons · eps. User directive 2026-10-15 — the
+                        // site stays in the model, the ℹ️ info sheet and the journal;
+                        // presentation never paints it. Blank parts (synthetic
                         // Downloads-series cards) never join the line.
                         val metaLine = listOf(
-                            show.site.uppercase(),
                             if (episodes.isEmpty()) null else
                                 if (seasonGroups.size > 1) "${seasonGroups.size} seasons" else null,
                             if (episodes.isEmpty()) null else "${episodes.size} eps"
@@ -1204,7 +1205,8 @@ fun EpisodeDrawer(
 
 /**
  * Episode row — the CONTRACT row spec: number tile 34dp + title 11.5sp/700 +
- * mono host 9.5sp + 24dp info circle + 19dp checkbox (selected = AccentPrimary
+ * mono quality·codec·size subtitle 9.5sp + 24dp info circle + 19dp checkbox
+ * (selected = AccentPrimary
  * fill + check in background color). 34dp tile + 2×16dp vertical padding keeps
  * the row at 66dp; the LazyColumn adds the 8dp gap of the 74dp rhythm.
  */
@@ -1287,15 +1289,21 @@ fun EpisodeRow(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
-            // Locker + site-reported size, always visible: the "wait, which
-            // host is this / how big" question disappears from behind the
-            // info toggle. Zero network — parsed from the URL in hand.
-            // Monospace host at 9.5sp (CONTRACT): hosts never kern like prose.
-            val (lockerHost, _) = remember(episode.url) { lockerPreview(episode.url) }
-            val subLine = listOf(
-                lockerHost.takeIf { it.isNotBlank() && it != "—" },
+            // Subtitle: quality · codec · size — the why-pick-this-one facts,
+            // not the plumbing. User directive 2026-10-15 — presentation never
+            // paints site/resolver/locker-host names; the host stays behind the
+            // ℹ️ panel below (progressive disclosure) and in the journal. Parts
+            // derive in order (blanks skipped, joined " · ") from data already
+            // in hand — nothing is invented; when the source offers nothing the
+            // bare "—" fallback remains. Monospace 9.5sp (CONTRACT).
+            val qualityTag = qualityInText.find(episode.title)?.value?.lowercase()
+                ?: qualityInText.find(lockerFile)?.value?.lowercase()
+            val codecTag = codecInText.find(lockerFile)?.value?.lowercase()
+            val subLine = listOfNotNull(
+                qualityTag,
+                codecTag,
                 episode.sizeText.takeIf { it.isNotBlank() }
-            ).filterNotNull().joinToString(" · ")
+            ).joinToString(" · ")
             Text(
                 text = subLine.ifBlank { "—" },
                 color = TextMuted,
@@ -1426,6 +1434,14 @@ fun EpisodeRow(
     }
 }
 }
+
+// Row-subtitle derivation (presentation only — the facts already riding on the
+// title / locker file name, in the approved contract form):
+//   qualityInText → "1080p" out of a title or file name
+//   codecInText   → "x265" / "hevc" / "h.264" / "av1" out of a file name
+// Both normalize lowercase; neither ever invents a value that wasn't there.
+private val qualityInText = Regex("""\b(\d{3,4}p)\b""", RegexOption.IGNORE_CASE)
+private val codecInText = Regex("""x26[45]|hevc|h\.?264|av1""", RegexOption.IGNORE_CASE)
 
 /** Parse (host, file name) from a locker URL without touching the network.
  *  The name comes from the last path segment; query strings (tokens, ?pt=,

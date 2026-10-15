@@ -236,9 +236,12 @@ class QuickShareActivity : ComponentActivity() {
         // 720p — the in-app SocialModal already seeds from defaultQuality.
         val q = (application as? AnonApp)?.engine?.defaultQuality ?: "720p"
         dispatchDownload(parsed, rawUrl, quality = q, audioOnly = false)
+        // User directive 2026-10-15 — presentation never paints the drama site
+        // name; "Drama" says what the download is while the site word stays in
+        // the model + journal. Social platforms keep their platform label.
         val label = when (parsed) {
             is ParsedUrl.SocialUrl -> parsed.platform
-            is ParsedUrl.DramaUrl -> parsed.site
+            is ParsedUrl.DramaUrl -> "Drama"
             else -> "Media"
         }
         Toast.makeText(this, "$label download started in background", Toast.LENGTH_SHORT).show()
@@ -349,9 +352,12 @@ fun QuickShareCard(
     // Guards against double-tap re-enqueue during the dismissal animation.
     var enqueued by remember { mutableStateOf(false) }
 
+    // User directive 2026-10-15 — the drama source site never paints (the show
+    // itself is the card's headline + poster below); a neutral kind word takes
+    // its place here and as the source-host fallback.
     val platformName = when (parsedUrl) {
         is ParsedUrl.SocialUrl -> parsedUrl.platform
-        is ParsedUrl.DramaUrl -> parsedUrl.site.replaceFirstChar { it.uppercase() }
+        is ParsedUrl.DramaUrl -> "Drama"
         is ParsedUrl.MagnetUrl -> "Torrent"
         is ParsedUrl.DirectMediaUrl -> "Direct Media"
         else -> "Web"

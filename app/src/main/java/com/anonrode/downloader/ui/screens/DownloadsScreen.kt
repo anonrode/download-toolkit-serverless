@@ -1025,11 +1025,10 @@ private fun taskMetaText(task: DownloadTask): AnnotatedString {
         TaskStatus.QUEUED -> buildAnnotatedString { append("Queued · waiting to start") }
         TaskStatus.FAILED -> buildAnnotatedString {
             withStyle(SpanStyle(color = FailRust)) { append("Failed") }
-            // One-line cause: collapse any engine multi-line message.
-            val cause = task.errorMessage
-                ?.replace(Regex("\\s+"), " ")
-                ?.trim()
-                .orEmpty()
+            // One-line cause: humanized (no machinery vocabulary, no raw locker
+            // URLs — see humanizeFailure) and collapsed to a single line. The
+            // machine truth stays in the journal + ℹ️ sheet for triage.
+            val cause = humanizeFailure(task.errorMessage ?: "")
             append(" · ${cause.ifBlank { "Download failed" }} — tap to retry")
         }
         TaskStatus.COMPLETED -> buildAnnotatedString {
@@ -1037,6 +1036,44 @@ private fun taskMetaText(task: DownloadTask): AnnotatedString {
             append("Done · $sizeText")
         }
     }
+}
+
+// ─── Failure humanizer (v5 cause line only — user directive 2026-10-15) ─────────
+// Failed rows speak in plain words: resolver classes, locker-step internals and
+// pipeline jargon never paint as machinery, engine file frames vanish, and a
+// full locker URL collapses to its bare host so the row stays one line. Purely
+// presentational scrub-and-reword — nothing is invented, and the machine truth
+// itself is untouched in the journal, ℹ️ sheet and the engine's own records.
+private val resolverClassName = Regex("""\b[A-Z][a-zA-Z]*Resolver\b""")
+private val lockerStepName = Regex("""\bDynamicLocker\w*\b""")
+private val resolverChainPhrase = Regex("""resolver chain""", RegexOption.IGNORE_CASE)
+private val otaPipelinePhrase = Regex("""OTA pipeline""")
+private val failureCrackWord = Regex("""\bcrack(ed|ing)?\b""", RegexOption.IGNORE_CASE)
+private val engineFrameFragment = Regex("""\bengine[/\\]\S*?\.kt:\d+""")
+private val urlInFailureMessage = Regex("""https?://([^/\s]+)\S*""")
+
+private fun humanizeFailure(raw: String): String {
+    // Locker URLs never read as prose; host only (e.g. "loadedfiles.net —")
+    // keeps the cause a single line. Applied first so no later rule ever
+    // rewrites a fragment of the URL itself.
+    var s = urlInFailureMessage.replace(raw) { it.groupValues[1] }
+    s = resolverClassName.replace(s, "stream finder")
+    s = lockerStepName.replace(s, "locker step")
+    s = resolverChainPhrase.replace(s, "stream chain")
+    s = otaPipelinePhrase.replace(s, "site playbook")
+    // crack / cracked / cracking → the resolv- word-shape equivalent,
+    // preserving the sentence's capitalization.
+    s = failureCrackWord.replace(s) { m ->
+        val plain = when (m.value.lowercase()) {
+            "cracked" -> "resolved"
+            "cracking" -> "resolving"
+            else -> "resolve"
+        }
+        if (m.value[0].isUpperCase()) plain.replaceFirstChar { it.uppercaseChar() } else plain
+    }
+    s = engineFrameFragment.replace(s, "")
+    return s.replace(Regex("\\s+"), " ").trim()
+        .replace(Regex("""[,;:]+\s*$"""), "").trim()
 }
 
 /** Flat monogram initials, remembered per item by the caller. Show episodes
