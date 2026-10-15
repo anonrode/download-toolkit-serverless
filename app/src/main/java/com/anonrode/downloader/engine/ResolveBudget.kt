@@ -124,9 +124,14 @@ object ResolveBudget {
     /** Marks a url dead for this task (idempotent; refreshes the TTL). */
     fun markDead(taskId: String, url: String) {
         if (taskId.isBlank() || url.isBlank()) return
-        val set = deadUrls.computeIfAbsent(taskId) {
+        // Eviction must run BEFORE computeIfAbsent: mutating deadUrls from
+        // inside its own mapping function (the old deadUrls.size >= 128
+        // check lived in the lambda) violates ConcurrentHashMap's contract
+        // and can throw IllegalStateException("Recursive update") on ART.
+        var set = deadUrls[taskId]
+        if (set == null) {
             if (deadUrls.size >= 128) evictStaleTasks()
-            ConcurrentHashMap()
+            set = deadUrls.computeIfAbsent(taskId) { ConcurrentHashMap() }
         }
         val now = System.currentTimeMillis()
         if (set.size >= 64) {

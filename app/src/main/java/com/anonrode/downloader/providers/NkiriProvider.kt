@@ -324,6 +324,23 @@ object NkiriProvider : SiteProvider {
                 }
             }
 
+            // Uniqueness net (RulesPipeline parity, b57339f): the engine
+            // re-resolves an episode by firstOrNull { episodeNum == … } — a
+            // pinned season*100 key colliding across a mirror/server row and
+            // its real episode (both land in the slug's season space now) or
+            // across two token rows would silently pick the wrong URL.
+            // Re-stamp later duplicates above the list maximum; the item keeps
+            // its title/URL, only the internal re-resolve key moves.
+            if (episodes.size > 1) {
+                val seen = HashSet<Int>(episodes.size)
+                var overflow = (episodes.maxOfOrNull { it.episodeNum } ?: 0) + 1
+                for (i in episodes.indices) {
+                    if (!seen.add(episodes[i].episodeNum)) {
+                        episodes[i] = episodes[i].copy(episodeNum = overflow++)
+                    }
+                }
+            }
+
             episodes.sortWith(compareBy({ it.episodeNum }, { it.title }))
 
             val card = ShowCard(title = title, url = cleanUrl, posterUrl = poster, site = name)

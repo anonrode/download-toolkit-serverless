@@ -857,7 +857,12 @@ object YoutubeDlDownloader {
                     var sibDest = File(targetDir, "$destBase.$langTag.$sExt")
                     var sn = 1
                     while (sibDest.exists()) {
-                        sibDest = File(targetDir, "$destBase ($sn).$langTag.$sExt")
+                        // Keep the collision inside the "$destBase." prefix
+                        // space: the player discovers sidecars by that prefix
+                        // and derives the language from the next dot segment
+                        // ("destBase.en-2.srt" -> "en"). A "destBase (2).en.srt"
+                        // collision name would be invisible to the discovery.
+                        sibDest = File(targetDir, "$destBase.$langTag-$sn.$sExt")
                         sn++
                     }
                     if (!sibling.renameTo(sibDest)) {

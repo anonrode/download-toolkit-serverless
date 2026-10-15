@@ -27,6 +27,24 @@ class HlsMonotonicProgressReconciler(
             return Triple(lastReportedBytes, tot, lastReportedPct)
         }
 
+        // Position-unknown guard: a 0-based / NA fragment_index tick (the
+        // parser only guarantees fragmentIndex > 0 for real positions, see
+        // ProgressParser's fi>0 note) would run the 0.001 ratio floor below
+        // and project landedBytes * 1000 as the total — and with no preflight
+        // estimate that 1000x guess is SEEDED as preflightTotal, pinning the
+        // card near 0% until w(i) decays. Bank the bytes, keep the previous
+        // working total (or the anchor reservation), and wait for a real
+        // fragment index to start extrapolating.
+        if (currentSeg <= 0) {
+            lastReportedBytes = maxOf(lastReportedBytes, landedBytes)
+            if (workingTotal > 0L) {
+                workingTotal = maxOf(workingTotal, landedBytes + 1024L)
+                val rawPct = lastReportedBytes.toDouble() / workingTotal * 100.0
+                lastReportedPct = minOf(99.9, maxOf(lastReportedPct, rawPct))
+            }
+            return Triple(lastReportedBytes, workingTotal, lastReportedPct)
+        }
+
         val ratio = (currentSeg.toDouble() / segmentCount.toDouble()).coerceIn(0.001, 1.0)
         val projectedTotal = (landedBytes.toDouble() / ratio).toLong()
 

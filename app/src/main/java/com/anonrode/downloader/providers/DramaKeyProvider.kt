@@ -215,6 +215,12 @@ object DramaKeyProvider : SiteProvider {
                     }
                 }
                 if (grouped.isNotEmpty()) {
+                    // Uniqueness net: "S%d E%02d" headers repeating within a
+                    // section, or a posNum > 99 slot-overflow colliding across
+                    // sections (S2E150 vs S3E50), would make the engine's
+                    // firstOrNull { episodeNum == … } re-resolve pick the
+                    // wrong URL. Re-stamp later duplicates above the maximum.
+                    reStampDuplicateKeys(grouped)
                     val card = ShowCard(title = title, url = showUrl, posterUrl = poster, site = name)
                     return ShowDetails(
                         show = card, synopsis = synopsis,
@@ -296,10 +302,29 @@ object DramaKeyProvider : SiteProvider {
                 count++
             }
 
+            // Flat-sweep uniqueness net (pinned season*100 space): a mirror
+            // row's positional key colliding with a later text-resolved "Ep N"
+            // row keeps the engine's firstOrNull re-resolve honest.
+            reStampDuplicateKeys(episodes)
             val card = ShowCard(title = title, url = showUrl, posterUrl = poster, site = name)
             return ShowDetails(show = card, synopsis = synopsis, episodes = episodes.sortedWith(compareBy({ it.episodeNum }, { it.title })))
         } catch (_: Exception) {
             return ShowDetails(show = show)
+        }
+    }
+
+    /** Uniqueness net (RulesPipeline parity): the engine re-resolves an
+     *  episode by firstOrNull { episodeNum == … } — duplicate keys silently
+     *  pick the wrong URL. Re-stamp later duplicates above the list maximum;
+     *  the item keeps its title/URL, only the internal key moves. */
+    private fun reStampDuplicateKeys(items: MutableList<EpisodeItem>) {
+        if (items.size < 2) return
+        val seen = HashSet<Int>(items.size)
+        var overflow = (items.maxOfOrNull { it.episodeNum } ?: 0) + 1
+        for (i in items.indices) {
+            if (!seen.add(items[i].episodeNum)) {
+                items[i] = items[i].copy(episodeNum = overflow++)
+            }
         }
     }
 

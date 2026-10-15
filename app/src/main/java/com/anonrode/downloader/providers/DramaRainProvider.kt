@@ -270,6 +270,22 @@ object DramaRainProvider : SiteProvider {
                 }
             }
 
+            // Uniqueness net (RulesPipeline/Nkiri parity, b57339f): two rows
+            // landing on one episodeNum (two "EPISODE N" anchors with distinct
+            // hrefs, or a mirror row's positional key colliding with a text
+            // number) would make the engine's firstOrNull { episodeNum == … }
+            // re-resolve pick the wrong URL. Re-stamp later duplicates above
+            // the list maximum; only the internal key moves.
+            if (episodes.size > 1) {
+                val seen = HashSet<Int>(episodes.size)
+                var overflow = (episodes.maxOfOrNull { it.episodeNum } ?: 0) + 1
+                for (i in episodes.indices) {
+                    if (!seen.add(episodes[i].episodeNum)) {
+                        episodes[i] = episodes[i].copy(episodeNum = overflow++)
+                    }
+                }
+            }
+
             val card = ShowCard(title = title, url = showUrl, posterUrl = poster, site = name)
             return ShowDetails(show = card, synopsis = synopsis, episodes = episodes.sortedWith(compareBy({ it.episodeNum }, { it.title })))
         } catch (_: Exception) {
