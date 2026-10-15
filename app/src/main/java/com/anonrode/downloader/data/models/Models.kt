@@ -106,5 +106,11 @@ data class DownloadTask(
      *  (0 = unknown: direct downloads or tasks persisted by older builds).
      *  Only a card-level hint — the drawer recomputes the exact un-downloaded
      *  set live from the provider when the chip opens it. */
-    val seriesTotal: Int = 0
+    val seriesTotal: Int = 0,
+    /** Poster art for the Downloads card thumbnail (v6 mock frame 1):
+     *  stamped by the episode drawer at enqueue time from the series poster.
+     *  "" for direct/social/torrent downloads, which keep the initials tile.
+     *  Serialized like any other field; journals persisted by older builds
+     *  simply load as "" (initials fallback). */
+    val posterUrl: String = ""
 )

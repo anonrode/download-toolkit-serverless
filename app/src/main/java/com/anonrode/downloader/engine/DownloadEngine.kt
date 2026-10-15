@@ -452,7 +452,10 @@ class DownloadEngine(
          *  without re-scraping. Defaults keep every other caller (direct
          *  pastes, playlists, subtitles) unchanged. */
         seriesUrl: String = "",
-        seriesTotal: Int = 0
+        seriesTotal: Int = 0,
+        /** Downloads-card thumbnail art (v6 mock frame 1); "" keeps the
+         *  initials tile. Callers without artwork just keep the default. */
+        posterUrl: String = ""
     ): String {
         val downloadFolder = getDownloadDirectory(showTitle, createDirs = false)
 
@@ -517,7 +520,8 @@ class DownloadEngine(
                     createdAt = System.currentTimeMillis(),
                     mirrorUrls = MirrorPool.sources(sourceUrl, mirrorUrls).filter { it != sourceUrl },
                     seriesUrl = seriesUrl,
-                    seriesTotal = seriesTotal
+                    seriesTotal = seriesTotal,
+                    posterUrl = posterUrl
                 )
 
                 repository.addFirst(task)

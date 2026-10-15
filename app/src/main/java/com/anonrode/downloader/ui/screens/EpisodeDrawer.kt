@@ -284,7 +284,8 @@ fun EpisodeDrawer(
                         parallelSockets = viewModel.engine.parallelSocketsPerFile,
                         verifiedDirectUrl = com.anonrode.downloader.pipeline.ResultVerifier.verifiedDirect(ep.url),
                         seriesUrl = show.url,
-                        seriesTotal = episodes.size
+                        seriesTotal = episodes.size,
+                        posterUrl = show.posterUrl
                     )
                 }
                 withContext(Dispatchers.Main) { onDismiss() }
@@ -1040,7 +1041,8 @@ fun EpisodeDrawer(
                                                                 parallelSockets = viewModel.engine.parallelSocketsPerFile,
                                                                 verifiedDirectUrl = com.anonrode.downloader.pipeline.ResultVerifier.verifiedDirect(ep.url),
                                                                 seriesUrl = show.url,
-                                                                seriesTotal = episodes.size
+                                                                seriesTotal = episodes.size,
+                                                                posterUrl = show.posterUrl
                                                             )
                                                             onDismiss()
                                                         }

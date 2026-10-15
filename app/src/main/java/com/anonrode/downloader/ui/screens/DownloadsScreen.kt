@@ -916,15 +916,9 @@ private fun ActivityRow(
             .padding(horizontal = 14.dp, vertical = 12.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            // POSTER GAP (frame 1 renders real art where the source gave it):
-            // DownloadTask (data/models/Models.kt) carries NO artwork field,
-            // and stamping one at enqueue must cross engine.enqueue
-            // (DownloadEngine.kt:428) plus the journal-persisted model —
-            // outside this change's authorized scope. Every card therefore
-            // falls back to the initials tile today; DownloadThumb renders
-            // Coil art the moment a poster URL rides along (single switching
-            // point, right here).
-            DownloadThumb(posterUrl = "", initials = monogram)
+            // Poster art rides on the task (stamped by the drawer at enqueue
+            // time, v6 mock frame 1); "" falls back to the initials tile.
+            DownloadThumb(posterUrl = task.posterUrl, initials = monogram)
 
             Spacer(modifier = Modifier.width(11.dp))
 
