@@ -340,6 +340,130 @@ class RulesPipelineTest {
     }
 
     @Test
+    fun episodesHtml_seasonFromUrlPinsSlugSeasonForPositionalAnchors() {
+        // nkiri/dramarain-class season post (live-verified 2026-10-15:
+        // "/adventure-time-side-quests-s02-complete-tv-series" renumbers its
+        // anchors 1..N): the slug-pinned season puts the flat list into the
+        // season*100 chip space with the Sxx template; season-1 and
+        // seasonless URLs keep the historical plain numbering.
+        val html = """
+            <html><body>
+              <div class="entry-content">
+                <a href="https://lightdl.cc/d/b1">Download</a>
+                <a href="https://lightdl.cc/d/b2">Download</a>
+                <a href="https://lightdl.cc/d/b3">Download</a>
+              </div>
+            </body></html>
+        """.trimIndent()
+        val items = """
+            {
+              "anchorSelector": ".entry-content a[href]",
+              "urlAllowlist": ["lightdl.cc"],
+              "labelChain": ["text", "counter"],
+              "seasonFromUrl": {
+                "regex": "(?i)(?:^|[.\\-_ /])s(\\d{1,2})(?!\\d)",
+                "group": 1,
+                "labelTemplate": "S{season:%02d} E{num:%02d}"
+              }
+            }
+        """.trimIndent()
+
+        val pinned = RulesPipeline.extractEpisodes(
+            "nkiri", step(items), htmlOutcome(html), baseVars,
+            "https://thenkiri.test/adventure-time-side-quests-s02-complete-tv-series/"
+        )
+        assertEquals(3, pinned.episodes.size)
+        assertEquals("S02 E01", pinned.episodes[0].title)
+        assertEquals(201, pinned.episodes[0].episodeNum)
+        assertEquals("S02 E02", pinned.episodes[1].title)
+        assertEquals(202, pinned.episodes[1].episodeNum)
+
+        val plain = RulesPipeline.extractEpisodes(
+            "nkiri", step(items), htmlOutcome(html), baseVars,
+            "https://thenkiri.test/inside-the-circle-s01-complete-tv-series/"
+        )
+        assertEquals(1, plain.episodes[0].episodeNum) // season-1 slug: historical 1..N
+
+        val noSeason = RulesPipeline.extractEpisodes(
+            "nkiri", step(items), htmlOutcome(html), baseVars,
+            "https://thenkiri.test/vincenzo-korean-drama/"
+        )
+        assertEquals(1, noSeason.episodes[0].episodeNum)
+    }
+
+    @Test
+    fun episodesHtml_seasonFromUrlBacksOffWhenTokensDisagree() {
+        // Rocks-canonical guard: a page whose own SxxEyy tokens name a
+        // different season than the slug is token-driven (mixed multi-season
+        // post) — the slug pin must NOT remap the plain/token numbers.
+        val html = """
+            <html><body>
+              <a href="https://lightdl.cc/d/Show.S01E01.mkv">Download</a>
+              <a href="https://lightdl.cc/d/Show.S01E02.mkv">Download</a>
+              <a href="https://lightdl.cc/d/Show.S02E01.mkv">Download</a>
+            </body></html>
+        """.trimIndent()
+        val items = """
+            {
+              "anchorSelector": "a[href]",
+              "urlAllowlist": ["lightdl.cc"],
+              "seasonFromUrl": {
+                "regex": "(?i)(?:^|[.\\-_ /])s(\\d{1,2})(?!\\d)",
+                "group": 1
+              }
+            }
+        """.trimIndent()
+
+        val result = RulesPipeline.extractEpisodes(
+            "nkiri", step(items), htmlOutcome(html), baseVars,
+            "https://thenkiri.test/show-s02-complete-tv-series/"
+        )
+        // Conflict (S01 tokens vs s02 slug) -> pin off: S01 tokens stay plain,
+        // the S02 token keeps its own season*100 coding from the heuristic.
+        assertEquals(3, result.episodes.size)
+        assertEquals(1, result.episodes[0].episodeNum)
+        assertEquals(2, result.episodes[1].episodeNum)
+        assertEquals(201, result.episodes[2].episodeNum)
+    }
+
+    @Test
+    fun episodesHtml_seasonFromUrlTokensAgreeingWithSlugStayTokenDriven() {
+        // thenkiri reality (live 2026-10-15, adventure-time-side-quests-s02):
+        // files carry S02E01..E20 tokens matching the slug. Token coding wins
+        // for tokened anchors — and the pin must not double-c-code them.
+        val html = """
+            <html><body>
+              <a href="https://downloadwella.com/Adv.S02E01.mkv.html">Download Episode</a>
+              <a href="https://downloadwella.com/Adv.S02E02.mkv.html">Download Episode</a>
+              <a href="https://lightdl.cc/d/untokened">Download</a>
+            </body></html>
+        """.trimIndent()
+        val items = """
+            {
+              "anchorSelector": "a[href]",
+              "urlAllowlist": ["downloadwella.com", "lightdl.cc"],
+              "labelChain": ["text", "counter"],
+              "seasonFromUrl": {
+                "regex": "(?i)(?:^|[.\\-_ /])s(\\d{1,2})(?!\\d)",
+                "group": 1,
+                "labelTemplate": "S{season:%02d} E{num:%02d}"
+              }
+            }
+        """.trimIndent()
+
+        val result = RulesPipeline.extractEpisodes(
+            "nkiri", step(items), htmlOutcome(html), baseVars,
+            "https://thenkiri.test/adv-s02-complete-tv-series/"
+        )
+        assertEquals(3, result.episodes.size)
+        // Tokened anchors: heuristic s*100+e coding, untouched by the pin.
+        assertEquals(201, result.episodes[0].episodeNum)
+        assertEquals(202, result.episodes[1].episodeNum)
+        // The untokened anchor rides the slug pin into the same season space.
+        assertEquals(203, result.episodes[2].episodeNum)
+    }
+
+    @Test
     fun episodesHtml_seasonGroupingUnparseableSeasonDegradesToChainLabel() {
         // No data-season on the header -> season null -> grouping still bounds
         // the anchors but the plain labelChain rides (no S?? prefix), and the

@@ -84,12 +84,29 @@ object AsianCProvider : SiteProvider {
 
             val episodes = mutableListOf<EpisodeItem>()
             val seen = mutableSetOf<String>()
+            // Season pin from the post identity (canon: NaijaVault/NaijaPrey
+            // season-post handling). asianc publishes ONE POST PER SEASON
+            // ("/drama-detail/taxi-driver-season-2", live-verified 2026-10-15:
+            // 16 anchors "Episode 1..16") and each list renumbers from 1 —
+            // without the pin every season of a series landed in the drawer's
+            // single "Season 1" chip with colliding keys across sibling posts.
+            // Season 1 and seasonless posts keep the historical 1..N numbering.
+            val slugSeason = Regex("""season-(\d{1,2})(?!\d)""", RegexOption.IGNORE_CASE).find(showUrl)
+                ?.groupValues?.getOrNull(1)?.toIntOrNull()
+                ?: Regex("""\bseason\s*(\d{1,2})\b""", RegexOption.IGNORE_CASE).find(title)
+                    ?.groupValues?.getOrNull(1)?.toIntOrNull()
             // Container selectors FIRST; the page-wide `-episode-` tail is a
             // sidebar magnet (related-episode widgets share the slug shape),
             // so it only rescues an otherwise-empty drawer.
             PostContentSanitizer.clean(doc)
             var epLinks = doc.select("ul.list-episode-item-2 li a, .all-episodes li a, .list-episode a, .list-episode-item a")
             if (epLinks.isEmpty()) epLinks = doc.select("a[href*='-episode-']")
+
+            // (episode, extraFraction) pairs pending their own drawer key: the
+            // final pass hands "Episode 16.5" rows a key no integer episode
+            // uses, without disturbing the historical 1..N numbering.
+            data class Draft(val item: EpisodeItem, val fractional: Boolean)
+            val drafts = mutableListOf<Draft>()
 
             for (link in epLinks) {
                 val rawHref = link.attr("href")
@@ -105,6 +122,13 @@ object AsianCProvider : SiteProvider {
                     .find(epRaw)?.groupValues?.get(1)?.toIntOrNull()
                     ?: Regex("""episode-(\d+)""", RegexOption.IGNORE_CASE).find(href)?.groupValues?.get(1)?.toIntOrNull()
                     ?: (episodes.size + 1)
+                // Fractional specials ("/vincenzo-2021-episode-16-5.html",
+                // "Episode 16.5" — live-verified 2026-10-15): the text/href
+                // above still parse 16, and without the fraction the special
+                // collapses into episode 16 (same label -> it became a
+                // "mirror" of a DIFFERENT episode).
+                val epFrac = Regex("""episode-\d+-(\d+)""", RegexOption.IGNORE_CASE)
+                    .find(href)?.groupValues?.getOrNull(1)?.toIntOrNull()
 
                 // Mirror-server / part rows must not be relabeled "Episode N"
                 // (2026-09-13 drawer bug class, shared with Rocks).
@@ -116,9 +140,15 @@ object AsianCProvider : SiteProvider {
                 val cleanTitle = when {
                     mirrorLabel != null -> mirrorLabel
                     partNum != null -> "Episode $epNum Part $partNum" + if (epRaw.contains("RAW", ignoreCase = true)) " (RAW)" else ""
+                    slugSeason != null && slugSeason >= 2 ->
+                        "S%02dE%02d".format(slugSeason, epNum) +
+                            (if (epFrac != null) ".$epFrac" else "") +
+                            if (epRaw.contains("RAW", ignoreCase = true)) " (RAW)" else ""
                     epRaw.contains("Episode", ignoreCase = true) ->
-                        "Episode $epNum" + if (epRaw.contains("RAW", ignoreCase = true)) " (RAW)" else ""
-                    else -> "Episode $epNum"
+                        "Episode $epNum" +
+                            (if (epFrac != null) ".$epFrac" else "") +
+                            if (epRaw.contains("RAW", ignoreCase = true)) " (RAW)" else ""
+                    else -> "Episode $epNum" + if (epFrac != null) ".$epFrac" else ""
                 }
 
                 val existing = episodes.firstOrNull { it.episodeNum == epNum && it.title == cleanTitle }
@@ -128,14 +158,30 @@ object AsianCProvider : SiteProvider {
                         episodes[idx] = existing.copy(mirrorUrls = existing.mirrorUrls + href)
                     }
                 } else {
-                    episodes.add(
-                        EpisodeItem(
-                            title = cleanTitle,
-                            url = href,
-                            episodeNum = epNum,
-                            site = name
+                    drafts.add(
+                        Draft(
+                            EpisodeItem(
+                                title = cleanTitle,
+                                url = href,
+                                episodeNum = epNum,
+                                site = name
+                            ),
+                            fractional = epFrac != null
                         )
                     )
+                    episodes.add(drafts.last().item)
+                }
+            }
+            // Fractional rows keep their faithful label but must not share the
+            // integer episode's re-resolve key (the engine re-resolves via
+            // firstOrNull { episodeNum == task.episodeNum }, so "Episode 16.5"
+            // colliding with "Episode 16" would download the wrong file):
+            // stamps the collision above the list maximum.
+            var overflowKey = (episodes.maxOfOrNull { it.episodeNum } ?: 0) + 1
+            for (d in drafts.filter { it.fractional }) {
+                if (episodes.count { it.episodeNum == d.item.episodeNum } > 1) {
+                    val idx = episodes.indexOfFirst { it === d.item }
+                    if (idx >= 0) episodes[idx] = d.item.copy(episodeNum = overflowKey++)
                 }
             }
 

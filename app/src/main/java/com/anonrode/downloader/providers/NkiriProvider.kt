@@ -142,6 +142,28 @@ object NkiriProvider : SiteProvider {
             PostContentSanitizer.clean(contentRoot)
             val allLinks = contentRoot.select("a[href]")
 
+            // Slug season pin (canon: NaijaVault/NaijaPrey). thenkiri publishes
+            // one post per season ("/adventure-time-side-quests-s02-complete-…",
+            // live-verified 2026-10-15: 20 anchors, files S02E01..S02E20) and
+            // each list renumbers from 1 — the pin puts season 2+ posts into
+            // their own drawer chip; season-1/seasonless posts keep 1..N.
+            val slugSeason = Regex("""(?i)(?:^|[.\-_ /])s(\d{1,2})(?!\d)""").find(cleanUrl)
+                ?.groupValues?.getOrNull(1)?.toIntOrNull()
+                ?: Regex("""(?i)(?:^|[.\-_ /])season[-.]?(\d{1,2})(?!\d)""").find(cleanUrl)
+                    ?.groupValues?.getOrNull(1)?.toIntOrNull()
+                ?: Regex("""\bseason\s*(\d{1,2})\b""", RegexOption.IGNORE_CASE).find(title)
+                    ?.groupValues?.getOrNull(1)?.toIntOrNull()
+
+            // Page-level S>=2 token guard (RulesPipeline parity): SxxEyy
+            // tokens only drive the season*100 key when every tokened anchor
+            // names the SAME series prefix (one show, not a list page).
+            val tokenPrefixes = HashSet<String>()
+            for (a in allLinks) {
+                val h = a.attr("abs:href").ifBlank { a.attr("href") }
+                fileSeasonToken(h)?.takeIf { it.first >= 2 }?.let { tokenPrefixes.add(it.second) }
+            }
+            val allowTokenSeasons = tokenPrefixes.size <= 1
+
             var count = 1
             for (a in allLinks) {
                 val rawHref = a.attr("href")
@@ -217,7 +239,8 @@ object NkiriProvider : SiteProvider {
 
                     if (nums.size > 1) {
                         for (n in nums) {
-                            val existingIdx = episodes.indexOfFirst { it.episodeNum == n }
+                            val key = if (slugSeason != null && slugSeason >= 2 && n in 1..99) slugSeason * 100 + n else n
+                            val existingIdx = episodes.indexOfFirst { it.episodeNum == key }
                             if (existingIdx >= 0) {
                                 val existing = episodes[existingIdx]
                                 val isNewDirect = href.contains("nkiserv.com") || com.anonrode.downloader.pipeline.StrictLinkClassifier.isDirectMedia(href)
@@ -232,7 +255,7 @@ object NkiriProvider : SiteProvider {
                                     EpisodeItem(
                                         title = "Episode $n",
                                         url = href,
-                                        episodeNum = n,
+                                        episodeNum = key,
                                         site = name
                                     )
                                 )
@@ -240,17 +263,40 @@ object NkiriProvider : SiteProvider {
                         }
                         count = nums.last() + 1
                     } else {
-                        val num = nums.firstOrNull() ?: count
-                        // Mirror-servers of ONE file are not episodes (device bug class
-                        // 2026-09-13, shared with Rocks/RulesPipeline).
                         val mirrorLabel = DownloadLinkLabels.serverOrPart(
                             text, prevHeading, href.substringAfterLast('/').substringBefore('?')
                         )
+                        // Numbering priority: a season token on the file itself
+                        // (…S04E01… on the -s04- post, single-series prefix
+                        // verified page-wide) decides; then the anchor's own
+                        // evidence (filename E-token / heading); the positional
+                        // counter is last — slug-pinned posts offset it into
+                        // the season*100 space so season 2+ gets its own chip.
+                        val filename = href.substringBefore('#').substringBefore('?').substringAfterLast('/')
+                        val seasonEp = fileSeasonToken(href)?.takeIf { allowTokenSeasons && it.first in 2..99 }
+                        val tokenE = seasonEp?.let {
+                            SEASON_EP_REGEX.find(filename)?.groupValues?.getOrNull(2)?.toIntOrNull()
+                        }
+                        val plainNum = nums.firstOrNull() ?: count
+                        val plainPinned = slugSeason != null && slugSeason >= 2 && plainNum in 1..99
+                        val num: Int
+                        val seasonLabel: String?
+                        if (seasonEp != null && tokenE != null) {
+                            num = seasonEp.first * 100 + tokenE
+                            seasonLabel = "S%02dE%02d".format(seasonEp.first, tokenE)
+                        } else if (plainPinned) {
+                            num = slugSeason * 100 + plainNum
+                            seasonLabel = "S%02dE%02d".format(slugSeason, plainNum)
+                        } else {
+                            num = plainNum
+                            seasonLabel = null
+                        }
                         val epTitle = when {
                             mirrorLabel != null -> mirrorLabel
+                            seasonLabel != null -> seasonLabel
                             !prevHeading.isNullOrBlank() && prevHeading.contains("Episode", ignoreCase = true) -> prevHeading
                             text.isNotBlank() && text.length < 40 && !text.equals("Download Episode", ignoreCase = true) && !text.equals("Download Movie", ignoreCase = true) && !text.equals("Download", ignoreCase = true) -> text
-                            else -> "Episode $num"
+                            else -> "Episode $plainNum"
                         }
 
                         val existingIdx = episodes.indexOfFirst { it.episodeNum == num && (mirrorLabel == null || it.title == epTitle) }
@@ -272,7 +318,7 @@ object NkiriProvider : SiteProvider {
                                     site = name
                                 )
                             )
-                            if (num >= count) count = num + 1
+                            if (num >= count) count = plainNum + 1
                         }
                     }
                 }
@@ -364,7 +410,7 @@ object NkiriProvider : SiteProvider {
         return out.distinct()
     }
 
-    /** Numbers a locker URL itself carries: "Alchemy.of.Souls.E17.(NKIRI.COM).mkv"
+    /** Numbers a locker URL itself carries: "Alchemy of Souls E17.(NKIRI.COM).mkv"
      *  → [17]; "Show.S01E19.NKIRI.COM.mkv" → [19] (season-1 only — season 2+
      *  filenames use a numbering space the episode page does not identify). */
     internal fun filenameEpisodeNums(url: String): List<Int> {
@@ -382,5 +428,18 @@ object NkiriProvider : SiteProvider {
             .filter { it in 1..2000 }
             .distinct()
             .toList()
+    }
+
+    /** (season, normalized series prefix) from the locker file's SxxEyy token
+     *  ("…/Show.S02E05.(THENKIRI.COM).mkv" -> (2, "show")) — RulesPipeline.fileSeasonToken
+     *  parity for the compiled sweep. null when the filename carries no token.
+     *  The prefix feeds the page-level single-series guard: equal prefixes
+     *  across a post's tokened anchors = one show; differing prefixes = a
+     *  cross-show list page whose tokens must not drive season keys. */
+    internal fun fileSeasonToken(url: String): Pair<Int, String>? {
+        val file = url.substringBefore('#').substringBefore('?').substringAfterLast('/')
+        val m = SEASON_EP_REGEX.find(file) ?: return null
+        val s = m.groupValues[1].toIntOrNull() ?: return null
+        return s to file.take(m.range.first).lowercase().filter { it.isLetterOrDigit() }
     }
 }

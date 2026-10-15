@@ -178,6 +178,18 @@ object DramaRainProvider : SiteProvider {
             }
 
             var count = 1
+            // Season pin from the post identity (canon: NaijaVault/NaijaPrey).
+            // dramarain publishes one post per season ("/joy-of-life-s02-chinese-
+            // drama/", live-verified 2026-10-15: 36 text-numbered anchors) and
+            // the list renumbers from 1 — the pin puts season-2+ posts into
+            // their own drawer chip; season-1/seasonless posts keep 1..N.
+            val slugSeason = Regex("""(?i)(?:^|[.\-_ /])(?:s|season)[-.]?(\d{1,2})(?!\d)""").find(showUrl)
+                ?.groupValues?.getOrNull(1)?.toIntOrNull()
+                ?: Regex("""\bseason\s*(\d{1,2})\b""", RegexOption.IGNORE_CASE).find(title)
+                    ?.groupValues?.getOrNull(1)?.toIntOrNull()
+            fun pinned(n: Int): Int =
+                if (slugSeason != null && slugSeason >= 2 && n in 1..99) slugSeason * 100 + n else n
+
             for (a in links) {
                 val rawHref = a.attr("href")
                 val href = a.attr("abs:href").ifBlank {
@@ -190,20 +202,76 @@ object DramaRainProvider : SiteProvider {
                     !PostContentSanitizer.isSiblingPostAnchorText(text)
                 ) {
                     seen.add(href)
-                    episodes.add(
-                        EpisodeItem(
-                            title = if (text.isNotBlank() && !text.equals("Download", ignoreCase = true)) text
-                                else DownloadLinkLabels.serverOrPart(text, href.substringAfterLast('/')) ?: "Episode $count",
+                    val filename = href.substringAfterLast('/').substringBefore('?').substringBefore('#')
+                    val quality = Regex("""\b(\d{3,4}p)\b""", RegexOption.IGNORE_CASE)
+                        .find(href)?.groupValues?.getOrNull(1)?.let { " [$it]" }
+                        ?: Regex("""\b(\d{3,4}p)\b""", RegexOption.IGNORE_CASE)
+                            .find(text)?.groupValues?.getOrNull(1)?.let { " [$it]" }
+                    // Mirror-server / part rows of ONE file are not episodes
+                    // (device bug class 2026-09-13, shared with Rocks).
+                    val mirrorLabel = DownloadLinkLabels.serverOrPart(text, filename)
+                    // Episode identity FIRST, position last: the site
+                    // text-numbers every row ("DOWNLOAD EPISODE 20"), so an
+                    // extra link (ad, subtitle) ahead of the list would shift
+                    // every positional number after it.
+                    val textNum = Regex("""(?i)\b(?:Episode|Ep)[ -]*(\d{1,4})\b""").find(text)
+                        ?.groupValues?.getOrNull(1)?.toIntOrNull()
+                        ?: Regex("""(?i)(?:^|[^a-z0-9])e(?:p)?[ ._-]*(\d{1,4})(?![a-z0-9])""").find(text)
+                            ?.groupValues?.getOrNull(1)?.toIntOrNull()
+                        ?: Regex("""(?i)\b(?:Episode|Ep|E)[- ]*(\d{1,4})\b""").find(href)
+                            ?.groupValues?.getOrNull(1)?.toIntOrNull()
+                    val token = Regex("""(?i)S(\d{1,2})E(\d{1,3})""").find(filename)
+                        ?: Regex("""(?i)S(\d{1,2})E(\d{1,3})""").find(text)
+
+                    val item = when {
+                        mirrorLabel != null -> EpisodeItem(
+                            title = mirrorLabel + (quality ?: ""),
                             url = href,
-                            episodeNum = count++,
+                            episodeNum = count,
                             site = name
                         )
-                    )
+                        token != null -> {
+                            val s = token.groupValues[1].toIntOrNull()?.coerceIn(1, 99) ?: 1
+                            val e = token.groupValues[2].toIntOrNull() ?: count
+                            EpisodeItem(
+                                title = "S%d E%02d".format(s, e) + (quality ?: ""),
+                                url = href,
+                                episodeNum = s * 100 + e,
+                                site = name
+                            )
+                        }
+                        textNum != null -> EpisodeItem(
+                            // The site's own shouty "DOWNLOAD EPISODE 20" anchor
+                            // text becomes the canonical "Episode 20" (OTA
+                            // labelChain parity); the pinned slug turns it into
+                            // the Sxx chip format.
+                            title = if (slugSeason != null && slugSeason >= 2)
+                                "S%d E%02d".format(slugSeason, textNum) + (quality ?: "")
+                            else "Episode $textNum" + (quality ?: ""),
+                            url = href,
+                            episodeNum = pinned(textNum),
+                            site = name
+                        )
+                        else -> {
+                            val textUsable = text.isNotBlank() &&
+                                !text.equals("Download", ignoreCase = true) &&
+                                !text.equals("Download Episode", ignoreCase = true) &&
+                                text.length < 40
+                            EpisodeItem(
+                                title = (if (textUsable) text else "Episode $count") + (quality ?: ""),
+                                url = href,
+                                episodeNum = pinned(count),
+                                site = name
+                            )
+                        }
+                    }
+                    episodes.add(item)
+                    count++
                 }
             }
 
             val card = ShowCard(title = title, url = showUrl, posterUrl = poster, site = name)
-            return ShowDetails(show = card, synopsis = synopsis, episodes = episodes)
+            return ShowDetails(show = card, synopsis = synopsis, episodes = episodes.sortedWith(compareBy({ it.episodeNum }, { it.title })))
         } catch (_: Exception) {
             return ShowDetails(show = show)
         }

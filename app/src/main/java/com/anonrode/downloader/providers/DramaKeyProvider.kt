@@ -151,10 +151,84 @@ object DramaKeyProvider : SiteProvider {
             } ?: ""
             val synopsis = doc.selectFirst(".entry-content p")?.text()?.trim() ?: ""
 
-            // Per-episode download links: lockers only (downloadwella is the
-            // site's host, others may appear later). Anchor text is a generic
-            // "Download Episode" for every row, so the real episode identity
-            // comes from the filename in the URL (The.Road...S01E01...mkv).
+            // Host allowlist shared by the accordion and flat sweeps (the 2026
+            // dramakey rebuild moved the site's per-episode buttons to
+            // lightdl.cc — live-verified 2026-10-15).
+            fun isEpisodeTarget(h: String): Boolean =
+                h.contains("lightdl.cc") ||
+                    h.contains("downloadwella.com") || h.contains("wetafiles.com") ||
+                    h.contains("loadedfiles.") || h.contains("dood.") ||
+                    h.contains("mega.") || h.contains("/download/") || h.contains("?download") ||
+                    h.contains("vikingfile") || h.contains("kissorgrab") ||
+                    h.contains("wildshare") || h.contains("waffi") ||
+                    com.anonrode.downloader.pipeline.StrictLinkClassifier.isKnownLocker(h)
+
+            // ── Season accordion (playbook-mirror). The rebuilt site renders
+            // one .season-accordion per season whose .season-header carries
+            // data-season (live /korean/a-teen: Season 1 = 24 episodes +
+            // Season 2 = 20, newest first) and textless SVG .download-btn
+            // anchors inside .episode-item blocks that carry an
+            // "Episode N" header. The flat sweep below sees the WHOLE body
+            // at once: per-section counting + the season*100 key (the
+            // drawer's chip contract, identical to the OTA sectionGrouping)
+            // replaces a flat 1..N numbering that mixed all seasons.
+            val accordions = doc.select(".season-accordion")
+            if (accordions.isNotEmpty()) {
+                val grouped = mutableListOf<EpisodeItem>()
+                val groupedSeen = mutableSetOf<String>()
+                for (acc in accordions) {
+                    val headerText = acc.selectFirst(".season-header")?.text().orEmpty()
+                    val season = acc.selectFirst(".season-header")?.attr("data-season")?.toIntOrNull()
+                        ?: Regex("""\d+""").find(acc.attr("key"))?.value?.toIntOrNull()
+                            ?.takeIf { it in 1..99 }
+                        ?: Regex("""\bseason\s*(\d{1,2})\b""", RegexOption.IGNORE_CASE)
+                            .find(headerText)?.groupValues?.getOrNull(1)?.toIntOrNull()
+                        ?: 1
+                    var pos = 0
+                    val rows = acc.select(".episode-item").ifEmpty { acc.select("a[href]") }
+                    // Episode rows carry the season-relative number in their
+                    // header; scanning .episode-item keeps each header paired
+                    // with its own button even when a season block renumbers.
+                    for (row in rows) {
+                        val anchor = if (row.tagName() == "a") row else row.selectFirst("a[href]") ?: continue
+                        val href = anchor.attr("abs:href").ifBlank {
+                            HttpClient.safeResolveUri(showUrl, anchor.attr("href"))
+                        }
+                        if (href.isBlank() || href in groupedSeen || !isEpisodeTarget(href)) continue
+                        groupedSeen.add(href)
+                        val headerNum = row.selectFirst(".episode-number")?.text()?.trim().orEmpty()
+                        val parsedNum = Regex("""(?i)(?:Episode|Ep|E)\s*(\d{1,3})""", RegexOption.IGNORE_CASE)
+                            .find(headerNum)?.groupValues?.get(1)?.toIntOrNull()
+                        pos++
+                        val posNum = parsedNum ?: pos
+                        val seasonNum = season.coerceIn(1, 99)
+                        val quality = Regex("""\b(\d{3,4}p)\b""", RegexOption.IGNORE_CASE)
+                            .find(href)?.groupValues?.getOrNull(1)?.let { " [$it]" } ?: ""
+                        grouped.add(
+                            EpisodeItem(
+                                title = "S%d E%02d".format(seasonNum, posNum) + quality,
+                                url = href,
+                                episodeNum = seasonNum * 100 + posNum,
+                                site = name
+                            )
+                        )
+                    }
+                }
+                if (grouped.isNotEmpty()) {
+                    val card = ShowCard(title = title, url = showUrl, posterUrl = poster, site = name)
+                    return ShowDetails(
+                        show = card, synopsis = synopsis,
+                        episodes = grouped.sortedWith(compareBy({ it.episodeNum }, { it.title }))
+                    )
+                }
+                // Accordions present but no usable links -> fall through to the
+                // flat sweep rather than returning an empty drawer.
+            }
+
+            // Per-episode download links: lockers only (lightdl is the current
+            // host, downloadwella others may appear later). Anchor text is a
+            // generic "Download Episode" for every row, so the real episode
+            // identity comes from the filename in the URL (The.Road...S01E01...mkv).
             val episodes = mutableListOf<EpisodeItem>()
             val seen = mutableSetOf<String>()
             val container = doc.selectFirst(".entry-content, .post-content, article") ?: doc.body() ?: doc
@@ -163,13 +237,15 @@ object DramaKeyProvider : SiteProvider {
                 val h = a.attr("abs:href").ifBlank { a.attr("href") }
                 !PostContentSanitizer.isSameSitePostPermalink(h, "dramakey.com") &&
                     !PostContentSanitizer.isSiblingPostAnchorText(a.text()) &&
-                    (h.contains("downloadwella.com") || h.contains("wetafiles.com") ||
-                    h.contains("loadedfiles.") || h.contains("dood.") ||
-                    h.contains("mega.") || h.contains("/download/") || h.contains("?download") ||
-                    h.contains("vikingfile") || h.contains("kissorgrab") ||
-                    h.contains("wildshare") || h.contains("waffi") ||
-                    com.anonrode.downloader.pipeline.StrictLinkClassifier.isKnownLocker(h))
+                    isEpisodeTarget(h)
             }
+
+            // Season pin for season-scoped posts whose lists renumber from 1
+            // (canon: NaijaVault/NaijaPrey). Season 1 keeps plain numbering.
+            val slugSeason = Regex("""season-(\d{1,2})(?!\d)""", RegexOption.IGNORE_CASE).find(showUrl)
+                ?.groupValues?.getOrNull(1)?.toIntOrNull()
+                ?: Regex("""\bseason\s*(\d{1,2})\b""", RegexOption.IGNORE_CASE).find(title)
+                    ?.groupValues?.getOrNull(1)?.toIntOrNull()
 
             val episodeRe = Regex("""(?i)S(\d+)E(\d+)""")
             var count = 1
@@ -183,11 +259,21 @@ object DramaKeyProvider : SiteProvider {
                 seen.add(href)
 
                 val filename = href.substringAfterLast('/').substringBefore('?').substringBefore('#')
+                val quality = Regex("""\b(\d{3,4}p)\b""", RegexOption.IGNORE_CASE)
+                    .find(filename)?.groupValues?.getOrNull(1)?.let { " [$it]" }
+                    ?: Regex("""\b(\d{3,4}p)\b""", RegexOption.IGNORE_CASE)
+                        .find(a.text())?.groupValues?.getOrNull(1)?.let { " [$it]" }
                 val epMatch = episodeRe.find(filename)
                 val label = epMatch?.let { m ->
                     "S${m.groupValues[1]} E${m.groupValues[2]}"
                 } ?: DownloadLinkLabels.serverOrPart(a.text(), filename)
-                    ?: "Episode $count"
+                // Season-pinned positional rows renumber from 1 inside their
+                // season, so the drawer key (and label) must carry the slug's
+                // season — unchanged for season-1/no-slug posts.
+                val positionalNum = if (slugSeason != null && slugSeason >= 2 && count in 1..99)
+                    slugSeason * 100 + count else count
+                val positionalLabel = if (slugSeason != null && slugSeason >= 2 && count in 1..99)
+                    "S$slugSeason E%02d".format(count) else "Episode $count"
 
                 val parsedNum = epMatch?.let { m ->
                     val s = m.groupValues[1].toIntOrNull() ?: 1
@@ -195,19 +281,23 @@ object DramaKeyProvider : SiteProvider {
                     s * 100 + e
                 } ?: Regex("""(?i)\b(?:Episode|Ep|E)[- ]*(\d{1,4})\b""").find(a.text())?.groupValues?.get(1)?.toIntOrNull()
 
-                val num = parsedNum ?: count++
+                val labelFinal = label?.let { it + (quality ?: "") } ?: positionalLabel
+                val num = parsedNum?.let { pn ->
+                    if (pn !in 100..9999 && slugSeason != null && slugSeason >= 2 && pn in 1..99) slugSeason * 100 + pn else pn
+                } ?: positionalNum
                 episodes.add(
                     EpisodeItem(
-                        title = label,
+                        title = labelFinal,
                         url = href,
                         episodeNum = num,
                         site = name
                     )
                 )
+                count++
             }
 
             val card = ShowCard(title = title, url = showUrl, posterUrl = poster, site = name)
-            return ShowDetails(show = card, synopsis = synopsis, episodes = episodes)
+            return ShowDetails(show = card, synopsis = synopsis, episodes = episodes.sortedWith(compareBy({ it.episodeNum }, { it.title })))
         } catch (_: Exception) {
             return ShowDetails(show = show)
         }

@@ -1005,6 +1005,19 @@ object RulesPipeline {
         val captures: List<String>
     )
 
+    /** Season number a single anchor names via its own SxxEyy token (href,
+     *  then text); null when the anchor declares no season. Used by the
+     *  seasonFromUrl conflict guard — full Rocks-canonical token separation
+     *  (an anchor that names S02 keeps the season*100 coding the heuristic
+     *  path already applies) has to know which anchors self-declare. */
+    private fun anchorTokenSeason(href: String, text: String): Int? {
+        for (target in listOf(href, text)) {
+            if (target.isBlank()) continue
+            SXX_EYY_TOKEN.find(target)?.let { return it.groupValues[1].toIntOrNull() }
+        }
+        return null
+    }
+
     internal fun extractEpisodes(
         site: String,
         step: PipelineStep,
@@ -1035,6 +1048,30 @@ object RulesPipeline {
             if (parsed.isEmpty()) emptyList() else parsed.sortedBy { it.second ?: Int.MAX_VALUE }
         } else emptyList()
         val grouped = sections.isNotEmpty()
+
+        // ---- slug-pinned season (the 9jarocks/NaijaVault-class season post:
+        // one post per season whose URL or title carries "season-N"/"s-N" and
+        // whose episode list renumbers from 1). Flat pipelines (asianc /
+        // dramarain / naijaprey / nkiri — no in-page season sections) encode
+        // the pinned season into episodeNum = season*100 + num for N >= 2 so
+        // each season of a series surfaces as its own drawer chip; season-1
+        // and seasonless posts keep the historical 1..N numbering untouched.
+        // Anchors that carry their OWN SxxEyy token keep token coding (the
+        // heuristic path's s>=2 branch) — the pin only seeds anchors that
+        // declare no season of their own, and it is ignored entirely when the
+        // page's tokens disagree with the slug (a mixed multi-season post is
+        // token-driven, not slug-driven).
+        val seasonFromUrl = items.optJSONObject("seasonFromUrl")
+        val urlSeason = seasonFromUrl?.let { spec ->
+            val re = if (spec.optString("regex").isNotBlank()) {
+                try { Regex(spec.optString("regex")) } catch (_: Exception) { null }
+            } else null
+            val fromUrl = re?.find(showUrl)
+                ?.groupValues?.getOrNull(spec.optInt("group", 1))
+                ?.toIntOrNull()?.takeIf { it in 2..99 }
+            (fromUrl ?: spec.optString("literal").toIntOrNull()?.takeIf { it in 2..99 })
+        }
+        val urlSeasonTemplate = seasonFromUrl?.optString("labelTemplate").orEmpty()
 
         // ---- collect anchors (root-scoped when grouped)
         class Collected(val ctx: AnchorCtx, val season: Int?)
@@ -1110,6 +1147,15 @@ object RulesPipeline {
             }
         }
         val allowTokenSeasons = seasonTokenPrefixes.size <= 1
+        // seasonFromUrl conflict guard: one anchor token naming a DIFFERENT
+        // season than the slug means the post mixes seasons and tokens drive
+        // the numbering space — the slug pin backs off for the whole page
+        // (untokened anchors' seasons are not identifiable in that mix).
+        val tokenSeasonConflict = urlSeason != null && !grouped && anchors.any { col ->
+            val tok = anchorTokenSeason(col.ctx.href, col.ctx.text)
+            tok != null && tok != urlSeason
+        }
+        val effectiveUrlSeason = if (tokenSeasonConflict) null else urlSeason
         val kept = mutableListOf<Pair<Collected, List<Int>>>()
         for (col in anchors) {
             val ctx = col.ctx
@@ -1176,6 +1222,11 @@ object RulesPipeline {
         // walks over already-numbered items so the two ranges cannot collide.
         // Grouped pages count WITHIN the current section (season), so S2's
         // first anchor is ep 1 of season 2, not ep 13 of the show.
+        // Season-pinned pages record every emitted key (tokened anchors
+        // included) so positional rows land in the season's first FREE slot
+        // instead of duplicating a token sibling's number.
+        val usedKeys = HashSet<Int>(kept.size * 2)
+        kept.forEach { (_, nums) -> nums.forEach { n -> usedKeys.add(n) } }
         val builtList = mutableListOf<EpisodeItem>()
         var positional = 0
         var lastSeason: Int? = null
@@ -1187,7 +1238,24 @@ object RulesPipeline {
             if (nums.isEmpty()) {
                 positional += 1
                 val position = if (season != null) { posInSeason += 1; posInSeason } else positional
-                val num = deriveNum(ctx, position)
+                val posNum = deriveNum(ctx, position)
+                // Slug-pinned season for flat pipelines: the post is one
+                // season that renumbers 1..N, so its position lands in the
+                // season*100 chip space (only for season >= 2 — see urlSeason).
+                // Grouped pages already carry the section season, so the pin
+                // never compounds there.
+                var num = posNum
+                var pinnedLabelNum = posNum
+                if (!grouped && effectiveUrlSeason != null && posNum in 1..99) {
+                    var candidate = posNum
+                    while (candidate in 1..99 &&
+                        usedKeys.contains(effectiveUrlSeason * 100 + candidate)
+                    ) candidate++
+                    if (candidate in 1..99) {
+                        num = effectiveUrlSeason * 100 + candidate
+                        pinnedLabelNum = candidate
+                    }
+                }
                 // Device bug class 2026-09-13 (Rocks/Nkiri/DramaKey): an
                 // unmarked anchor whose text says "SERVER n"/"PART n" is a
                 // mirror or split of ONE file, not a positional episode.
@@ -1196,14 +1264,19 @@ object RulesPipeline {
                 val mirrorTitle = DownloadLinkLabels.serverOrPart(
                     ctx.text, ctx.href.substringAfterLast('/').substringBefore('?')
                 )
-                builtList.add(
-                    EpisodeItem(
-                        title = mirrorTitle ?: seasonLabel(ctx, num, season, labelTemplate),
-                        url = ctx.href,
-                        episodeNum = seasonCode(season, num),
-                        site = site
-                    )
+                val title = mirrorTitle ?: if (num != posNum && urlSeasonTemplate.isNotBlank()) {
+                    // Pinned slug season overrides the flat label so the
+                    // row reads "S02 E05" like the grouped dramakey pages.
+                    fillSeasonTemplate(urlSeasonTemplate, effectiveUrlSeason, pinnedLabelNum, labelFor(ctx, posNum))
+                } else seasonLabel(ctx, posNum, season, labelTemplate)
+                val built = EpisodeItem(
+                    title = title,
+                    url = ctx.href,
+                    episodeNum = if (season != null) seasonCode(season, num) else num,
+                    site = site
                 )
+                usedKeys.add(built.episodeNum)
+                builtList.add(built)
             } else {
                 // An expanded post's heading/label describes the whole post
                 // ("Episode 17 & 18"); only the counter gives each expanded
@@ -1216,25 +1289,37 @@ object RulesPipeline {
                 if (season != null) posInSeason = maxOf(posInSeason + 1, nums.maxOrNull() ?: posInSeason)
                 nums.forEach { n ->
                     val base = if (nums.size > 1) "Episode $n" else labelFor(ctx, n)
-                    val title = if (nums.size > 1 || season == null || labelTemplate.isBlank()) base
-                    else fillSeasonTemplate(labelTemplate, season, n, base)
-                    builtList.add(EpisodeItem(title = title, url = ctx.href, episodeNum = seasonCode(season, n), site = site))
+                    val seasonCoded = if (!grouped && effectiveUrlSeason != null && n in 1..99) {
+                        // Plain number (an E-token or heading number without a
+                        // season) under a season-pinned post -> season*100 key.
+                        effectiveUrlSeason * 100 + n
+                    } else n
+                    val coded = seasonCode(season, seasonCoded)
+                    val title = when {
+                        seasonCoded != n && urlSeasonTemplate.isNotBlank() ->
+                            fillSeasonTemplate(urlSeasonTemplate, effectiveUrlSeason, n, base)
+                        nums.size > 1 || season == null || labelTemplate.isBlank() -> base
+                        else -> fillSeasonTemplate(labelTemplate, season, n, base)
+                    }
+                    val built = EpisodeItem(title = title, url = ctx.href, episodeNum = coded, site = site)
+                    usedKeys.add(coded)
+                    builtList.add(built)
                 }
             }
         }
         var built: List<EpisodeItem> = builtList
 
-        // ---- uniqueness safety net (grouped pages only)
+        // ---- uniqueness safety net (grouped pages, and season-pinned pages)
         // The engine re-resolves an episode by firstOrNull { episodeNum == … }
         // — duplicates silently pick the wrong one. seasonCode guarantees
         // uniqueness while nums stay <=99 and counters stay aligned, but a
         // pathological page (100+ episodes in one season, or a token that
         // collides across seasons because `num !in 1..99` falls back to the
-        // plain num) can still emit a duplicate. Make every grouped list
-        // provably unique: re-stamp collisions above the list maximum. The
-        // item KEEPS its correct title (labels were already built from the
-        // true numbers); only the internal re-resolve key moves.
-        if (grouped) {
+        // plain num) can still emit a duplicate. Make every grouped or
+        // season-pinned list provably unique: re-stamp collisions above the
+        // list maximum. The item KEEPS its correct title (labels were already
+        // built from the true numbers); only the internal re-resolve key moves.
+        if (grouped || effectiveUrlSeason != null) {
             val seen = HashSet<Int>(built.size)
             var overflow = (built.maxOfOrNull { it.episodeNum } ?: 0) + 1
             built = built.map { e ->
@@ -1256,7 +1341,21 @@ object RulesPipeline {
                 )
                 .mapIndexed { newIdx, (_, ctx) ->
                     val num = newIdx + 1
-                    EpisodeItem(title = labelFor(ctx, num), url = ctx.href, episodeNum = num, site = site)
+                    if (!grouped && effectiveUrlSeason != null) {
+                        // asianc-class captures pages under a season slug: the
+                        // sort order is the numbering, so the pin applies to the
+                        // sorted position exactly like the positional path.
+                        EpisodeItem(
+                            title = if (urlSeasonTemplate.isNotBlank())
+                                fillSeasonTemplate(urlSeasonTemplate, effectiveUrlSeason, num, labelFor(ctx, num))
+                            else labelFor(ctx, num),
+                            url = ctx.href,
+                            episodeNum = seasonCode(effectiveUrlSeason, num),
+                            site = site
+                        )
+                    } else {
+                        EpisodeItem(title = labelFor(ctx, num), url = ctx.href, episodeNum = num, site = site)
+                    }
                 }
         } else if (sortByNumber) {
             built = built.sortedBy { it.episodeNum }
