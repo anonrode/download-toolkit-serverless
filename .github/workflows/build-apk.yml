@@ -69,6 +69,16 @@ jobs:
           set -o pipefail
           gradle :app:testDebugUnitTest --no-daemon 2>&1 | tee test_run.log || {
             echo "::error::Unit tests failed! Finding failure details:"
+            # Kotlin compile errors (e: file..., error: ...) never produce
+            # test XMLs and don't match the FAILURE/FAILED grep below — the
+            # 2026-10-15 v3.2.9 tag failed three runs with no detail at all.
+            # Surface the compiler's own lines and the log tail explicitly.
+            while IFS= read -r line; do
+              echo "::error::$line"
+            done < <(grep -E "^[eE]: |(error|warning): [a-zA-Z]" test_run.log | head -n 30)
+            while IFS= read -r line; do
+              echo "::error::$line"
+            done < <(tail -n 40 test_run.log)
             for f in $(find app/build -name "*.xml" 2>/dev/null); do
               if grep -q '<failure' "$f"; then
                 echo "::error::Failed file: $f"
