@@ -110,6 +110,14 @@ object NaijaPreyProvider : SiteProvider {
             val navText = Regex("""(?i)^\s*(download\s+(movies|series|tv|films?|episodes?)|all\s+downloads?|series\s+downloads?|how\s+to\s+download.*)\s*$""")
 
             var count = 1
+            // Same season gap as NaijaVault: posts are per season
+            // ("/download-<show>-season-2/") and renumber "Episode nn" from 1,
+            // so season 2 must offset into the drawer's season*100 chip code
+            // (season 1 keeps its historical 1..N numbering).
+            val slugSeason = Regex("""season[-_ ]?(\d{1,2})""", RegexOption.IGNORE_CASE).find(showUrl)
+                ?.groupValues?.getOrNull(1)?.toIntOrNull()
+                ?: Regex("""\bseason\s*(\d{1,2})\b""", RegexOption.IGNORE_CASE).find(title)
+                    ?.groupValues?.getOrNull(1)?.toIntOrNull()
             for (a in links) {
                 val rawHref = a.attr("href")
                 // The anchor's own visible text — every guard below reasons on
@@ -148,12 +156,16 @@ object NaijaPreyProvider : SiteProvider {
                     seen.add(href)
                     val parsedNum = Regex("""(?i)\b(?:Episode|Ep|E)[- ]*(\d{1,4})\b""").find(text)?.groupValues?.get(1)?.toIntOrNull()
                         ?: Regex("""(?i)\b(?:Episode|Ep|E)[- ]*(\d{1,4})\b""").find(href)?.groupValues?.get(1)?.toIntOrNull()
-                    val cleanTitle = if (text.isNotBlank() && !text.equals("Download", ignoreCase = true) && !text.startsWith("http", ignoreCase = true)) text else "Download $count"
+                    val seasonNum = slugSeason?.takeIf { it >= 2 && parsedNum != null && parsedNum in 1..99 }
+                    val epNum = if (seasonNum != null) parsedNum else null
+                    val cleanTitle = if (seasonNum != null && epNum != null) {
+                        "S%02dE%02d".format(seasonNum, epNum)
+                    } else if (text.isNotBlank() && !text.equals("Download", ignoreCase = true) && !text.startsWith("http", ignoreCase = true)) text else "Download $count"
                     episodes.add(
                         EpisodeItem(
                             title = cleanTitle,
                             url = href,
-                            episodeNum = parsedNum ?: count++,
+                            episodeNum = if (seasonNum != null && epNum != null) seasonNum * 100 + epNum else (parsedNum ?: count++),
                             site = name
                         )
                     )

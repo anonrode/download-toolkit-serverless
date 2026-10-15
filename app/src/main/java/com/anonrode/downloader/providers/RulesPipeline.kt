@@ -1089,6 +1089,27 @@ object RulesPipeline {
         // explicit numbering chain or a captures regex already defines its own
         // episode numbers and gets none of the heuristics.
         val heuristicNums = numChain == null && !dedupeByCaptures
+        // Season 2+ SxxEyy tokens only become season codes when every tokened
+        // anchor names the SAME series. Live evidence 2026-10-14 (9jaRocks
+        // "The Promised Neverland Season 1"): a season-1-slug post carries
+        // files "…S01E01…" for season 1 AND "…S02E01…" for season 2 — the
+        // S02 tokens were dropped as "a numbering space the page does not
+        // identify", the positional counter restarted at 1 for the season-2
+        // block, and the drawer rendered 24 "Download" rows numbered
+        // 01,01,02,02… under a single "Season 1" chip. The filename prefix
+        // before the token ("thepromisedneverland") is the series name; equal
+        // prefixes = one show, differing prefixes = a cross-show list page,
+        // where the old drop-everything behavior stays (seasonal numbering
+        // would mix shows).
+        val seasonTokenPrefixes = HashSet<String>(anchors.size)
+        if (heuristicNums) {
+            for (col in anchors) {
+                val token = fileSeasonToken(col.ctx.href) ?: continue
+                if (token.first < 2) continue
+                seasonTokenPrefixes.add(token.second)
+            }
+        }
+        val allowTokenSeasons = seasonTokenPrefixes.size <= 1
         val kept = mutableListOf<Pair<Collected, List<Int>>>()
         for (col in anchors) {
             val ctx = col.ctx
@@ -1099,7 +1120,7 @@ object RulesPipeline {
             if (showUrl.startsWith(href)) continue
             if (blacklist.any { href.contains(it, ignoreCase = true) }) continue
             if (allowlist.isNotEmpty() && allowlist.none { href.contains(it, ignoreCase = true) }) continue
-            val nums = if (heuristicNums) anchorEpisodeNums(ctx) else emptyList()
+            val nums = if (heuristicNums) anchorEpisodeNums(ctx, allowTokenSeasons) else emptyList()
             if (dedupeByCaptures) {
                 if (!seenCaptures.add(ctx.captures)) continue
             } else if (nums.size > 1) {
@@ -1317,7 +1338,11 @@ object RulesPipeline {
      * combined post ("Episode 17 & 18" behind one anchor) expands into one
      * item per real episode; empty means "no self-declared number, fall back
      * to position". Patterns hit the URL first (locker filenames carry the
-     * true number) and then the heading/anchor text.
+     * true number) and then the heading/anchor text. SxxEyy tokens with
+     * season >= 2 encode season*100+ep when [allowTokenSeasons] says the
+     * page's tokened anchors all name the same series (single-show page);
+     * on cross-show list pages those tokens are skipped (they name a show
+     * the page does not identify).
      */
     private val ANCHOR_NUM_PATTERNS = listOf(
         Regex("""(?i)\bs(\d+)e(\d+)\b"""),
@@ -1326,7 +1351,22 @@ object RulesPipeline {
         Regex("""(?i)(?:^|[^a-z0-9])e(?:p)?[\s._-]*(\d{1,4})(?![a-z0-9])""")
     )
 
-    private fun anchorEpisodeNums(ctx: AnchorCtx): List<Int> {
+    /** First SxxEyy token on a page claim — strict 1..2-digit seasons only so
+     *  the season*100 code below can never overflow. */
+    private val SXX_EYY_TOKEN = Regex("""(?i)\bs(\d{1,2})e(\d{1,3})\b""")
+
+    /** (season, normalized series prefix) from the locker file's SxxEyy token
+     *  ("…/The.Show.S02E01…" -> (2, "theshow")); null when the filename
+     *  carries none. The prefix is the series name the file belongs to —
+     *  equal prefixes across a page's anchors = one series, not a list page. */
+    private fun fileSeasonToken(href: String): Pair<Int, String>? {
+        val file = href.substringBefore('?').substringBefore('#').substringAfterLast('/')
+        val m = SXX_EYY_TOKEN.find(file) ?: return null
+        val s = m.groupValues.getOrNull(1)?.toIntOrNull() ?: return null
+        return s to file.take(m.range.first).lowercase().filter { it.isLetterOrDigit() }
+    }
+
+    private fun anchorEpisodeNums(ctx: AnchorCtx, allowTokenSeasons: Boolean): List<Int> {
         val numbers = mutableListOf<Int>()
         for (target in listOf(ctx.href, ctx.text)) {
             if (target.isBlank()) continue
@@ -1334,11 +1374,26 @@ object RulesPipeline {
                 for (m in re.findAll(target)) {
                     val groups = m.groupValues.drop(1).filter { it.isNotBlank() }
                     val seasonEp = if (groups.size >= 2) {
-                        // S01E19 style: season token present. Only trust it as
-                        // an episode number for single-season list pages —
-                        // season 2+ is a different numbering space the site
-                        // pages do not identify, so bail out entirely.
-                        if (groups[0].toIntOrNull() == 1) groups[1].toIntOrNull() else null
+                        val s = groups[0].toIntOrNull()
+                        val e = groups[1].toIntOrNull()
+                        when {
+                            // Season 1 kept plain: every existing single-season
+                            // page numbers 1..N today and the drawer decodes
+                            // <100 as season 1 — no reason to renumber it.
+                            s == 1 -> e
+                            // Season 2+ = season*100 (the codebase drawer/
+                            // engine convention) so both seasons of the same
+                            // post get distinct chips; still capped by the
+                            // same 1..2000 sanity bound below. Only when the
+                            // single-series prefix guard passed — on cross-show
+                            // list pages the season token names a DIFFERENT
+                            // show than the page, so bail (old behavior).
+                            s != null && s in 2..99 && allowTokenSeasons -> {
+                                val ep = groups[1].toIntOrNull()
+                                if (ep != null) s * 100 + ep else null
+                            }
+                            else -> null
+                        }
                     } else {
                         groups.lastOrNull()?.toIntOrNull()
                     }

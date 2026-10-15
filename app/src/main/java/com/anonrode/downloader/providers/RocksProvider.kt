@@ -114,18 +114,69 @@ object RocksProvider : SiteProvider {
 
             var count = 1
             val allElements = entry.allElements
+
+            // A "SEASON n" section label in the post body (same style rules the
+            // sweep below uses: short, non-exclusion text in the heading-ish tags).
+            fun seasonMarker(el: org.jsoup.nodes.Element): Int? {
+                val t = el.text().trim()
+                val isExclusion = Regex("""\b(synopsis|storyline|about|comment|how to|click|added)\b""", RegexOption.IGNORE_CASE).containsMatchIn(t)
+                if (t.length >= 60 || isExclusion) return null
+                val sm = Regex("""\b(?:SEASON|S)\s*(\d{1,2})\b(?!\s*-\s*\d+)""", RegexOption.IGNORE_CASE).find(t) ?: return null
+                return sm.groupValues.getOrNull(1)?.toIntOrNull()
+            }
+
+            // In-page season sections decide the season when the page declares
+            // MORE seasons than the slug. Live-verified 2026-10-14: the site
+            // ships multi-season posts under a season-1 slug — "The Promised
+            // Neverland Season 1" (…season-1-anime-id383590.html) carries
+            // <p><strong>SEASON 2</strong></p> between its S01Exx and S02Exx
+            // blocks, and "Legend of Sho Season 1-2" keeps S01 file names even
+            // inside the season-2 block — so the slug pin alone collapsed both
+            // seasons into a single "Season 1" chip. The pin still wins when
+            // every in-page marker agrees with it (plain single-season posts
+            // keep their pinned season); the site's related-posts carousel
+            // lives outside .entry-content so it never seeds a marker.
+            var trackHeadings = !isExplicitSingleSeasonPage
+            if (!trackHeadings) {
+                for (el in allElements) {
+                    if (el.tagName().lowercase() !in listOf("h1", "h2", "h3", "h4", "strong", "b", "p", "div", "span")) continue
+                    val marker = seasonMarker(el)
+                    if (marker != null && marker != currentSeason) {
+                        trackHeadings = true
+                        break
+                    }
+                }
+            }
+
+            // Season for an anchor that declares an SxxEyy token: without
+            // in-page markers the token wins (today's behavior); with them, a
+            // token contradicting the active section is the site's own mislabel
+            // ("…S01E11…" under the SEASON 2 heading) and the section decides.
+            var markerSeasonActive = false
+            fun anchorSeason(tokenSeason: Int?): Int = when {
+                tokenSeason == null -> currentSeason
+                !trackHeadings -> tokenSeason
+                tokenSeason == currentSeason -> tokenSeason
+                !markerSeasonActive -> tokenSeason
+                else -> currentSeason
+            }
+
+            // One page-level series check: the loop's mirror/part branches and
+            // the no-locker fallback both key off it (showUrl/title never vary
+            // per anchor).
+            val isSeriesPage = isExplicitSingleSeasonPage || showUrl.contains("/series/") ||
+                Regex("""\b(?:season|s\d{1,2})\b""", RegexOption.IGNORE_CASE).containsMatchIn(showUrl) ||
+                Regex("""\b(?:season|s\d{1,2})\b""", RegexOption.IGNORE_CASE).containsMatchIn(title)
+
             for (elem in allElements) {
                 val tagName = elem.tagName().lowercase()
 
-                // Track active Season headings in page content (only if not an explicit single-season page)
-                if (!isExplicitSingleSeasonPage && tagName in listOf("h1", "h2", "h3", "h4", "strong", "b", "p", "div", "span")) {
-                    val t = elem.text().trim()
-                    val isExclusion = Regex("""\b(synopsis|storyline|about|comment|how to|click|added)\b""", RegexOption.IGNORE_CASE).containsMatchIn(t)
-                    if (t.length < 60 && !isExclusion) {
-                        val sm = Regex("""\b(?:SEASON|S)\s*(\d{1,2})\b(?!\s*-\s*\d+)""", RegexOption.IGNORE_CASE).find(t)
-                        if (sm != null) {
-                            currentSeason = sm.groupValues.getOrNull(1)?.toIntOrNull() ?: currentSeason
-                        }
+                // Track active Season headings in page content
+                if (trackHeadings && tagName in listOf("h1", "h2", "h3", "h4", "strong", "b", "p", "div", "span")) {
+                    val sm = seasonMarker(elem)
+                    if (sm != null) {
+                        currentSeason = sm
+                        markerSeasonActive = true
                     }
                 }
 
@@ -203,7 +254,7 @@ object RocksProvider : SiteProvider {
                             ?: Regex("""\b(?:EPISODE|EP|E)\s*(\d{1,3})\b""", RegexOption.IGNORE_CASE).find(href)
                             ?: Regex("""\b(?:EPISODE|EP|E)\s*(\d{1,3})\b""", RegexOption.IGNORE_CASE).findAll(safeParentText).lastOrNull()
 
-                        val itemSeason = explicitSm?.groupValues?.getOrNull(1)?.toIntOrNull() ?: currentSeason
+                        val itemSeason = anchorSeason(explicitSm?.groupValues?.getOrNull(1)?.toIntOrNull())
                         val qMatch = Regex("""\b(\d{3,4}p)\b""", RegexOption.IGNORE_CASE).find(text)
                             ?: Regex("""\b(\d{3,4}p)\b""", RegexOption.IGNORE_CASE).findAll(safeParentText).lastOrNull()
                         val qualitySuffix = qMatch?.groupValues?.getOrNull(1)?.let { " [$it]" } ?: ""
@@ -224,9 +275,7 @@ object RocksProvider : SiteProvider {
                                 ?: Regex("""\b(?:file\s+)?part\s*(\d{1,2})\b""", RegexOption.IGNORE_CASE).find(safeParentText)
                         } else null
 
-                        val isSeries = isExplicitSingleSeasonPage || showUrl.contains("/series/") ||
-                            Regex("""\b(?:season|s\d{1,2})\b""", RegexOption.IGNORE_CASE).containsMatchIn(showUrl) ||
-                            Regex("""\b(?:season|s\d{1,2})\b""", RegexOption.IGNORE_CASE).containsMatchIn(title)
+                        val isSeries = isSeriesPage
 
                         when {
                             mirrorMark != null -> episodes.add(
@@ -285,15 +334,58 @@ object RocksProvider : SiteProvider {
                     }
                     if (href.isNotBlank() && href !in seen) {
                         seen.add(href)
-                        val text = a.text().trim().ifEmpty { "Download Link $count" }
-                        episodes.add(
-                            EpisodeItem(
-                                title = text,
-                                url = href,
-                                episodeNum = count++,
-                                site = name
+                        val text = a.text().trim()
+                        // The old fallback copied the anchor text verbatim —
+                        // every row titled "Download" with count numbering that
+                        // restarted per season block. Derive the identity from
+                        // the file the anchor points at, exactly like the main
+                        // sweep: SxxEyy token from the filename, then a bare
+                        // episode token, then a quality tag. The anchor text is
+                        // kept only when it is more specific than "Download".
+                        val file = href.substringBefore('?').substringBefore('#').substringAfterLast('/')
+                        val smFb = Regex("""\bS(\d{1,2})E(\d{1,3})\b""", RegexOption.IGNORE_CASE).find(file)
+                        val epFb = Regex("""(?:^|[^a-z0-9])e(?:p)?[\s._-]*(\d{1,3})(?![a-z0-9])""", RegexOption.IGNORE_CASE).find(file)
+                        val qFb = Regex("""\b(\d{3,4}p)\b""", RegexOption.IGNORE_CASE).find(file)
+                        val qualitySuffix = qFb?.groupValues?.getOrNull(1)?.let { " [$it]" } ?: ""
+                        val genericText = text.isBlank() || text.equals("Download", ignoreCase = true)
+                        val fbSm = smFb?.groupValues
+                        when {
+                            fbSm != null -> {
+                                val s = anchorSeason(fbSm.getOrNull(1)?.toIntOrNull())
+                                val e = fbSm.getOrNull(2)?.toIntOrNull() ?: count
+                                episodes.add(
+                                    EpisodeItem(
+                                        title = "S%02dE%02d".format(s, e) + qualitySuffix,
+                                        url = href,
+                                        episodeNum = s * 100 + e,
+                                        site = name
+                                    )
+                                )
+                            }
+                            epFb != null -> {
+                                val e = epFb.groupValues.getOrNull(1)?.toIntOrNull() ?: count
+                                val label = if (genericText) {
+                                    if (isSeriesPage) "S%02dE%02d".format(currentSeason, e) else "Episode $e"
+                                } else text
+                                episodes.add(
+                                    EpisodeItem(
+                                        title = label + qualitySuffix,
+                                        url = href,
+                                        episodeNum = if (isSeriesPage) currentSeason * 100 + e else e,
+                                        site = name
+                                    )
+                                )
+                            }
+                            else -> episodes.add(
+                                EpisodeItem(
+                                    title = ((if (genericText) "Download Link $count" else text) + qualitySuffix).trim(),
+                                    url = href,
+                                    episodeNum = count,
+                                    site = name
+                                )
                             )
-                        )
+                        }
+                        if (fbSm == null && epFb == null) count++
                     }
                 }
             }

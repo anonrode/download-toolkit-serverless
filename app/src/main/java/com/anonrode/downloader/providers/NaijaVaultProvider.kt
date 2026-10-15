@@ -262,6 +262,16 @@ object NaijaVaultProvider : SiteProvider {
             }
 
             var count = 1
+            // Season-scoped series posts ("…/tyson-season-2/") renumber their
+            // "EPISODE nn" buttons from 1, so without an offset every season of
+            // a series lands in the drawer's single "Season 1" chip and two
+            // seasons collide on the same episode numbers. Offset into the
+            // codebase's season*100 chip convention — but only for season 2+,
+            // single-season posts keep their historical 1..N numbering.
+            val slugSeason = Regex("""season[-_ ]?(\d{1,2})""", RegexOption.IGNORE_CASE).find(showUrl)
+                ?.groupValues?.getOrNull(1)?.toIntOrNull()
+                ?: Regex("""\bseason\s*(\d{1,2})\b""", RegexOption.IGNORE_CASE).find(title)
+                    ?.groupValues?.getOrNull(1)?.toIntOrNull()
             for (a in links) {
                 val rawHref = a.attr("href")
                 val href = a.attr("abs:href").ifBlank {
@@ -299,11 +309,15 @@ object NaijaVaultProvider : SiteProvider {
                     val text = a.text().trim()
                     val parsedNum = Regex("""(?i)\b(?:Episode|Ep|E)[- ]*(\d{1,4})\b""").find(text)?.groupValues?.get(1)?.toIntOrNull()
                         ?: Regex("""(?i)\b(?:Episode|Ep|E)[- ]*(\d{1,4})\b""").find(href)?.groupValues?.get(1)?.toIntOrNull()
+                    val seasonNum = slugSeason?.takeIf { it >= 2 && parsedNum != null && parsedNum in 1..99 }
+                    val epNum = if (seasonNum != null) parsedNum else null
                     episodes.add(
                         EpisodeItem(
-                            title = if (text.isNotBlank() && !text.equals("Download", ignoreCase = true)) text else "Download $count",
+                            title = if (seasonNum != null && epNum != null) {
+                                "S%02dE%02d".format(seasonNum, epNum)
+                            } else if (text.isNotBlank() && !text.equals("Download", ignoreCase = true)) text else "Download $count",
                             url = href,
-                            episodeNum = parsedNum ?: count++,
+                            episodeNum = if (seasonNum != null && epNum != null) seasonNum * 100 + epNum else (parsedNum ?: count++),
                             site = name
                         )
                     )
