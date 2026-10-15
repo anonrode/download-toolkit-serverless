@@ -34,6 +34,7 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.shadow
@@ -61,8 +62,6 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import coil.compose.AsyncImage
-import coil.request.ImageRequest
-import coil.transform.BlurTransformation
 import androidx.lifecycle.viewModelScope
 import com.anonrode.downloader.data.models.EpisodeItem
 import com.anonrode.downloader.data.models.ShowCard
@@ -422,7 +421,7 @@ fun EpisodeDrawer(
                         return Offset.Zero
                     }
 
-                    override suspend fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
+                    override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
                         val dy = available.y
                         // Only leftovers reach here: at FULL that means the list
                         // hit its scroll-top while scrolling down → collapse.
@@ -522,21 +521,18 @@ fun EpisodeDrawer(
                         .height(bannerH)
                 ) {
                     // Data-driven hero: no new network — the poster the drawer
-                    // already has is reused as the blurred/darkened banner fill
-                    // (contract fallback: 20f blur + 40% black overlay).
+                    // already has is reused as the banner fill. Blur comes from
+                    // Compose's stable Modifier.blur (coil 2.7 ships no
+                    // coil.transform.BlurTransformation), darkening via the 40%
+                    // black overlay + scrims below (contract fallback).
                     if (show.posterUrl.isNotBlank()) {
-                        val bannerModel = remember(show.posterUrl, context) {
-                            ImageRequest.Builder(context)
-                                .data(show.posterUrl)
-                                .transformations(BlurTransformation(context, radius = 20f))
-                                .crossfade(150)
-                                .build()
-                        }
                         AsyncImage(
-                            model = bannerModel,
+                            model = show.posterUrl,
                             contentDescription = null,
                             contentScale = ContentScale.Crop,
-                            modifier = Modifier.fillMaxSize()
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .blur(24.dp)
                         )
                     } else {
                         // Neutral charcoal fallback: the hero is never dead black,
@@ -715,7 +711,7 @@ fun EpisodeDrawer(
                     Box(
                         modifier = Modifier
                             .offset(x = Spacing.lg, y = storyTop)
-                            .width(Wdp - 2 * Spacing.lg)
+                            .width(Wdp - Spacing.lg - Spacing.lg)
                             .height(storyCardH)
                             .clip(RoundedCornerShape(14.dp))
                             .background(SurfaceCard)
@@ -921,7 +917,7 @@ fun EpisodeDrawer(
                     Box(
                         modifier = Modifier
                             .offset(x = Spacing.lg, y = rangeTop)
-                            .width(Wdp - 2 * Spacing.lg)
+                            .width(Wdp - Spacing.lg - Spacing.lg)
                     ) {
                         OutlinedTextField(
                             value = rangeText,
