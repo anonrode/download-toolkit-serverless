@@ -265,6 +265,11 @@ fun SettingsScreen(
     }
     BackHandler(enabled = currentDrawer != null) { openDrawerName = null }
 
+    // The hub breathes wider (24dp gutter) than the drawer pages (16dp): six
+    // quiet cards at 16dp read as edge-hugging on a phone, which is exactly
+    // the device-reported complaint this fixes.
+    val hubGutter = if (currentDrawer == null) Spacing.xl else Spacing.lg
+
     val lifecycleOwner = LocalLifecycleOwner.current
     // Two jobs on one observer:
     //  - flush the debounced settings write when the app backgrounds / the
@@ -345,7 +350,7 @@ fun SettingsScreen(
                     modifier = Modifier
                         .fillMaxSize()
                         .verticalScroll(rememberScrollState())
-                        .padding(start = Spacing.lg, end = Spacing.lg, bottom = Spacing.xl)
+                        .padding(start = hubGutter, end = hubGutter, bottom = Spacing.xl)
                 ) {
                     when (drawer) {
                         SettingsDrawer.PLAYBACK -> SettingsPlaybackSection(state = state)
