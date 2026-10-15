@@ -232,7 +232,13 @@ object DramaRainProvider : SiteProvider {
                         )
                         token != null -> {
                             val s = token.groupValues[1].toIntOrNull()?.coerceIn(1, 99) ?: 1
-                            val e = token.groupValues[2].toIntOrNull() ?: count
+                            // Season-key contract holds episodes at 1..99 (s*100
+                            // + e): an "E150"-style token would spill into the
+                            // season digits (S03E150 keys 450 = S4E50 on decode)
+                            // and resolve the wrong file — fall back to the
+                            // positional count for the same row instead.
+                            val e = token.groupValues[2].toIntOrNull()
+                                ?.takeIf { it in 1..99 } ?: count
                             EpisodeItem(
                                 title = "S%d E%02d".format(s, e) + (quality ?: ""),
                                 url = href,

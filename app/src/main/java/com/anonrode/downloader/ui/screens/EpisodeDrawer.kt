@@ -61,6 +61,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.window.DialogWindowProvider
 import coil.compose.AsyncImage
 import androidx.lifecycle.viewModelScope
 import com.anonrode.downloader.data.models.EpisodeItem
@@ -289,6 +290,16 @@ fun EpisodeDrawer(
             decorFitsSystemWindows = false
         )
     ) {
+        // The dialog covers the whole screen and its sheet is dark in BOTH
+        // themes, but a Light-theme user's dialog window inherits the light
+        // appearance flag — dark status-bar icons painted over the dark
+        // sheet, i.e. an invisible clock at FULL. Force light (white) icons
+        // on the dialog's own window; the app window's flag re-applies
+        // untouched the moment the dialog dismisses.
+        val dialogWindow = (LocalView.current.parent as? DialogWindowProvider)?.window
+        SideEffect {
+            dialogWindow?.isAppearanceLightStatusBars = false
+        }
         BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
             // W = container width, H = full screen height (MATH CONTRACT inputs).
             val Hpx = constraints.maxHeight.toFloat()

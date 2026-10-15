@@ -1971,10 +1971,20 @@ private fun VolumeHudPill(
     isBoostAllowed: Boolean,
     isDetentActive: Boolean
 ) {
+    // Fixed-geometry capsule (the HUD jank fix): the old pill sized itself
+    // to its label, so every state change — "80%" → "100% (Pull to Boost)"
+    // — re-measured a wrap-width Row and the capsule jumped width/position
+    // mid-drag. Nothing in here is intrinsic-width anymore: one constant
+    // capsule, percent-only text, and the boost/state vocabulary moved into
+    // color (white = normal, amber = boost realm, amber border = sitting on
+    // the boost edge at 100 with the gesture still held).
     val isBoost = volume > 100
-    val boostAmber = Color(0xFFFFA000)
-    val pillBg = Color(0xDD12141A)
-    val borderColor = if (isBoost) boostAmber.copy(alpha = 0.6f) else Color.White.copy(alpha = 0.2f)
+    val boostAmber = Color(0xFFE8B04B)
+    val capsuleBg = Color(0xDD12141A)
+    val borderColor = when {
+        isBoost || isDetentActive -> boostAmber.copy(alpha = 0.55f)
+        else -> Color.White.copy(alpha = 0.16f)
+    }
 
     val icon = when {
         isBoost -> Icons.Filled.GraphicEq
@@ -1983,54 +1993,50 @@ private fun VolumeHudPill(
         else -> Icons.AutoMirrored.Filled.VolumeUp
     }
 
-    val iconTint = if (isBoost) boostAmber else Color.White
-    val textTint = if (isBoost) boostAmber else Color.White
-
-    val labelText = when {
-        isBoost -> if (volume >= 150) "150% (Max Boost)" else "$volume% (Boost)"
-        isDetentActive -> "100% (Pull to Boost)"
-        !isBoostAllowed && volume >= 100 -> "100% (Max)"
-        else -> "$volume%"
-    }
-
-    Row(
+    Column(
         modifier = Modifier
-            .clip(RoundedCornerShape(24.dp))
-            .background(pillBg)
-            .border(1.dp, borderColor, RoundedCornerShape(24.dp))
-            .padding(horizontal = Spacing.md, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(Spacing.sm)
+            .width(168.dp)
+            .clip(RoundedCornerShape(20.dp))
+            .background(capsuleBg)
+            .border(1.dp, borderColor, RoundedCornerShape(20.dp))
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(7.dp)
     ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = null,
-            tint = iconTint,
-            modifier = Modifier.size(18.dp)
-        )
-        Text(
-            text = labelText,
-            color = textTint,
-            fontSize = Type.caption.fontSize,
-            fontWeight = FontWeight.Bold
-        )
-        // Level indicator bar (width 64dp, height 4dp)
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = if (isBoost) boostAmber else Color.White,
+                modifier = Modifier.size(16.dp)
+            )
+            Text(
+                text = "$volume%",
+                color = if (isBoost) boostAmber else Color.White,
+                fontSize = Type.rowTitle.fontSize,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1
+            )
+        }
         Box(
             modifier = Modifier
-                .width(64.dp)
-                .height(4.dp)
-                .clip(RoundedCornerShape(2.dp))
-                .background(Color.White.copy(alpha = 0.2f))
+                .width(96.dp)
+                .height(3.dp)
+                .clip(RoundedCornerShape(1.5.dp))
+                .background(Color.White.copy(alpha = 0.18f))
         ) {
             if (isBoost) {
-                // 100% nominal base
+                // 100% nominal base, amber segment rides on top for the
+                // boost excess (up to the +50% cap).
                 Box(
                     modifier = Modifier
                         .fillMaxWidth(0.67f)
                         .fillMaxHeight()
                         .background(Color.White.copy(alpha = 0.7f))
                 )
-                // Boost segment
                 val boostFraction = ((volume - 100) / 50f).coerceIn(0f, 1f)
                 Box(
                     modifier = Modifier

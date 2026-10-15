@@ -559,7 +559,9 @@ private fun SettingsHub(
         val chipColor = when (drawer) {
             SettingsDrawer.PLAYBACK -> AccentViolet
             SettingsDrawer.DOWNLOADS -> StatusSuccess
-            SettingsDrawer.CONNECTIONS -> Color(0xFF22D3EE)
+            // Token, not the old raw cyan: the palette has no teal and the
+            // hub must not mint a new hue — the Connections icon is neutral.
+            SettingsDrawer.CONNECTIONS -> AccentPrimary
             SettingsDrawer.UPDATES -> StatusWarning
             SettingsDrawer.LOGS -> StatusError
         }
@@ -652,8 +654,9 @@ private fun SettingsHub(
  *                                  24dp is measured from the top of the
  *                                  navigation-bar inset — the caption always
  *                                  clears the gesture bar.
- * Color note: keeps the pre-existing dim-slate literal from the old footer —
- * no new colors introduced (monochrome law, notebook §3).
+ * Color note: TextMuted token at its natural weight — the old dim-slate
+ * literal (0xFF3D4453) sat at ~2.3:1 contrast, illegible for 11sp text; the
+ * token reads as the same "quiet metadata" without inventing a ninth color.
  */
 @Composable
 private fun SettingsPinnedFooter(uiState: com.anonrode.downloader.viewmodel.HomeUiState) {
@@ -661,7 +664,7 @@ private fun SettingsPinnedFooter(uiState: com.anonrode.downloader.viewmodel.Home
         text = "Anonrode v${BuildConfig.VERSION_NAME} · " +
             "${uiState.freeStorageGb} GB free of ${uiState.totalStorageGb} GB",
         fontSize = Type.caption.fontSize,
-        color = Color(0xFF3D4453),
+        color = TextMuted,
         modifier = Modifier
             .fillMaxWidth()
             .padding(top = Spacing.md, bottom = Spacing.xl),

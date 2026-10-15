@@ -445,7 +445,14 @@ private fun DramaCardItem(
                         .align(Alignment.TopEnd)
                         .padding(Spacing.xs)
                         .clip(RoundedCornerShape(Radius.xs))
-                        .background(if (isComplete) Color(0xCC059669) else Color(0xCC0284C7))
+                        // Token hues, not raw literals: the old END green was
+                        // the LIGHT-theme success color (wrong contrast over a
+                        // dark poster) and AIRING's sky hex wasn't a token
+                        // at all. 0.8 alpha keeps both badges quiet over art.
+                        .background(
+                            if (isComplete) StatusSuccess.copy(alpha = 0.8f)
+                            else AccentViolet.copy(alpha = 0.8f)
+                        )
                         .padding(horizontal = 5.dp, vertical = 2.dp)
                 ) {
                     Text(

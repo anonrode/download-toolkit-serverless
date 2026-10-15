@@ -977,6 +977,12 @@ object VidsrcResolver : BaseResolver {
             lastFailure = "Vidsrc: vidsrc.buzz has no mintable sources for tmdb=$tmdb (ssr empty)"
             return null
         }
+        // Relative minted paths absolutize against the MINT origin (the relay
+        // that produced them), never the embed origin — an OTA resolverConfig
+        // may re-point embedBase and mintBase separately, and gluing a mint
+        // path onto the embed host would 404 outside the default same-host
+        // configuration.
+        val mintOrigin = Regex("""https?://[^/]+""").find(mintBase)?.value ?: embedBase
         for (i in 0 until minOf(3, servers.length())) {
             val sv = servers.optJSONObject(i) ?: continue
             val ref = sv.optString("ref").takeIf { it.isNotBlank() } ?: continue
@@ -996,7 +1002,7 @@ object VidsrcResolver : BaseResolver {
                 // The player sets video.src to this URL directly (ip-gated by
                 // the mint) — no generate.php restamp; a token-bearing input
                 // must flow through untouched (same doctrine as below).
-                val absolute = if (streamUrl.startsWith("/")) "$embedBase$streamUrl" else streamUrl
+                val absolute = if (streamUrl.startsWith("/")) "$mintOrigin$streamUrl" else streamUrl
                 if (absolute.contains("_stream") || absolute.contains(".m3u8") ||
                     absolute.contains(".mpd") || absolute.contains(".mp4") ||
                     isDirectMediaUrl(absolute)
