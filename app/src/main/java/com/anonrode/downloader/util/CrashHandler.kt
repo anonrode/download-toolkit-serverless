@@ -5,6 +5,7 @@ import android.os.Environment
 import android.util.Log
 import java.io.File
 import java.io.PrintWriter
+import java.io.RandomAccessFile
 import java.io.StringWriter
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -44,6 +45,22 @@ object CrashHandler : Thread.UncaughtExceptionHandler {
             // must carry the crash too — a log that just ends mid-line was
             // undiagnosable (user-reported log ended abruptly with no trace).
             DebugLog.crashLog(throwable)
+
+            // Crash-first full-log upload (2026-10-15 directive): the crash
+            // trace is in the journal now, so ship the WHOLE thing immediately
+            // — bounded snapshot (≤1 MB journal + crash reports), short
+            // timeouts, synchronous because the process dies when this handler
+            // returns. A device that uninstalls right after a fatal crash
+            // still gets its evidence onto the server; the size/day triggers
+            // could never guarantee that. Send-and-clear cycle of its own,
+            // user kill-switch respected inside; anything it can't do is a
+            // silent no-op and the day/size triggers pick the evidence up on
+            // the next launch.
+            appContext?.let { ctx ->
+                try {
+                    LogUploader.onFatalCrash(ctx)
+                } catch (_: Throwable) {}
+            }
 
             // Track 6: the same crash snapshot to the OTA-routed sink, so a
             // fleet-wide fatality is visible without waiting for users to
@@ -93,7 +110,22 @@ object CrashHandler : Thread.UncaughtExceptionHandler {
      * always enough to root-cause a device crash.
      */
     fun crashReportsText(context: Context): String {
-        val sb = StringBuilder()
+        return crashReportsTextFor(snapshotCrashFiles(context))
+    }
+
+    // ---- upload snapshot / watermark contract -----------------------------
+    // The full-log pipeline (LogUploader) ships crash reports alongside the
+    // activity journal and clears the local files once the server confirms.
+    // Same rule as the journal: capture lengths FIRST, ship exactly that,
+    // truncate on confirmation only.
+
+    /** One crash file frozen at a known length. */
+    data class CrashSnap(val file: File, val length: Long)
+
+    /** Captures the crash-report files (Downloads copy first, internal
+     *  fallback second) with their current lengths — the upload extent and
+     *  the clear extent are the same numbers by construction. */
+    fun snapshotCrashFiles(context: Context): List<CrashSnap> {
         val candidates = listOfNotNull(
             try {
                 File(
@@ -105,18 +137,60 @@ object CrashHandler : Thread.UncaughtExceptionHandler {
             },
             File(context.filesDir, "anon_crash.txt")
         )
-        for (f in candidates) {
+        return candidates.mapNotNull { f ->
             try {
-                if (f.exists() && f.length() > 0) {
-                    sb.append("===== ").append(f.absolutePath).append(" =====\n")
-                    val text = f.readText()
-                    // tail-first: the newest crash is the one being diagnosed
-                    sb.append(
-                        if (text.length > 512_000) text.substring(text.length - 512_000) else text
-                    ).append('\n')
-                }
+                if (f.exists() && f.length() > 0) CrashSnap(f, f.length()) else null
+            } catch (_: Exception) {
+                null
+            }
+        }
+    }
+
+    /**
+     * Crash text bounded to the captured [snaps] — identical format to
+     * [crashReportsText], but a crash appended while an upload was in flight
+     * can never be read into the payload AND then cleared unsent: the
+     * watermark range is fixed at snapshot time. Tail-capped per file
+     * (512 KB) exactly like the manual share.
+     */
+    fun crashReportsTextFor(snaps: List<CrashSnap>): String {
+        val sb = StringBuilder()
+        for (snap in snaps) {
+            try {
+                val f = snap.file
+                if (!f.exists() || snap.length <= 0) continue
+                val len = minOf(f.length(), snap.length)
+                sb.append("===== ").append(f.absolutePath).append(" =====\n")
+                sb.append(readBoundedText(f, len)).append('\n')
             } catch (_: Exception) {}
         }
         return sb.toString()
+    }
+
+    /** Newest [TAIL_CAP] bytes of the first [upTo] bytes of the file. */
+    private fun readBoundedText(f: File, upTo: Long, tailCap: Long = 512_000): String {
+        val len = minOf(f.length(), upTo)
+        if (len <= 0) return ""
+        val start = if (len > tailCap) len - tailCap else 0L
+        RandomAccessFile(f, "r").use { raf ->
+            raf.seek(start)
+            val buf = ByteArray((len - start).toInt())
+            raf.readFully(buf)
+            return String(buf, Charsets.UTF_8)
+        }
+    }
+
+    /**
+     * Clear-after-send for crash reports (server 2xx required): both copies
+     * are deleted outright. The upload carried the newest 512 KB per file —
+     * the full untruncated stack of the newest crashes, the part diagnosis
+     * runs on — and anything older than that tail was already beyond the
+     * shareable/shipable cap, so nothing diagnosable is lost, and "after it
+     * uploads, the phone is clean" stays literally true.
+     */
+    fun applyCrashWatermark(snaps: List<CrashSnap>) {
+        for (snap in snaps) {
+            try { snap.file.delete() } catch (_: Exception) {}
+        }
     }
 }

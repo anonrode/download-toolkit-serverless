@@ -3,10 +3,12 @@ package com.anonrode.downloader.util
 import android.content.Context
 import java.io.File
 import java.io.FileWriter
+import java.io.RandomAccessFile
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Always-on activity journal: literally everything — every user action and
@@ -42,6 +44,19 @@ object DebugLog {
     private val timeFormat = ThreadLocal.withInitial { SimpleDateFormat("MM-dd HH:mm:ss.SSS", Locale.US) }
 
     private const val MAX_FILE_BYTES = 8L * 1024 * 1024
+
+    /**
+     * Fires from the writer thread once every [SIZE_CHECK_EVERY] appends with
+     * the total journal byte count — the hook the 1 MB auto-upload trigger
+     * (LogUploader) registers. Kept as an injected callback so this class
+     * stays a dumb journal: it must not know upload mechanics exist.
+     */
+    @Volatile
+    var sizeWatch: ((Long) -> Unit)? = null
+
+    private const val SIZE_CHECK_EVERY = 64L
+    private const val SIZE_WATCH_FLOOR = 512L * 1024
+    private val appendCount = AtomicLong(0)
 
     /** User-configurable retention (Settings > Diagnostics); default 7 days. */
     @Volatile
@@ -115,6 +130,82 @@ object DebugLog {
             ?.sortedByDescending { it.name }
             ?.asReversed()
             ?: emptyList()
+    }
+
+    // ---- upload snapshot / watermark contract -----------------------------
+    // LogUploader ships the FULL journal to the server and clears the local
+    // copy afterwards. These helpers give it byte-precise operations that are
+    // safe against the append path: everything mutating a file's length takes
+    // the same monitor the writer appends hold, so a snapshot, a truncation
+    // and a fresh line can never interleave.
+
+    /** One file frozen at a known length — the unit of the upload snapshot:
+     *  exactly these bytes ship, exactly this far gets cleared on success. */
+    data class JournalSnap(val file: File, val length: Long)
+
+    /** Total bytes of every journal file on disk (rolls included). */
+    fun totalJournalBytes(): Long = synchronized(this@DebugLog) {
+        logDir?.listFiles()?.filter { it.name.startsWith("app-") }?.sumOf { it.length() } ?: 0L
+    }
+
+    /**
+     * Captures what the next upload covers: retained files oldest-first, each
+     * pinned at its CURRENT length, capped at [capBytes] by dropping oldest
+     * files (the newest day file is always kept). Frozen inside the append
+     * monitor, so lengths are coherent with the on-disk content the upload
+     * then reads.
+     */
+    fun snapshotJournal(capBytes: Long): List<JournalSnap> = synchronized(this@DebugLog) {
+        val files = retainedLogFiles()
+        if (files.isEmpty()) return@synchronized emptyList()
+        var total = files.sumOf { it.length() }
+        var from = 0
+        while (from < files.size - 1 && total > capBytes) {
+            total -= files[from].length()
+            from++
+        }
+        files.subList(from, files.size).map { JournalSnap(it, it.length()) }
+    }
+
+    /**
+     * Clear-after-send, the watermark way (requires the server's 2xx, never
+     * runs on a failed/timed-out send): a fully-sent file is deleted; a file
+     * that grew past its snapshot length while the upload was in flight is
+     * truncated to EXACTLY the snapshotted length — the appends that happened
+     * during upload survive and belong to the next cycle.
+     */
+    fun applyWatermark(snaps: List<JournalSnap>) = synchronized(this@DebugLog) {
+        for (snap in snaps) {
+            try {
+                val f = snap.file
+                if (!f.exists()) continue
+                if (f.length() <= snap.length) {
+                    f.delete()
+                } else {
+                    RandomAccessFile(f, "rw").use { raf ->
+                        if (raf.length() > snap.length) raf.setLength(snap.length)
+                    }
+                }
+            } catch (_: Exception) {}
+        }
+    }
+
+    /**
+     * Offline convergence cap: when the device can't upload, the journal must
+     * still stop growing eventually. Deletes OLDEST day files until the
+     * total is at or under [keepAtMost] — called by LogUploader only AFTER an
+     * upload attempt already ran, so pruning never replaces a send.
+     */
+    fun pruneOldest(keepAtMost: Long) {
+        synchronized(this@DebugLog) {
+            val files = retainedLogFiles()
+            var total = files.sumOf { it.length() }
+            for (f in files) {
+                if (total <= keepAtMost) break
+                val size = f.length()
+                if (f.delete()) total -= size
+            }
+        }
     }
 
     // ---- category helpers -------------------------------------------------
@@ -194,6 +285,16 @@ object DebugLog {
                     FileWriter(f, true).use { it.write(line) }
                 }
             } catch (_: Exception) {}
+            // Cheap size pulse for the auto-upload trigger: two syscalls per
+            // 64 appends, and only past the floor does anything downstream
+            // even wake up.
+            val n = appendCount.incrementAndGet()
+            if (n % SIZE_CHECK_EVERY == 0L) {
+                val total = totalJournalBytes()
+                if (total >= SIZE_WATCH_FLOOR) {
+                    try { sizeWatch?.invoke(total) } catch (_: Exception) {}
+                }
+            }
         }
     }
 

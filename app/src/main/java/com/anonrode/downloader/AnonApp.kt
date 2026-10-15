@@ -49,6 +49,10 @@ class AnonApp : Application(), ImageLoaderFactory {
         // the endpoint arrives via OTA rules and reporting stays a no-op
         // until it provisions one.
         com.anonrode.downloader.util.RemoteLogger.install(this)
+        // Full-log pipeline hooks (1 MB size trigger lives on the journal's
+        // append path); the first-open-of-day send runs further below, after
+        // DynamicRulesManager provisions the sink origin.
+        com.anonrode.downloader.util.LogUploader.install(this)
         appScope.launch {
             try {
                 // Non-critical startup initializations: disk I/O, AES decryption,
@@ -60,9 +64,10 @@ class AnonApp : Application(), ImageLoaderFactory {
                 initYoutubeDlInternal(this@AnonApp)
                 maybeSyncRules()
                 if (ytdlpReady) maybeUpdateYoutubeDL()
-                // The "logs on the server" half (any connection, once/day, same
+                // The "logs on the server" half (any connection, first open of
+                // the day + the 1 MB / crash-first triggers wired above; same
                 // kill-switch as the fatal reports; silent when anything's off).
-                com.anonrode.downloader.util.LogUploader.maybeUploadDaily(this@AnonApp)
+                com.anonrode.downloader.util.LogUploader.onAppOpen(this@AnonApp)
             } catch (t: Throwable) {
                 Log.e("AnonApp", "Background initialization error", t)
             }
