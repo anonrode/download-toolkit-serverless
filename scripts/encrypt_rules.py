@@ -431,7 +431,11 @@ def _validate_pipeline(where, pl, problems):
                 )
                 ALLOWED_TRANSFORMS = {
                     "base64decode", "base64encode", "hexdecode", "rot13",
-                    "urldecode", "urlencode", "trim", "lowercase", "uppercase", "reverse"
+                    "urldecode", "urlencode", "trim", "lowercase", "uppercase", "reverse",
+                    # 2026-10-15: JS string-literal unescape (\\uXXXX / \\xXX / \\/ …)
+                    # for lockers that embed window.location/link URLs escaped.
+                    # Must stay in lockstep with RulesPipeline.applyTransforms.
+                    "jsunescape"
                 }
                 for bk, bv in bind.items():
                     bw = f"{w}.bind.{bk}"

@@ -477,6 +477,49 @@ object RulesPipeline {
         }
     }
 
+    /** Hard cap on 302 Location hops the terminal probe may walk (see the
+     *  probe branch). Three covers the observed pt -> download_token -> CDN
+     *  chains with one spare; a fourth hop means a loop or a trap. */
+    private const val PROBE_HOP_LIMIT = 3
+
+    /**
+     * Decodes JS string-literal escapes (\\uXXXX, \\xXX, \\/, \\n, ...) so a
+     * URL embedded as `window.location = 'https\u003A\/\/...'` or
+     * `link: 'https\u003A...\u00253D'` binds as the real URL. Unknown or
+     * malformed escapes are left verbatim — never throw, never truncate.
+     */
+    private fun jsUnescape(input: String): String {
+        if (!input.contains('\\')) return input
+        val sb = StringBuilder(input.length)
+        var i = 0
+        while (i < input.length) {
+            val c = input[i]
+            if (c != '\\' || i + 1 >= input.length) { sb.append(c); i++; continue }
+            val n = input[i + 1]
+            when {
+                n == 'u' && i + 6 <= input.length -> {
+                    val code = input.substring(i + 2, i + 6).toIntOrNull(16)
+                    if (code != null) { sb.append(code.toChar()); i += 6 } else { sb.append(c); i++ }
+                }
+                n == 'x' && i + 4 <= input.length -> {
+                    val code = input.substring(i + 2, i + 4).toIntOrNull(16)
+                    if (code != null) { sb.append(code.toChar()); i += 4 } else { sb.append(c); i++ }
+                }
+                n == '/' -> { sb.append('/'); i += 2 }
+                n == 'n' -> { sb.append('\n'); i += 2 }
+                n == 't' -> { sb.append('\t'); i += 2 }
+                n == 'r' -> { sb.append('\r'); i += 2 }
+                n == 'b' -> { sb.append('\b'); i += 2 }
+                n == 'f' -> { sb.append('\u000C'); i += 2 }
+                n == '\\' -> { sb.append('\\'); i += 2 }
+                n == '\'' -> { sb.append('\''); i += 2 }
+                n == '"' -> { sb.append('"'); i += 2 }
+                else -> { sb.append(c); i++ }
+            }
+        }
+        return sb.toString()
+    }
+
     internal fun applyTransforms(input: String, transforms: List<String>): String {
         var curr = input
         for (t in transforms) {
@@ -516,6 +559,7 @@ object RulesPipeline {
                 "urldecode" -> {
                     try { java.net.URLDecoder.decode(curr, "UTF-8") } catch (_: Exception) { curr }
                 }
+                "jsunescape" -> jsUnescape(curr)
                 "urlencode" -> {
                     try { java.net.URLEncoder.encode(curr, "UTF-8") } catch (_: Exception) { curr }
                 }
@@ -711,13 +755,32 @@ object RulesPipeline {
             val ref = if (terminal.referer.isNotBlank())
                 renderTemplate(terminal.referer, vars) { name -> vars[name] }
             else base.ifBlank { null }?.plus("/")
-            val tp = HttpClient.probeTerminal(HttpClient.safeUrl(candidate), referer = ref)
+            // 302-Location walk (2026-10-15, wildshare/loadedfiles pattern):
+            // pt-token chains hand the real file over as short 302 hops
+            // (page -> ?pt= -> ...download_token=... -> CDN) and only the
+            // last response is media. The probe client deliberately does NOT
+            // auto-follow (a Location can point anywhere); we walk at most
+            // PROBE_HOP_LIMIT hops instead. Each hop is trusted because it
+            // was issued by the previous response, and every hop URL still
+            // passes isSafeTarget (no private ranges / junk schemes).
+            var probeUrl = HttpClient.safeUrl(candidate)
+            var referer = ref
+            var tp = HttpClient.probeTerminal(probeUrl, referer = referer)
+            var hops = 0
+            while (tp != null && tp.totalBytes == null && !tp.location.isNullOrBlank() && hops < PROBE_HOP_LIMIT) {
+                val next = HttpClient.safeResolveUri(probeUrl, tp.location!!)
+                if (next.isBlank() || !HttpClient.isSafeTarget(next)) break
+                hops++
+                referer = probeUrl
+                probeUrl = next
+                tp = HttpClient.probeTerminal(HttpClient.safeUrl(probeUrl), referer = referer)
+            }
             if (tp?.totalBytes == null) {
-                DebugLog.resolve("$site pipeline resolve: probe rejected terminal ${candidate.take(140)}")
+                DebugLog.resolve("$site pipeline resolve: probe rejected terminal ${probeUrl.take(140)} (hops=$hops)")
                 return null
             }
-            DebugLog.resolve("$site pipeline resolve: terminal validated (${tp.totalBytes}B) ${candidate.take(140)}")
-            return HttpClient.safeUrl(candidate)
+            DebugLog.resolve("$site pipeline resolve: terminal validated (${tp.totalBytes}B, hops=$hops) ${probeUrl.take(140)}")
+            return probeUrl
         }
         if (candidate == episodeUrl) {
             DebugLog.resolve("$site pipeline resolve: handoff candidate identical to entry URL — refusing self-loop")
