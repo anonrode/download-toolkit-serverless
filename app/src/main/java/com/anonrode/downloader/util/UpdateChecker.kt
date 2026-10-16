@@ -25,7 +25,7 @@ sealed class UpdateCheckResult {
  */
 object UpdateChecker {
 
-    private const val REPO = "anonrode/REDACTED-DIRless"
+    private const val REPO = "anonrode/download-toolkit-serverless"
     private const val API_URL = "https://api.github.com/repos/$REPO/releases/latest"
     const val RELEASES_PAGE = "https://github.com/$REPO/releases"
 

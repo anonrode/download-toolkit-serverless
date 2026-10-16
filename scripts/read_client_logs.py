@@ -39,7 +39,7 @@ import sys
 
 DEFAULT_HOST = ""
 DEFAULT_KEY = ""
-DEFAULT_REMOTE_DIR = "~/REDACTED-DIR/logs/clients"
+DEFAULT_REMOTE_DIR = "~/download-toolkit-server/logs/clients"
 
 
 def ssh(host: str, key: str, remote_cmd: str, timeout: int = 60) -> str:

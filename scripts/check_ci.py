@@ -2,7 +2,7 @@ import urllib.request
 import json
 import sys
 
-url = "https://api.github.com/repos/anonrode/REDACTED-DIRless/actions/runs?per_page=10"
+url = "https://api.github.com/repos/anonrode/download-toolkit-serverless/actions/runs?per_page=10"
 req = urllib.request.Request(url, headers={"User-Agent": "CI-Watcher/1.0", "Accept": "application/vnd.github.v3+json"})
 
 try:

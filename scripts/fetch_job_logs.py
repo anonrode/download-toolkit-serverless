@@ -24,7 +24,7 @@ opener = urllib.request.build_opener(NoAuthRedirectHandler())
 urllib.request.install_opener(opener)
 
 failed_job_id = 111494469833
-log_url = f"https://api.github.com/repos/anonrode/REDACTED-DIRless/actions/jobs/{failed_job_id}/logs"
+log_url = f"https://api.github.com/repos/anonrode/download-toolkit-serverless/actions/jobs/{failed_job_id}/logs"
 req = urllib.request.Request(log_url, headers={"User-Agent": "CI-Watcher/1.0", "Authorization": f"Bearer {token}"})
 
 try:

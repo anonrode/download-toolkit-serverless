@@ -48,7 +48,7 @@ object DynamicRulesManager {
     // extract them. Keep the key/IV in sync with probe/encrypt_rules.py.
     private const val RULES_KEY_HEX = "8f3a9c21d4e65b0789a2c4f6d1e3b5a7"
     private const val RULES_IV_HEX = "5b7e9d2f4a6c8e10f3a5c7d9b1e2f4a6"
-    private const val RULES_URL = "https://raw.githubusercontent.com/anonrode/REDACTED-DIRless/master/scraper_rules.json.enc"
+    private const val RULES_URL = "https://raw.githubusercontent.com/anonrode/download-toolkit-serverless/master/scraper_rules.json.enc"
     private const val CACHE_FILE = "dynamic_scraper_rules.enc"
 
     // ECDSA P-256 public key (X509/SPKI DER, base64). Private half lives ONLY

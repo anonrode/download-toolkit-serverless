@@ -4,7 +4,7 @@ import time
 import sys
 
 RUN_IDS = [36803331791, 36803309610]
-BASE_URL = "https://api.github.com/repos/anonrode/REDACTED-DIRless/actions/runs"
+BASE_URL = "https://api.github.com/repos/anonrode/download-toolkit-serverless/actions/runs"
 
 import subprocess
 

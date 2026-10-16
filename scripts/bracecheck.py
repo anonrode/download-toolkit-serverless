@@ -46,7 +46,7 @@ def analyze(pat, origin):
     return probs
 
 here = os.path.dirname(os.path.abspath(__file__))
-repo = r"C:\Users\user\Anon\ANON TOOLS\REDACTED-DIRless"
+repo = r"C:\Users\user\Anon\ANON TOOLS\download-toolkit-serverless"
 cat = io.open(os.path.join(repo, r"app\src\androidTest\java\com\anonrode\downloader\RegexCompatCatalog.kt"), encoding="utf-8").read()
 bad = 0
 total = 0

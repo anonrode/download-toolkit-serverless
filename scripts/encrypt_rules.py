@@ -1,7 +1,7 @@
 """Scraper-rules OTA pipeline: validate -> encrypt -> sign -> envelope.
 
 Produces the payload served at scraper_rules.json.enc (repo root of
-REDACTED-DIRless). Envelope format v2:
+download-toolkit-serverless). Envelope format v2:
 
     {"v": 2,
      "alg": "aes-128-cbc",
