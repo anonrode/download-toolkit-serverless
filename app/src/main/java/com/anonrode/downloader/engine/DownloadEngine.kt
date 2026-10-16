@@ -924,11 +924,19 @@ class DownloadEngine(
                 if (!com.anonrode.downloader.pipeline.HostHealth.isUsable(card.url)) return@filter false
                 if (!titleMatches(query, card.title)) return@filter false
 
-                // Layer 2: Release Year Matching
+                // Layer 2: Release Year Matching with ±1 tolerance.
+                // Streaming sites label the SAME show off-by-one (original
+                // production year vs international premiere): asianc serves
+                // "the-promised-neverland-2020" while 9jaRocks lists
+                // "The Promised Neverland (2019)" — a hard mismatch reject
+                // silently discarded the user's working source and pushed the
+                // task onto a failing one (journal 10-15 20:25). ±1 years is
+                // tight enough that implausible cross-show matches still lose
+                // on season/title guards above and below.
                 val candYear = extractYear(card.year)
                     ?: extractYear(card.title)
                     ?: extractYear(card.url)
-                if (origYear != null && candYear != null && origYear != candYear) {
+                if (origYear != null && candYear != null && kotlin.math.abs(origYear - candYear) > 1) {
                     com.anonrode.downloader.util.DebugLog.resolve(
                         "task=${task.id} failover: rejected card \"${card.title}\" due to year mismatch (orig=$origYear, cand=$candYear)"
                     )

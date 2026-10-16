@@ -31,18 +31,47 @@ object DynamicLockerEngine {
         depth: Int = 0,
         visitedSites: Set<String> = emptySet()
     ): String? {
-        if (depth >= ResolverRegistry.RESOLVE_DEPTH_LIMIT) {
-            DebugLog.resolve("DynamicLockerEngine: depth limit ($depth) reached for $url — refusing")
-            return null
-        }
         val host = HttpClient.parsedHost(url) ?: return null
         val clean = host.removePrefix("www.").lowercase()
         val siteKey = pipelineKeyForHost(clean) ?: return null
-        if (siteKey in visitedSites || clean in visitedSites) {
-            DebugLog.resolve("DynamicLockerEngine: cycle detected for siteKey '$siteKey' / host '$clean' in $visitedSites — refusing")
+        val nextVisited = nextLockerHop(siteKey, clean, depth, visitedSites)
+        if (nextVisited == null) {
+            // Depth limit OR cycle on the chain (see nextLockerHop): refusing
+            // here is what turns an A -> B -> A rule cycle into a terminated
+            // chain (null) instead of the 2026-10-15 recursive-crash stack.
+            DebugLog.resolve(
+                "DynamicLockerEngine: depth/cycle guard refused $url (depth=$depth, siteKey=$siteKey, visited=$visitedSites)"
+            )
             return null
         }
-        return RulesPipeline.runResolveForSite(siteKey, url, quality, depth + 1, visitedSites + siteKey + clean)
+        return RulesPipeline.runResolveForSite(siteKey, url, quality, depth + 1, nextVisited)
+    }
+
+    /**
+     * Pure re-entry guard for one locker hop — JVM-testable core of
+     * [resolve]'s recursion control:
+     *  - `depth >= RESOLVE_DEPTH_LIMIT` → refuse (null);
+     *  - the candidate site key or host already on the chain's visited set
+     *    → refuse (null) — this is the A -> B -> A cycle stop;
+     *  - otherwise → the chain's NEXT visited set (previous sites + this
+     *    hop's key + host), to be threaded into the `runResolveForSite`
+     *    call. Depth is carried as +1 by the caller — matching the
+     *    `runResolveForSite(siteKey, url, quality, depth + 1, ...)` contract
+     *    (pinned by ResolverDefectRegressionTest.otaHandoffCarriesResolverDepth).
+     *
+     * A legitimate chain of distinct, not-yet-visited sites under the depth
+     * limit always proceeds, so valid resolves are unaffected; only depth
+     * exhaustion and revisits stop.
+     */
+    internal fun nextLockerHop(
+        siteKey: String,
+        host: String,
+        depth: Int,
+        visitedSites: Set<String>
+    ): Set<String>? {
+        if (depth >= ResolverRegistry.RESOLVE_DEPTH_LIMIT) return null
+        if (siteKey in visitedSites || host in visitedSites) return null
+        return visitedSites + siteKey + host
     }
 
     /** A provider/search-only pipeline is not a locker resolver. */

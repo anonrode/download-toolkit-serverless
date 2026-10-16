@@ -86,19 +86,119 @@ object CrashHandler : Thread.UncaughtExceptionHandler {
                 val anonDir = File(dlDir, "Anon")
                 if (!anonDir.exists()) anonDir.mkdirs()
                 val crashFile = File(anonDir, "anon_crash.txt")
-                crashFile.appendText(logMessage)
+                appendCrashEntry(crashFile, logMessage)
             } catch (_: Exception) {}
 
             // Save to internal app files directory as fallback
             appContext?.let { ctx ->
                 try {
                     val internalCrash = File(ctx.filesDir, "anon_crash.txt")
-                    internalCrash.appendText(logMessage)
+                    appendCrashEntry(internalCrash, logMessage)
                 } catch (_: Exception) {}
             }
         } catch (_: Exception) {}
 
         defaultHandler?.uncaughtException(thread, throwable)
+    }
+
+    // ---- crash-file hygiene (2026-10-15 device evidence) -------------------
+    // anon_crash.txt had grown so large that its 512 KB share tail flood(ed)
+    // the activity journal: one StackOverflowError recursion (the ~969-frame
+    // resolve cycle) re-crashed on every launch and every copy appended the
+    // full fat trace again, so the tail the journal reads carried nothing but
+    // repeats and the real history was pushed out. Two guards close that
+    // class:
+    //   1. repeat folding — an identical crash (same exception line + first
+    //      3 stack lines) appended right after itself adds one small
+    //      "REPEATED xN" counter line instead of another full trace;
+    //   2. hard cap — a file over 256 KB is rewritten to a truncation marker
+    //      + the NEWEST 128 KB, so no crash storm can make the file
+    //      unbounded. The snapshot/watermark contract is untouched:
+    //      snapshotCrashFiles still pins lengths first and applyCrashWatermark
+    //      still clears only after a confirmed upload.
+    internal const val CRASH_FILE_MAX_BYTES = 256 * 1024
+    internal const val CRASH_FILE_KEEP_BYTES = 128 * 1024
+    private const val SIGNATURE_TAIL_BYTES = 128 * 1024
+    private const val ENTRY_HEADER = "=== ANONRODE CRASH LOG ("
+    private const val REPEAT_MARKER = "=== ANONRODE CRASH LOG REPEATED x"
+    private const val TRUNCATION_MARKER =
+        "=== ANONRODE CRASH LOG TRUNCATED: older entries dropped, newest 128 KB kept ===\n"
+    private val REPEAT_COUNT_RE = Regex("""REPEATED x(\d+)""")
+
+    /**
+     * Signature of one crash entry: the "Exception:" line plus the first
+     * three stack lines — stable across re-crashes at the same site (thread
+     * id / timestamp / device block are ignored), different for genuinely
+     * different crashes. Pure string math (JVM-testable).
+     */
+    internal fun crashSignature(crashEntry: String): String {
+        val exceptionLine = crashEntry.lineSequence()
+            .firstOrNull { it.startsWith("Exception: ") } ?: return ""
+        val stackLines = crashEntry.lineSequence()
+            .dropWhile { !it.startsWith("Stacktrace:") }
+            .drop(1)
+            .filter { it.isNotBlank() && !it.startsWith("===") }
+            .take(3)
+            .toList()
+        return (listOf(exceptionLine) + stackLines).joinToString("\n")
+    }
+
+    /** Last full entry in [text] — from the trailing [ENTRY_HEADER] on; the
+     *  whole text when no header is present. REPEATED/TRUNCATED lines can
+     *  never match the header ("LOG (" vs "LOG REPEATED/TRUNCATED"). */
+    private fun lastEntryText(text: String): String {
+        val idx = text.lastIndexOf(ENTRY_HEADER)
+        return if (idx >= 0) text.substring(idx) else text
+    }
+
+    /** Newest [maxBytes] of [file] as text, aligned to a line boundary
+     *  (a partial first line from the mid-file cut is dropped); "" when
+     *  unreadable. */
+    private fun readTailText(file: File, maxBytes: Int): String {
+        return try {
+            val len = file.length()
+            if (len <= 0) return ""
+            val start = if (len > maxBytes) len - maxBytes else 0L
+            RandomAccessFile(file, "r").use { raf ->
+                raf.seek(start)
+                val buf = ByteArray((len - start).toInt())
+                raf.readFully(buf)
+                val text = String(buf, Charsets.UTF_8)
+                if (start > 0) text.substringAfter('\n', text) else text
+            }
+        } catch (_: Exception) {
+            ""
+        }
+    }
+
+    /**
+     * Appends [logMessage] to [file], folding an identical immediate repeat
+     * into a single "REPEATED xN" counter line, then enforces
+     * [CRASH_FILE_MAX_BYTES]. File-only (no Android APIs) so the dedupe/cap
+     * logic stays JVM-testable; callers keep their own try/catch.
+     */
+    internal fun appendCrashEntry(file: File, logMessage: String) {
+        val signature = crashSignature(logMessage)
+        val lastBlock = lastEntryText(readTailText(file, SIGNATURE_TAIL_BYTES))
+        if (signature.isNotBlank() && signature == crashSignature(lastBlock)) {
+            val repeats = REPEAT_COUNT_RE.findAll(lastBlock).count()
+            val timeStamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())
+            file.appendText("$REPEAT_MARKER${repeats + 2} ($timeStamp) ===\n")
+            enforceCrashFileCap(file)
+            return
+        }
+        file.appendText(logMessage)
+        enforceCrashFileCap(file)
+    }
+
+    /** Keeps a crash file at or below the cap: truncation marker + the newest
+     *  [CRASH_FILE_KEEP_BYTES], aligned to a line boundary. */
+    internal fun enforceCrashFileCap(file: File) {
+        try {
+            if (file.length() <= CRASH_FILE_MAX_BYTES) return
+            val keep = readTailText(file, CRASH_FILE_KEEP_BYTES)
+            file.writeText(TRUNCATION_MARKER + keep)
+        } catch (_: Exception) {}
     }
 
     /**

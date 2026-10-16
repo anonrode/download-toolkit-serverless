@@ -11,6 +11,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.coroutines.AbstractCoroutineContextElement
+import kotlin.coroutines.CoroutineContext
 import com.anonrode.downloader.engine.ResolveBudget
 import okhttp3.FormBody
 import okhttp3.Request
@@ -87,6 +89,76 @@ internal fun hostClaim(url: String, hosts: List<String>): Boolean {
         }
     }
 }
+
+/**
+ * Resolve-chain lineage — the recursion budget of ONE user-facing resolve,
+ * carried in the coroutine context so EVERY nested registry re-entry inherits
+ * it (same propagation contract as ResolveBudget.TaskMemo).
+ *
+ * Why this exists (device crash evidence 2026-10-15, Downloads/Anon/
+ * anon_crash.txt): one trace nested ~969 RulesPipeline.runResolveForSite
+ * frames / ~486 DynamicLockerEngine.resolve / ~243 DynamicLockerResolver
+ * frames — a resolver cycle whose guards leaked. The OTA handoff corridor
+ * (RulesPipeline.runResolveForSite -> ResolverRegistry.resolve) threads
+ * depth + visitedSites correctly, but a leg that re-enters the registry with
+ * DEFAULT arguments — NaijaVaultGatewayResolver's `ResolverRegistry.resolve(
+ * url, quality)` calls, Resolvers.kt NaijaVaultGatewayResolver.resolve —
+ * zeroed BOTH guards on every turn through the gateway: depth back to 0 and
+ * visitedSites back to empty. A -> gateway -> A then recursed forever:
+ * DynamicLockerEngine's cycle check never saw site A again (visited was
+ * re-seeded each leg) and no depth check could fire (depth was re-zeroed).
+ *
+ * [depth]        deepest registry depth this chain reached. A caller that
+ *                passes a smaller value (including the reset-to-0 class
+ *                above) can never pull the chain below it + 1 — monotone.
+ * [visitedSites] union of every site key/host seen on this chain, so
+ *                DynamicLockerEngine's cycle check sees the WHOLE path, not
+ *                just the current leg.
+ * [entries]      hard backstop: how many registry entries this chain made.
+ *                Even a chain that defeated both guards cannot pass
+ *                [MAX_ENTRIES].
+ *
+ * Legitimate chains never observe a behavior change: an outermost resolve
+ * has no ambient lineage (effective values == caller arguments), and a chain
+ * that threads depth/visited correctly computes the same values here.
+ */
+internal class ResolveLineage(
+    val depth: Int,
+    val visitedSites: Set<String>,
+    val entries: Int
+) : AbstractCoroutineContextElement(Key) {
+    companion object Key : CoroutineContext.Key<ResolveLineage> {
+        /**
+         * Hard re-entry backstop: 2x the depth limit. A chain that respects
+         * the limit makes at most RESOLVE_DEPTH_LIMIT + 1 registry entries
+         * (depth grows by >= 1 per entry); 2x is slack for multi-leg
+         * resolvers, and anything beyond it is a cycle by construction.
+         */
+        const val MAX_ENTRIES = ResolverRegistry.RESOLVE_DEPTH_LIMIT * 2
+    }
+}
+
+/**
+ * Pure lineage math for ONE registry entry — JVM-testable.
+ *  - depth can only grow: max(callerDepth, ambient.depth + 1). A caller that
+ *    dropped or reset its depth (exactly the NaijaVaultGatewayResolver
+ *    `ResolverRegistry.resolve(x, quality)` class) cannot shrink the budget,
+ *    so every handoff loop walks toward ResolverRegistry.RESOLVE_DEPTH_LIMIT.
+ *  - visitedSites is the UNION of the caller's set and the ambient chain's,
+ *    so cycle detection (DynamicLockerEngine) sees the whole path.
+ *  - entries counts each nested registry entry for the hard backstop.
+ * With no ambient lineage (the outermost, user-facing resolve) the caller's
+ * arguments pass through: depth unchanged, visited = caller's set, entries 1.
+ */
+internal fun advanceResolveLineage(
+    ambient: ResolveLineage?,
+    callerDepth: Int,
+    callerVisitedSites: Set<String>
+): ResolveLineage = ResolveLineage(
+    depth = maxOf(callerDepth, (ambient?.depth ?: -1) + 1),
+    visitedSites = callerVisitedSites + (ambient?.visitedSites ?: emptySet()),
+    entries = (ambient?.entries ?: 0) + 1
+)
 
 object ResolverRegistry {
     const val RESOLVE_DEPTH_LIMIT = 6
@@ -167,10 +239,26 @@ object ResolverRegistry {
         memoTaskId: String?
     ): String? = withContext(Dispatchers.IO) {
         currentCoroutineContext().ensureActive()
-        // Cache + health apply ONCE per user-facing resolve (depth==0); the
-        // recursive descent below stays uncached so gateway chains work.
+        // Chain lineage (see ResolveLineage): merges this call's arguments
+        // with the ambient chain state. A nested leg that reset depth or
+        // visited (NaijaVaultGatewayResolver's default-argument registry
+        // re-entries — the 2026-10-15 recursion leak) can no longer reboot
+        // the budget: effective depth only grows, visited only unions, and a
+        // per-chain entry counter is the hard backstop. Outermost calls have
+        // no ambient lineage and pass through unchanged.
+        val lineage = advanceResolveLineage(currentCoroutineContext()[ResolveLineage.Key], depth, visitedSites)
+        if (lineage.entries > ResolveLineage.MAX_ENTRIES) {
+            com.anonrode.downloader.util.DebugLog.resolve(
+                "chain lineage: re-entry budget exhausted (${lineage.entries} registry entries on this chain, ${lineage.visitedSites.size} sites visited) — refusing ${url.take(90)}"
+            )
+            return@withContext null
+        }
+        // Cache + health apply ONCE per user-facing resolve (lineage depth 0 —
+        // an inherited lineage means a nested leg, never a fresh user-facing
+        // attempt, even when its caller passed depth 0); the recursive
+        // descent below stays uncached so gateway chains work.
         val cacheKey = com.anonrode.downloader.pipeline.ResolveCache.keyFor(url, quality)
-        if (depth == 0) {
+        if (lineage.depth == 0) {
             com.anonrode.downloader.pipeline.ResolveCache.get(cacheKey)?.let { cached ->
                 com.anonrode.downloader.pipeline.PipelineJournal.hop(
                     site = "", stage = "cache", url = url, ok = true, ms = 0
@@ -188,39 +276,44 @@ object ResolverRegistry {
                 return@withContext null
             }
         }
-        val outcome = resolveInternal(url, quality, depth, visitedSites, memoTaskId)
-        currentCoroutineContext().ensureActive()
-        val result = (outcome as? ResolverOutcome.Success)?.url
-        if (memoTaskId != null) {
-            // Success here PROVES the host can still crack — a dead mark for
-            // this url (e.g. left from a gateway handoff) must not survive it.
-            if (result != null) ResolveBudget.markAlive(memoTaskId, url)
-            else if (outcome is ResolverOutcome.Failure &&
-                // Same content-vs-transport rule as the registry loop-end mark:
-                // a transport-sick pass re-walks next pass; a proven-dead page skips.
-                !ResolveBudget.isTransportLevelFailure(outcome.reason)
-            ) ResolveBudget.markDead(memoTaskId, url)
-        }
-        if (depth == 0 && recordHealth) {
-            // Health must be keyed on the TRUE host (same source of truth as
-            // hostClaim/the terminal gate): the old string-split host recorded
-            // `vikingfile.com:443@evil.com` as a key for forged URLs, leaving
-            // the real victim host's backoff stale while garbage keys grew.
-            val host = HttpClient.parsedHost(url)
-                ?: url.trim().substringAfter("://").substringBefore('/').substringBefore('?')
-            if (result != null) {
-                com.anonrode.downloader.pipeline.ResolveCache.put(cacheKey, result)
-                com.anonrode.downloader.pipeline.HostHealth.recordOk(host)
-            } else if (outcome is ResolverOutcome.Failure) {
-                val reason = outcome.reason
-                com.anonrode.downloader.pipeline.HostHealth.recordFail(
-                    host,
-                    rateLimited = reason?.contains("429") == true || HttpClient.remainingCooldownMs(url) > 0L,
-                    reason = reason
-                )
+        // Publish the lineage for the whole subtree: resolver-internal
+        // registry re-entries (gateway handoffs, embed walks, OTA handoffs)
+        // inherit it via the coroutine context with zero signature changes.
+        withContext(lineage) {
+            val outcome = resolveInternal(url, quality, lineage.depth, lineage.visitedSites, memoTaskId)
+            currentCoroutineContext().ensureActive()
+            val result = (outcome as? ResolverOutcome.Success)?.url
+            if (memoTaskId != null) {
+                // Success here PROVES the host can still crack — a dead mark for
+                // this url (e.g. left from a gateway handoff) must not survive it.
+                if (result != null) ResolveBudget.markAlive(memoTaskId, url)
+                else if (outcome is ResolverOutcome.Failure &&
+                    // Same content-vs-transport rule as the registry loop-end mark:
+                    // a transport-sick pass re-walks next pass; a proven-dead page skips.
+                    !ResolveBudget.isTransportLevelFailure(outcome.reason)
+                ) ResolveBudget.markDead(memoTaskId, url)
             }
+            if (lineage.depth == 0 && recordHealth) {
+                // Health must be keyed on the TRUE host (same source of truth as
+                // hostClaim/the terminal gate): the old string-split host recorded
+                // `vikingfile.com:443@evil.com` as a key for forged URLs, leaving
+                // the real victim host's backoff stale while garbage keys grew.
+                val host = HttpClient.parsedHost(url)
+                    ?: url.trim().substringAfter("://").substringBefore('/').substringBefore('?')
+                if (result != null) {
+                    com.anonrode.downloader.pipeline.ResolveCache.put(cacheKey, result)
+                    com.anonrode.downloader.pipeline.HostHealth.recordOk(host)
+                } else if (outcome is ResolverOutcome.Failure) {
+                    val reason = outcome.reason
+                    com.anonrode.downloader.pipeline.HostHealth.recordFail(
+                        host,
+                        rateLimited = reason?.contains("429") == true || HttpClient.remainingCooldownMs(url) > 0L,
+                        reason = reason
+                    )
+                }
+            }
+            result
         }
-        result
     }
 
     /** True if any registered resolver claims this URL. */
@@ -878,6 +971,12 @@ object VidsrcResolver : BaseResolver {
     //           Q = {"type":..,"id":"tt..","t":"<signed token>",
     //                "ssr":{"status":"ok","servers":[
     //                  {"ref":"<signed mint ref>","name":"Server VNH",..}]}}
+    //        -- "ssr" is NULL on many episode pages (live: tmdb 83097 S2E9);
+    //           the player then fills the list from its own endpoint, and we
+    //           must too (see the sources-fill fallback below):
+    //   GET vidsrc.buzz/pl/api.php?a=sources&type=<Q.type>&id=<Q.id>
+    //       &s=<Q.s>&e=<Q.e>&t=<t>
+    //        -> 200 {"status":"ok","servers":[{"ref":"<signed ref>",..}]}
     //   GET vidsrc.buzz/pl/api.php?a=play&ref=<ref>&t=<t>
     //        -> 200 {"url":"/_stream?id=<id>","type":"hls"}
     //        -> GET vidsrc.buzz/_stream?id=<id> = live #EXTM3U (VOD).
@@ -964,12 +1063,43 @@ object VidsrcResolver : BaseResolver {
         }
         var token: String? = null
         var servers: org.json.JSONArray? = null
+        var sourcesFillFailed = false
         try {
             val q = JSONObject(qm.group(1))
             token = q.optString("t").takeIf { it.isNotBlank() }
             servers = q.optJSONObject("ssr")?.optJSONArray("servers")
+            // Episode pages routinely ship ssr:null (live: tmdb 83097 S2E9)
+            // while the player's own fill call still returns the server list
+            // — the page JS runs exactly this before playing. Without it the
+            // resolver declared a live episode "no mintable sources" and
+            // memoized it dead for 15 minutes ("known unavailable").
+            if ((servers == null || servers.length() == 0) && token != null) {
+                val qs = "type=" + URLEncoder.encode(q.optString("type"), "UTF-8") +
+                    "&id=" + URLEncoder.encode(q.optString("id"), "UTF-8") +
+                    "&s=" + URLEncoder.encode(q.optString("s"), "UTF-8") +
+                    "&e=" + URLEncoder.encode(q.optString("e"), "UTF-8") +
+                    "&t=" + URLEncoder.encode(token, "UTF-8")
+                val filled = try {
+                    HttpClient.getText("$mintBase/api.php?a=sources&$qs", referer = pageUrl)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    null
+                }
+                if (filled == null) {
+                    sourcesFillFailed = true
+                } else {
+                    servers = try { JSONObject(filled).optJSONArray("servers") } catch (_: Exception) { null }
+                }
+            }
         } catch (_: Exception) {}
         if (token == null || servers == null || servers.length() == 0) {
+            if (sourcesFillFailed) {
+                // The fill call never answered: transport-class, NOT a content
+                // verdict — no memo, so the next pass re-walks.
+                lastFailure = "Vidsrc: vidsrc.buzz sources fill failed for tmdb=$tmdb"
+                return null
+            }
             // The machine around the content is alive (page + bootstrap +
             // signature) but no source server exists for this title: a
             // proven-dead content verdict.
@@ -1651,21 +1781,28 @@ object NaijaVaultGatewayResolver : BaseResolver {
             if (btn != null) {
                 val href = btn.attr("abs:href").ifBlank { btn.attr("href") }
                 if (href.isNotBlank()) {
+                    // Re-entry budget: these registry callbacks used to pass
+                    // NEITHER depth nor visitedSites (depth defaulted to 0),
+                    // zeroing the OTA handoff chain's guard on every turn
+                    // through this gateway — the 2026-10-15 recursive-crash
+                    // class (see ResolveLineage). depth + 1 keeps the chain
+                    // monotone at the exact reset point; the ambient lineage
+                    // adds the visited-set/counter backstops.
                     if (href.contains("sdm_process_download") || href.contains("/sdm_downloads/")) {
                         val redirected = HttpClient.probeTerminal(href, referer = url)?.location ?: href
                         if (redirected != href && redirected.isNotBlank()) {
-                            val cracked = ResolverRegistry.resolve(redirected, quality) ?: redirected
+                            val cracked = ResolverRegistry.resolve(redirected, quality, depth + 1) ?: redirected
                             return cracked
                         }
                     }
-                    val cracked = ResolverRegistry.resolve(href, quality) ?: href
+                    val cracked = ResolverRegistry.resolve(href, quality, depth + 1) ?: href
                     return cracked
                 }
             }
             val lockerAnchor = soup.select("a[href]").map { it.attr("abs:href").ifBlank { it.attr("href") } }
                 .firstOrNull { LinkResolver.isKnownLockerHost(it) && it != url }
             if (!lockerAnchor.isNullOrBlank()) {
-                return ResolverRegistry.resolve(lockerAnchor, quality) ?: lockerAnchor
+                return ResolverRegistry.resolve(lockerAnchor, quality, depth + 1) ?: lockerAnchor
             }
 
             val directMedia = soup.select("a[href]").map { it.attr("abs:href").ifBlank { it.attr("href") } }
@@ -2942,8 +3079,14 @@ object DynamicLockerResolver : BaseResolver {
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
         val host = HttpClient.parsedHost(url)?.removePrefix("www.")?.lowercase()
-        val visited = if (host != null) setOf(host) else emptySet()
-        return (resolveOutcome(url, quality, depth, visited) as? ResolverOutcome.Success)?.url
+        val seed = if (host != null) setOf(host) else emptySet()
+        // The typed BaseResolver entry can be reached without resolveCore's
+        // lineage scope: merge the ambient chain lineage here so this call
+        // can never re-seed visitedSites/depth and reboot cycle detection
+        // mid-chain (the 2026-10-15 leak class). No ambient lineage (a
+        // top-level caller) => arguments pass through unchanged.
+        val lineage = advanceResolveLineage(currentCoroutineContext()[ResolveLineage.Key], depth, seed)
+        return (resolveOutcome(url, quality, lineage.depth, lineage.visitedSites) as? ResolverOutcome.Success)?.url
     }
 
     internal suspend fun resolveOutcome(

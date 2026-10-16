@@ -16,5 +16,10 @@
         <domain includeSubdomains="true">loadedfiles.org</domain>
         <domain includeSubdomains="true">loadedfiles.com</domain>
         <domain includeSubdomains="true">kissorgrab.com</domain>
+        <!-- Telemetry sink: plain-HTTP raw-IP on a nonstandard port; the OTA
+             rules carry remote_logging_url on this host and every prior
+             upload died at the network layer without this exemption
+             (CleartextNotPermitted). Only this address is exempted. -->
+        <domain includeSubdomains="false">68.155.146.145</domain>
     </domain-config>
 </network-security-config>
