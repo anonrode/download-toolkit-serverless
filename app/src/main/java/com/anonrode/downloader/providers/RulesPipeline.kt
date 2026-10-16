@@ -639,8 +639,19 @@ object RulesPipeline {
         }
         if (episodeUrl.isBlank()) return null
         val nextVisited = visitedSites + site.lowercase()
-        val sp = DynamicRulesManager.getPipeline(site) ?: return null
-        val term = sp.terminal ?: return null
+        val sp = DynamicRulesManager.getPipeline(site)
+        val term = sp?.terminal
+        if (sp == null || term == null) {
+            // P2-4 shadow trigger (Scientist pattern): no published recipe means
+            // the caller's next step is its COMPILED control path — the user's
+            // result comes from that, always. Offer the same site task to
+            // ShadowRunner as a deferred, sampled candidate measurement (it
+            // never answers this call; null semantics below are untouched).
+            com.anonrode.downloader.pipeline.ShadowRunner.considerResolve(
+                site, episodeUrl, quality, depth, visitedSites
+            )
+            return null
+        }
         return try {
             runResolveInner(site, sp.resolve, term, episodeUrl, depth) { cand ->
                 ResolverRegistry.resolve(
@@ -685,6 +696,7 @@ object RulesPipeline {
         terminal: PipelineTerminal,
         episodeUrl: String,
         depth: Int,
+        fetchCounter: AtomicInteger? = null,
         handoff: suspend (String) -> String?
     ): String? {
         val bases = DynamicRulesManager.getBaseUrls(site)
@@ -721,6 +733,10 @@ object RulesPipeline {
             var bound = false
             val stepMaxBytes = if (step.maxBytes > 0L) step.maxBytes.coerceIn(50_000L, 3_000_000L) else RESOLVE_FETCH_MAX_BYTES
             for ((source, sourceVars) in expandSources(site, step, vars)) {
+                // Shadow-run measurement: count every fetch ATTEMPT (P2-4
+                // "request count" metric; attempts, not successes, is the load
+                // the site actually felt).
+                fetchCounter?.incrementAndGet()
                 val outcome = fetchSource(site, "resolve", step, source, sourceVars, tag = null, customMaxBytes = stepMaxBytes) ?: continue
                 consumed += outcome.body.length
                 if (consumed > RESOLVE_TOTAL_MAX_BYTES) {
@@ -789,6 +805,61 @@ object RulesPipeline {
         val out = handoff(candidate)
         DebugLog.resolve("$site pipeline resolve: handoff ${candidate.take(120)} -> ${out?.take(120) ?: "null"}")
         return out
+    }
+
+    /**
+     * P2-4 SHADOW candidate execution (Scientist pattern; called ONLY by
+     * ShadowRunner). Runs the same governed resolve path as the user-facing
+     * pipeline — terminal host gate, probe validation, byte budgets — with
+     * exactly two measurement-driven differences:
+     *  1. the handoff into the compiled registry runs with
+     *     `recordHealth = false`, so a shadow measurement never mutates
+     *     user-facing HostHealth state;
+     *  2. every fetch ATTEMPT is counted (the request-count metric).
+     * The result is measurement data ONLY — ShadowRunner discards it after
+     * classification; it can never reach a provider, the engine, or the user.
+     */
+    internal data class ShadowResolveResult(
+        val direct: String?,
+        val fetchAttempts: Int,
+        val outcomeClass: String
+    )
+
+    internal suspend fun runShadowResolve(
+        site: String,
+        sp: com.anonrode.downloader.data.rules.SitePipeline,
+        episodeUrl: String,
+        quality: String,
+        depth: Int,
+        visitedSites: Set<String>
+    ): ShadowResolveResult {
+        val nextVisited = visitedSites + site.lowercase()
+        val term = sp.terminal
+            ?: return ShadowResolveResult(null, 0, "no_recipe")
+        val counter = java.util.concurrent.atomic.AtomicInteger(0)
+        return try {
+            val direct = runResolveInner(
+                site, sp.resolve, term, episodeUrl, depth, counter
+            ) { cand ->
+                ResolverRegistry.resolve(
+                    cand,
+                    quality,
+                    depth + 1,
+                    bypassHealth = false,
+                    recordHealth = false,
+                    visitedSites = nextVisited
+                )
+            }
+            ShadowResolveResult(
+                direct = direct,
+                fetchAttempts = counter.get(),
+                outcomeClass = if (direct != null) "success" else "no_result"
+            )
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (e: Exception) {
+            ShadowResolveResult(null, counter.get(), "error")
+        }
     }
 
     /**

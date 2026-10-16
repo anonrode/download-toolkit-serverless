@@ -466,7 +466,8 @@ object NaijaVaultProvider : SiteProvider {
                         ).findAll(html).map { it.groupValues.getOrNull(0) ?: "" }
                             .filter { it.isNotBlank() }.toList()
                         if (lockerMatches.isNotEmpty()) {
-                            direct = ResolverRegistry.resolveAny(lockerMatches, quality)
+                            // Provider-issued fan-out; bypass stale HostHealth pre-judges.
+                            direct = ResolverRegistry.resolveAny(lockerMatches, quality, bypassHealth = true)
                         }
                     }
                 }

@@ -70,7 +70,15 @@ object NepuProvider : SiteProvider {
         }
 
         if (rawResults.isEmpty()) return emptyList()
-        return filterAvailable(rawResults)
+        // NoSourceLedger: titles verified (multi-episode × multi-platform, 2026-10-16)
+        // to have NO source on ANY platform don't even appear in search. A new
+        // rules payload clears the ledger, so the day a mirror adds one of
+        // these titles it re-appears automatically.
+        val notHidden = rawResults.filter {
+            !com.anonrode.downloader.pipeline.NoSourceLedger.isHidden(it.title)
+        }
+        if (notHidden.isEmpty()) return emptyList()
+        return filterAvailable(notHidden)
     }
 
     internal suspend fun filterAvailable(cards: List<ShowCard>): List<ShowCard> = coroutineScope {
@@ -293,14 +301,24 @@ object NepuProvider : SiteProvider {
             val mediaType = if (isTv) "tv" else "movie"
 
             if (tmdbId.isNotBlank() && tmdbId.all { it.isDigit() }) {
-                val candidateMirrors = buildMirrors(mediaType, tmdbId, season, episode, primaryUrl = episodeUrl)
-                for (mirror in candidateMirrors) {
-                    val resolved = ResolverRegistry.resolve(mirror, quality)
-                    if (!resolved.isNullOrBlank()) {
-                        direct = resolved
-                        break
-                    }
-                }
+                // Mirror sweep via resolveAny (boundedFirstSuccess, 3-wide
+                // sliding window, first success cancels the rest — the same
+                // bounded race the AsianC sweep uses) instead of the
+                // sequential candidate loop.
+                // bypassHealth=true (share-31 log, 2026-10-16 12:05, Servamp):
+                // this list is issued BY THE PROVIDER for this episode, but
+                // HostHealth's cross-session backoff still pre-skipped every
+                // candidate (2,189 health-gate ERR hops in one share, zero
+                // requests fired; hosts marked dead under old behavior —
+                // vidsrc.mov now works, vidsrc.fyi now iframes vsembed). Only the pre-judge skip lifts: full attempt
+                // budgets stay, and fresh outcomes re-record health, so a
+                // mirror that is genuinely dead re-earns its backoff on this
+                // very pass.
+                direct = ResolverRegistry.resolveAny(
+                    buildMirrors(mediaType, tmdbId, season, episode, primaryUrl = episodeUrl),
+                    quality,
+                    bypassHealth = true
+                )
             }
         }
 

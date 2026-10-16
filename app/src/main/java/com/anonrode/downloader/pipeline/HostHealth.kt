@@ -139,6 +139,80 @@ object HostHealth {
         persist()
     }
 
+    /**
+     * Rules-rev state invalidation (Firefox Remote Settings semantics —
+     * scratch/ota_rule_engine_design.md §3.7): a new OTA rules version
+     * republishes known-dead lists and pipelines, so every parked/dead
+     * backoff verdict in this ledger was formed against a DIFFERENT payload
+     * than the one about to run. Such verdicts are stale by construction —
+     * the share-31 massacre (2,189 fans-out pre-skipped by backoffs earned
+     * under old rules) is the live proof. Drops only the backoff JUDGMENT;
+     * ok/fail history (and [hasProvenLocker] credentials) and 429 cooldowns
+     * are fresh evidence, not stale, so they stay. Called by
+     * DynamicRulesManager on an actual version change at activation.
+     *
+     * @return count of hosts that had an active verdict cleared.
+     */
+    fun clearBackoffsOnNewRules(): Int {
+        var cleared = 0
+        for (h in records.keys) {
+            records.compute(h) { _, v ->
+                if (v == null) return@compute null
+                if (v.consecutiveFails > 0) {
+                    cleared++
+                    v.consecutiveFails = 0
+                    v.lastFailMs = 0L
+                }
+                v
+            }
+        }
+        if (cleared > 0) persist()
+        return cleared
+    }
+
+    /**
+     * P2-7 — diff-based state invalidation (plan slice 7; the scoped
+     * refinement of [clearBackoffsOnNewRules]). Clears the backoff JUDGMENT
+     * only for hosts covered by [changedTargets] — the set of knownDead /
+     * lockerHosts / hostPolicy / pipeline targets whose policy CHANGED or was
+     * REMOVED between the previously active payload and the new one. A truly
+     * dead host whose policy did not change keeps its live backoff, so an
+     * unrelated update never re-hammers it; hosts REMOVED from knownDead /
+     * lockerHosts are inside the changed set by construction, which is
+     * exactly the confirmed "remembers-dead-after-fix" bug this fixes.
+     *
+     * Matching is deliberately shard-based (contains in either direction):
+     * the playbook addresses hosts by fragments ("jisooido", "megap.")
+     * everywhere else in this file's consumers, so a ledger record
+     * "cdn.jisooido.net" must match the changed fragment "jisooido". Only
+     * the judgment clears — ok/fail history and 429 cooldowns stay, and the
+     * exempt-host rule does not apply (this is playbook-scoped, not a
+     * failure recording path).
+     *
+     * @return count of hosts that had an active verdict cleared.
+     */
+    fun clearBackoffsFor(changedTargets: Set<String>): Int {
+        if (changedTargets.isEmpty()) return 0
+        val targets = changedTargets.map { it.lowercase().trim().removePrefix("*.") }.filter { it.isNotBlank() }
+        if (targets.isEmpty()) return 0
+        var cleared = 0
+        for (h in records.keys) {
+            val hit = targets.any { t -> h.contains(t) || t.contains(h) }
+            if (!hit) continue
+            records.compute(h) { _, v ->
+                if (v == null) return@compute null
+                if (v.consecutiveFails > 0) {
+                    cleared++
+                    v.consecutiveFails = 0
+                    v.lastFailMs = 0L
+                }
+                v
+            }
+        }
+        if (cleared > 0) persist()
+        return cleared
+    }
+
     fun recordFail(hostOrUrl: String, rateLimited: Boolean = false, reason: String? = null) {
         val h = hostOf(hostOrUrl)
         if (h.isBlank() || isExemptHost(h)) return

@@ -297,6 +297,7 @@ object AnitakuProvider : SiteProvider {
     }
 
     override suspend fun resolveEpisode(episodeUrl: String, quality: String): DownloadRecipe {
+        val shadowControlStart = System.currentTimeMillis()
         // OTA resolve recipe first: when a signed playbook carries the
         // resolve+terminal stages it replaces this compiled scraping flow
         // entirely — and skips the page fetch below on success. The compiled
@@ -322,7 +323,8 @@ object AnitakuProvider : SiteProvider {
 
                 if (candidates.isNotEmpty()) {
                     val fullCandidates = candidates.map { HttpClient.safeResolveUri(episodeUrl, it) }
-                    val resolved = ResolverRegistry.resolveAny(fullCandidates, quality)
+                    // Provider-issued fan-out; bypass stale HostHealth pre-judges.
+                    val resolved = ResolverRegistry.resolveAny(fullCandidates, quality, bypassHealth = true)
                     if (!resolved.isNullOrBlank()) {
                         direct = resolved
                     }
@@ -335,6 +337,17 @@ object AnitakuProvider : SiteProvider {
                     if (malMatch.find() && epMatch.find()) {
                         val malId = malMatch.group(1) ?: ""
                         val ep = epMatch.group(1) ?: ""
+                        // N2-fix (investigation anime100): some gogo-hosted
+                        // episodes expose ONLY a transport-dead player lane, but
+                        // the page still carries malId/ep — the megaplays mal
+                        // endpoint is the live lane (mal 59433/5 proven to
+                        // MPEG-TS on the wire). The fetchdl ajax below stays as
+                        // the follow-up fallback (its gap is site-side data).
+                        ResolverRegistry.resolveAny(
+                            listOf("https://megaplays.se/stream/mal/$malId/$ep/sub"),
+                            quality,
+                            bypassHealth = true
+                        )?.let { direct = it }
                         val host = HttpClient.safeHost(episodeUrl, "gogoanime.or.at")
                         val ajaxUrl = "https://$host/wp-admin/admin-ajax.php"
 
@@ -343,7 +356,8 @@ object AnitakuProvider : SiteProvider {
                             "mal_id" to malId,
                             "ep" to ep
                         )
-                        val body = HttpClient.postForm(
+                        // Ajax runs only if the megaplays handoff above missed.
+                        val body = if (direct.isNullOrBlank()) HttpClient.postForm(
                             url = ajaxUrl,
                             form = form,
                             referer = episodeUrl,
@@ -367,7 +381,7 @@ object AnitakuProvider : SiteProvider {
                                 } else {
                                     dlDoc.select("a[href]").map { it.attr("abs:href").ifBlank { it.attr("href") } }
                                 }
-                                val resolved = ResolverRegistry.resolveAny(sortedLinks, quality)
+                                val resolved = ResolverRegistry.resolveAny(sortedLinks, quality, bypassHealth = true)
                                 if (!resolved.isNullOrBlank()) {
                                     direct = resolved
                                 }
@@ -382,6 +396,15 @@ object AnitakuProvider : SiteProvider {
             if (com.anonrode.downloader.pipeline.StrictLinkClassifier.isDirectMedia(episodeUrl)) episodeUrl else ""
         }
         val isHls = target.contains(".m3u8") || target.contains("manifest")
+        // Scientist control seam: this compiled path IS the user-facing
+        // control whenever the pipelines family runs shadow-armed (published
+        // empty). Report only the outcome class — never URLs — so ShadowRunner
+        // issues real both-engine comparison records.
+        com.anonrode.downloader.pipeline.ShadowRunner.observeControl(
+            name,
+            success = target.isNotBlank(),
+            wallMs = System.currentTimeMillis() - shadowControlStart
+        )
         return DownloadRecipe(
             directUrl = target,
             filename = target.substringAfterLast('/').substringBefore('?').ifEmpty { "anime.mp4" },

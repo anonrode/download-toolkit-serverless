@@ -226,13 +226,15 @@ private fun rememberSettingsState(
 /** The five settings drawers (approved re-group, 2026-10-14). Pure
  *  re-grouping: every existing control renders inside exactly one of these —
  *  none added except the two player defaults that already had stored prefs,
- *  and the remote-reporting switch that wires RemoteLogger's real kill-switch. */
-internal enum class SettingsDrawer(val label: String, val sub: String, val count: Int) {
-    PLAYBACK("Playback", "Quality · subtitles · player defaults", 5),
-    DOWNLOADS("Downloads", "Parallelism · organize · limits", 8),
-    CONNECTIONS("Connections", "Stall · retries · torrents · Wi-Fi", 8),
-    UPDATES("Updates & Reliability", "Site logic · yt-dlp core · reporting", 5),
-    LOGS("Privacy & Logs", "Content filter · logging · diagnostics", 4)
+ *  and the remote-reporting switch that wires RemoteLogger's real kill-switch.
+ *  §4.5: the numeric `count` badge property is GONE — the pills read as
+ *  unread notifications; rows end in a clean chevron. */
+internal enum class SettingsDrawer(val label: String, val sub: String) {
+    PLAYBACK("Playback", "Quality · subtitles · player defaults"),
+    DOWNLOADS("Downloads", "Parallelism · organize · limits"),
+    CONNECTIONS("Connections", "Stall · retries · torrents · Wi-Fi"),
+    UPDATES("Updates & Reliability", "Site logic · yt-dlp core · reporting"),
+    LOGS("Privacy & Logs", "Content filter · logging · diagnostics")
 }
 
 private val SettingsEasing = CubicBezierEasing(0.2f, 0f, 0f, 1f)
@@ -620,22 +622,12 @@ private fun SettingsHub(
                     overflow = TextOverflow.Ellipsis
                 )
             }
-            Text(
-                text = "${drawer.count}",
-                fontSize = Type.label.fontSize,
-                fontWeight = FontWeight.Bold,
-                color = TextMuted,
-                modifier = Modifier
-                    .clip(RoundedCornerShape(Radius.xs))
-                    .background(SurfaceElevated)
-                    .border(1.dp, BorderHairline, RoundedCornerShape(Radius.xs))
-                    .padding(horizontal = 8.dp, vertical = 3.dp)
-            )
-            Text(
-                text = "›",
-                fontSize = Type.rowTitle.fontSize,
-                fontWeight = FontWeight.Bold,
-                color = TextMuted
+            // §4.5: clean chevron only — the numeric count pill is gone.
+            Icon(
+                imageVector = Icons.Rounded.ChevronRight,
+                contentDescription = null,
+                tint = TextMuted,
+                modifier = Modifier.size(20.dp)
             )
         }
         // (Trailing Spacer(Spacing.sm) removed — the content column's

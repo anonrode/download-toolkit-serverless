@@ -1213,6 +1213,38 @@ object HttpClient {
     }
     private val terminalProbeClient: OkHttpClient get() = noRedirectClient
     private val terminalProbeClientPermissive: OkHttpClient get() = noRedirectPermissiveClient
+
+    // ------------- OTA diagnostics add-ons (ADDITIVE ONLY — existing bodies
+    // above are untouched; these hooks only READ existing private state) -----
+
+    /** What a hostname resolves to through the EXACT pipeline a fetch on
+     *  [shared] uses (hybrid system-DNS race + DoH fallback + SSRF floor),
+     *  plus whether the DoH cache holds an entry for it — i.e. whether DoH
+     *  was ever the path that answered for this host in this process.
+     *
+     *  Purpose: OTA failure diagnostics (OtaFetchDiagnostics). The known
+     *  blind spot is that DoH only engages when the DNS LOOKUP itself
+     *  fails/times out — never when the carrier hands back a poisoned but
+     *  resolvable answer that then dies at connect/TLS/HTTP. This snapshot
+     *  captures whichever answer the pipeline produced so a failure event can
+     *  carry the IPs the phone actually had. Bounded: the lookup inherits
+     *  BoundedDnsScheduler's 3 s system cap + the 4 s bootstrap DoH caps.
+     *  Call only on failure paths (it re-runs resolution). */
+    data class OtaDnsSnapshot(val resolved: String?, val dohEntry: Boolean)
+
+    fun otaDnsSnapshot(hostname: String): OtaDnsSnapshot {
+        val dohUsed = try { dohCache.containsKey(hostname) } catch (_: Exception) { false }
+        val ips = try {
+            hybridDns.lookup(hostname)
+                .mapNotNull { it.hostAddress }
+                .distinct()
+                .joinToString(",")
+                .ifBlank { null }
+        } catch (_: Exception) {
+            null
+        }
+        return OtaDnsSnapshot(ips, dohUsed)
+    }
 }
 
 data class HttpRawResult(

@@ -39,6 +39,7 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
@@ -48,6 +49,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
@@ -66,6 +68,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.unit.dp
@@ -81,8 +84,10 @@ import com.anonrode.downloader.data.models.ShowCard
 import com.anonrode.downloader.ui.components.SkeletonBox
 import com.anonrode.downloader.ui.components.rememberReduceMotion
 import com.anonrode.downloader.ui.components.rememberShimmerX
+import com.anonrode.downloader.ui.theme.AnonTheme
 import com.anonrode.downloader.ui.theme.Motion
 import com.anonrode.downloader.ui.theme.Radius
+import com.anonrode.downloader.ui.util.TitleFormatting
 import com.anonrode.downloader.viewmodel.MainViewModel
 import com.anonrode.downloader.ui.util.confirmHaptic
 import com.anonrode.downloader.ui.util.tick
@@ -92,6 +97,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -148,8 +154,47 @@ fun EpisodeDrawer(
     preselectRemaining: Boolean = false
 ) {
     val uiState by viewModel.uiState.collectAsState()
-    val episodes = uiState.drawerEpisodes
-    val isLoading = uiState.isEpisodesLoading
+
+    // ── §1/§2 theme handoff: the sheet resolves ONE pinned palette for its
+    //    whole lifetime (the drawer's theme-proof doctrine — hexes stay
+    //    pinned at the bottom of this file, never re-resolved mid-layout),
+    //    but now holds BOTH an obsidian-dark and a clean-light instance so
+    //    the sheet follows the app theme instead of smearing navy in dark
+    //    and ignoring light entirely.
+    val pal = sheetPalette(AnonTheme.colors.isDark)
+
+    // ── §4.4 episode-sheet TTL cache (UI edge — MainViewModel untouched) ────
+    // Re-opening a show used to re-scrape for 7-8s before a single row
+    // painted. The last successful scrape per `source + showUrl` parks in an
+    // in-memory map with a 30-minute TTL; the next open paints it
+    // INSTANTLY and silently swaps in the fresh list when the scrape lands.
+    // The ViewModel is not edited and no new state is added there: this is a
+    // read-only presentation cache over data the drawer already received.
+    val freshEpisodes = uiState.drawerEpisodes
+    LaunchedEffect(freshEpisodes, show.url) {
+        if (freshEpisodes.isNotEmpty()) {
+            cachedEpisodeLists[show.site + "|" + show.url] = CachedEpisodeList(
+                episodes = freshEpisodes,
+                synopsis = uiState.drawerSynopsis,
+                savedAtMs = System.currentTimeMillis()
+            )
+        }
+    }
+    val cachedHit = remember(show.site, show.url) {
+        cachedEpisodeLists[show.site + "|" + show.url]
+            ?.takeIf { System.currentTimeMillis() - it.savedAtMs <= EPISODE_CACHE_TTL_MS }
+            ?.episodes
+            .orEmpty()
+    }
+    val episodes = if (freshEpisodes.isNotEmpty()) freshEpisodes else cachedHit
+    val isLoading = uiState.isEpisodesLoading && episodes.isEmpty()
+    val showSynopsis = if (uiState.drawerSynopsis.isNotBlank()) uiState.drawerSynopsis
+        else remember(show.site, show.url) {
+            cachedEpisodeLists[show.site + "|" + show.url]
+                ?.takeIf { System.currentTimeMillis() - it.savedAtMs <= EPISODE_CACHE_TTL_MS }
+                ?.synopsis
+                .orEmpty()
+        }
     val context = LocalContext.current
     // Haptic engine handle: queueing a download is the app's main commitment
     // moment, and multi-select needs per-item acknowledgement. Default flags
@@ -167,6 +212,14 @@ fun EpisodeDrawer(
     var enqueued by remember { mutableStateOf(false) }
     var isEnqueuing by remember { mutableStateOf(false) }
     var showBatchConfirmation by rememberSaveable { mutableStateOf(false) }
+    // §2.7: the batch confirm must remember it holds a "Download All" (zero
+    // picked) vs a plain selection batch — the confirm button enqueues
+    // accordingly.
+    var pendingForceAll by rememberSaveable { mutableStateOf(false) }
+    // §2.7: the batch confirm must remember it holds a "Download All" (zero
+    // picked) vs a plain selection batch — the confirm button enqueues
+    // accordingly.
+    var pendingForceAll by rememberSaveable { mutableStateOf(false) }
 
     val allTasks by viewModel.engine.tasks.collectAsState()
     val downloadedOrQueuedUrls = remember(allTasks, show.title) {
@@ -246,12 +299,16 @@ fun EpisodeDrawer(
     }
     val uniqueSelectedCount = selectedEpisodes.distinctBy { it.url }.size
 
-    fun enqueueSelected() {
+    fun enqueueSelected(forceAll: Boolean = false) {
         if (enqueued || isEnqueuing) return
+        // §2.7 zero-selection CTA: the Download button is rendered as
+        // "Download All (N)" when nothing is picked, and it MEANS it —
+        // forceAll enqueues every listed episode in the same batch order.
         // Combined provider pages may intentionally reuse one anchor URL for
         // multiple episodes. Keep every selected row visible, but never enqueue
         // that source more than once in the same batch.
-        val toEnqueue = selectedEpisodes
+        val picked = if (forceAll) episodes else selectedEpisodes
+        val toEnqueue = picked
             .distinctBy { it.url }
             .sortedWith(compareBy(
                 { episode -> seasonGroups.entries.firstOrNull { it.value.any { it === episode } }?.key ?: Int.MAX_VALUE },
@@ -513,24 +570,27 @@ fun EpisodeDrawer(
 
             val gutter = 16.dp                                           // grid gutter G = 16
             val gripZoneH = 30.dp                                        // HALF grip zone (sheet-y 0→30)
-            val artBandH = 104.dp                                        // CONTRACT: art band 104
-            val artFadeH = 48.dp                                         // CONTRACT: bottom 48dp fade
-            val posterW = 76.dp                                          // CONTRACT: poster 76×112
-            val posterH = 112.dp
+            // CONTRACT: poster 76×108 (§2.3 geometry: radius 10, 1dp white-10%
+            // hairline — was 76×112/12).
+            val posterW = 76.dp
+            val posterH = 108.dp
             val posterLeft = 20.dp                                       // CONTRACT: left 20
-            // title x = 20 + 76 + 16 = 112 (CONTRACT)
-            // artTop: HALF = below the 30dp grip (mock sheet-y 30) · FULL = the real
-            // status-bar inset (mock device 34dp → band 34→138)
+            // title x = 20 + 76 + 14 = 110 (spec header Row: spacedBy 14)
+            // artTop: HALF = below the 30dp grip · FULL = the real status-bar inset.
             val artTop = if (isFull) statusBarDp else gripZoneH
-            // poster y: +8 under the band top at HALF (mock (20, 38)) · +14 under the
-            // status bar at FULL (mock (20, 48))
+            // poster y: +8 under the band top at HALF · +14 under the status bar at FULL.
             val posterTop = artTop + if (isFull) 14.dp else 8.dp
-            // close ✕ offset from the poster top: 0 at FULL (mock ✕ @ 48) ·
-            // −2dp at HALF (mock ✕ @ 36, two above the poster)
+            // close ✕ offset from the poster top: 0 at FULL · −2dp at HALF.
             val closeTopOffset = if (isFull) 0.dp else (-2).dp
-            // List column top: the chips row is item 0, so the chips land exactly
-            // on it. HALF mock y=166 (range absent; rows reach 214 = 166+32+16) ·
-            // FULL mock y=176 (range at 224 = 176+32+16; rows from ~300)
+            // Art band: grows with the header so EVERY pinned header element
+            // (poster, title, synopsis, pills) always sits on the theme-proof
+            // dark imagery — in light mode a white sheet would swallow the
+            // light header text otherwise. 14dp of band below the poster,
+            // then the 48dp fade into the sheet color.
+            val artBandH = (posterTop - artTop) + posterH + 14.dp        // was fixed 104dp
+            val artFadeH = 48.dp                                         // CONTRACT: bottom 48dp fade
+            // List column top: chips row top. HALF mock y=166 · FULL y=176 (kept;
+            // the Selection/Range chips now PIN here instead of scrolling away — §2.3).
             val listTop = if (isFull) 176.dp else 166.dp
 
             val scrimAlphaMax = 0.32f  // M3 modal default, kept where the spec is silent
@@ -575,7 +635,7 @@ fun EpisodeDrawer(
                     // placement phase; drag frames do not recompose the content.
                     .offset { IntOffset(0, anim.value.roundToInt()) }
                     .clip(sheetShape)
-                    .background(SheetBg)
+                    .background(pal.bg)
                     // An empty sheet region (below the sticky bar, etc.) must not
                     // let taps fall through to the scrim — only the scrim itself
                     // dismisses. Children (clickables, the list) still win first.
@@ -629,16 +689,19 @@ fun EpisodeDrawer(
                             .height(artFadeH)
                             .background(
                                 Brush.verticalGradient(
-                                    listOf(SheetBg.copy(alpha = 0f), SheetBg)
+                                    listOf(pal.bg.copy(alpha = 0f), pal.bg)
                                 )
                             )
                     )
                 }
 
-                // ── GRIP ZONE (HALF, sheet-y 0→30): 36×4 bar + uppercase pull hint.
+                // ── GRIP ZONE (HALF, sheet-y 0→30): the 36×4 drag-handle pill,
+                //    and nothing else. The spec's obsolete pull-hint caption is
+                //    deleted outright (§2.2) — the handle + the sheet's own drag
+                //    affordance carry the gesture.
                 //    Alpha reads anim.value in the LAYER phase so detent drags
-                //    never recompose. Drawn after the art band so the hint never
-                //    sinks under it. ──
+                //    never recompose. Drawn after the art band so the handle
+                //    never sinks under it. ──
                 Box(
                     modifier = Modifier
                         .align(Alignment.TopCenter)
@@ -652,50 +715,43 @@ fun EpisodeDrawer(
                         .sheetDrag(),
                     contentAlignment = Alignment.TopCenter
                 ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Box(
-                            modifier = Modifier
-                                .padding(top = 9.dp)
-                                .size(width = 36.dp, height = 4.dp)
-                                .clip(RoundedCornerShape(2.dp))
-                                .background(Color.White.copy(alpha = 0.32f))
-                        )
-                        Text(
-                            text = PULL_HINT.uppercase(),
-                            color = Color.White.copy(alpha = 0.55f),
-                            fontSize = 10.sp,               // user floor: mock 8.5 → 10
-                            fontWeight = FontWeight.Bold,
-                            letterSpacing = 1.8.sp,
-                            modifier = Modifier.padding(top = 7.dp)
-                        )
-                    }
+                    // Handle color rides the palette: white on obsidian, ink
+                    // on the light sheet — a white bar vanishes on white.
+                    Box(
+                        modifier = Modifier
+                            .padding(top = 13.dp)
+                            .size(width = 36.dp, height = 4.dp)
+                            .clip(RoundedCornerShape(2.dp))
+                            .background(pal.handle)
+                    )
                 }
 
-                // ── SHARED HEADER ROW: poster 76×112 @ left 20 · title @ x=112 ·
-                //    glass ✕ right 16. Everything here drags the sheet. ──
+                // ── SHARED HEADER ROW (§2.3): poster 76×108 @ left 20 ·
+                //    pills / title / synopsis column · glass ✕ inset from the
+                //    top-right. Everything here drags the sheet. ──
                 Row(
                     modifier = Modifier
                         .sheetDrag()
                         .offset(x = posterLeft, y = posterTop)
                         .padding(end = gutter),
-                    verticalAlignment = Alignment.Top
+                    verticalAlignment = Alignment.Top,
+                    horizontalArrangement = Arrangement.spacedBy(14.dp)
                 ) {
-                    // Poster card 76×112 radius 12 — shadow 0/18/42 black-62%
-                    // (Modifier.shadow cannot offset a shadow; the 42px blur is
-                    // emulated with an 18dp elevation around the poster shape),
-                    // white-10% border; initials fallback in accent on card bg.
+                    // Poster card 76×108 radius 10 — shadow 0/18/42 black-62%
+                    // emulated with an 18dp elevation around the poster shape,
+                    // 1dp 0x1AFFFFFF hairline; initials fallback on failure.
                     Box(
                         modifier = Modifier
                             .shadow(
                                 elevation = 18.dp,
-                                shape = RoundedCornerShape(12.dp),
+                                shape = RoundedCornerShape(10.dp),
                                 ambientColor = Color.Black.copy(alpha = 0.62f),
                                 spotColor = Color.Black.copy(alpha = 0.62f)
                             )
                             .size(width = posterW, height = posterH)
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(SheetCard)
-                            .border(1.dp, Color.White.copy(alpha = 0.10f), RoundedCornerShape(12.dp))
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(BandPosterWell)
+                            .border(1.dp, Color(0x1AFFFFFF), RoundedCornerShape(10.dp))
                     ) {
                         if (show.posterUrl.isNotBlank()) {
                             AsyncImage(
@@ -712,77 +768,84 @@ fun EpisodeDrawer(
                                     .mapNotNull { it.firstOrNull()?.uppercaseChar() }
                                     .joinToString(""),
                                 fontSize = 24.sp, fontWeight = FontWeight.Black,
-                                color = SheetAccent, modifier = Modifier.align(Alignment.Center)
+                                color = BandAccent, modifier = Modifier.align(Alignment.Center)
                             )
                         }
                     }
 
-                    Spacer(modifier = Modifier.width(gutter))  // title lands at x = 112
-
-                    // Title block: 16dp below the poster's top in BOTH detents
-                    // (mock HALF y=54, FULL y=64 — posterTop + 16).
+                    // Right column (§2.3): pills row on top, title + expandable
+                    // synopsis in the middle — heightIn anchors it to the
+                    // poster's 108dp optical line. Colors are pinned to the
+                    // over-band set (the band is theme-independent imagery).
+                    var synopsisExpanded by rememberSaveable(show.url) { mutableStateOf(false) }
                     Column(
                         modifier = Modifier
                             .weight(1f)
-                            .offset(y = 16.dp)
+                            .heightIn(min = posterH)
+                            .offset(y = 16.dp),
+                        verticalArrangement = Arrangement.SpaceBetween
                     ) {
-                        Text(
-                            text = show.title,
-                            fontSize = 20.sp,               // CONTRACT: 20sp/ExtraBold
-                            fontWeight = FontWeight.ExtraBold,
-                            lineHeight = 24.sp,
-                            color = Color.White,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        // Meta line: seasons · eps. User directive 2026-10-15 — the
-                        // site stays in the model, the ℹ️ info panel and the journal;
-                        // presentation never paints it. Blank parts (synthetic
-                        // Downloads-series cards) never join the line.
-                        val metaLine = listOf(
-                            if (episodes.isEmpty()) null else
-                                if (seasonGroups.size > 1) "${seasonGroups.size} seasons" else null,
-                            if (episodes.isEmpty()) null else "${episodes.size} eps"
-                        ).filterNotNull().filter { it.isNotBlank() }.joinToString(" · ")
-                        if (metaLine.isNotBlank()) {
-                            Text(
-                                text = metaLine,
-                                fontSize = 11.sp,               // CONTRACT: 11sp text-sub
-                                color = SheetTextSub,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.padding(top = 6.dp)
-                            )
+                        // Top row: source badge pill + episode count pill (+
+                        // seasons when the sheet really spans several), leaving
+                        // the trailing 36dp lane the ✕ circle occupies.
+                        val badgeLine = buildList {
+                            if (show.site.isNotBlank()) add(show.site.uppercase())
+                            if (episodes.isNotEmpty()) add("${episodes.size} EPS")
+                            if (seasonGroups.size > 1) add("${seasonGroups.size} SEASONS")
                         }
-                        // Selection summary pill (CONTRACT): bold-white count +
-                        // size on black-35%, hairline border — only when a
-                        // selection exists.
-                        if (uniqueSelectedCount > 0) {
+                        if (badgeLine.isNotEmpty()) {
+                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                badgeLine.forEachIndexed { i, label ->
+                                    Text(
+                                        text = label,
+                                        fontSize = 9.sp,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        letterSpacing = 0.8.sp,
+                                        color = if (i == 0) Color(0xFFFFFFFF) else Color.White.copy(alpha = 0.72f),
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(Radius.pill))
+                                            .background(
+                                                if (i == 0) Color.White.copy(alpha = 0.16f)
+                                                else Color.Black.copy(alpha = 0.35f)
+                                            )
+                                            .border(1.dp, BandHairline, RoundedCornerShape(Radius.pill))
+                                            .padding(horizontal = 8.dp, vertical = 3.dp)
+                                    )
+                                }
+                            }
+                        }
+
+                        Column {
                             Text(
-                                text = buildAnnotatedString {
-                                    withStyle(SpanStyle(color = Color.White, fontWeight = FontWeight.ExtraBold)) {
-                                        append("$uniqueSelectedCount selected")
-                                    }
-                                    selectedSizeLabel?.let { append(" · $it") }
-                                },
-                                fontSize = 10.sp,               // CONTRACT: 10sp/800
-                                fontWeight = FontWeight.ExtraBold,
-                                color = SheetTextSub,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier
-                                    .padding(top = 10.dp)
-                                    .clip(RoundedCornerShape(Radius.pill))
-                                    .background(Color.Black.copy(alpha = 0.35f))
-                                    .border(1.dp, SheetHairline, RoundedCornerShape(Radius.pill))
-                                    .padding(horizontal = 10.dp, vertical = 5.dp)
+                                text = show.title,
+                                fontSize = 18.sp,               // §2.3: 18sp bold
+                                fontWeight = FontWeight.Bold,
+                                lineHeight = 23.sp,
+                                color = Color(0xFFF4F4F6),
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis
                             )
+                            // §2.3 synopsis restore: the series write-up the
+                            // ViewModel already carries (drawerSynopsis), right
+                            // under the title; tap toggles 2 ↔ 8 lines.
+                            if (showSynopsis.isNotBlank()) {
+                                Text(
+                                    text = showSynopsis,
+                                    fontSize = 12.sp,
+                                    lineHeight = 16.sp,
+                                    color = Color.White.copy(alpha = 0.72f),
+                                    maxLines = if (synopsisExpanded) 8 else 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier
+                                        .padding(top = 4.dp)
+                                        .clickable { synopsisExpanded = !synopsisExpanded }
+                                )
+                            }
                         }
                     }
 
-                    Spacer(modifier = Modifier.width(12.dp))
-
-                    // ── CLOSE ✕: 38dp glass circle at right 16 ──
+                    // ── CLOSE ✕: 38dp glass circle at right 16 — inset top 12
+                    //    from the post-status-bar header line per §2.2. ──
                     Box(
                         modifier = Modifier
                             .offset(y = closeTopOffset)
@@ -792,7 +855,7 @@ fun EpisodeDrawer(
                             // approximated by the translucent fill alone.
                             .clip(CircleShape)
                             .background(Color.Black.copy(alpha = 0.72f))
-                            .border(1.dp, SheetHairline, CircleShape)
+                            .border(1.dp, BandHairline, CircleShape)
                             .clickable { onDismiss() },
                         contentAlignment = Alignment.Center
                     ) {
@@ -805,11 +868,10 @@ fun EpisodeDrawer(
                     }
                 }
 
-                // ── CONTENT REGION: everything from listTop down is ONE LazyColumn
-                //    (chips → range[FULL only] → season slabs → rows), so HALF gets
-                //    four rows + a peek in 511dp ((511−214)/72 = 4.1) and FULL gets
-                //    one continuous scroll under the sticky footer. Loading and
-                //    failure states occupy the same box (no content jumps). ──
+                // ── CONTENT REGION (§2.1/§2.3/§2.4): from listTop down, a pinned
+                //    Column = Selection Rail (chips + toggleable range field)
+                //    then the episode LazyColumn — so the controls NEVER scroll
+                //    away and the list is the only thing that scrolls. ──
                 Box(
                     modifier = Modifier
                         .offset(y = listTop)
@@ -834,187 +896,211 @@ fun EpisodeDrawer(
                             )
                         }
                         else -> {
-                            LazyColumn(
-                                state = listState,
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .nestedScroll(scrollConnection),
-                                contentPadding = PaddingValues(
-                                    start = gutter,
-                                    end = gutter,
-                                    // FULL: keep the last rows reachable above the
-                                    // 76dp sticky footer + gesture nav bar; HALF has
-                                    // no footer — a breathing gap + the nav bar.
-                                    bottom = (if (isFull) 92.dp else 24.dp) + navBottomDp
-                                )
-                            ) {
-                                // ── SEASON CHIPS ROW (item 0 → chips land on listTop) ──
-                                item(key = "chips") {
-                                    Row(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .horizontalScroll(rememberScrollState())
-                                            .padding(bottom = 16.dp),  // HALF: 166+32+16 = rows @ 214
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                    ) {
-                                        // All Chip
-                                        val isAllSelected = selectedUrls.size == episodes.size
+                            // §2.4 conditional range selector: hidden by default;
+                            // the "Range" toggle chip only exists when the show
+                            // has more than 6 episodes (Teetotaler, 2 eps, never
+                            // renders a giant OutlinedTextField again).
+                            var showRangeInput by remember(show.url) { mutableStateOf(false) }
+                            Column(modifier = Modifier.fillMaxSize()) {
+                                // ── SELECTION RAIL (pinned): All · [Remaining] ·
+                                //    [Seasons…] · [Range] · Clear. ──
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .horizontalScroll(rememberScrollState())
+                                        .padding(start = gutter, end = gutter, bottom = 12.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    // All Chip
+                                    val isAllSelected = selectedUrls.size == episodes.size
+                                    DrawerChip(
+                                        label = "All (${episodes.size})",
+                                        selected = isAllSelected,
+                                        onClick = {
+                                            updateSelected(
+                                                if (isAllSelected) emptySet() else episodes.map { it.url }.toSet()
+                                            )
+                                        }
+                                    )
+
+                                    // Remaining Episodes Chip (when some episodes are
+                                    // already downloaded/queued — Track 4)
+                                    if (downloadedOrQueuedUrls.isNotEmpty() && remainingEpisodes.isNotEmpty()) {
+                                        val isRemainingSelected = remainingEpisodes.all { it.url in selectedUrls }
                                         DrawerChip(
-                                            label = "All (${episodes.size})",
-                                            selected = isAllSelected,
+                                            label = "Remaining (${remainingEpisodes.size})",
+                                            selected = isRemainingSelected,
                                             onClick = {
                                                 updateSelected(
-                                                    if (isAllSelected) emptySet() else episodes.map { it.url }.toSet()
+                                                    if (isRemainingSelected) emptySet() else remainingEpisodes.map { it.url }.toSet()
+                                                )
+                                            },
+                                            leading = {
+                                                Icon(
+                                                    Icons.Rounded.Download,
+                                                    contentDescription = null,
+                                                    tint = if (isRemainingSelected) pal.chipInk else pal.textSub,
+                                                    modifier = Modifier.size(13.dp)
                                                 )
                                             }
                                         )
+                                    }
 
-                                        // Remaining Episodes Chip (when some episodes are
-                                        // already downloaded/queued — Track 4)
-                                        if (downloadedOrQueuedUrls.isNotEmpty() && remainingEpisodes.isNotEmpty()) {
-                                            val isRemainingSelected = remainingEpisodes.all { it.url in selectedUrls }
+                                    // Individual Season Chips (compact "S1 (10)" per mock)
+                                    if (seasonGroups.size > 1) {
+                                        for ((sNum, sEps) in seasonGroups) {
+                                            val isSeasonSelected = sEps.all { it.url in selectedUrls }
                                             DrawerChip(
-                                                label = "Remaining (${remainingEpisodes.size})",
-                                                selected = isRemainingSelected,
+                                                label = "S$sNum (${sEps.size})",
+                                                selected = isSeasonSelected,
                                                 onClick = {
+                                                    val seasonUrls = sEps.map { it.url }.toSet()
                                                     updateSelected(
-                                                        if (isRemainingSelected) emptySet() else remainingEpisodes.map { it.url }.toSet()
-                                                    )
-                                                },
-                                                leading = {
-                                                    Icon(
-                                                        Icons.Rounded.Download,
-                                                        contentDescription = null,
-                                                        tint = if (isRemainingSelected) SheetChipInk else SheetTextSub,
-                                                        modifier = Modifier.size(13.dp)
+                                                        if (isSeasonSelected) selectedUrls - seasonUrls else selectedUrls + seasonUrls
                                                     )
                                                 }
                                             )
                                         }
+                                    }
 
-                                        // Individual Season Chips (compact "S1 (10)" per mock)
-                                        if (seasonGroups.size > 1) {
-                                            for ((sNum, sEps) in seasonGroups) {
-                                                val isSeasonSelected = sEps.all { it.url in selectedUrls }
-                                                DrawerChip(
-                                                    label = "S$sNum (${sEps.size})",
-                                                    selected = isSeasonSelected,
-                                                    onClick = {
-                                                        val seasonUrls = sEps.map { it.url }.toSet()
-                                                        updateSelected(
-                                                            if (isSeasonSelected) selectedUrls - seasonUrls else selectedUrls + seasonUrls
-                                                        )
+                                    // §2.4: Range toggle chip, only past 6 episodes.
+                                    if (episodes.size > 6) {
+                                        DrawerChip(
+                                            label = "Range",
+                                            selected = showRangeInput,
+                                            onClick = { showRangeInput = !showRangeInput },
+                                            leading = {
+                                                Icon(
+                                                    Icons.Rounded.FormatListNumbered,
+                                                    contentDescription = null,
+                                                    tint = if (showRangeInput) pal.chipInk else pal.textSub,
+                                                    modifier = Modifier.size(13.dp)
+                                                )
+                                            }
+                                        )
+                                    }
+
+                                    // Clear Chip — neutral (no status color fills
+                                    // outside the failure box, palette doctrine).
+                                    if (selectedEpisodes.isNotEmpty()) {
+                                        DrawerChip(
+                                            label = "Clear (${selectedEpisodes.size})",
+                                            selected = false,
+                                            onClick = { updateSelected(emptySet()) },
+                                            leading = {
+                                                Icon(
+                                                    Icons.Rounded.Close,
+                                                    contentDescription = null,
+                                                    tint = pal.textSub,
+                                                    modifier = Modifier.size(13.dp)
+                                                )
+                                            }
+                                        )
+                                    }
+                                }
+
+                                // §2.4 range input: appears ONLY through the chip.
+                                AnimatedVisibility(visible = showRangeInput && episodes.size > 6) {
+                                    OutlinedTextField(
+                                        value = rangeText,
+                                        onValueChange = {
+                                            rangeText = it
+                                            applyRange(it)
+                                        },
+                                        placeholder = {
+                                            Text(
+                                                "Range (e.g. 1-5, 8, 10)",
+                                                color = pal.textMuted,
+                                                fontSize = 12.5.sp
+                                            )
+                                        },
+                                        singleLine = true,
+                                        keyboardOptions = KeyboardOptions(
+                                            keyboardType = KeyboardType.Text,
+                                            imeAction = ImeAction.Done
+                                        ),
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(start = gutter, end = gutter)
+                                            .height(42.dp),
+                                        colors = OutlinedTextFieldDefaults.colors(
+                                            focusedContainerColor = pal.card,
+                                            unfocusedContainerColor = pal.card,
+                                            focusedBorderColor = pal.textSub,
+                                            unfocusedBorderColor = pal.hairline,
+                                            focusedTextColor = pal.textPrimary,
+                                            unfocusedTextColor = pal.textPrimary,
+                                            cursorColor = pal.textPrimary
+                                        ),
+                                        shape = RoundedCornerShape(Radius.md)
+                                    )
+                                }
+
+                                Spacer(modifier = Modifier.height(4.dp))
+
+                                LazyColumn(
+                                    state = listState,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .weight(1f)
+                                        .nestedScroll(scrollConnection),
+                                    contentPadding = PaddingValues(
+                                        start = gutter,
+                                        end = gutter,
+                                        // The sticky footer is ALWAYS composed (§2.1),
+                                        // at HALF too — keep the last rows reachable
+                                        // above it + the gesture nav bar.
+                                        bottom = 92.dp + navBottomDp
+                                    )
+                                ) {
+                                    // ── SEASON SLABS + GROUPED INSET CONTAINERS
+                                    //    (§2.5): each season renders as one inset
+                                    //    surface block — rows are compact 50dp-inset
+                                    //    rows separated by hairline dividers, no more
+                                    //    separate floating bordered cards. ──
+                                    seasonGroups.forEach { (season, seasonEpisodes) ->
+                                        item(key = "season-$season") {
+                                            val isExpanded = season in expandedSeasons
+                                            // Season slab (CONTRACT): uppercase micro-label +
+                                            // full-width hairline rule; tap still collapses the
+                                            // season (existing behavior, chevron dropped per mock).
+                                            Row(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .clickable {
+                                                        expandedSeasons =
+                                                            if (isExpanded) expandedSeasons - season else expandedSeasons + season
                                                     }
+                                                    .padding(top = 14.dp, bottom = 8.dp),
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                            ) {
+                                                Text(
+                                                    text = "Season $season · ${seasonEpisodes.size} episodes".uppercase(),
+                                                    color = pal.textMuted,
+                                                    fontSize = 10.sp,
+                                                    fontWeight = FontWeight.ExtraBold,
+                                                    letterSpacing = 1.4.sp
+                                                )
+                                                Box(
+                                                    modifier = Modifier
+                                                        .weight(1f)
+                                                        .height(1.dp)
+                                                        .background(pal.hairline)
                                                 )
                                             }
                                         }
-
-                                        // Clear Chip — neutral (no status color fills
-                                        // outside the failure box, palette doctrine).
-                                        if (selectedEpisodes.isNotEmpty()) {
-                                            DrawerChip(
-                                                label = "Clear (${selectedEpisodes.size})",
-                                                selected = false,
-                                                onClick = { updateSelected(emptySet()) },
-                                                leading = {
-                                                    Icon(
-                                                        Icons.Rounded.Close,
-                                                        contentDescription = null,
-                                                        tint = SheetTextSub,
-                                                        modifier = Modifier.size(13.dp)
-                                                    )
-                                                }
-                                            )
-                                        }
-                                    }
-                                }
-
-                                // ── RANGE FIELD: contract 42dp, radius 12, card bg —
-                                //    visible only at FULL (hidden at HALF). Its top lands
-                                //    exactly at mock y=224 (176 + chips 32 + gap 16). ──
-                                if (isFull) {
-                                    item(key = "range") {
-                                        Box(modifier = Modifier.padding(bottom = 16.dp)) {
-                                            OutlinedTextField(
-                                                value = rangeText,
-                                                onValueChange = {
-                                                    rangeText = it
-                                                    applyRange(it)
-                                                },
-                                                placeholder = {
-                                                    Text(
-                                                        "Range (e.g. 1-5, 8, 10)",
-                                                        color = SheetTextMuted,
-                                                        fontSize = 12.5.sp
-                                                    )
-                                                },
-                                                singleLine = true,
-                                                keyboardOptions = KeyboardOptions(
-                                                    keyboardType = KeyboardType.Text,
-                                                    imeAction = ImeAction.Done
-                                                ),
-                                                modifier = Modifier
-                                                    .fillMaxWidth()
-                                                    .height(42.dp),
-                                                colors = OutlinedTextFieldDefaults.colors(
-                                                    focusedContainerColor = SheetCard,
-                                                    unfocusedContainerColor = SheetCard,
-                                                    focusedBorderColor = Color.White.copy(alpha = 0.35f),
-                                                    unfocusedBorderColor = SheetHairline,
-                                                    focusedTextColor = SheetTextPrimary,
-                                                    unfocusedTextColor = SheetTextPrimary,
-                                                    cursorColor = SheetTextPrimary
-                                                ),
-                                                shape = RoundedCornerShape(Radius.md)
-                                            )
-                                        }
-                                    }
-                                }
-
-                                // ── SEASON SLABS + EPISODE ROWS (72dp rhythm: 64 + 8) ──
-                                seasonGroups.forEach { (season, seasonEpisodes) ->
-                                    item(key = "season-$season") {
-                                        val isExpanded = season in expandedSeasons
-                                        // Season slab (CONTRACT): uppercase micro-label +
-                                        // full-width hairline rule; tap still collapses the
-                                        // season (existing behavior, chevron dropped per mock).
-                                        Row(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .clickable {
-                                                    expandedSeasons =
-                                                        if (isExpanded) expandedSeasons - season else expandedSeasons + season
-                                                }
-                                                .padding(top = 14.dp, bottom = 8.dp),
-                                            verticalAlignment = Alignment.CenterVertically,
-                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                        ) {
-                                            Text(
-                                                text = "Season $season · ${seasonEpisodes.size} episodes".uppercase(),
-                                                color = SheetTextMuted,
-                                                fontSize = 10.sp,
-                                                fontWeight = FontWeight.ExtraBold,
-                                                letterSpacing = 1.4.sp
-                                            )
-                                            Box(
-                                                modifier = Modifier
-                                                    .weight(1f)
-                                                    .height(1.dp)
-                                                    .background(SheetHairline)
-                                            )
-                                        }
-                                    }
-                                    if (season in expandedSeasons) {
-                                        itemsIndexed(
-                                            items = seasonEpisodes,
-                                            key = { i, ep -> "season-$season-${ep.url}|$i" }
-                                        ) { _, ep ->
-                                            val isSelected = ep.url in selectedUrls
-                                            Box(modifier = Modifier.padding(bottom = 8.dp)) {
+                                        if (season in expandedSeasons) {
+                                            itemsIndexed(
+                                                items = seasonEpisodes,
+                                                key = { i, ep -> "season-$season-${ep.url}|$i" }
+                                            ) { i, ep ->
+                                                val isSelected = ep.url in selectedUrls
+                                                val isDownloaded = ep.url in downloadedOrQueuedUrls
                                                 EpisodeRow(
                                                     episode = ep,
                                                     isSelected = isSelected,
-                                                    isDownloaded = ep.url in downloadedOrQueuedUrls,
+                                                    isDownloaded = isDownloaded,
                                                     onToggle = {
                                                         hapticView.tick()
                                                         updateSelected(
@@ -1046,7 +1132,19 @@ fun EpisodeDrawer(
                                                             )
                                                             onDismiss()
                                                         }
-                                                    }
+                                                    },
+                                                    // §2.6 sanitizer: raw scraper labels
+                                                    // ("01 Download") and bracketed ids
+                                                    // never paint; junk titles fall back
+                                                    // to the real episode number.
+                                                    displayTitle = TitleFormatting.sanitizeEpisodeTitle(
+                                                        rawTitle = ep.title,
+                                                        index = if (ep.episodeNum > 0) ep.episodeNum - 1 else i,
+                                                        seasonNumber = season
+                                                    ),
+                                                    groupIndex = i,
+                                                    groupSize = seasonEpisodes.size,
+                                                    groupColor = pal.group
                                                 )
                                             }
                                         }
@@ -1057,11 +1155,13 @@ fun EpisodeDrawer(
                     }
                 }
 
-                // ── STICKY FOOTER (FULL only): 76dp, sunk-97%, top hairline,
-                //    padding 12/16 + navigationBars inset. Left = selection
-                //    summary with bold-white counts; right = white Download pill. ──
+                // ── STICKY FOOTER (§2.1, ALWAYS visible once episodes exist —
+                //    at HALF too): 76dp, sunk-97%, top hairline, padding 12/16 +
+                //    navigationBars inset. Left = selection summary with
+                //    bold-white counts; right = the Download pill, rendered as
+                //    "Download All (N)" while nothing is picked (§2.7). ──
                 AnimatedVisibility(
-                    visible = isFull && episodes.isNotEmpty(),
+                    visible = episodes.isNotEmpty(),
                     modifier = Modifier.align(Alignment.BottomCenter),
                     enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
                     exit = slideOutVertically(targetOffsetY = { it }) + fadeOut()
@@ -1069,13 +1169,13 @@ fun EpisodeDrawer(
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .background(SheetSunk.copy(alpha = 0.97f))
+                            .background(pal.sunk.copy(alpha = 0.97f))
                     ) {
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .height(1.dp)
-                                .background(SheetHairline)
+                                .background(pal.hairline)
                         )
                         Row(
                             modifier = Modifier
@@ -1090,13 +1190,13 @@ fun EpisodeDrawer(
                             Text(
                                 text = buildAnnotatedString {
                                     append("Selected ")
-                                    withStyle(SpanStyle(color = Color.White, fontWeight = FontWeight.ExtraBold)) {
+                                    withStyle(SpanStyle(color = pal.textPrimary, fontWeight = FontWeight.ExtraBold)) {
                                         append("$uniqueSelectedCount episode${if (uniqueSelectedCount == 1) "" else "s"}")
                                     }
                                     selectedSizeLabel?.let { append(" · $it") }
                                 },
                                 fontSize = 12.5.sp,             // CONTRACT: 12.5sp text-sub
-                                color = SheetTextSub,
+                                color = pal.textSub,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                                 modifier = Modifier.weight(1f, fill = false)
@@ -1105,25 +1205,30 @@ fun EpisodeDrawer(
                             Spacer(modifier = Modifier.width(12.dp))
 
                             val queueSrc = remember { MutableInteractionSource() }
+                            val isDownloadAll = uniqueSelectedCount == 0
                             Button(
                                 onClick = {
                                     val uniqueCount = selectedEpisodes.distinctBy { it.url }.size
-                                    if (uniqueCount > 10) {
-                                        showBatchConfirmation = true
-                                    } else {
-                                        enqueueSelected()
+                                    pendingForceAll = uniqueCount == 0
+                                    when {
+                                        // §2.7 Download All: every listed episode, batch-gated.
+                                        pendingForceAll ->
+                                            if (episodes.distinctBy { it.url }.size > 10) showBatchConfirmation = true
+                                            else enqueueSelected(forceAll = true)
+                                        uniqueCount > 10 -> showBatchConfirmation = true
+                                        else -> enqueueSelected()
                                     }
                                 },
-                                enabled = uniqueSelectedCount > 0 && !isEnqueuing && !enqueued,
+                                enabled = !isEnqueuing && !enqueued,
                                 interactionSource = queueSrc,
                                 modifier = Modifier
                                     .height(44.dp)              // CONTRACT: ~44dp pill
                                     .pressScale(queueSrc),
                                 colors = ButtonDefaults.buttonColors(
-                                    containerColor = SheetTextPrimary,
-                                    contentColor = SheetChipInk,
-                                    disabledContainerColor = SheetTextPrimary.copy(alpha = 0.35f),
-                                    disabledContentColor = SheetChipInk.copy(alpha = 0.60f)
+                                    containerColor = pal.textPrimary,
+                                    contentColor = pal.chipInk,
+                                    disabledContainerColor = pal.textPrimary.copy(alpha = 0.35f),
+                                    disabledContentColor = pal.chipInk.copy(alpha = 0.60f)
                                 ),
                                 shape = RoundedCornerShape(Radius.pill),
                                 contentPadding = PaddingValues(horizontal = 20.dp)
@@ -1132,7 +1237,7 @@ fun EpisodeDrawer(
                                     CircularProgressIndicator(
                                         modifier = Modifier.size(16.dp),
                                         strokeWidth = 2.dp,
-                                        color = SheetChipInk
+                                        color = pal.chipInk
                                     )
                                     Spacer(modifier = Modifier.width(6.dp))
                                     Text("Queueing...", fontSize = 12.5.sp, fontWeight = FontWeight.ExtraBold)
@@ -1143,7 +1248,11 @@ fun EpisodeDrawer(
                                         modifier = Modifier.size(15.dp)
                                     )
                                     Spacer(modifier = Modifier.width(6.dp))
-                                    Text("Download", fontSize = 12.5.sp, fontWeight = FontWeight.ExtraBold)
+                                    Text(
+                                        if (isDownloadAll) "Download All (${episodes.size})" else "Download",
+                                        fontSize = 12.5.sp,
+                                        fontWeight = FontWeight.ExtraBold
+                                    )
                                 }
                             }
                         }
@@ -1154,7 +1263,7 @@ fun EpisodeDrawer(
                     val uniqueCount = selectedEpisodes.distinctBy { it.url }.size
                     AlertDialog(
                         onDismissRequest = { showBatchConfirmation = false },
-                        title = { Text("Queue $uniqueCount episodes?") },
+                        title = { Text("Queue ${if (pendingForceAll) episodes.distinctBy { it.url }.size else uniqueCount} episodes?") },
                         text = {
                             Text(
                                 "This starts one download task per selected episode and may use a large amount of mobile data."
@@ -1165,10 +1274,10 @@ fun EpisodeDrawer(
                                 enabled = !isEnqueuing && !enqueued,
                                 onClick = {
                                     showBatchConfirmation = false
-                                    enqueueSelected()
+                                    enqueueSelected(forceAll = pendingForceAll)
                                 }
                             ) {
-                                Text("Queue $uniqueCount")
+                                Text("Queue ${if (pendingForceAll) episodes.distinctBy { it.url }.size else uniqueCount}")
                             }
                         },
                         dismissButton = {
@@ -1184,22 +1293,32 @@ fun EpisodeDrawer(
 }
 
 /**
- * Episode row — the CONTRACT row spec: 64dp tall, card bg, hairline border,
- * radius 14; number tile 34dp radius 9 (sunk bg, hairline, 11.5sp/800);
- * title 12sp/700 single line; quality meta 10sp muted mono (only the parts the
- * data actually provides — quality/codec/size, blanks skipped, nothing
- * invented); 24dp info circle (hairline border, italic i); 19dp checkbox
- * radius 6 (unselected: white-35% 1.5dp border; selected: white #F2F5F9 fill +
- * dark #0B0E13 check). The row click also toggles; both consume the tap.
- * Rows already downloaded/queued stay selectable but dim (Track 4 scan-ability).
+ * Episode row — §2.5 grouped-inset row: a compact `heightIn(min = 50.dp)`
+ * row inside its season's inset container block (the block paints itself,
+ * index-aware: first row rounds its top corners, last row its bottom, and a
+ * 0.5dp hairline divider sits above every following row — the old separate
+ * 64dp floating bordered cards are gone while LazyColumn recycling KEYS are
+ * preserved, which a single container item would have flattened for
+ * 100+-episode seasons).
+ *
+ * Geometry per row: monospace episode number (13sp, own 28dp column — the
+ * bulky sunk number TILE is gone), sanitized title 14sp medium with an
+ * inline emerald "✓ Downloaded" pill when completed (row content dims to
+ * 0.78f), quality/codec/size meta when the data carries it, the 24dp info
+ * circle (Feature #26 preview — real per-episode metadata exists, so the
+ * spec's "hide unless metadata" condition is met), and a 22dp rounded check
+ * indicator (selected = white fill + dark check; unselected = hairline).
  */
-@Composable
 fun EpisodeRow(
     episode: EpisodeItem,
     isSelected: Boolean,
     onToggle: () -> Unit,
     isDownloaded: Boolean = false,
-    onDownloadSingle: () -> Unit
+    onDownloadSingle: () -> Unit,
+    displayTitle: String = episode.title,
+    groupIndex: Int = 0,
+    groupSize: Int = 1,
+    groupColor: Color = GroupedInsetDark
 ) {
     // Feature #26: details preview BEFORE enqueue — an info toggle that shows
     // which locker will serve this episode and the filename its URL carries,
@@ -1211,63 +1330,84 @@ fun EpisodeRow(
     // just opened the moment it recycles off-screen.
     var expanded by rememberSaveable { mutableStateOf(false) }
     val (lockerHost, lockerFile) = remember(episode.url) { lockerPreview(episode.url) }
+    // Row chrome rides the same palette instance the caller painted the
+    // group block with (resolved per composition — the sheet is one theme
+    // for its lifetime).
+    val pal = sheetPalette(AnonTheme.colors.isDark)
+    val groupShape = groupedRowShape(groupIndex, groupSize)
 
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
-            .background(SheetCard)
-            .border(1.dp, SheetHairline, RoundedCornerShape(14.dp))
+            .clip(groupShape)
+            .background(groupColor)
     ) {
+        if (groupIndex > 0) {
+            // 0.5dp hairline divider flush to the group's previous row (§2.5).
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(0.5.dp)
+                    .background(pal.hairline)
+            )
+        }
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(64.dp)
+                .heightIn(min = 50.dp)
                 .clickable(onClick = onToggle)
-                .padding(horizontal = 12.dp),
+                .padding(horizontal = 14.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            // Episode-number tile: the row's spine. Scanning a 130-row list is a
-            // number-lookup, and a 34dp tile keeps every number on the same
-            // optical left edge — the checkbox never has to do this job.
-            Box(
-                modifier = Modifier
-                    .size(34.dp)
-                    .clip(RoundedCornerShape(9.dp))
-                    .background(SheetSunk)
-                    .border(1.dp, SheetHairline, RoundedCornerShape(9.dp)),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = "%02d".format(episode.episodeNum),
-                    fontSize = 11.5.sp,
-                    fontWeight = FontWeight.ExtraBold,
-                    color = if (isDownloaded) SheetTextMuted else SheetTextSub
-                )
-            }
+            // Episode number: clean monospace column, its own left edge.
+            Text(
+                text = "%02d".format(episode.episodeNum),
+                fontSize = 13.sp,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.SemiBold,
+                color = if (isDownloaded) pal.textMuted else pal.textSub,
+                modifier = Modifier.width(28.dp)
+            )
 
             Column(
-                modifier = Modifier.weight(1f),
+                modifier = Modifier
+                    .weight(1f)
+                    .alpha(if (isDownloaded) 0.78f else 1f),
                 verticalArrangement = Arrangement.Center
             ) {
-                Text(
-                    text = episode.title,
-                    // Already-downloaded rows dim (Track 4): still selectable — a
-                    // re-download is a legitimate choice — but the muted title
-                    // makes the state scannable in a 130-row list.
-                    color = if (isDownloaded) SheetTextSub else SheetTextPrimary,
-                    fontSize = 12.sp,                    // CONTRACT: 12sp/700
-                    fontWeight = FontWeight.Bold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = displayTitle,
+                        color = if (isDownloaded) pal.textSub else pal.textPrimary,
+                        fontSize = 14.sp,                    // §2.5: 14sp medium
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false)
+                    )
+                    if (isDownloaded) {
+                        Spacer(modifier = Modifier.width(6.dp))
+                        // §2.6 emerald state pill: ✓ Downloaded / already queued —
+                        // a scannable tick in a 130-row list, colour+word+glyph.
+                        Text(
+                            text = "✓ Downloaded",
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            letterSpacing = 0.4.sp,
+                            color = pal.emeraldText,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(Radius.pill))
+                                .background(pal.emeraldTint)
+                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                        )
+                    }
+                }
                 // Subtitle: quality · codec · size — parts derive in order
                 // (blanks skipped, joined " · ") from data already in hand;
                 // when the source offers nothing the whole line is omitted —
-                // nothing is invented. User directive 2026-10-15 — presentation
-                // never paints site/resolver/locker-host names here; the host
-                // stays behind the ℹ️ panel below.
+                // nothing is invented. The locker host stays behind the ℹ️
+                // panel below (presentation never paints resolver names).
                 val qualityTag = qualityInText.find(episode.title)?.value?.lowercase()
                     ?: qualityInText.find(lockerFile)?.value?.lowercase()
                 val codecTag = codecInText.find(lockerFile)?.value?.lowercase()
@@ -1279,8 +1419,8 @@ fun EpisodeRow(
                 if (subLine.isNotBlank()) {
                     Text(
                         text = subLine,
-                        color = SheetTextMuted,
-                        fontSize = 10.sp,                // contract 9.5 → 10sp user floor
+                        color = pal.textMuted,
+                        fontSize = 10.sp,
                         fontFamily = FontFamily.Monospace,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
@@ -1294,7 +1434,7 @@ fun EpisodeRow(
                 modifier = Modifier
                     .size(24.dp)
                     .clip(CircleShape)
-                    .border(1.dp, if (expanded) SheetTextSub else SheetHairline, CircleShape)
+                    .border(1.dp, if (expanded) pal.textSub else pal.hairline, CircleShape)
                     .clickable { expanded = !expanded },
                 contentAlignment = Alignment.Center
             ) {
@@ -1303,21 +1443,22 @@ fun EpisodeRow(
                     fontSize = 11.sp,
                     fontStyle = FontStyle.Italic,
                     fontWeight = FontWeight.Bold,
-                    color = if (expanded) SheetTextPrimary else SheetTextMuted
+                    color = if (expanded) pal.textPrimary else pal.textMuted
                 )
             }
 
-            // 19dp checkbox (CONTRACT, radius 6): selected = white #F2F5F9 fill +
-            // dark #0B0E13 check; unselected = white-35% 1.5dp border.
+            // §2.5 right control: ONE 22dp rounded check indicator (was 19dp):
+            // selected = white #F4F4F6 fill + dark #0B0B0E check; unselected =
+            // horizontal hairline box.
             Box(
                 modifier = Modifier
-                    .size(19.dp)
-                    .clip(RoundedCornerShape(6.dp))
+                    .size(22.dp)
+                    .clip(RoundedCornerShape(7.dp))
                     .then(
                         if (isSelected) {
-                            Modifier.background(SheetTextPrimary)
+                            Modifier.background(pal.textPrimary)
                         } else {
-                            Modifier.border(1.5.dp, Color.White.copy(alpha = 0.35f), RoundedCornerShape(6.dp))
+                            Modifier.border(1.5.dp, Color.White.copy(alpha = 0.35f), RoundedCornerShape(7.dp))
                         }
                     )
                     .clickable(onClick = onToggle),
@@ -1327,8 +1468,8 @@ fun EpisodeRow(
                     Icon(
                         imageVector = Icons.Rounded.Check,
                         contentDescription = if (isSelected) "Selected" else "Not selected",
-                        tint = SheetChipInk,
-                        modifier = Modifier.size(13.dp)
+                        tint = pal.chipInk,
+                        modifier = Modifier.size(14.dp)
                     )
                 }
             }
@@ -1338,7 +1479,7 @@ fun EpisodeRow(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(start = 12.dp, end = 12.dp, bottom = 12.dp)
+                    .padding(start = 14.dp, end = 14.dp, bottom = 12.dp)
             ) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     PreviewChip(label = "locker", value = lockerHost)
@@ -1354,7 +1495,7 @@ fun EpisodeRow(
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
                         text = "Site-reported size: ${episode.sizeText}",
-                        color = SheetTextSub,
+                        color = pal.textSub,
                         fontSize = 11.sp
                     )
                 }
@@ -1369,17 +1510,17 @@ fun EpisodeRow(
                     interactionSource = singleSrc,
                     shape = RoundedCornerShape(Radius.sm),
                     colors = ButtonDefaults.filledTonalButtonColors(
-                        containerColor = SheetSunk,
-                        contentColor = SheetTextPrimary
+                        containerColor = pal.sunk,
+                        contentColor = pal.textPrimary
                     ),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, SheetHairline),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, pal.hairline),
                     modifier = Modifier.pressScale(singleSrc)
                 ) {
                     Icon(
                         Icons.Rounded.DownloadForOffline,
                         contentDescription = null,
                         modifier = Modifier.size(15.dp),
-                        tint = SheetTextSub
+                        tint = pal.textSub
                     )
                     Spacer(modifier = Modifier.width(4.dp))
                     Text("Queue this episode", fontSize = 11.5.sp, fontWeight = FontWeight.SemiBold)
@@ -1387,7 +1528,7 @@ fun EpisodeRow(
                 Spacer(modifier = Modifier.height(2.dp))
                 Text(
                     text = "Queue now, or check this link on a browser first.",
-                    color = SheetTextMuted,
+                    color = pal.textMuted,
                     fontSize = 10.sp,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
@@ -1398,13 +1539,16 @@ fun EpisodeRow(
 }
 
 // ═══════════════════════ LOADING (scraping) STATE ═══════════════════════
-// Must be VISIBLE on the dark sheet: skeleton rows in the EXACT episode-row
-// geometry (64dp card, 34dp tile, two bars 66%/38% in the pinned #2A303C),
-// an honest stage line, and a thin 5dp full-width accent progress track.
+// §5.1: a grouped inset container (surface-variant block, radius 14) holding
+// 5 compact 50dp shimmer rows separated by hairlines replaces the old 4
+// separate double-bordered navy boxes; the stage line reads as honest STEP
+// progress ("Step 1/2 · Finding episode pages…") and a thin 5dp accent
+// progress track sweeps beneath it.
 @Composable
 private fun DrawerLoadingState(stageText: String) {
     val reduceMotion = rememberReduceMotion()
     val skeletonX = rememberShimmerX(reduceMotion)
+    val pal = sheetPalette(AnonTheme.colors.isDark)
     val sweepState = rememberInfiniteTransition(label = "scrapeProgress").animateFloat(
         initialValue = 0f,
         targetValue = 1f,
@@ -1423,14 +1567,14 @@ private fun DrawerLoadingState(stageText: String) {
             CircularProgressIndicator(
                 modifier = Modifier.size(12.dp),
                 strokeWidth = 2.dp,
-                color = SheetAccent,
-                trackColor = SheetSkeleton
+                color = pal.accent,
+                trackColor = pal.skeleton
             )
             Text(
                 text = stageText,
                 fontSize = 12.sp,
                 fontWeight = FontWeight.SemiBold,
-                color = SheetTextSub,
+                color = pal.textSub,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
@@ -1444,62 +1588,77 @@ private fun DrawerLoadingState(stageText: String) {
                 .fillMaxWidth()
                 .height(5.dp)
                 .clip(RoundedCornerShape(Radius.pill))
-                .background(SheetSkeleton)
+                .background(pal.skeleton)
                 .drawBehind {
                     val w = size.width
                     if (w <= 0f) return@drawBehind
                     val segW = w * 0.34f
                     val x = if (reduceMotion) 0f else sweepState.value * (w - segW)
                     drawRoundRect(
-                        color = SheetAccent,
+                        color = pal.accent,
                         topLeft = Offset(x, 0f),
                         size = Size(segW, size.height),
                         cornerRadius = CornerRadius(size.height / 2f)
                     )
                 }
         )
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            repeat(5) { DrawerSkeletonRow(x = skeletonX) }
+        // §5.1 grouped container: ONE inset block, five 50dp rows, hairline
+        // dividers — the exact shape the real grouped episode list lands in.
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(14.dp))
+                .background(pal.group)
+                .border(1.dp, pal.hairline, RoundedCornerShape(14.dp))
+        ) {
+            repeat(5) { row ->
+                if (row > 0) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(0.5.dp)
+                            .background(pal.hairline)
+                    )
+                }
+                DrawerSkeletonRow(x = skeletonX, pal = pal)
+            }
         }
     }
 }
 
-/** Skeleton row in the exact 64dp episode-row geometry (CONTRACT loading). */
+/** Skeleton row in the grouped 50dp inset geometry (§5.1). */
 @Composable
-private fun DrawerSkeletonRow(x: Float) {
+private fun DrawerSkeletonRow(x: Float, pal: SheetPalette) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .height(64.dp)
-            .clip(RoundedCornerShape(14.dp))
-            .background(SheetCard)
-            .border(1.dp, SheetHairline, RoundedCornerShape(14.dp))
-            .padding(horizontal = 12.dp),
+            .heightIn(min = 50.dp)
+            .padding(horizontal = 14.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         SkeletonBox(
-            modifier = Modifier.size(34.dp),
-            shape = RoundedCornerShape(9.dp),
+            modifier = Modifier.size(22.dp),
+            shape = RoundedCornerShape(5.dp),
             x = x,
-            base = SheetSkeleton,
-            highlight = SkeletonHighlight
+            base = pal.skeleton,
+            highlight = pal.skeletonHighlight
         )
         Column(modifier = Modifier.weight(1f)) {
             SkeletonBox(
                 modifier = Modifier.fillMaxWidth(0.66f).height(10.dp),
                 shape = RoundedCornerShape(5.dp),
                 x = x,
-                base = SheetSkeleton,
-                highlight = SkeletonHighlight
+                base = pal.skeleton,
+                highlight = pal.skeletonHighlight
             )
             Spacer(modifier = Modifier.height(7.dp))
             SkeletonBox(
                 modifier = Modifier.fillMaxWidth(0.38f).height(7.dp),
                 shape = RoundedCornerShape(4.dp),
                 x = x,
-                base = SheetSkeleton,
-                highlight = SkeletonHighlight
+                base = pal.skeleton,
+                highlight = pal.skeletonHighlight
             )
         }
     }
@@ -1511,14 +1670,15 @@ private fun DrawerSkeletonRow(x: Float) {
 // on the table.
 @Composable
 private fun DrawerFailureState(reason: String, failedFetch: Boolean, onRetry: () -> Unit) {
+    val pal = sheetPalette(AnonTheme.colors.isDark)
     Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
         Spacer(modifier = Modifier.height(8.dp))
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(16.dp))
-                .background(SheetCard)
-                .border(1.dp, SheetHairline, RoundedCornerShape(16.dp))
+                .background(pal.group)
+                .border(1.dp, pal.hairline, RoundedCornerShape(16.dp))
                 .padding(14.dp)
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1527,14 +1687,14 @@ private fun DrawerFailureState(reason: String, failedFetch: Boolean, onRetry: ()
                         text = if (failedFetch) "Couldn't reach the episode locker." else "No playable episodes found.",
                         fontSize = 11.5.sp,
                         fontWeight = FontWeight.Bold,
-                        color = SheetRust
+                        color = pal.rust
                     )
                     if (reason.isNotBlank()) {
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
                             text = reason,
                             fontSize = 11.5.sp,
-                            color = SheetTextSub,
+                            color = pal.textSub,
                             lineHeight = 17.sp,
                             maxLines = 3,
                             overflow = TextOverflow.Ellipsis
@@ -1546,8 +1706,8 @@ private fun DrawerFailureState(reason: String, failedFetch: Boolean, onRetry: ()
                 Row(
                     modifier = Modifier
                         .clip(RoundedCornerShape(Radius.pill))
-                        .background(SheetRustAccent.copy(alpha = 0.14f))
-                        .border(1.dp, SheetRustBorder, RoundedCornerShape(Radius.pill))
+                        .background(pal.rustAccent.copy(alpha = 0.14f))
+                        .border(1.dp, pal.rustBorder, RoundedCornerShape(Radius.pill))
                         .clickable(onClick = onRetry)
                         .padding(horizontal = 14.dp, vertical = 8.dp)
                 ) {
@@ -1555,7 +1715,7 @@ private fun DrawerFailureState(reason: String, failedFetch: Boolean, onRetry: ()
                         text = "RETRY",
                         fontSize = 10.sp,
                         fontWeight = FontWeight.ExtraBold,
-                        color = SheetRust,
+                        color = pal.rust,
                         letterSpacing = 0.5.sp
                     )
                 }
@@ -1564,8 +1724,9 @@ private fun DrawerFailureState(reason: String, failedFetch: Boolean, onRetry: ()
     }
 }
 
-/** Season/All/Remaining/Clear chip per the mock: pill, hairline, card bg;
- *  selected = white #F2F5F9 fill with dark #0B0E13 ink. */
+/** Season/All/Remaining/Clear chip per the mock: pill, hairline, inset-card
+ *  bg; selected = text-primary fill with ink label. Palette-selected per
+ *  composition so the sheet follows dark AND light themes. */
 @Composable
 private fun DrawerChip(
     label: String,
@@ -1573,13 +1734,14 @@ private fun DrawerChip(
     onClick: () -> Unit,
     leading: (@Composable () -> Unit)? = null
 ) {
+    val pal = sheetPalette(AnonTheme.colors.isDark)
     Row(
         modifier = Modifier
             .clip(RoundedCornerShape(Radius.pill))
-            .background(if (selected) SheetTextPrimary else SheetCard)
+            .background(if (selected) pal.textPrimary else pal.card)
             .border(
                 1.dp,
-                if (selected) SheetTextPrimary else SheetHairline,
+                if (selected) pal.textPrimary else pal.hairline,
                 RoundedCornerShape(Radius.pill)
             )
             .clickable(onClick = onClick)
@@ -1592,7 +1754,7 @@ private fun DrawerChip(
             text = label,
             fontSize = 11.5.sp,
             fontWeight = if (selected) FontWeight.Bold else FontWeight.SemiBold,
-            color = if (selected) SheetChipInk else SheetTextSub
+            color = if (selected) pal.chipInk else pal.textSub
         )
     }
 }
@@ -1600,19 +1762,20 @@ private fun DrawerChip(
 /** Info-panel chip ("locker" / "file"): sunk bg + hairline, content unchanged. */
 @Composable
 private fun PreviewChip(label: String, value: String, modifier: Modifier = Modifier) {
+    val pal = sheetPalette(AnonTheme.colors.isDark)
     Row(
         modifier = modifier
             .clip(RoundedCornerShape(Radius.sm))
-            .background(SheetSunk)
-            .border(1.dp, SheetHairline, RoundedCornerShape(Radius.sm))
+            .background(pal.sunk)
+            .border(1.dp, pal.hairline, RoundedCornerShape(Radius.sm))
             .padding(horizontal = 8.dp, vertical = 3.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(4.dp)
     ) {
-        Text(label.uppercase(), color = SheetTextMuted, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+        Text(label.uppercase(), color = pal.textMuted, fontSize = 10.sp, fontWeight = FontWeight.Bold)
         Text(
             value,
-            color = SheetTextSub,
+            color = pal.textSub,
             fontSize = 11.sp,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
@@ -1685,25 +1848,112 @@ private fun sumSelectedSizeLabel(eps: List<EpisodeItem>): String? {
     }
 }
 
-// ── PINNED DARK PALETTE (drawer contract, theme-proof) ──────────────────────
-// NEVER resolve these through the app theme tokens: the shipped bug was the
-// drawer reading light-theme colors and smearing. Hexes mirror the approved
-// mockup exactly (declaration order follows the palette contract).
-private val SheetBg = Color(0xFF171B23)                 // sheet background
-private val SheetSunk = Color(0xFF12141A)               // sunk wells / footer / preview chips
-private val SheetCard = Color(0xFF1D222C)               // cards, chips, poster fallback
-private val SheetSkeleton = Color(0xFF2A303C)           // skeletons + progress track
-private val SkeletonHighlight = Color(0xFF383E4A)       // skeleton shimmer highlight (2A303C + white 7%)
-private val SheetHairline = Color.White.copy(alpha = 0.09f)
-private val SheetTextPrimary = Color(0xFFF2F5F9)        // titles, selected chip fill, button fill
-private val SheetTextSub = Color.White.copy(alpha = 0.66f)
-private val SheetTextMuted = Color.White.copy(alpha = 0.42f)
-private val SheetChipInk = Color(0xFF0B0E13)            // ink on white fills
-private val SheetAccent = Color(0xFF4FB3D9)             // progress/accent bars on dark + initials
-private val SheetRust = Color(0xFFE4908A)               // failure headline + RETRY text
-private val SheetRustAccent = Color(0xFFC25B52)         // RETRY pill fill (14% alpha at use site)
-private val SheetRustBorder = Color(0x80C25B52)         // RETRY pill border (50% alpha)
+// ── PINNED DUAL PALETTE (drawer contract, theme-proof) ──────────────────────
+// Doctrine kept: the drawer NEVER resolves colors through app theme tokens
+// mid-layout — it resolves ONE pinned SheetPalette per composition (dark or
+// light, chosen once from AnonTheme.colors.isDark). §1's obsidian values are
+// the dark instance; light carries the spec's clean light set. Hexes mirror
+// the overhaul mockup exactly.
+data class SheetPalette(
+    val bg: Color,            // sheet background (spec surface: 0xFF0B0B0E / 0xFFFFFFFF)
+    val sunk: Color,          // sticky footer / preview chips / queue wells
+    val card: Color,          // chips + range field wells (spec surfaceVariant family)
+    val group: Color,         // grouped episode inset container (spec surfaceVariant)
+    val skeleton: Color,      // skeleton + progress track base
+    val skeletonHighlight: Color,
+    val hairline: Color,      // 7% white / 8% black — never a bright opaque gray
+    val textPrimary: Color,   // 0xFFF4F4F6 / 0xFF0F1115 (spec onSurface)
+    val textSub: Color,       // 0xFF8E8E99 / 0xFF5C606B (spec onSurfaceVariant)
+    val textMuted: Color,
+    val chipInk: Color,       // ink on white/ink selected-chip fills
+    val accent: Color,        // progress/accent bars + initials
+    val rust: Color,          // failure headline + RETRY text
+    val rustAccent: Color,    // RETRY pill fill (14% alpha at use site)
+    val rustBorder: Color,
+    val emeraldText: Color,   // §2.6 "✓ Downloaded" pill text
+    val emeraldTint: Color,   // §2.6 "✓ Downloaded" pill background
+    val handle: Color         // drag-handle pill (theme-contrast on sheet bg)
+)
 
-private const val PULL_HINT = "Pull up for the full view"
-private const val STAGE_FINDING = "Finding episode pages…"
-private const val STAGE_UNLOCKING = "Unlocking stream locker…"
+private val DarkSheetPalette = SheetPalette(
+    bg = Color(0xFF0B0B0E),
+    sunk = Color(0xFF141419),
+    card = Color(0xFF141419),
+    group = Color(0xFF141419),
+    skeleton = Color(0xFF22222A),
+    skeletonHighlight = Color(0xFF2E2E38),
+    hairline = Color(0x12FFFFFF),
+    textPrimary = Color(0xFFF4F4F6),
+    textSub = Color(0xFF8E8E99),
+    textMuted = Color(0xFF84848E),
+    chipInk = Color(0xFF0B0B0E),
+    accent = Color(0xFF4FB3D9),
+    rust = Color(0xFFE4908A),
+    rustAccent = Color(0xFFC25B52),
+    rustBorder = Color(0x80C25B52),
+    emeraldText = Color(0xFF10B981),
+    emeraldTint = Color(0x1F10B981),
+    handle = Color.White.copy(alpha = 0.32f)
+)
+
+private val LightSheetPalette = SheetPalette(
+    bg = Color(0xFFFFFFFF),
+    sunk = Color(0xFFE9ECEF),
+    card = Color(0xFFF1F3F5),
+    group = Color(0xFFF1F3F5),
+    skeleton = Color(0xFFE2E6EA),
+    skeletonHighlight = Color(0xFFF0F2F4),
+    hairline = Color(0x14000000),
+    textPrimary = Color(0xFF0F1115),
+    textSub = Color(0xFF5C606B),
+    textMuted = Color(0xFF686D79),
+    chipInk = Color(0xFFFFFFFF),
+    accent = Color(0xFF0E7490),
+    rust = Color(0xFFB03E36),
+    rustAccent = Color(0xFFC25B52),
+    rustBorder = Color(0x80C25B52),
+    emeraldText = Color(0xFF059669),
+    emeraldTint = Color(0x1F059669),
+    handle = Color.Black.copy(alpha = 0.28f)
+)
+
+/** One palette per composition — the sheet never mixes dark and light roles. */
+private fun sheetPalette(isDark: Boolean): SheetPalette =
+    if (isDark) DarkSheetPalette else LightSheetPalette
+
+// Over-band constants: the art band is theme-independent dark IMAGERY, so the
+// header's poster well / accent / hairlines keep the dark values in BOTH
+// themes — light-theme text on the dark band must stay light.
+private val BandHairline = Color(0x12FFFFFF)
+private val BandPosterWell = Color(0xFF1E1E26)   // §1.4 fallback-art well
+private val BandAccent = Color(0xFF4FB3D9)       // initials on the poster well
+
+/** §2.5 grouped-inset row shape: first row rounds its top corners, last row
+ *  its bottom — interior rows stay square so the block reads as ONE surface
+ *  (the old separate floating cards are gone). */
+private fun groupedRowShape(index: Int, count: Int, radius: Dp = 14.dp): Shape {
+    if (count <= 1) return RoundedCornerShape(radius)
+    val top = if (index == 0) radius else 0.dp
+    val bottom = if (index == count - 1) radius else 0.dp
+    return RoundedCornerShape(
+        topStart = top, topEnd = top, bottomStart = bottom, bottomEnd = bottom
+    )
+}
+
+// ── §4.4 episode-sheet TTL cache (in-memory, 30 minutes) ─────────────────────
+// Keyed by `source + showUrl`; stores the last SUCCESSFUL scrape so reopening
+// a sheet paints instantly instead of re-crawling for 7-8s. The MainViewModel
+// stays untouched (strictly off-limits): this is a presentation-layer cache
+// the drawer itself populates from the state it already receives. Nothing
+// persists to disk — a process kill simply restores the old re-scrape path.
+private data class CachedEpisodeList(
+    val episodes: List<EpisodeItem>,
+    val synopsis: String,
+    val savedAtMs: Long
+)
+
+private const val EPISODE_CACHE_TTL_MS = 30L * 60L * 1000L   // §4.4: 30-minute TTL
+private val cachedEpisodeLists = ConcurrentHashMap<String, CachedEpisodeList>()
+
+private const val STAGE_FINDING = "Step 1/2 · Finding episode pages…"
+private const val STAGE_UNLOCKING = "Step 2/2 · Unlocking stream links…"

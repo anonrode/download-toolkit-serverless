@@ -15,6 +15,7 @@ import kotlin.coroutines.AbstractCoroutineContextElement
 import kotlin.coroutines.CoroutineContext
 import com.anonrode.downloader.engine.ResolveBudget
 import okhttp3.FormBody
+import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
@@ -323,13 +324,43 @@ object ResolverRegistry {
     }
 
     /** Try all usable candidates in a bounded window; first success cancels losers. */
-    suspend fun resolveAny(urls: List<String>, quality: String = "720p", maxConcurrency: Int = 3): String? {
+    suspend fun resolveAny(
+        urls: List<String>,
+        quality: String = "720p",
+        maxConcurrency: Int = 3,
+        bypassHealth: Boolean = false
+    ): String? {
         val candidates = urls.asSequence()
             .filter { it.isNotBlank() }
             .distinct()
-            .filter { com.anonrode.downloader.pipeline.HostHealth.isUsable(it) }
+            .let { seq -> if (bypassHealth) seq else seq.filter { com.anonrode.downloader.pipeline.HostHealth.isUsable(it) } }
             .toList()
-        return boundedFirstSuccess(candidates, maxConcurrency) { resolve(it, quality) }
+        // Provider-issued mirror fan-outs (nepu resolveEpisode — share-31 log,
+        // 2026-10-16 12:05, Servamp): the candidate list was handed to us by
+        // the provider THIS episode, but HostHealth's cross-session backoff
+        // ledger still pre-skipped EVERY one of them (2,189 health-gate ERR
+        // hops in one share — stale marks earned in old sessions gated the
+        // whole fan-out into a no-op and the task died on "known unavailable"
+        // without firing ONE request). bypassHealth=true drops only the
+        // PRE-JUDGE skips: this pre-filter and resolveCore's health gate.
+        // Nothing else relaxes — per-attempt ResolveBudget caps, retry and
+        // transport-failure handling run exactly as before, and HostHealth
+        // keeps recording every real outcome (recordOk/recordFail are
+        // untouched in resolveCore), so a mirror that fails again re-earns
+        // its backoff immediately while one that recovered proof-clears
+        // (clearIfAlive on the 2xx). Engine/provider ordering paths keep the
+        // default (health-gated) behavior.
+        if (bypassHealth) {
+            candidates.forEach { url ->
+                if (!com.anonrode.downloader.pipeline.HostHealth.isUsable(url)) {
+                    com.anonrode.downloader.util.DebugLog.resolve(
+                        "mirror fan-out: attempting ${url.take(90)} despite stale HostHealth backoff " +
+                            "(provider-endorsed candidate list — backoff re-earned from fresh outcomes only)"
+                    )
+                }
+            }
+        }
+        return boundedFirstSuccess(candidates, maxConcurrency) { resolve(it, quality, bypassHealth = bypassHealth) }
     }
 
     private suspend fun resolveInternal(
@@ -699,6 +730,8 @@ object KisskhMegaplayResolver : BaseResolver {
         System.arraycopy(src, 0, target, 0, minOf(32, src.size))
     }
     private val MEGAPLAY_IV = "W0;27ToaUpl_P%'c".toByteArray(Charsets.UTF_8)
+    /** window.MP_CFG = {…};|< — lazy DOTALL body (megaplays.se 2026-10-15, anitaku mal pages). */
+    private val MP_CFG_PATTERN = Pattern.compile("""window\.MP_CFG\s*=\s*(\{.*?\})\s*[;<]""", Pattern.DOTALL)
 
     override fun lastResolveFailure(): String? = lastFailure
 
@@ -723,6 +756,49 @@ object KisskhMegaplayResolver : BaseResolver {
         } catch (_: Exception) {
             null
         }
+    }
+
+    /**
+     * TRUE quality semantics for the MP_CFG token map — mirrors the app's
+     * download-links picker (AnitakuProvider fetch_download_links ordering:
+     * best height <= request first, then nearest). Pure, JVM-testable:
+     *   1. exact key == [quality] (case-insensitive, live key "720p");
+     *   2. nearest key by numeric height parsed from `(\d{3,4})` (prefer
+     *      at/below the request, then smallest distance);
+     *   3. the key named by [defaultQuality] (window.MP_CFG.defaultQuality);
+     *   4. the first qualities key (org.json preserves insertion order).
+     * Returns the TOKEN VALUE for the winning key, or null when no key maps
+     * to a non-blank string.
+     */
+    internal fun pickMpQualityToken(qualities: JSONObject, quality: String, defaultQuality: String? = null): String? {
+        val keys = mutableListOf<String>()
+        val iter = qualities.keys()
+        while (iter.hasNext()) keys.add(iter.next())
+        if (keys.isEmpty()) return null
+        fun tokenOf(key: String?): String? =
+            key?.takeIf { it.isNotBlank() && keys.contains(it) }
+                ?.let { qualities.optString(it).takeIf { v -> v.isNotBlank() } }
+        // 1. exact
+        tokenOf(keys.firstOrNull { it.equals(quality.trim(), ignoreCase = true) })?.let { return it }
+        // 2. nearest by numeric height
+        val reqHeight = quality.filter { it.isDigit() }.toIntOrNull()
+        if (reqHeight != null) {
+            val parsed = keys.mapNotNull { k ->
+                val h = Regex("""(\d{3,4})""").find(k)?.groupValues?.get(1)?.toIntOrNull() ?: return@mapNotNull null
+                Triple(k, h, Math.abs(h - reqHeight))
+            }
+            if (parsed.isNotEmpty()) {
+                val best = parsed.minWithOrNull(
+                    compareBy({ (_, h, _) -> if (h <= reqHeight) 0 else 1 }, { (_, _, d) -> d })
+                )
+                tokenOf(best?.first)?.let { return it }
+            }
+        }
+        // 3. the key window.MP_CFG.defaultQuality names
+        tokenOf(defaultQuality?.trim())?.let { return it }
+        // 4. first key
+        tokenOf(keys.first())?.let { return it }
+        return null
     }
 
     override fun canResolve(url: String): Boolean {
@@ -750,6 +826,48 @@ object KisskhMegaplayResolver : BaseResolver {
             ) ?: run {
                 lastFailure = "KisskhMegaplay: empty HTTP response for $url"
                 return null
+            }
+
+            // megaplay MP_CFG config object — LIVE (2026-10-15, anitaku →
+            // megaplays.se/stream/mal/<mal>/<ep>/sub): the page now carries
+            //   window.MP_CFG = {"qualities":{"1080p":"<tok>","720p":"<tok>",...},
+            //                     "defaultQuality":"720p",
+            //                     "proxyBase":"https://megaplays.se/api/playlist.php?t=",...}
+            // and NO legacy markers (no data-id / getSources / defaultUrl).
+            // Mint = proxyBase + qualities[<q>] — returned url is real HLS VOD
+            // (proven to TS bytes live). This page 200s with the standard
+            // header set, so the fetch above already sends Referer = url
+            // (tamilembed keeps its no-referer/404-accept special case).
+            // Checked FIRST: legacy data-id/getSources below never matches an
+            // MP_CFG page, but an MP_CFG page must not spend the inner-iframe
+            // walk either.
+            val cfgMatcher = MP_CFG_PATTERN.matcher(html)
+            if (cfgMatcher.find()) {
+                try {
+                    val cfg = JSONObject(cfgMatcher.group(1) ?: "")
+                    val qualities = cfg.optJSONObject("qualities")
+                    if (qualities != null && qualities.length() > 0) {
+                        val proxyBase = cfg.optString("proxyBase").takeIf { it.isNotBlank() }
+                        if (proxyBase != null) {
+                            val token = pickMpQualityToken(
+                                qualities,
+                                quality,
+                                cfg.optString("defaultQuality").takeIf { it.isNotBlank() }
+                            )
+                            if (!token.isNullOrBlank()) return proxyBase + token
+                        }
+                    } else if (cfg.optString("enc").isNotBlank()) {
+                        // Some deployments ship {"enc":"..."} instead of the
+                        // token map: same AES blob the legacy getSources path
+                        // decrypts below.
+                        val decrypted = decryptMegaplayEnc(cfg.optString("enc"))
+                        if (!decrypted.isNullOrBlank()) return decrypted
+                    }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {}
+                // MP_CFG present but shape-unusable: fall through to the
+                // legacy branches unchanged.
             }
 
             // Inner iframe (tamilembed / blogger)
@@ -915,11 +1033,19 @@ object BloggerResolver : BaseResolver {
                     return null
                 }
 
-                val urlMatches = Pattern.compile("""(https://[^"]+googlevideo\.com[^"]+)""").matcher(body)
+                // JSON-in-JSON wire (WcwnYd payload): URLs are closed by \" and
+                // interior chars are DOUBLE-escaped (\\u003d). The old greedy
+                // regex swallowed the terminator backslash and the single-layer
+                // unescape left a stray \ before every '='/'&' — okhttp then
+                // percent-encoded them and googlevideo 403'd every request
+                // (signature/lsig mismatch). Lazy match up to the terminator +
+                // two-layer unescape; live A/B: clean URL 206+ftyp, old replay 403
+                // (scratch/anime100/INVESTIGATION403.md).
+                val urlMatches = Pattern.compile("""(https://[^"]+?googlevideo\.com[^"]+?(?=\\\"))""").matcher(body)
                 val urls = mutableListOf<String>()
                 while (urlMatches.find()) {
                     var u = urlMatches.group(1) ?: continue
-                    u = u.replace("\\u003d", "=").replace("\\u0026", "&").replace("\\/", "/").replace("""\""", "")
+                    u = u.replace("\\\\u003d", "=").replace("\\\\u0026", "&").replace("\\\\/", "/").replace("\\\"", "")
                     urls.add(u)
                 }
 
@@ -1064,6 +1190,7 @@ object VidsrcResolver : BaseResolver {
         var token: String? = null
         var servers: org.json.JSONArray? = null
         var sourcesFillFailed = false
+        var sourcesFillWaitTimedOut = false
         try {
             val q = JSONObject(qm.group(1))
             token = q.optString("t").takeIf { it.isNotBlank() }
@@ -1079,25 +1206,59 @@ object VidsrcResolver : BaseResolver {
                     "&s=" + URLEncoder.encode(q.optString("s"), "UTF-8") +
                     "&e=" + URLEncoder.encode(q.optString("e"), "UTF-8") +
                     "&t=" + URLEncoder.encode(token, "UTF-8")
-                val filled = try {
-                    HttpClient.getText("$mintBase/api.php?a=sources&$qs", referer = pageUrl)
-                } catch (cancelled: CancellationException) {
-                    throw cancelled
-                } catch (_: Exception) {
-                    null
+                // LIVE (2026-10-16, tmdb 67710 = Servamp): while the vault
+                // prepares the server list the fill call answers
+                // {"status":"wait"} and held it for >25s — the code below
+                // used to treat a wait+empty exactly like content-empty and
+                // memoized the title dead for 15 minutes. Retry the SAME url
+                // up to 2 more times (3s apart) before giving up; a wait that
+                // never resolves is transport-class (no memo), while a real
+                // {"status":"none", servers:[]} keeps today's verdict.
+                var waitRetries = 0
+                var fillSaidWait = false
+                while (true) {
+                    val filled = try {
+                        HttpClient.getText("$mintBase/api.php?a=sources&$qs", referer = pageUrl)
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (_: Exception) {
+                        null
+                    }
+                    if (filled == null) {
+                        sourcesFillFailed = true
+                        break
+                    }
+                    val fillObj = try { JSONObject(filled) } catch (_: Exception) { null }
+                    servers = fillObj?.optJSONArray("servers")
+                    fillSaidWait = fillObj?.optString("status") == "wait"
+                    if ((servers?.length() ?: 0) > 0 || !fillSaidWait) break
+                    if (waitRetries >= 2) break
+                    waitRetries++
+                    delay(3000)
                 }
-                if (filled == null) {
-                    sourcesFillFailed = true
-                } else {
-                    servers = try { JSONObject(filled).optJSONArray("servers") } catch (_: Exception) { null }
+                if (fillSaidWait && (servers == null || servers.length() == 0)) {
+                    sourcesFillWaitTimedOut = true
                 }
             }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (_: Exception) {}
         if (token == null || servers == null || servers.length() == 0) {
             if (sourcesFillFailed) {
                 // The fill call never answered: transport-class, NOT a content
                 // verdict — no memo, so the next pass re-walks.
                 lastFailure = "Vidsrc: vidsrc.buzz sources fill failed for tmdb=$tmdb"
+                return null
+            }
+            if (sourcesFillWaitTimedOut) {
+                // The vault kept answering {"status":"wait"} past the retry
+                // budget: the server list is still being prepared, so this is
+                // a TRANSPORT-class stall like [sourcesFillFailed] — return
+                // without a memo (a content verdict here would park a live
+                // title as "known unavailable" for 15 minutes). No mint was
+                // attempted and no server was judged, so nothing is proven
+                // about the content itself.
+                lastFailure = "Vidsrc: sources fill wait timeout for tmdb=$tmdb"
                 return null
             }
             // The machine around the content is alive (page + bootstrap +
@@ -1113,6 +1274,13 @@ object VidsrcResolver : BaseResolver {
         // path onto the embed host would 404 outside the default same-host
         // configuration.
         val mintOrigin = Regex("""https?://[^/]+""").find(mintBase)?.value ?: embedBase
+        // LIVE (2026-10-16, tmdb 680 = Pulp Fiction): the FIRST listed server
+        // mints a perfectly playable playlist whose segments are a TikTok ad
+        // (p1x-ad-site-sign host, image/jpeg) while a later server is the real
+        // TS — the app took the first hit and served 2s of ad PNGs. Before
+        // returning a minted url, verify its first media unit is actually
+        // media; a confirmed ad server is skipped for the next of the 3.
+        var adClassifiedServers = 0
         for (i in 0 until minOf(3, servers.length())) {
             val sv = servers.optJSONObject(i) ?: continue
             val ref = sv.optString("ref").takeIf { it.isNotBlank() } ?: continue
@@ -1137,12 +1305,146 @@ object VidsrcResolver : BaseResolver {
                     absolute.contains(".mpd") || absolute.contains(".mp4") ||
                     isDirectMediaUrl(absolute)
                 ) {
-                    return absolute
+                    when (classifyMintedStream(absolute, pageUrl)) {
+                        MintHeadVerdict.AD -> {
+                            // AD verdict needs POSITIVE payload evidence
+                            // (image/* type or PNG magic) — a transport miss
+                            // on the probe is UNKNOWN and must NOT veto the
+                            // mint (same transport-vs-content doctrine the
+                            // failure branches above follow).
+                            adClassifiedServers++
+                            com.anonrode.downloader.util.DebugLog.resolve(
+                                "Vidsrc: minted server #$i is an ad payload — skipping to next server for tmdb=$tmdb"
+                            )
+                            continue
+                        }
+                        // MEDIA confirmed, or UNKNOWN (probe transport miss):
+                        // both keep today's return-the-mint behavior.
+                        else -> return absolute
+                    }
                 }
             }
         }
+        if (adClassifiedServers > 0) {
+            // Every minted server we could classify served an ad payload: an
+            // ad-only list is a CONTENT verdict about this server line-up, but
+            // deliberately NOT memoized (like the mint-refused verdict below) —
+            // the ad rotation changes between passes.
+            lastFailure = "Vidsrc: ad-only server list for tmdb=$tmdb"
+            return null
+        }
         lastFailure = "Vidsrc: vidsrc.buzz mint refused to produce a playable url for tmdb=$tmdb"
         return null
+    }
+
+    // ------------------------------------------------------------------
+    // Minted-server head verification (ad-first mint skip, 2026-10-16).
+    // ------------------------------------------------------------------
+
+    private enum class MintHeadVerdict { MEDIA, AD, MANIFEST, UNKNOWN }
+
+    /** Derived clients keep the shared pool/DNS/cookies/SSRF floor but bound
+     *  the WHOLE call: playlist fetch ≤ 2s, segment head ≤ 1.5s. HttpClient.probe
+     *  does per-call bounding with call.timeout(), but its in-flight registry is
+     *  private to HttpClient — a callTimeout-capped newBuilder() client bounds
+     *  the call identically without modifying HttpClient. */
+    private val mintPlaylistClient: OkHttpClient by lazy {
+        HttpClient.shared.newBuilder()
+            .callTimeout(2000, TimeUnit.MILLISECONDS)
+            .build()
+    }
+    private val mintSegmentClient: OkHttpClient by lazy {
+        HttpClient.shared.newBuilder()
+            .connectTimeout(1500, TimeUnit.MILLISECONDS)
+            .readTimeout(1500, TimeUnit.MILLISECONDS)
+            .callTimeout(1500, TimeUnit.MILLISECONDS)
+            .build()
+    }
+
+    /** Bounded GET returning (code, Content-Type, first bytes): null on ANY
+     *  transport miss (network, cooldown throw, unsafe target). Head reads
+     *  use peekBody so a server that ignores Range on a big body is capped
+     *  at [maxPeek] bytes regardless (the response is closed on return). */
+    private fun rangedHeadGet(url: String, referer: String, client: OkHttpClient, maxPeek: Int, withRange: Boolean): Triple<Int, String, ByteArray>? {
+        return try {
+            val builder = Request.Builder()
+                .url(HttpClient.safeUrl(url))
+                .header("User-Agent", HttpClient.DEFAULT_UA)
+            if (withRange) builder.header("Range", "bytes=0-512")
+            if (referer.isNotBlank()) builder.header("Referer", referer)
+            HttpClient.executeCancellable(client, builder.build()) { res ->
+                val bytes = try { res.peekBody(maxPeek).bytes() } catch (_: Exception) { ByteArray(0) }
+                Triple(res.code, res.header("Content-Type")?.lowercase() ?: "", bytes)
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /**
+     * Payload verdict on ONE probed head. AD: PNG magic regardless of claimed
+     * type, or image/* Content-Type over non-media bytes (the ad segments are
+     * image/jpeg|png). MEDIA: MPEG-TS sync byte, EBML, MP4 'ftyp'@4. MANIFEST:
+     * playlist/XML text ("#EXT…" or mpegurl/dash Content-Type). BODY EVIDENCE
+     * IS CHECKED BEFORE HEADER CLAIMS: the megaplays.se preview proxy serves
+     * REAL MPEG-TS with a lying "Content-Type: image/jpeg" (live 2026-10-15),
+     * so a media magic must win over an image type. Everything else — HTML
+     * interstitials, empty bodies, unknown types — is UNKNOWN, never silently
+     * promoted to AD: skipping real servers on a probe hiccup trades proven
+     * streams for a guess.
+     */
+    private fun headPayloadVerdict(contentType: String, bytes: ByteArray): MintHeadVerdict {
+        if (bytes.size >= 4 &&
+            bytes[0] == 0x89.toByte() && bytes[1] == 0x50.toByte() &&
+            bytes[2] == 0x4E.toByte() && bytes[3] == 0x47.toByte()
+        ) return MintHeadVerdict.AD // PNG magic beats any header claim
+        if (bytes.isNotEmpty() && bytes[0] == 0x47.toByte()) return MintHeadVerdict.MEDIA // MPEG-TS
+        if (bytes.size >= 4 &&
+            bytes[0] == 0x1A.toByte() && bytes[1] == 0x45.toByte() &&
+            bytes[2] == 0xDF.toByte() && bytes[3] == 0xA3.toByte()
+        ) return MintHeadVerdict.MEDIA // EBML/Matroska
+        if (bytes.size >= 8 &&
+            bytes[4] == 0x66.toByte() && bytes[5] == 0x74.toByte() &&
+            bytes[6] == 0x79.toByte() && bytes[7] == 0x70.toByte()
+        ) return MintHeadVerdict.MEDIA // MP4 'ftyp' at offset 4
+        if (contentType.startsWith("image/")) return MintHeadVerdict.AD
+        if (contentType.contains("mpegurl") || contentType.contains("mp2t")) return MintHeadVerdict.MANIFEST
+        val text = String(bytes, Charsets.UTF_8)
+        if (text.startsWith("#EXT")) return MintHeadVerdict.MANIFEST
+        if (contentType.contains("dash") || text.startsWith("<?xml") || text.startsWith("<MPD")) return MintHeadVerdict.MANIFEST
+        return MintHeadVerdict.UNKNOWN
+    }
+
+    /**
+     * Verifies a minted stream url serves real media and not the ad: fetches
+     * the url's head; for a playlist, walks to the FIRST media unit and
+     * judges that head (ranged bytes=0-512 ≤ 1.5s). Latency bounded: ≤ 2s
+     * playlist + ≤ 1.5s segment per mint. The first non-'#' line of a live
+     * m3u8 is the segment URI; an in-manifest nested playlist (first line is
+     * itself another m3u8, live-verified on vidsrc.buzz VOD) counts as
+     * media-ish, per "m3u8/HTML-less binary beginning" evidence. */
+    private fun classifyMintedStream(streamUrl: String, referer: String): MintHeadVerdict {
+        val head = rangedHeadGet(streamUrl, referer, mintPlaylistClient, 64 * 1024, withRange = false)
+            ?: return MintHeadVerdict.UNKNOWN
+        if (head.first !in 200..299) return MintHeadVerdict.UNKNOWN
+        val verdict = headPayloadVerdict(head.second, head.third)
+        if (verdict != MintHeadVerdict.MANIFEST) return verdict
+        val text = String(head.third, Charsets.UTF_8)
+        val firstLine = text.lineSequence()
+            .map { it.trim() }
+            .firstOrNull { it.isNotEmpty() && !it.startsWith("#") }
+            ?: return MintHeadVerdict.UNKNOWN
+        val segmentUrl = if (firstLine.startsWith("http", ignoreCase = true)) firstLine
+        else HttpClient.safeResolveUri(streamUrl, firstLine)
+        val seg = rangedHeadGet(segmentUrl, streamUrl, mintSegmentClient, 513, withRange = true)
+            ?: return MintHeadVerdict.UNKNOWN
+        if (seg.first !in 200..299) return MintHeadVerdict.UNKNOWN
+        val segVerdict = headPayloadVerdict(seg.second, seg.third)
+        // A nested playlist at the segment slot is the same media-ish
+        // beginning class the direct case already accepts.
+        return if (segVerdict == MintHeadVerdict.MANIFEST) MintHeadVerdict.MEDIA else segVerdict
     }
 
     override fun lastResolveFailure(): String? = lastFailure

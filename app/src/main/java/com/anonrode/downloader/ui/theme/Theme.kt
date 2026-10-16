@@ -25,16 +25,19 @@ data class AnonColors(
 val DarkAnonColors = AnonColors(
     isDark = true,
     background = Color(0xFF000000),
-    surfaceCard = Color(0xFF101216),
-    surfaceElevated = Color(0xFF181B22),
-    borderHairline = Color(0xFF1F232D),
+    surfaceCard = Color(0xFF0B0B0E),
+    surfaceElevated = Color(0xFF1E1E26),
+    borderHairline = Color(0x12FFFFFF),
     accentPrimary = Color(0xFFFFFFFF),
-    textPrimary = Color(0xFFFFFFFF),
-    // #A8B8CE (was #94A3B8, identical to textMuted): the two-tier text
-    // hierarchy every screen leans on silently collapsed in dark mode.
-    // Contrast: 9.0:1 on surfaceCard, 8.9:1 on background.
-    textSecondary = Color(0xFFA8B8CE),
-    textMuted = Color(0xFF94A3B8),
+    textPrimary = Color(0xFFF4F4F6),
+    // Secondary/subtitle text: #8E8E99 reads 6.0:1 on #0B0B0E and 5.7:1 on
+    // #141419 (UI overhaul spec §1.1 "onSurfaceVariant"). The two-tier
+    // hierarchy below it is preserved — #84848E (muted) is the dimmest
+    // neutral that still holds ~5.3:1 on #0B0B0E and ~4.5:1 on #1E1E26, so
+    // 9-11sp captions never drop under the small-text floor while a real
+    // gap to #8E8E99 remains.
+    textSecondary = Color(0xFF8E8E99),
+    textMuted = Color(0xFF84848E),
     accentViolet = Color(0xFF8B5CF6),
     accentPink = Color(0xFFEC4899),
     statusSuccess = Color(0xFF10B981),
@@ -44,18 +47,17 @@ val DarkAnonColors = AnonColors(
 
 val LightAnonColors = AnonColors(
     isDark = false,
-    background = Color(0xFFF4F7FA),
+    background = Color(0xFFF8F9FA),
     surfaceCard = Color(0xFFFFFFFF),
-    surfaceElevated = Color(0xFFE9EFF5),
-    borderHairline = Color(0xFFD8E0E8),
-    accentPrimary = Color(0xFF07131A),
-    textPrimary = Color(0xFF07131A),
-    textSecondary = Color(0xFF475569),
-    // #55627A (was #64748B): 64748B computed only 4.34:1 on surfaceElevated
-    // (the pair ships as the QUEUED chip) — under the 4.5:1 floor for the
-    // 9-11sp chip labels that use muted-on-elevated. #55627A is 5.6:1 there
-    // and visually near-identical on the #F4F7FA background.
-    textMuted = Color(0xFF55627A),
+    surfaceElevated = Color(0xFFF1F3F5),
+    borderHairline = Color(0x14000000),
+    accentPrimary = Color(0xFF0F1115),
+    textPrimary = Color(0xFF0F1115),
+    textSecondary = Color(0xFF5C606B),
+    // #686D79 (was #55627A): the same "quiet metadata" step one shade lighter
+    // in the overhauled neutral palette — 5.2:1 on #FFFFFF and 4.7:1 on
+    // #F1F3F5, still above the 4.5:1 floor the previous value was tuned for.
+    textMuted = Color(0xFF686D79),
     accentViolet = Color(0xFF7C3AED),
     accentPink = Color(0xFFDB2777),
     statusSuccess = Color(0xFF059669),
@@ -125,18 +127,28 @@ val SplashOnBackground = Color(0xFFFFFFFF)
 val SplashMuted = Color(0xFF94A3B8)
 val SplashElevated = Color(0xFF181B22)
 
+// True OLED Obsidian dark scheme (UI overhaul spec §1.1): pure #000000
+// background, cards/sheets on #0B0B0E, grouped containers on #141419, pressed
+// wells + fallback art on #1E1E26, hairlines at 7% white — never an opaque
+// gray border over #000000.
 private val DarkMaterialColorScheme = darkColorScheme(
     primary = Color(0xFFFFFFFF),
     onPrimary = Color(0xFF000000),
-    primaryContainer = Color(0xFF181B22),
-    onPrimaryContainer = Color(0xFFFFFFFF),
+    primaryContainer = Color(0xFF1E1E26),
+    onPrimaryContainer = Color(0xFFF4F4F6),
     background = Color(0xFF000000),
-    onBackground = Color(0xFFFFFFFF),
-    surface = Color(0xFF000000),
-    onSurface = Color(0xFFFFFFFF),
-    surfaceVariant = Color(0xFF101216),
-    onSurfaceVariant = Color(0xFF94A3B8),
-    outline = Color(0xFF1F232D),
+    onBackground = Color(0xFFF4F4F6),
+    surface = Color(0xFF0B0B0E),
+    onSurface = Color(0xFFF4F4F6),
+    surfaceVariant = Color(0xFF141419),
+    onSurfaceVariant = Color(0xFF8E8E99),
+    outline = Color(0x12FFFFFF),
+    outlineVariant = Color(0x0DFFFFFF),
+    surfaceContainerLowest = Color(0xFF000000),
+    surfaceContainerLow = Color(0xFF0B0B0E),
+    surfaceContainer = Color(0xFF0B0B0E),
+    surfaceContainerHigh = Color(0xFF1E1E26),
+    surfaceContainerHighest = Color(0xFF1E1E26),
     // Explicit secondary/tertiary/error: left to the baseline these are
     // Material's own M3-purple/M3-red, which clash with the app's violet/
     // pink/status tokens the moment any M3 component touches those roles
@@ -155,18 +167,26 @@ private val DarkMaterialColorScheme = darkColorScheme(
     onErrorContainer = Color(0xFFFDCFCF)
 )
 
+// Clean light scheme (UI overhaul spec §1.2): porcelain background, white
+// surfaces, #0F1115 ink, 8% black hairlines.
 private val LightMaterialColorScheme = lightColorScheme(
-    primary = Color(0xFF07131A),
+    primary = Color(0xFF0F1115),
     onPrimary = Color(0xFFFFFFFF),
-    primaryContainer = Color(0xFFE9EFF5),
-    onPrimaryContainer = Color(0xFF07131A),
-    background = Color(0xFFF4F7FA),
-    onBackground = Color(0xFF07131A),
-    surface = Color(0xFFF4F7FA),
-    onSurface = Color(0xFF07131A),
-    surfaceVariant = Color(0xFFFFFFFF),
-    onSurfaceVariant = Color(0xFF475569),
-    outline = Color(0xFFD8E0E8),
+    primaryContainer = Color(0xFFF1F3F5),
+    onPrimaryContainer = Color(0xFF0F1115),
+    background = Color(0xFFF8F9FA),
+    onBackground = Color(0xFF0F1115),
+    surface = Color(0xFFFFFFFF),
+    onSurface = Color(0xFF0F1115),
+    surfaceVariant = Color(0xFFF1F3F5),
+    onSurfaceVariant = Color(0xFF5C606B),
+    outline = Color(0x14000000),
+    outlineVariant = Color(0x0F000000),
+    surfaceContainerLowest = Color(0xFFFFFFFF),
+    surfaceContainerLow = Color(0xFFF8F9FA),
+    surfaceContainer = Color(0xFFF8F9FA),
+    surfaceContainerHigh = Color(0xFFF1F3F5),
+    surfaceContainerHighest = Color(0xFFE9ECEF),
     secondary = Color(0xFF7C3AED),
     onSecondary = Color(0xFFFFFFFF),
     secondaryContainer = Color(0xFFEDE4FE),

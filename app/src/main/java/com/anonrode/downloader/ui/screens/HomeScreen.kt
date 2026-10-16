@@ -45,17 +45,16 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import coil.compose.SubcomposeAsyncImage
 import com.anonrode.downloader.R
 import com.anonrode.downloader.data.models.ShowCard
 import com.anonrode.downloader.pipeline.VerdictPolicy
 import com.anonrode.downloader.providers.CategoryFeed
+import com.anonrode.downloader.ui.components.PosterFallbackWell
+import com.anonrode.downloader.ui.components.PosterImageOrFallback
 import com.anonrode.downloader.ui.components.SearchListSkeleton
-import com.anonrode.downloader.ui.components.SkeletonBox
 import com.anonrode.downloader.ui.components.TrendingRowSkeleton
-import com.anonrode.downloader.ui.components.rememberReduceMotion
-import com.anonrode.downloader.ui.components.rememberShimmerX
 import com.anonrode.downloader.ui.theme.*
+import com.anonrode.downloader.ui.util.TitleFormatting
 import com.anonrode.downloader.util.UrlExtractor
 import com.anonrode.downloader.viewmodel.MainViewModel
 
@@ -419,7 +418,9 @@ fun HomeScreen(
                         shape = RoundedCornerShape(Radius.full)
                     )
                 }
-                Spacer(modifier = Modifier.width(Spacing.md))
+                // §5.5: end runway = 16dp so the last chip ("AsianC", "NaijaVault")
+                // never sits clipped against the screen edge when scrolled.
+                Spacer(modifier = Modifier.width(Spacing.lg))
             }
 
             Spacer(modifier = Modifier.height(Spacing.lg))
@@ -547,11 +548,8 @@ fun HomeScreen(
                     )
                     Spacer(modifier = Modifier.height(Spacing.lg))
                     CategoryTilesGrid(
-                        tiles = uiState.genreTiles,
-                        showPosters = viewModel.engine.showPostersInResults,
                         onOpen = { category -> viewModel.openCategory(category) },
-                        onMore = { viewModel.openCatalog() },
-                        isLoading = uiState.isTrendingLoading
+                        onMore = { viewModel.openCatalog() }
                     )
                 }
             } else {
@@ -834,12 +832,8 @@ private fun TrendingSection(
                         }
                     }
                 }
-                Spacer(modifier = Modifier.height(Spacing.lg))
-                Text(
-                    text = "Tap a title to pick episodes · or search above",
-                    color = TextMuted,
-                    fontSize = Type.label.fontSize
-                )
+                // (§4.3: the "Tap a title to pick episodes · or search above"
+                //  helper line under Trending Now is deleted outright.)
             }
         }
     }
@@ -852,6 +846,18 @@ private fun TrendingCard(
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    // §4.2 title sanitizer: raw scraper suffixes ("| Download …"), (YYYY)
+    // tokens and Season markers are stripped from the face title; (YYYY) and
+    // "Season X" move into the muted subtitle so grid rows align.
+    val faceTitle = remember(show.title) { TitleFormatting.cleanPosterTitle(show.title) }
+    val seasonPart = remember(show.title) {
+        val (_, sub) = TitleFormatting.splitYearAndSeason(show.title)
+        sub?.split(" · ")?.firstOrNull { it.startsWith("Season", ignoreCase = true) }
+    }
+    val yearPart = show.year.trim()
+    val subtitleLine = remember(seasonPart, yearPart) {
+        listOfNotNull(yearPart.ifBlank { null }, seasonPart).joinToString(" · ")
+    }
     Column(
         modifier = modifier
             .width(124.dp)
@@ -860,70 +866,69 @@ private fun TrendingCard(
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                // Poster geometry unified to 2:3 across every card dialect
-                // (v3.1.6 design pass — the old 124×176 was a third ratio).
+                // Poster geometry unified to 2:3 across every card dialect.
                 .aspectRatio(2f / 3f)
                 .clip(RoundedCornerShape(Radius.md))
-                .background(tileColor(show.title))
+                .background(tileColor(faceTitle))
                 .border(1.dp, BorderHairline, RoundedCornerShape(Radius.md))
         ) {
-            if (showPosters && show.posterUrl.isNotBlank()) {
-                SubcomposeAsyncImage(
-                    model = show.posterUrl,
-                    contentDescription = show.title,
-                    contentScale = ContentScale.Crop,
+            if (showPosters) {
+                PosterImageOrFallback(
+                    posterUrl = show.posterUrl,
+                    showTitle = faceTitle,
                     modifier = Modifier.fillMaxSize(),
-                    loading = { InitialGlyph(show.title) },
-                    error = { InitialGlyph(show.title) }
+                    shape = RoundedCornerShape(Radius.md),
+                    fallbackIcon = Icons.Rounded.PlayArrow,
+                    showFallbackTitle = true
                 )
             } else {
-                InitialGlyph(show.title)
+                PosterFallbackWell(
+                    modifier = Modifier.fillMaxSize(),
+                    shape = RoundedCornerShape(Radius.md),
+                    icon = Icons.Rounded.PlayArrow,
+                    title = faceTitle
+                )
             }
             PosterScrim()
         }
         Spacer(modifier = Modifier.height(Spacing.xs))
+        // §4.2: fixed 2-line title — every card in a grid row aligns.
         Text(
-            text = show.title,
+            text = faceTitle,
             color = TextPrimary,
             fontSize = Type.body.fontSize,
             fontWeight = FontWeight.SemiBold,
             lineHeight = 17.sp,
             maxLines = 2,
+            minLines = 2,
             overflow = TextOverflow.Ellipsis
         )
-        if (show.year.isNotBlank()) {
+        if (subtitleLine.isNotBlank()) {
             Spacer(modifier = Modifier.height(2.dp))
             Text(
-                text = show.year,
+                text = subtitleLine,
                 color = TextSecondary,
                 fontSize = Type.micro.fontSize,
-                fontWeight = FontWeight.Medium
+                fontWeight = FontWeight.Medium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
             )
         }
     }
 }
 
 /**
- * Genre poster tiles under the trending row (blank-query landing only),
- * v3.1.6: a WRAPPING grid, three per row, dropping down — the sideways
- * LazyRow is gone (user: "browse my genre shouldnt be scrollable left and
- * right, it should drop down… 3 per row"). Same poster-card language as
- * before (live top-post artwork, colored initial-glyph fallback, the row
- * never disappears over artwork); the trailing View More tile opens the
- * per-genre catalog. The tiles NAVIGATE — they are not filters.
+ * Genre tiles under the trending row (blank-query landing only), §4.3:
+ * a WRAPPING 3-per-row grid of sleek 2:1 horizontal-gradient category cards
+ * with bold typography and a per-category icon. Posters are gone from this
+ * surface — eliminating the broken "A" poster and the duplicate artwork the
+ * View More tile used to inherit. The tiles NAVIGATE — they are not filters.
  */
 @Composable
 private fun CategoryTilesGrid(
-    tiles: List<CategoryFeed.GenreTile>,
-    showPosters: Boolean,
     onOpen: (CategoryFeed.Category) -> Unit,
-    onMore: () -> Unit,
-    isLoading: Boolean = false
+    onMore: () -> Unit
 ) {
-    val posters = tiles.associate { it.category.label to it.posterUrl }
-    // No horizontal padding here: the landing Column already owns the gutter
-    // (v3.1.6 design pass — a second Spacing.lg here inset this section 32dp
-    // while Trending sat at 16dp, so the two headers never lined up).
     Column(modifier = Modifier.fillMaxWidth()) {
         Text(
             text = "Browse by Genre",
@@ -932,14 +937,14 @@ private fun CategoryTilesGrid(
             fontWeight = FontWeight.Bold
         )
         val allCategories = CategoryFeed.CATEGORIES
-        val morePoster = posters.values.reversed().firstOrNull { it.isNotBlank() }
-            ?: posters.values.firstOrNull { it.isNotBlank() }.orEmpty()
         val totalSlots = allCategories.size + 1 // 7 categories + 1 View More = 8
         val rows = (totalSlots + 2) / 3 // 3 rows
 
         for (rowIndex in 0 until rows) {
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = Spacing.sm),
                 horizontalArrangement = Arrangement.spacedBy(Spacing.sm)
             ) {
                 for (colIndex in 0 until 3) {
@@ -949,21 +954,13 @@ private fun CategoryTilesGrid(
                         Box(modifier = Modifier.weight(1f)) {
                             GenreTileCard(
                                 label = category.label,
-                                posterUrl = posters[category.label] ?: "",
-                                showPosters = showPosters,
-                                onClick = { onOpen(category) },
-                                isLoading = isLoading
+                                onClick = { onOpen(category) }
                             )
                         }
                     } else if (itemIndex == allCategories.size) {
-                        // The "View More" tile: sits directly beside "Anime" on Row 3
+                        // The "View More" tile: sits beside "Anime" on Row 3.
                         Box(modifier = Modifier.weight(1f)) {
-                            ViewMoreTileCard(
-                                posterUrl = morePoster,
-                                showPosters = showPosters,
-                                onClick = onMore,
-                                isLoading = isLoading
-                            )
+                            ViewMoreTileCard(onClick = onMore)
                         }
                     } else {
                         // Keep 3-column alignment for the remaining slot on the last row
@@ -971,158 +968,143 @@ private fun CategoryTilesGrid(
                     }
                 }
             }
-            if (rowIndex < rows - 1) {
-                Spacer(modifier = Modifier.height(Spacing.md))
-            }
         }
     }
 }
 
-/**
- * The "View More" tile: opens the per-genre catalog.
- * Renders with a rich poster backdrop just like the other genre tiles,
- * with a cinematic dark overlay and an accent circular '+' badge.
- */
+/** §4.3 View More tile: the duplicate-poster tile is now a matching 2:1
+ *  gradient card with the Add icon — nothing duplicated, nothing broken. */
 @Composable
-private fun ViewMoreTileCard(
-    posterUrl: String = "",
-    showPosters: Boolean = true,
-    onClick: () -> Unit,
-    isLoading: Boolean = false
-) {
-    val shimmerX = if (showPosters && isLoading && posterUrl.isBlank()) {
-        rememberShimmerX(rememberReduceMotion())
-    } else 0f
-    Column(
+private fun ViewMoreTileCard(onClick: () -> Unit) {
+    val isDark = AnonTheme.colors.isDark
+    Box(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable { onClick() }
+            .aspectRatio(2f)
+            .clip(RoundedCornerShape(Radius.md))
+            .background(
+                Brush.horizontalGradient(
+                    if (isDark) listOf(Color(0xFF20202C), Color(0xFF101016))
+                    else listOf(Color(0xFFE9ECEF), Color(0xFFF8F9FA))
+                )
+            )
+            .border(1.dp, BorderHairline, RoundedCornerShape(Radius.md))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        contentAlignment = Alignment.CenterStart
     ) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .aspectRatio(2f / 3f)
-                .clip(RoundedCornerShape(Radius.md))
-                .background(tileColor("View More"))
-                .border(1.dp, BorderHairline, RoundedCornerShape(Radius.md))
-        ) {
-            if (showPosters && posterUrl.isNotBlank()) {
-                SubcomposeAsyncImage(
-                    model = posterUrl,
-                    contentDescription = "View More",
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize(),
-                    loading = { InitialGlyph("+") },
-                    error = { InitialGlyph("+") }
-                )
-            } else if (showPosters && isLoading) {
-                SkeletonBox(
-                    modifier = Modifier.fillMaxSize(),
-                    shape = RoundedCornerShape(Radius.md),
-                    x = shimmerX
-                )
-            } else {
-                InitialGlyph("+")
-            }
-            // Darker cinematic scrim over the artwork so the + badge pops
+        Row(verticalAlignment = Alignment.CenterVertically) {
             Box(
                 modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color.Black.copy(alpha = 0.45f))
-            )
-            PosterScrim()
-            Box(
-                modifier = Modifier.fillMaxSize(),
+                    .size(26.dp)
+                    .clip(CircleShape)
+                    .background(AccentPrimary),
                 contentAlignment = Alignment.Center
             ) {
-                Box(
-                    modifier = Modifier
-                        .size(36.dp)
-                        .background(AccentPrimary.copy(alpha = 0.92f), CircleShape),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.Add,
-                        contentDescription = null,
-                        tint = if (AnonTheme.colors.isDark) Color.Black else Color.White,
-                        modifier = Modifier.size(22.dp)
-                    )
-                }
+                Icon(
+                    imageVector = Icons.Rounded.Add,
+                    contentDescription = null,
+                    tint = if (isDark) Color.Black else Color.White,
+                    modifier = Modifier.size(16.dp)
+                )
             }
+            Spacer(modifier = Modifier.width(8.dp))
+            Column {
+                Text(
+                    text = "View More",
+                    color = TextPrimary,
+                    fontSize = Type.label.fontSize,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1
+                )
+                Text(
+                    text = "All genres",
+                    color = TextMuted,
+                    fontSize = Type.micro.fontSize,
+                    maxLines = 1
+                )
+            }
+            Spacer(modifier = Modifier.weight(1f))
+            Icon(
+                imageVector = Icons.Rounded.ArrowForward,
+                contentDescription = null,
+                tint = TextMuted,
+                modifier = Modifier.size(13.dp)
+            )
         }
-        Spacer(modifier = Modifier.height(Spacing.xs))
-        Text(
-            text = "View More",
-            color = TextPrimary,
-            fontSize = Type.body.fontSize,
-            fontWeight = FontWeight.Bold,
-            lineHeight = 17.sp,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-        )
     }
 }
 
+/** §4.3 genre card: a 2:1 horizontal gradient category card with a bold
+ *  label and a per-category icon — no poster wells, no broken monograms. */
 @Composable
 private fun GenreTileCard(
     label: String,
-    posterUrl: String,
-    showPosters: Boolean,
-    onClick: () -> Unit,
-    isLoading: Boolean = false
+    onClick: () -> Unit
 ) {
-    // Shimmer only while the artwork is actually on its way. A transition per
-    // tile that lived forever would keep the frame clock busy on a screen the
-    // user is just reading — the research's "one transition per surface" rule.
-    val shimmerX = if (showPosters && isLoading && posterUrl.isBlank()) {
-        rememberShimmerX(rememberReduceMotion())
-    } else 0f
-    Column(
+    val isDark = AnonTheme.colors.isDark
+    Box(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable { onClick() }
+            .aspectRatio(2f)
+            .clip(RoundedCornerShape(Radius.md))
+            .background(
+                Brush.horizontalGradient(
+                    if (isDark) listOf(Color(0xFF20202C), Color(0xFF101016))
+                    else listOf(Color(0xFFE9ECEF), Color(0xFFF8F9FA))
+                )
+            )
+            .border(1.dp, BorderHairline, RoundedCornerShape(Radius.md))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        contentAlignment = Alignment.CenterStart
     ) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .aspectRatio(2f / 3f)
-                .clip(RoundedCornerShape(Radius.md))
-                .background(tileColor(label))
-                .border(1.dp, BorderHairline, RoundedCornerShape(Radius.md))
-        ) {
-            if (showPosters && posterUrl.isNotBlank()) {
-                SubcomposeAsyncImage(
-                    model = posterUrl,
-                    contentDescription = label,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize(),
-                    loading = { InitialGlyph(label) },
-                    error = { InitialGlyph(label) }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                imageVector = genreIconFor(label),
+                contentDescription = null,
+                tint = AccentViolet,
+                modifier = Modifier.size(18.dp)
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Column {
+                Text(
+                    text = label,
+                    color = TextPrimary,
+                    fontSize = Type.label.fontSize,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
-            } else if (showPosters && isLoading) {
-                // Poster URL has not arrived yet: shimmer the box instead of
-                // showing a letter that is about to be covered.
-                SkeletonBox(
-                    modifier = Modifier.fillMaxSize(),
-                    shape = RoundedCornerShape(Radius.md),
-                    x = shimmerX
+                Text(
+                    text = "Browse",
+                    color = TextMuted,
+                    fontSize = Type.micro.fontSize,
+                    maxLines = 1
                 )
-            } else {
-                InitialGlyph(label)
             }
-            PosterScrim()
+            Spacer(modifier = Modifier.weight(1f))
+            Icon(
+                imageVector = Icons.Rounded.ArrowForward,
+                contentDescription = null,
+                tint = TextMuted,
+                modifier = Modifier.size(13.dp)
+            )
         }
-        Spacer(modifier = Modifier.height(Spacing.xs))
-        Text(
-            text = label,
-            color = TextPrimary,
-            fontSize = Type.body.fontSize,
-            fontWeight = FontWeight.Bold,
-            lineHeight = 17.sp,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-        )
     }
+}
+
+/** §4.3 category icon mapping (keyword → rounded icon; Movie fallback). */
+private fun genreIconFor(label: String): androidx.compose.ui.graphics.vector.ImageVector = when {
+    label.contains("Action", true) -> Icons.Rounded.Bolt
+    label.contains("Comedy", true) -> Icons.Rounded.SentimentVerySatisfied
+    label.contains("Horror", true) -> Icons.Rounded.DarkMode
+    label.contains("Romance", true) -> Icons.Rounded.Favorite
+    label.contains("Sci", true) -> Icons.Rounded.RocketLaunch
+    label.contains("Thriller", true) -> Icons.Rounded.Visibility
+    label.contains("Anime", true) -> Icons.Rounded.AutoAwesome
+    label.contains("Drama", true) -> Icons.Rounded.TheaterComedy
+    else -> Icons.Rounded.Movie
 }
 
 /**
@@ -1303,10 +1285,10 @@ private fun CategoryPage(
     }
 }
 
-/** Grid cell of the genre page: the trending card's language (colored
- *  ground, Crop poster, initial-glyph fallback, one-line bold title) sized
- *  to the cell — three across on every phone, never a fixed dp width that
- *  overflows a small one. */
+/** Grid cell of the genre page: the trending card's language (§4.2 sanitized
+ *  title + (YYYY)·Season subtitle, gradient-fallback poster, 2-line fixed
+ *  title) sized to the cell — three across on every phone, never a fixed dp
+ *  width that overflows a small one. */
 @Composable
 private fun GridPosterCard(
     show: ShowCard,
@@ -1314,6 +1296,15 @@ private fun GridPosterCard(
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val faceTitle = remember(show.title) { TitleFormatting.cleanPosterTitle(show.title) }
+    val seasonPart = remember(show.title) {
+        val (_, sub) = TitleFormatting.splitYearAndSeason(show.title)
+        sub?.split(" · ")?.firstOrNull { it.startsWith("Season", ignoreCase = true) }
+    }
+    val yearPart = show.year.trim()
+    val subtitleLine = remember(seasonPart, yearPart) {
+        listOfNotNull(yearPart.ifBlank { null }, seasonPart).joinToString(" · ")
+    }
     Column(
         modifier = modifier
             .fillMaxWidth()
@@ -1324,33 +1315,51 @@ private fun GridPosterCard(
                 .fillMaxWidth()
                 .aspectRatio(2f / 3f)
                 .clip(RoundedCornerShape(Radius.md))
-                .background(tileColor(show.title))
+                .background(tileColor(faceTitle))
                 .border(1.dp, BorderHairline, RoundedCornerShape(Radius.md))
         ) {
-            if (showPosters && show.posterUrl.isNotBlank()) {
-                SubcomposeAsyncImage(
-                    model = show.posterUrl,
-                    contentDescription = show.title,
-                    contentScale = ContentScale.Crop,
+            if (showPosters) {
+                PosterImageOrFallback(
+                    posterUrl = show.posterUrl,
+                    showTitle = faceTitle,
                     modifier = Modifier.fillMaxSize(),
-                    loading = { InitialGlyph(show.title) },
-                    error = { InitialGlyph(show.title) }
+                    shape = RoundedCornerShape(Radius.md),
+                    fallbackIcon = Icons.Rounded.PlayArrow,
+                    showFallbackTitle = true
                 )
             } else {
-                InitialGlyph(show.title)
+                PosterFallbackWell(
+                    modifier = Modifier.fillMaxSize(),
+                    shape = RoundedCornerShape(Radius.md),
+                    icon = Icons.Rounded.PlayArrow,
+                    title = faceTitle
+                )
             }
             PosterScrim()
         }
         Spacer(modifier = Modifier.height(Spacing.xs))
+        // §4.2: fixed 2-line title so every cell in a row aligns.
         Text(
-            text = show.title,
+            text = faceTitle,
             color = TextPrimary,
             fontSize = Type.caption.fontSize,
             fontWeight = FontWeight.Bold,
             lineHeight = 14.sp,
             maxLines = 2,
+            minLines = 2,
             overflow = TextOverflow.Ellipsis
         )
+        if (subtitleLine.isNotBlank()) {
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = subtitleLine,
+                color = TextSecondary,
+                fontSize = Type.micro.fontSize,
+                fontWeight = FontWeight.Medium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
     }
 }
 
@@ -1499,11 +1508,13 @@ fun ShowCardItem(
             .padding(Spacing.md),
         horizontalArrangement = Arrangement.spacedBy(Spacing.md)
     ) {
-        PosterTile(show = show, showPosters = showPosters)
+        // §4.2: the search row's face title is sanitized too.
+        val faceTitle = remember(show.title) { TitleFormatting.cleanPosterTitle(show.title) }
+        PosterTile(show = show, showPosters = showPosters, faceTitle = faceTitle)
 
         Column(modifier = Modifier.weight(1f)) {
             Text(
-                text = show.title,
+                text = faceTitle,
                 color = TextPrimary,
                 fontSize = Type.itemTitle.fontSize,
                 fontWeight = FontWeight.SemiBold,
@@ -1578,45 +1589,36 @@ fun ShowCardItem(
 }
 
 @Composable
-private fun PosterTile(show: ShowCard, showPosters: Boolean) {
-    val shape = RoundedCornerShape(Radius.md)
+private fun PosterTile(show: ShowCard, showPosters: Boolean, faceTitle: String) {
     Box(
         modifier = Modifier
             .size(width = 74.dp, height = 106.dp)
-            .clip(shape)
-            .background(tileColor(show.title))
+            .clip(RoundedCornerShape(Radius.md))
+            .background(tileColor(faceTitle))
     ) {
-        if (showPosters && show.posterUrl.isNotBlank()) {
-            SubcomposeAsyncImage(
-                model = show.posterUrl,
-                contentDescription = show.title,
-                contentScale = ContentScale.Crop,
+        if (showPosters) {
+            PosterImageOrFallback(
+                posterUrl = show.posterUrl,
+                showTitle = faceTitle,
                 modifier = Modifier.fillMaxSize(),
-                loading = { InitialGlyph(show.title) },
-                error = { InitialGlyph(show.title) }
+                shape = RoundedCornerShape(Radius.md),
+                fallbackIcon = Icons.Rounded.PlayArrow,
+                showFallbackTitle = false
             )
         } else {
-            InitialGlyph(show.title)
+            PosterFallbackWell(
+                modifier = Modifier.fillMaxSize(),
+                shape = RoundedCornerShape(Radius.md),
+                icon = Icons.Rounded.PlayArrow,
+                title = null
+            )
         }
     }
 }
 
-@Composable
-private fun InitialGlyph(title: String) {
-    // Theme-aware glyph (UI research round): white@18% over the LIGHT tile
-    // palette is invisible — light tiles carry an ink glyph of similar
-    // subtlety, dark tiles keep the white one.
-    val glyphColor = if (AnonTheme.colors.isDark) Color.White.copy(alpha = 0.18f)
-        else Color.Black.copy(alpha = 0.20f)
-    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        Text(
-            text = title.trim().firstOrNull()?.uppercaseChar()?.toString() ?: "?",
-            color = glyphColor,
-            fontSize = Type.displayPoster.fontSize,
-            fontWeight = FontWeight.Black
-        )
-    }
-}
+// ─── (Removed §4.1: InitialGlyph single-letter fallbacks ("A", "P", "M") —
+// every poster surface now falls back to the stylized gradient well with the
+// media icon + centered title, via PosterImageOrFallback/PosterFallbackWell.)
 
 @Composable
 private fun CardBadge(
@@ -1727,14 +1729,24 @@ private fun AsianDramaHeroSection(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(Spacing.sm)
         ) {
-            // K-Drama Hero Card
+            // K-Drama Hero Card (§4.3: rich gradient + subtle violet accent
+            // border — a deliberate destination, not a gray box).
             Box(
                 modifier = Modifier
                     .weight(1f)
                     .height(96.dp)
                     .clip(RoundedCornerShape(Radius.md))
-                    .background(SurfaceCard)
-                    .border(1.dp, BorderHairline, RoundedCornerShape(Radius.md))
+                    .background(
+                        Brush.horizontalGradient(
+                            if (AnonTheme.colors.isDark) listOf(Color(0xFF1C1B2E), Color(0xFF0F0F16))
+                            else listOf(Color(0xFFEDE9FE), Color(0xFFF8F9FA))
+                        )
+                    )
+                    .border(
+                        1.dp,
+                        if (AnonTheme.colors.isDark) Color(0x338B5CF6) else Color(0x337C3AED),
+                        RoundedCornerShape(Radius.md)
+                    )
                     .clickable(onClick = onOpenKdrama)
                     .padding(Spacing.md),
                 contentAlignment = Alignment.CenterStart
@@ -1785,14 +1797,23 @@ private fun AsianDramaHeroSection(
                 }
             }
 
-            // C-Drama Hero Card
+            // C-Drama Hero Card (§4.3: matching gradient destination).
             Box(
                 modifier = Modifier
                     .weight(1f)
                     .height(96.dp)
                     .clip(RoundedCornerShape(Radius.md))
-                    .background(SurfaceCard)
-                    .border(1.dp, BorderHairline, RoundedCornerShape(Radius.md))
+                    .background(
+                        Brush.horizontalGradient(
+                            if (AnonTheme.colors.isDark) listOf(Color(0xFF2A1B24), Color(0xFF140F14))
+                            else listOf(Color(0xFFFCE7F3), Color(0xFFF8F9FA))
+                        )
+                    )
+                    .border(
+                        1.dp,
+                        if (AnonTheme.colors.isDark) Color(0x33EC4899) else Color(0x33DB2777),
+                        RoundedCornerShape(Radius.md)
+                    )
                     .clickable(onClick = onOpenCdrama)
                     .padding(Spacing.md),
                 contentAlignment = Alignment.CenterStart

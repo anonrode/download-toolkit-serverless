@@ -56,14 +56,15 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import androidx.compose.ui.graphics.StrokeCap
 import coil.compose.SubcomposeAsyncImage
 import com.anonrode.downloader.data.models.DownloadTask
 import com.anonrode.downloader.data.models.TaskStatus
 import com.anonrode.downloader.ui.components.DownloadsSorter
-import com.anonrode.downloader.ui.components.SegmentBar
-import com.anonrode.downloader.ui.components.SegmentCell
+import com.anonrode.downloader.ui.components.PosterImageOrFallback
 import com.anonrode.downloader.ui.components.downloadsStats
 import com.anonrode.downloader.ui.theme.*
+import com.anonrode.downloader.ui.util.TitleFormatting
 import com.anonrode.downloader.ui.util.rejectHaptic
 import com.anonrode.downloader.viewmodel.MainViewModel
 import java.io.File
@@ -92,10 +93,9 @@ private val FailedTint = Color(0xFFF9E9E7)
 // dashed rule above the failure reason (the one non-chrome hue on a card).
 private val FailRust = Color(0xFFC25B52)
 private val MeterTrack = Color(0xFFE2E8EF)        // live meter track (mock .meter)
-private val ChipNeutralBg = Color(0xFFEEF2F6)     // neutral site tag (mock --chipbg)
-private val SiteTagInk = Color(0xFF475569)        // neutral site tag text (mock --sub)
-private val ThumbTile = Color(0xFFE9EFF5)         // initials tile well (mock .thumb .init)
-private val DashRust = Color(0xFFEFD5D2)          // dashed rule (mock .errline border-top)
+private val ChipNeutralBg = Color(0xFFEEF2F6)     // neutral site tag (mock --chipbg; legacy palette)
+private val SiteTagInk = Color(0xFF475569)        // neutral site tag text (mock --sub; legacy palette)
+private val DashRust = Color(0xFFEFD5D2)          // legacy dashed rule (kept for the frozen palette block)
 private val ProgressFillGray = Color(0xFF9AA0A8)  // whole-screen storage meter pin (unchanged)
 private val ShelfTileDeep = Color(0xFF0C0E11)     // offline-shelf tile well (mock --deep)
 // Glass scrims & hairlines, cited from the mock CSS (.back / .pl / .thumb):
@@ -103,6 +103,79 @@ private val GlassBackScrim = Color(0xB8000000)    // header back circle: black a
 private val GlassBackOutline = Color(0x17FFFFFF)  // header back outline: white at 9% (0x17 = .09·255)
 private val GlassPlayScrim = Color(0x80000000)    // shelf play circle: black at 50% (0x80)
 private val GlassPlayOutline = Color(0x24FFFFFF)  // shelf play outline: white at 14% (0x24 = .14·255)
+
+// ─── §3 theme-aware state chroma (UI overhaul) ───────────────────────────────
+// The frozen light-paper palette above stays (it pins downloadStatusStyle's
+// JVM contract, DownloadStatusStyleTest). The live card face instead reads
+// DownloadsChroma: obsidian's spec hexes (amber 0xFFF59E0B paused, red
+// 0xFFEF4444 failed, emerald 0xFF10B981 done) in dark, the tuned paper
+// words in light — both keep "colour + WORD + glyph" discipline.
+internal data class DownloadsChroma(
+    val live: Color,
+    val liveTint: Color,
+    val liveFill: Color,
+    val done: Color,
+    val doneTint: Color,
+    val paused: Color,
+    val pausedTint: Color,
+    val failed: Color,
+    val failedTint: Color,
+    val neutralInk: Color,
+    val neutralTint: Color
+)
+
+internal fun downloadsChroma(isDark: Boolean): DownloadsChroma = if (isDark) {
+    DownloadsChroma(
+        live = Color(0xFF38BDF8),
+        liveTint = Color(0x1F38BDF8),
+        liveFill = Color(0xFF38BDF8),
+        done = Color(0xFF10B981),
+        doneTint = Color(0x1F10B981),
+        paused = Color(0xFFF59E0B),
+        pausedTint = Color(0x1FF59E0B),
+        failed = Color(0xFFEF4444),
+        failedTint = Color(0x1FEF4444),
+        neutralInk = Color(0xFF8E8E99),
+        neutralTint = Color(0x14141419)
+    )
+} else {
+    DownloadsChroma(
+        live = LiveWord, liveTint = LiveTint, liveFill = LiveFill,
+        done = DoneWord, doneTint = DoneTint,
+        paused = PausedWord, pausedTint = PausedTint,
+        failed = FailedWord, failedTint = FailedTint,
+        neutralInk = SiteTagInk, neutralTint = ChipNeutralBg
+    )
+}
+
+/** Status filter keys for the §3.1 FilterChip row. */
+private const val FILTER_ALL = "all"
+private const val FILTER_ACTIVE = "active"
+private const val FILTER_PAUSED = "paused"
+private const val FILTER_DONE = "done"
+private const val FILTER_FAILED = "failed"
+private val ALL_FILTERS = listOf(FILTER_ALL, FILTER_ACTIVE, FILTER_PAUSED, FILTER_DONE, FILTER_FAILED)
+
+/** §3.1 filter membership: Active buckets every unfinished in-flight state
+ *  (including QUEUED — the user's mental model is "still working", the
+ *  badge's stricter "transferring" bucket stays on the header line). */
+private fun DownloadTask.matchesStatusFilter(filter: String): Boolean = when (filter) {
+    FILTER_ACTIVE -> status == TaskStatus.DOWNLOADING || status == TaskStatus.RESOLVING ||
+        status == TaskStatus.VALIDATING || status == TaskStatus.QUEUED
+    FILTER_PAUSED -> status == TaskStatus.PAUSED
+    FILTER_DONE -> status == TaskStatus.COMPLETED
+    FILTER_FAILED -> status == TaskStatus.FAILED
+    else -> true
+}
+
+/** Filter labels for the empty-state line. */
+private fun statusFilterLabel(filter: String): String = when (filter) {
+    FILTER_ACTIVE -> "active"
+    FILTER_PAUSED -> "paused"
+    FILTER_DONE -> "completed"
+    FILTER_FAILED -> "failed"
+    else -> ""
+}
 
 @Composable
 fun DownloadsScreen(
@@ -148,6 +221,8 @@ fun DownloadsScreen(
         if (raw != null && raw in DownloadsSorter.ALL_MODES) raw else DownloadsSorter.SORT_DATE
     }
     var sortMode by remember { mutableStateOf(initialSort) }
+    // §3.1 status filter for the FilterChip row (All/Active/Paused/Done/Failed).
+    var statusFilter by rememberSaveable { mutableStateOf(FILTER_ALL) }
     // A completed row's actions dialog ("More actions") is the kebab /
     // tile long-press surface: share AND delete, both reusing the existing
     // flows (shareMedia chooser + the gated pendingDeleteTask confirm).
@@ -241,9 +316,34 @@ fun DownloadsScreen(
         groups.map { (header, items) -> header to items.mapNotNull { tasksById[it.id] } }
     }
 
+    // §3.1 status-filter application — pure grouping above, the chips only
+    // narrow what is VISIBLE (no engine/state churn). Empty groups drop; the
+    // shelf only appears under All / Done (its tiles are completed files).
+    val filteredGroups = remember(liveGroups, statusFilter) {
+        if (statusFilter == FILTER_ALL) liveGroups
+        else liveGroups.map { (header, items) -> header to items.filter { it.matchesStatusFilter(statusFilter) } }
+            .filter { it.second.isNotEmpty() }
+    }
+    val visibleShelf = remember(shelfItems, statusFilter) {
+        if (statusFilter == FILTER_ALL || statusFilter == FILTER_DONE) shelfItems else emptyList()
+    }
+
     // Header meta counts (mock: "26.4 GB of 112 GB · 45 done · 0 active · 1
     // failed"). Counts are structural → remembered on the signature.
     val stats = remember(structureSig) { downloadsStats(viewModel.engine.tasks.value) }
+    val pausedCount = remember(structureSig) { tasks.count { it.status == TaskStatus.PAUSED } }
+    val filterCounts = remember(structureSig) {
+        mapOf(
+            FILTER_ALL to tasks.size,
+            FILTER_ACTIVE to tasks.count {
+                it.status == TaskStatus.DOWNLOADING || it.status == TaskStatus.RESOLVING ||
+                    it.status == TaskStatus.VALIDATING || it.status == TaskStatus.QUEUED
+            },
+            FILTER_PAUSED to pausedCount,
+            FILTER_DONE to stats.done,
+            FILTER_FAILED to stats.failed
+        )
+    }
 
     // Track 4 ("Download Remaining"): per-series count of episodes still
     // missing from the library. seriesUrl/seriesTotal are stamped on tasks by
@@ -277,9 +377,12 @@ fun DownloadsScreen(
     // Storage part is whole-GB (the Settings footer exposes whole-GB Longs —
     // mock shows a decimal, we degrade to the spec's fallback format "X GB of
     // Y GB"); counts-only when StatFs has not reported yet (total == 0).
+    // Storage part is whole-GB (the Settings footer exposes whole-GB Longs —
+    // §3.1 compact subtitle: "110 / 112 GB used · 2 GB free"); counts-only
+    // when StatFs has not reported yet (total == 0).
     val storagePart = if (uiState.totalStorageGb > 0L) {
         val usedGb = (uiState.totalStorageGb - uiState.freeStorageGb).coerceAtLeast(0L)
-        "$usedGb GB of ${uiState.totalStorageGb} GB"
+        "$usedGb / ${uiState.totalStorageGb} GB used · ${uiState.freeStorageGb} GB free"
     } else null
     val summaryLine = buildAnnotatedString {
         if (storagePart != null) {
@@ -358,7 +461,7 @@ fun DownloadsScreen(
             }
         }
 
-        // ── STORAGE METER (mock .meter: 2dp, radius 1, track elev, fill gray) ──
+        // ── STORAGE METER (§3.1: sleek rounded 4dp LinearProgressIndicator) ──
         if (uiState.totalStorageGb > 0L) {
             val usedGb = (uiState.totalStorageGb - uiState.freeStorageGb).coerceAtLeast(0L)
             val fillFraction = (usedGb.toFloat() / uiState.totalStorageGb.toFloat()).coerceIn(0f, 1f)
@@ -367,41 +470,38 @@ fun DownloadsScreen(
                 animationSpec = tween(durationMillis = 350),
                 label = "storageMeter"
             )
-            Box(
+            LinearProgressIndicator(
+                progress = { animatedFill },
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(top = 12.dp)
-                    .height(2.dp)
-                    .clip(RoundedCornerShape(1.dp))
-                    .background(SurfaceElevated)
-            ) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth(animatedFill)
-                        .fillMaxHeight()
-                        .background(ProgressFillGray)
-                )
-            }
+                    .height(4.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .semantics { contentDescription = "Storage used" },
+                color = TextSecondary,
+                trackColor = SurfaceElevated,
+                strokeCap = StrokeCap.Square
+            )
         }
 
-        // ── SORT RAIL: canonical 32dp segmented bar (notebook §3 / mock .seg) ──
-        DownloadsSortRail(
-            selectedMode = sortMode,
-            onSelectMode = { mode ->
-                sortMode = mode
-                context.getSharedPreferences(PREF_SORT, Context.MODE_PRIVATE)
-                    .edit().putString(PREF_SORT_KEY, mode).apply()
-            },
-            modifier = Modifier.padding(top = 16.dp)
+        // ── §3.1 INTERACTIVE FILTER CHIP ROW: one horizontal LazyRow of
+        //    FilterChips with counts (All · Active · Paused · Done · Failed)
+        //    replaces the four giant sort rectangles AND the static legend. ──
+        DownloadsFilterChipRow(
+            selected = statusFilter,
+            counts = filterCounts,
+            onSelect = { statusFilter = it },
+            modifier = Modifier
+                .padding(top = 14.dp)
+                .fillMaxWidth()
         )
 
-        // ── ACTIONS RAIL (mock .actions): "Resume all" ghost on the left, the
-        // right-aligned status legend riding the same single-line row —
-        // everything one line, nothing wraps. ──
+        // ── ACTIONS RAIL (§3.1): "Resume all" ghost on the left, the compact
+        //    "Sort: Date ▾" dropdown menu aligned right — everything one line. ──
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(top = 12.dp),
+                .padding(top = 10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             if (hasPaused) {
@@ -414,7 +514,14 @@ fun DownloadsScreen(
                 )
             }
             Spacer(modifier = Modifier.weight(1f))
-            DownloadsStatusLegend()
+            DownloadsSortMenu(
+                selectedMode = sortMode,
+                onSelectMode = { mode ->
+                    sortMode = mode
+                    context.getSharedPreferences(PREF_SORT, Context.MODE_PRIVATE)
+                        .edit().putString(PREF_SORT_KEY, mode).apply()
+                }
+            )
         }
 
         if (tasks.isEmpty()) {
@@ -438,6 +545,31 @@ fun DownloadsScreen(
                     }
                 }
             }
+        } else if (filteredGroups.isEmpty() && visibleShelf.isEmpty()) {
+            // A status chip narrowed everything out: say so, and one tap
+            // restores the full library.
+            Box(
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(
+                        imageVector = Icons.Rounded.FilterList,
+                        contentDescription = null,
+                        tint = TextMuted,
+                        modifier = Modifier.size(40.dp)
+                    )
+                    Spacer(modifier = Modifier.height(Spacing.sm))
+                    Text(
+                        "No ${statusFilterLabel(statusFilter)} downloads",
+                        color = TextSecondary,
+                        fontSize = Type.rowTitle.fontSize
+                    )
+                    TextButton(onClick = { statusFilter = FILTER_ALL }) {
+                        Text("Show all", color = AccentPrimary, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
         } else {
             val expandedShows = remember { mutableStateMapOf<String, Boolean>() }
 
@@ -446,7 +578,7 @@ fun DownloadsScreen(
                 modifier = Modifier.padding(top = 20.dp).fillMaxSize()
             ) {
                 if (sortMode == DownloadsSorter.SORT_LIBRARY) {
-                    items(liveGroups, key = { "show-${it.first}" }) { (showTitle, showItems) ->
+                    items(filteredGroups, key = { "show-${it.first}" }) { (showTitle, showItems) ->
                         val isExpanded = expandedShows[showTitle] ?: (showItems.size == 1 || showItems.any {
                             it.status == TaskStatus.DOWNLOADING || it.status == TaskStatus.RESOLVING
                         })
@@ -472,7 +604,7 @@ fun DownloadsScreen(
                         )
                     }
                 } else {
-                    liveGroups.forEach { (header, groupItems) ->
+                    filteredGroups.forEach { (header, groupItems) ->
                         item(key = "h-$header") {
                             // Track-4 inline action at group level: rendered only
                             // when the group's remaining pickups belong to ONE
@@ -508,15 +640,15 @@ fun DownloadsScreen(
                 }
 
                 // ── OFFLINE SHELF (mock zone "Social & Media"; ONE LazyRow max) ──
-                if (shelfItems.isNotEmpty()) {
+                if (visibleShelf.isNotEmpty()) {
                     item(key = "shelf-zone") {
-                        DownloadsGroupHeader(title = "Social & Media", count = shelfItems.size)
+                        DownloadsGroupHeader(title = "Social & Media", count = visibleShelf.size)
                         Spacer(modifier = Modifier.height(Spacing.sm))
                         LazyRow(
                             horizontalArrangement = Arrangement.spacedBy(12.dp),
                             modifier = Modifier.fillMaxWidth()
                         ) {
-                            items(shelfItems, key = { "shelf-${it.id}" }) { item ->
+                            items(visibleShelf, key = { "shelf-${it.id}" }) { item ->
                                 SocialShelfTile(
                                     task = item,
                                     onPlay = { onPlayTask(item) },
@@ -528,7 +660,7 @@ fun DownloadsScreen(
                     // Bottom line (mock): mono caption under the shelf zone.
                     item(key = "shelf-footnote") {
                         Text(
-                            text = "Hold a tile to share or delete · ${shelfItems.size} items on this device",
+                            text = "Hold a tile to share or delete · ${visibleShelf.size} items on this device",
                             fontFamily = FontFamily.Monospace,
                             fontSize = 10.5.sp,
                             color = TextMuted,
@@ -558,15 +690,23 @@ fun DownloadsScreen(
             textContentColor = TextSecondary,
             title = { Text(if (failedTarget) "Retry or remove?" else if (finishedTarget) "Share or delete?" else "Cancel this download?") },
             text = {
+                // §3.2: the card face shows the failure ONE line; the full
+                // humanized reason (and the raw engine string when it adds
+                // anything) lives here, in the ⋮ actions dialog.
+                val baseText = when {
+                    failedTarget -> "\"${target.episodeTitle}\" did not finish. Retry now, or remove the dead task?"
+                    finishedTarget -> "\"${target.episodeTitle}\" is finished and on this device."
+                    else -> "\"${target.episodeTitle}\" has not finished yet. Cancel it and remove the task?"
+                }
+                val failureDetail = if (failedTarget) {
+                    val reason = humanizeFailure(target.errorMessage ?: "").trim()
+                    if (reason.isBlank()) "" else "\n\n$reason"
+                } else ""
                 Text(
-                    when {
-                        failedTarget -> "\"${target.episodeTitle}\" did not finish. Retry now, or remove the dead task?"
-                        finishedTarget -> "\"${target.episodeTitle}\" is finished and on this device."
-                        else -> "\"${target.episodeTitle}\" has not finished yet. Cancel it and remove the task?"
-                    },
+                    baseText + failureDetail,
                     color = TextSecondary,
                     fontSize = Type.body.fontSize,
-                    maxLines = 4,
+                    maxLines = 6,
                     overflow = TextOverflow.Ellipsis
                 )
             },
@@ -650,31 +790,131 @@ fun DownloadsScreen(
     }
 }
 
-/** Canonical 32dp segmented sort rail (notebook §3 "Sort & Segmented Bars",
- *  mock .seg): SurfaceCard container, 3dp inner padding, 32dp cells,
- *  selected pill = AccentPrimary fill + background ink, text-only labels. */
+/** §3.1 interactive filter chip row (one LazyRow): All · Active · Paused ·
+ *  Done · Failed, each with its live count — the four static legend dots and
+ *  the four giant sort boxes are consolidated into this single scrollable
+ *  rail. Theme-aware chip colors follow the app's FilterChip pattern. */
 @Composable
-private fun DownloadsSortRail(
-    selectedMode: String,
-    onSelectMode: (String) -> Unit,
+private fun DownloadsFilterChipRow(
+    selected: String,
+    counts: Map<String, Int>,
+    onSelect: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val modes = listOf(
+    val labels = mapOf(
+        FILTER_ALL to "All",
+        FILTER_ACTIVE to "Active",
+        FILTER_PAUSED to "Paused",
+        FILTER_DONE to "Done",
+        FILTER_FAILED to "Failed"
+    )
+    LazyRow(
+        modifier = modifier,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        contentPadding = PaddingValues(vertical = 4.dp)
+    ) {
+        items(ALL_FILTERS, key = { it }) { filter ->
+            val isSelected = filter == selected
+            FilterChip(
+                selected = isSelected,
+                onClick = { onSelect(filter) },
+                label = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = labels[filter] ?: filter,
+                            fontSize = 11.sp,
+                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                        )
+                        Text(
+                            text = " ${counts[filter] ?: 0}",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.ExtraBold
+                        )
+                    }
+                },
+                colors = FilterChipDefaults.filterChipColors(
+                    containerColor = SurfaceCard,
+                    selectedContainerColor = AccentPrimary,
+                    labelColor = TextSecondary,
+                    selectedLabelColor = BackgroundDark
+                ),
+                border = FilterChipDefaults.filterChipBorder(
+                    enabled = true,
+                    selected = isSelected,
+                    borderColor = BorderHairline,
+                    selectedBorderColor = AccentPrimary
+                ),
+                shape = RoundedCornerShape(Radius.full)
+            )
+        }
+    }
+}
+
+/** §3.1 compact "Sort: Date ▾" dropdown menu button (replaces the segmented
+ *  sort rectangles; the DownloadsSorter modes and their persistence are
+ *  untouched). */
+@Composable
+private fun DownloadsSortMenu(
+    selectedMode: String,
+    onSelectMode: (String) -> Unit
+) {
+    val labels = mapOf(
         DownloadsSorter.SORT_DATE to "Date",
         DownloadsSorter.SORT_LIBRARY to "By Show",
         DownloadsSorter.SORT_STATUS to "Status",
         DownloadsSorter.SORT_SIZE to "Size"
     )
-
-    SegmentBar(modifier = modifier, innerPadding = 3.dp) {
-        modes.forEach { (mode, label) ->
-            SegmentCell(
-                selected = mode == selectedMode,
-                onClick = { onSelectMode(mode) },
-                label = label,
-                modifier = Modifier.weight(1f),
-                cellHeight = 32.dp
+    var open by remember { mutableStateOf(false) }
+    Box {
+        Row(
+            modifier = Modifier
+                .clip(RoundedCornerShape(Radius.full))
+                .clickable { open = true }
+                .padding(horizontal = 10.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(3.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Rounded.SwapVert,
+                contentDescription = null,
+                tint = TextSecondary,
+                modifier = Modifier.size(13.dp)
             )
+            Text(
+                text = "Sort: ${labels[selectedMode] ?: selectedMode}",
+                fontSize = 11.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = TextSecondary
+            )
+            Icon(
+                imageVector = Icons.Rounded.ExpandMore,
+                contentDescription = null,
+                tint = TextSecondary,
+                modifier = Modifier.size(14.dp)
+            )
+        }
+        DropdownMenu(
+            expanded = open,
+            onDismissRequest = { open = false },
+            modifier = Modifier.background(SurfaceCard)
+        ) {
+            DownloadsSorter.ALL_MODES.forEach { mode ->
+                val label = labels[mode] ?: mode
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            text = label,
+                            fontSize = Type.body.fontSize,
+                            fontWeight = if (mode == selectedMode) FontWeight.Bold else FontWeight.Normal,
+                            color = if (mode == selectedMode) AccentPrimary else TextPrimary
+                        )
+                    },
+                    onClick = {
+                        onSelectMode(mode)
+                        open = false
+                    }
+                )
+            }
         }
     }
 }
@@ -726,6 +966,16 @@ internal fun groupCountColor(header: String): Color = when (header) {
     else -> LiveWord
 }
 
+/** Group-header count colour (mock .sect .cnt): THEME-AWARE variant of the
+ *  test-pinned `groupCountColor(header)` — same mapping, DownloadsChroma hues
+ *  (spec amber/red/emerald on obsidian, paper words on light). */
+internal fun groupCountColor(header: String, chroma: DownloadsChroma): Color = when (header) {
+    "PAUSED" -> chroma.paused
+    "FAILED" -> chroma.failed
+    "DONE", "COMPLETED" -> chroma.done
+    else -> chroma.live
+}
+
 /** Group header (mock .sect): 11sp/800 caps, count in the matching state
  *  colour, then a trailing 1dp hairline rule flexing the remaining width.
  *  A custom measure keeps the mock's flex: a plain weight() pair would cap
@@ -738,7 +988,7 @@ private fun DownloadsGroupHeader(
     remainingCount: Int = 0,
     onDownloadRemaining: (() -> Unit)? = null
 ) {
-    val countColor = groupCountColor(title)
+    val countColor = groupCountColor(title, downloadsChroma(AnonTheme.colors.isDark))
     val action: (() -> Unit)? = onDownloadRemaining?.takeIf { remainingCount > 0 }
     Layout(
         modifier = Modifier
@@ -851,13 +1101,19 @@ private fun InlineRemainingAction(count: Int, onClick: () -> Unit) {
     }
 }
 
-/** v6 activity card (mock .card): white card on the paper background, hairline
- *  border, radius 18, padding 12/14; 46×58 poster/initials thumb, 13sp/700
- *  single-line title, 11sp/600 status line (glyph dot + coloured word + grey
- *  detail — never colour alone), 10sp source chip, 5dp meter (cyan live fill,
- *  rust stall on failed), failed rows add a dashed rule + the humanized reason
- *  line. Trailing: 38dp ink circle action + ⋮ (mock .iconbtn/.kebab); failed
- *  rows carry the filled RETRY circle (mock .iconbtn.fretry). */
+/** §3.2 activity card — strict THREE-COLUMN geometry inside one Card:
+ *  LEFT  52×72 poster thumb (SxxExx micro badge anchored BottomStart — the
+ *        tag is EXTRACTED out of the title and stamped onto the thumb);
+ *  CENTER  tight 2-row stack (clean sanitized title; then the source badge
+ *        pill INLINE on the same row as the status word + unified detail —
+ *        the source badge never gets its own third vertical row);
+ *  RIGHT  vertically centered 36dp circular action (+ ⋮ kebab), with the
+ *        contrast LOCK: dark = white circle + black glyph, light = ink
+ *        circle + white glyph — the white-on-white play bug is impossible.
+ *  For active/paused rows a 3dp progress bar sits FLUSH along the card's
+ *  bottom edge (inside the same Box, Alignment.BottomCenter); failed/done
+ *  cards carry no bar at all. Failure copy lives on the status row itself;
+ *  the full raw error is reachable in the ⋮ dialog. */
 @Composable
 private fun ActivityRow(
     task: DownloadTask,
@@ -875,35 +1131,51 @@ private fun ActivityRow(
     val isFailed = task.status == TaskStatus.FAILED
     val isDone = task.status == TaskStatus.COMPLETED
 
-    // Performance guard: the monogram is remembered per item (title pair), so
-    // progress ticks re-render text but never re-derive the initials.
-    val monogram = remember(task.showTitle, task.episodeTitle) { monogramFor(task) }
-    val style = downloadStatusStyle(task.status, neutralInk = TextMuted)
+    val chroma = downloadsChroma(AnonTheme.colors.isDark)
+    val style = downloadStatusStyle(task.status, chroma)
 
+    // §3.2 title sanitizer: the SxxExx tag MOVES to the thumbnail badge and
+    // trailing [yt-dlp-id] brackets + scraper suffixes never paint ("Video by
+    // lolita [Defo4HhjcWO]" renders as "Video by lolita" — §5.3).
+    val titleDetail = remember(task.episodeTitle) {
+        TitleFormatting.extractSeasonEpisodeTag(task.episodeTitle)
+    }
+    val cleanTitle = remember(titleDetail) {
+        TitleFormatting.stripTrailingYtDlpId(
+            TitleFormatting.collapseSpaces(titleDetail?.first ?: task.episodeTitle)
+        ).ifBlank { task.episodeTitle }
+    }
+    // §5.4 source badge: stamped provider site, or "SOCIAL" for the direct/
+    // one-off social downloads that never carry a site stamp.
+    val sourceBadge = task.site.uppercase().ifBlank {
+        if (task.showTitle.contains("Social", ignoreCase = true) ||
+            task.showTitle == "Direct Downloads" ||
+            task.showTitle.startsWith("Social", ignoreCase = true)
+        ) "SOCIAL" else ""
+    }
+
+    // Flush bottom progress bar (§3.2): active + paused only; unknown total +
+    // bytes in flight = the honest indeterminate sweep.
     val totalKnown = task.totalBytes > 0
-    // Failed rows freeze at the last known percentage (rust stall meter); live
-    // rows animate toward the current byte ratio (350ms, as before).
-    val meterTarget = if (totalKnown) {
+    val barTarget = if (totalKnown) {
         (task.downloadedBytes.toFloat() / task.totalBytes.toFloat()).coerceIn(0f, 1f)
     } else 0f
-    val meterFraction by animateFloatAsState(
-        targetValue = if (isDone) 1f else meterTarget,
+    val barFraction by animateFloatAsState(
+        targetValue = barTarget,
         animationSpec = tween(durationMillis = 350),
         label = "rowProgress"
     )
-    // Unknown total + bytes in flight: indeterminate sweep (same honest signal
-    // as the v5 pin — a static 0% meter would read as a hang).
-    val indeterminate = isActive && !totalKnown && task.downloadedBytes > 0
-    val detail = statusDetailText(task)
+    val barVisible = (isActive || isPaused) && !isDone && !isFailed
+    val barIndeterminate = isActive && !totalKnown && task.downloadedBytes > 0
 
-    Column(
+    Card(
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(containerColor = SurfaceCard),
+        border = BorderStroke(1.dp, BorderHairline),
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(18.dp))
-            .background(SurfaceCard)
-            .border(1.dp, BorderHairline, RoundedCornerShape(18.dp))
-            // DONE rows open in the player; FAILED rows retry ("tap to retry"
-            // behavior kept from v5) on top of the primary RETRY circle.
+            // DONE rows open in the player; FAILED rows retry on top of the
+            // primary RETRY control.
             .clickable(
                 enabled = isDone || isFailed,
                 onClickLabel = if (isFailed) "Retry" else "Play"
@@ -913,50 +1185,88 @@ private fun ActivityRow(
                     isDone -> onPlay()
                 }
             }
-            .padding(horizontal = 14.dp, vertical = 12.dp)
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            // Poster art rides on the task (stamped by the drawer at enqueue
-            // time, v6 mock frame 1); "" falls back to the initials tile.
-            DownloadThumb(posterUrl = task.posterUrl, initials = monogram)
-
-            Spacer(modifier = Modifier.width(11.dp))
-
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = task.episodeTitle,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = TextPrimary,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-                // Status line (mock .stat): glyph dot 6dp + coloured word +
-                // grey detail — always colour + WORD + GLYPH, single line.
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    if (style.kind == DownloadStateKind.LIVE) {
-                        StatusDot(color = style.accent, pulse = true)
-                    } else {
+        Box(modifier = Modifier.fillMaxWidth()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    // +3dp when the flush bar rides the bottom edge so the
+                    // bar never covers row content.
+                    .padding(
+                        start = 12.dp, end = 12.dp,
+                        top = 10.dp, bottom = if (barVisible) 13.dp else 10.dp
+                    ),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                // ── LEFT: 52×72 poster thumb (2:3.46), SxxExx badge overlay ──
+                Box(modifier = Modifier.size(width = 52.dp, height = 72.dp)) {
+                    PosterImageOrFallback(
+                        posterUrl = task.posterUrl,
+                        showTitle = cleanTitle,
+                        modifier = Modifier.size(width = 52.dp, height = 72.dp),
+                        shape = RoundedCornerShape(8.dp),
+                        fallbackIcon = Icons.Rounded.Videocam,
+                        showFallbackTitle = false
+                    )
+                    if (titleDetail != null) {
                         Text(
-                            text = style.glyph,
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.ExtraBold,
-                            color = style.accent
+                            text = titleDetail.second,
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White,
+                            modifier = Modifier
+                                .align(Alignment.BottomStart)
+                                .padding(4.dp)
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(Color(0xCC000000))
+                                .padding(horizontal = 4.dp, vertical = 1.dp)
                         )
                     }
-                    Spacer(modifier = Modifier.width(5.dp))
+                }
+
+                // ── CENTER: tight 2-row stack ──
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.Center
+                ) {
                     Text(
-                        text = style.word,
-                        fontSize = 11.sp,
+                        text = cleanTitle,
+                        fontSize = 14.sp,
                         fontWeight = FontWeight.SemiBold,
-                        color = style.accent,
-                        maxLines = 1
+                        color = TextPrimary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
-                    if (detail.isNotEmpty()) {
-                        Spacer(modifier = Modifier.width(4.dp))
+                    Spacer(modifier = Modifier.height(4.dp))
+                    // Row 2: [SOURCE] pill INLINE with the unified status +
+                    // size string — never a third vertical row.
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        if (sourceBadge.isNotBlank()) {
+                            SiteTagChip(site = sourceBadge, kind = style.kind, chroma = chroma)
+                        }
+                        if (style.kind == DownloadStateKind.LIVE) {
+                            StatusDot(color = style.accent, pulse = true)
+                        } else {
+                            Text(
+                                text = style.glyph,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = style.accent
+                            )
+                        }
                         Text(
-                            text = detail,
+                            text = style.word,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = style.accent,
+                            maxLines = 1
+                        )
+                        Text(
+                            text = cardStatusDetail(task),
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Medium,
                             color = TextMuted,
@@ -966,149 +1276,95 @@ private fun ActivityRow(
                         )
                     }
                 }
-                // Site/source tag (mock .sitetag): only when the record knows
-                // its source — tinted for live/failed, neutral grey otherwise.
-                if (task.site.isNotBlank()) {
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Row {
-                        SiteTagChip(site = task.site.uppercase(), kind = style.kind)
-                    }
-                }
-                // Honest verification note, if any (rare): plain grey line,
-                // completed cards only (kept from the v5 contract).
-                if (isDone && task.validationNote != null) {
-                    Text(
-                        text = task.validationNote,
-                        fontSize = 10.sp,
-                        color = TextMuted,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.padding(top = 2.dp)
-                    )
-                }
-            }
 
-            Spacer(modifier = Modifier.width(12.dp))
-
-            // Trailing controls (mock .iconbtn / .fretry / .kebab), 10dp apart.
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                when {
-                    isActive -> {
-                        // Behavior guard: pause/resume must survive — the active
-                        // card's solid circle is Pause (same geometry the mock
-                        // draws for the paused card's Resume).
-                        SolidActionButton(icon = Icons.Rounded.Pause, description = "Pause", onClick = onPause)
-                        KebabButton(onClick = onOpenActions)
+                // ── RIGHT: vertically centered action + kebab ──
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    when {
+                        isActive -> {
+                            SolidActionButton(icon = Icons.Rounded.Pause, description = "Pause", onClick = onPause)
+                            KebabButton(onClick = onOpenActions)
+                        }
+                        isPaused -> {
+                            SolidActionButton(icon = Icons.Rounded.PlayArrow, description = "Resume", onClick = onRetry)
+                            KebabButton(onClick = onOpenActions)
+                        }
+                        isDone -> {
+                            SolidActionButton(icon = Icons.Rounded.PlayArrow, description = "Play", onClick = onPlay)
+                            KebabButton(onClick = onOpenActions)
+                        }
+                        isFailed -> {
+                            RetryCircleButton(onClick = onRetry, accent = chroma.failed)
+                            KebabButton(onClick = onOpenActions)
+                        }
+                        // QUEUED / VALIDATING: no transfer affordance is real
+                        // yet — the ⋮ dialog stays reachable.
+                        else -> KebabButton(onClick = onOpenActions)
                     }
-                    isPaused -> {
-                        SolidActionButton(icon = Icons.Rounded.PlayArrow, description = "Resume", onClick = onRetry)
-                        KebabButton(onClick = onOpenActions)
-                    }
-                    isDone -> {
-                        SolidActionButton(icon = Icons.Rounded.PlayArrow, description = "Play", onClick = onPlay)
-                        KebabButton(onClick = onOpenActions)
-                    }
-                    isFailed -> {
-                        // Primary failed action (mock .iconbtn.fretry): filled
-                        // rust circle, white RETRY label.
-                        RetryCircleButton(onClick = onRetry)
-                        KebabButton(onClick = onOpenActions)
-                    }
-                    // QUEUED / VALIDATING: no transfer affordance is real yet —
-                    // the ⋮ dialog ("Cancel this download?") stays reachable.
-                    else -> KebabButton(onClick = onOpenActions)
                 }
             }
-        }
 
-        // 5dp meter (mock .meter): cyan live fill on the #E2E8EF track; the
-        // failed card keeps a rust stall meter at the last known percentage.
-        if (isActive || isFailed) {
-            BoxWithConstraints(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 10.dp)
-                    .height(5.dp)
-                    .clip(RoundedCornerShape(999.dp))
-                    .background(MeterTrack)
-                    // A hand-drawn meter is invisible to TalkBack: expose it as
-                    // a real progress range (kept from the v5 pin).
-                    .semantics {
-                        progressBarRangeInfo =
-                            if (indeterminate) ProgressBarRangeInfo.Indeterminate
-                            else ProgressBarRangeInfo(meterFraction, 0f..1f)
-                        contentDescription = "Download progress"
-                    }
-            ) {
-                if (indeterminate) {
-                    val sweepWidth = 64.dp
-                    val sweep by rememberInfiniteTransition(label = "indeterminate").animateFloat(
-                        initialValue = 0f,
-                        targetValue = 1f,
-                        animationSpec = infiniteRepeatable(tween(durationMillis = 1100, easing = LinearEasing)),
-                        label = "indeterminateValue"
-                    )
-                    Box(
+            // §3.2 flush bottom progress bar — 0dp of extra vertical height,
+            // aligned to the card Box's BottomCenter; hidden on Done/Failed.
+            if (barVisible) {
+                if (barIndeterminate) {
+                    LinearProgressIndicator(
                         modifier = Modifier
-                            .width(sweepWidth)
-                            .fillMaxHeight()
-                            .clip(RoundedCornerShape(999.dp))
-                            .offset(x = (maxWidth - sweepWidth) * sweep)
-                            .background(LiveFill)
+                            .align(Alignment.BottomCenter)
+                            .fillMaxWidth()
+                            .height(3.dp)
+                            .semantics {
+                                progressBarRangeInfo = ProgressBarRangeInfo.Indeterminate
+                                contentDescription = "Download in progress"
+                            },
+                        color = if (isPaused) chroma.paused else chroma.live,
+                        trackColor = SurfaceElevated,
+                        strokeCap = StrokeCap.Square
                     )
                 } else {
-                    Box(
+                    LinearProgressIndicator(
+                        progress = { barFraction },
                         modifier = Modifier
-                            .fillMaxWidth(if (isFailed) meterTarget else meterFraction)
-                            .fillMaxHeight()
-                            .clip(RoundedCornerShape(999.dp))
-                            .background(if (isFailed) FailRust else LiveFill)
+                            .align(Alignment.BottomCenter)
+                            .fillMaxWidth()
+                            .height(3.dp)
+                            .semantics {
+                                progressBarRangeInfo = ProgressBarRangeInfo(barFraction, 0f..1f)
+                                contentDescription = "Download progress"
+                            },
+                        color = if (isPaused) chroma.paused else chroma.live,
+                        trackColor = SurfaceElevated,
+                        strokeCap = StrokeCap.Square
                     )
                 }
             }
-        }
-
-        // Failed extras (mock .errline): dashed rust rule, then the humanized
-        // failure reason on one clipped line, in the failed word colour.
-        // SWITCH SITE pill intentionally OMITTED — the pipeline exposes no
-        // source-preference / retry-with-different-source knob a card could
-        // call (AppSettings has none; DownloadEngine.retry re-resolves the
-        // same sourceUrl), and a dead button would be worse than none.
-        if (isFailed) {
-            Spacer(modifier = Modifier.height(10.dp))
-            DashedSeparator()
-            Spacer(modifier = Modifier.height(8.dp))
-            Text(
-                text = humanizeFailure(task.errorMessage ?: "").ifBlank { "Download failed" },
-                fontSize = 11.sp,
-                color = FailedWord,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
         }
     }
 }
 
-/** Solid 38dp ink circle (mock .iconbtn): ink fill, white glyph — the card's
- *  primary control (Pause / Resume / Play). */
+/** §1.3 CONTRAST-LOCKED 36dp circular action (§3.2 geometry, was 38dp ink):
+ *  the container color and the glyph tint are bound together EXPLICITLY per
+ *  theme — Dark = white circle + black glyph, Light = ink (#0F1115) circle +
+ *  white glyph. Never relies on LocalContentColor, so the white-on-white
+ *  play button bug cannot recur. */
 @Composable
 private fun SolidActionButton(icon: ImageVector, description: String, onClick: () -> Unit) {
+    val isDark = AnonTheme.colors.isDark
     Box(
         modifier = Modifier
-            .size(38.dp)
+            .size(36.dp)
             .clip(CircleShape)
-            .background(TextPrimary)
+            .background(if (isDark) Color(0xFFFFFFFF) else Color(0xFF0F1115))
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center
     ) {
         Icon(
             imageVector = icon,
             contentDescription = description,
-            tint = Color.White,
-            modifier = Modifier.size(13.dp)
+            tint = if (isDark) Color(0xFF000000) else Color(0xFFFFFFFF),
+            modifier = Modifier.size(14.dp)
         )
     }
 }
@@ -1117,12 +1373,12 @@ private fun SolidActionButton(icon: ImageVector, description: String, onClick: (
  *  white 10sp/800 label — the failed card's primary verb (mock pins the
  *  font smaller, this change's 10sp hard floor governs). */
 @Composable
-private fun RetryCircleButton(onClick: () -> Unit) {
+private fun RetryCircleButton(onClick: () -> Unit, accent: Color = FailRust) {
     Box(
         modifier = Modifier
-            .size(38.dp)
+            .size(36.dp)
             .clip(CircleShape)
-            .background(FailRust)
+            .background(accent)
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center
     ) {
@@ -1165,26 +1421,20 @@ private fun StatusDot(color: Color, pulse: Boolean = false) {
 }
 
 /** Site/source chip (mock .sitetag): 10sp/700 with 0.8sp tracking in a soft
- *  rounded chip — tinted for live/failed cards, neutral grey otherwise. */
+ *  rounded chip — tinted for live/failed cards, neutral grey otherwise.
+ *  §3.2: rides INLINE in the card's status row (never a third vertical row);
+ *  colors come from DownloadsChroma so both themes read. */
 @Composable
-private fun SiteTagChip(site: String, kind: DownloadStateKind) {
+private fun SiteTagChip(site: String, kind: DownloadStateKind, chroma: DownloadsChroma = downloadsChroma(AnonTheme.colors.isDark)) {
     val tinted = when (kind) {
-        DownloadStateKind.LIVE -> LiveTint to LiveWord
-        DownloadStateKind.FAILED -> FailedTint to FailedWord
-        else -> ChipNeutralBg to SiteTagInk
+        DownloadStateKind.LIVE -> chroma.liveTint to chroma.live
+        DownloadStateKind.FAILED -> chroma.failedTint to chroma.failed
+        else -> chroma.neutralTint to chroma.neutralInk
     }
     Row(
         modifier = Modifier
             .clip(RoundedCornerShape(5.dp))
             .background(tinted.first)
-            // Neutral tags keep the mock's hairline border; tinted ones drop it.
-            .then(
-                if (tinted.first == ChipNeutralBg) {
-                    Modifier.border(1.dp, BorderHairline, RoundedCornerShape(5.dp))
-                } else {
-                    Modifier
-                }
-            )
             .padding(horizontal = 6.dp, vertical = 2.dp)
     ) {
         Text(
@@ -1198,100 +1448,13 @@ private fun SiteTagChip(site: String, kind: DownloadStateKind) {
     }
 }
 
-/** Status legend (mock .legend / .lg): four tinted chips, dot + word,
- *  10sp/800 — the same chroma the cards use. */
-@Composable
-private fun DownloadsStatusLegend() {
-    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        LegendChip("Live", LiveWord, LiveTint, pulse = true)
-        LegendChip("Done", DoneWord, DoneTint)
-        LegendChip("Paused", PausedWord, PausedTint)
-        LegendChip("Failed", FailedWord, FailedTint)
-    }
-}
+// ─── (Removed §3.1: DownloadsStatusLegend / LegendChip — the four static
+// legend dots are superseded by the interactive DownloadsFilterChipRow, whose
+// chips carry the same state chroma via DownloadsChroma.) ────────────────────
 
-@Composable
-private fun LegendChip(label: String, accent: Color, tint: Color, pulse: Boolean = false) {
-    Row(
-        modifier = Modifier
-            .clip(RoundedCornerShape(Radius.full))
-            .background(tint)
-            .padding(horizontal = 9.dp, vertical = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(4.dp)
-    ) {
-        StatusDot(color = accent, pulse = pulse)
-        Text(
-            text = label,
-            fontSize = 10.sp,
-            fontWeight = FontWeight.ExtraBold,
-            color = accent,
-            maxLines = 1,
-            softWrap = false
-        )
-    }
-}
-
-/** Card thumbnail (mock .thumb): 46×58, radius 9, hairline border. POSTER ART
- *  through the app's existing Coil pipeline whenever the record carries a
- *  poster URL (HomeScreen's SubcomposeAsyncImage pattern — initials while it
- *  loads, initials on error); initials tile (12sp/800, mock .thumb .init) is
- *  the explicit last-resort fallback. */
-@Composable
-private fun DownloadThumb(posterUrl: String, initials: String) {
-    Box(
-        modifier = Modifier
-            .size(width = 46.dp, height = 58.dp)
-            .clip(RoundedCornerShape(9.dp))
-            .background(ThumbTile)
-            .border(1.dp, BorderHairline, RoundedCornerShape(9.dp)),
-        contentAlignment = Alignment.Center
-    ) {
-        if (posterUrl.isNotBlank()) {
-            SubcomposeAsyncImage(
-                model = posterUrl,
-                contentDescription = null,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize(),
-                loading = { ThumbInitials(initials) },
-                error = { ThumbInitials(initials) }
-            )
-        } else {
-            ThumbInitials(initials)
-        }
-    }
-}
-
-@Composable
-private fun ThumbInitials(initials: String) {
-    Text(
-        text = initials,
-        fontSize = 12.sp,
-        fontWeight = FontWeight.ExtraBold,
-        color = TextMuted
-    )
-}
-
-/** 1dp dashed rule (mock .errline border-top: 1px dashed #EFD5D2) — Compose
- *  has no dashed-line modifier primitive, so the mock's dash/gap rhythm
- *  (6dp/4dp) is drawn segment by segment. */
-@Composable
-private fun DashedSeparator() {
-    Canvas(modifier = Modifier.fillMaxWidth().height(1.dp)) {
-        val dash = 6.dp.toPx()
-        val gap = 4.dp.toPx()
-        var x = 0f
-        while (x < size.width) {
-            drawLine(
-                color = DashRust,
-                start = Offset(x, 0f),
-                end = Offset(minOf(x + dash, size.width), 0f),
-                strokeWidth = size.height
-            )
-            x += dash + gap
-        }
-    }
-}
+// ─── (Removed §3.2/§1.4/§5.4: DownloadThumb / ThumbInitials / ThumbTile — the
+// 46×58 initials tile is replaced by the 52×72 gradient well + video icon via
+// PosterImageOrFallback, and the MN/JK/PS/SO monogram squares are gone.) ────
 
 /** Trailing ⋮ (mock .kebab): text glyph, gray, opens the row actions dialog
  *  (share-or-delete on finished items, retry-or-remove on failed, cancel on
@@ -1351,6 +1514,89 @@ internal fun downloadStatusStyle(
         DownloadStatusStyle(DownloadStateKind.NEUTRAL, "Queued", "○", neutralInk, neutralTint)
     TaskStatus.VALIDATING ->
         DownloadStatusStyle(DownloadStateKind.NEUTRAL, "Checking", "●", neutralInk, neutralTint)
+}
+
+/** §3.2 theme-aware variant of [downloadStatusStyle] — same word/glyph/kind
+ *  vocabulary the JVM test pins, hues from [DownloadsChroma] (obsidian spec
+ *  hexes in dark, paper words in light). The legacy function above stays
+ *  byte-identical for DownloadStatusStyleTest. */
+internal fun downloadStatusStyle(status: TaskStatus, chroma: DownloadsChroma): DownloadStatusStyle =
+    when (status) {
+        TaskStatus.DOWNLOADING, TaskStatus.RESOLVING ->
+            DownloadStatusStyle(DownloadStateKind.LIVE, "Downloading", "●", chroma.live, chroma.liveTint)
+        TaskStatus.COMPLETED ->
+            DownloadStatusStyle(DownloadStateKind.DONE, "Done", "✓", chroma.done, chroma.doneTint)
+        TaskStatus.PAUSED ->
+            DownloadStatusStyle(DownloadStateKind.PAUSED, "Paused", "❚❚", chroma.paused, chroma.pausedTint)
+        TaskStatus.FAILED ->
+            DownloadStatusStyle(DownloadStateKind.FAILED, "Failed", "✕", chroma.failed, chroma.failedTint)
+        TaskStatus.QUEUED ->
+            DownloadStatusStyle(DownloadStateKind.NEUTRAL, "Queued", "○", chroma.neutralInk, chroma.neutralTint)
+        TaskStatus.VALIDATING ->
+            DownloadStatusStyle(DownloadStateKind.NEUTRAL, "Checking", "●", chroma.neutralInk, chroma.neutralTint)
+    }
+
+/** §3.2 ZERO-BYTE DENOMINATOR RULE: the "X / Y" span composes ONLY when the
+ *  record really knows its total. `totalBytes <= 0L` can never emit "/ 0 B"
+ *  — the formatter returns the downloaded size alone. */
+internal fun formatBytesSpan(downloadedBytes: Long, totalBytes: Long): String =
+    if (totalBytes > 0L) {
+        "${formatBytes(minOf(downloadedBytes, totalBytes))} / ${formatBytes(totalBytes)}"
+    } else {
+        formatBytes(downloadedBytes)
+    }
+
+/** §3.2 unified per-status detail for the card's status ROW (the single
+ *  second row: [SOURCE] Word · detail). The legacy [statusDetailText] stays
+ *  untouched for its JVM test; this is the card face's copy:
+ *    Paused  → "· 368.0 KB · Tap to resume"   (the retry wording is banned)
+ *    Active  → "· 42% · 140.2 MB / 330.0 MB · 2.0 MB/s"
+ *    Failed  → "· <humanized reason>"         (one line; full error in ⋮)
+ *    Done    → "· 323.3 MB"
+ *  Size math runs through [formatBytesSpan], so "/ 0 B" is impossible. */
+internal fun cardStatusDetail(task: DownloadTask): String {
+    val totalKnown = task.totalBytes > 0
+    val pctText = if (totalKnown) {
+        (((task.downloadedBytes.toFloat() / task.totalBytes.toFloat()).coerceIn(0f, 1f)) * 100)
+            .toInt().coerceIn(0, 100).toString() + "%"
+    } else null
+
+    val transferring = task.status == TaskStatus.DOWNLOADING
+    val speedMb = task.speedBytesPerSec / (1024.0 * 1024.0)
+    val speedText = when {
+        !transferring -> null
+        speedMb >= 0.1 -> "%.1f MB/s".format(java.util.Locale.US, speedMb)
+        task.speedBytesPerSec >= 1024.0 -> "%.0f KB/s".format(java.util.Locale.US, task.speedBytesPerSec / 1024.0)
+        task.speedBytesPerSec > 0.0 -> "%.0f B/s".format(java.util.Locale.US, task.speedBytesPerSec)
+        else -> null
+    }
+    val etaText = if (transferring && task.etaSeconds > 0) formatEta(task.etaSeconds) else null
+
+    return when (task.status) {
+        TaskStatus.PAUSED -> when {
+            task.downloadedBytes > 0 || totalKnown -> "· ${formatBytesSpan(task.downloadedBytes, task.totalBytes)} · Tap to resume"
+            else -> "· Tap to resume"
+        }
+        TaskStatus.DOWNLOADING -> {
+            val parts = mutableListOf<String>()
+            if (totalKnown) parts.add(pctText!!)
+            parts.add(formatBytesSpan(task.downloadedBytes, task.totalBytes))
+            speedText?.let { parts.add(it) }
+            etaText?.let { parts.add(it) }
+            if (parts.size == 1 && parts[0].isBlank()) "" else "· " + parts.joinToString(" · ")
+        }
+        TaskStatus.RESOLVING -> if (task.downloadedBytes > 0) "· ${formatBytes(task.downloadedBytes)}" else ""
+        TaskStatus.VALIDATING -> "· checking file"
+        TaskStatus.QUEUED -> "· waiting to start"
+        TaskStatus.FAILED -> {
+            val reason = humanizeFailure(task.errorMessage ?: "").trim()
+            if (reason.isNotBlank() && reason != "Download failed") "· $reason" else "· download failed"
+        }
+        TaskStatus.COMPLETED -> {
+            val size = formatBytes(if (task.totalBytes > 0) task.totalBytes else task.downloadedBytes)
+            "· $size"
+        }
+    }
 }
 
 /** Grey detail after the status word (mock .stat .x), single line: percent,
@@ -1460,25 +1706,9 @@ private fun humanizeFailure(raw: String): String {
         .replace(Regex("""[,;:]+\s*$"""), "").trim()
 }
 
-/** Flat monogram initials, remembered per item by the caller. Show episodes
- *  monogram the SHOW (mock "PN" for The Promised Neverland); direct files
- *  monogram their own title. */
-private fun monogramFor(task: DownloadTask): String {
-    val source = if (task.showTitle.isNotBlank() && task.showTitle != "Direct Downloads") {
-        task.showTitle
-    } else {
-        task.episodeTitle
-    }
-    val words = source.trim().split(Regex("\\s+")).filter { it.isNotBlank() }
-    return when {
-        words.size >= 2 -> buildString {
-            append(words[0].first())
-            append(words[1].first())
-        }.uppercase()
-        words.isNotEmpty() -> words[0].take(2).uppercase()
-        else -> "··"
-    }
-}
+// ─── (Removed §5.4: flat monogramFor initials — the social/direct fallback
+//  thumb is now the §4.1 gradient well with a video icon, and the source is
+//  named by the inline [SOCIAL]/[NKIRI]-style site badge instead.) ───────────
 
 /** Offline-shelf tile (mock .tile): 166×94 deep well, hairline, centered
  *  platform glyph + 34dp glass play (black-50%, white-14% outline, white ▶),
@@ -1534,7 +1764,9 @@ private fun SocialShelfTile(
             }
         }
         Text(
-            text = task.episodeTitle,
+            // §5.3: shelf tile titles shed trailing "[yt-dlp_id]" brackets too.
+            text = remember(task.episodeTitle) { TitleFormatting.stripTrailingYtDlpId(task.episodeTitle) }
+                .ifBlank { task.episodeTitle },
             fontSize = 11.sp,
             fontWeight = FontWeight.Bold,
             color = TextPrimary,

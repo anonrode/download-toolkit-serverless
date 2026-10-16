@@ -58,3 +58,8 @@ REVIEW_PROMPTS.md
 *.pem
 anon-release.*
 NUL
+
+# OTA signing hierarchy custody (step 7, docs/SIGNING_ROTATION.md): the
+# root-2/leaf private PEMs live ONLY in keys/ on the maintainer PC. Public
+# halves are pinned as constants in code/commits; private halves NEVER do.
+keys/

@@ -9,27 +9,58 @@ download-toolkit-serverless). Envelope format v2:
      "payload": "<base64 AES-CBC-PKCS7 ciphertext>",
      "sig": "<base64 DER ECDSA-P256-SHA256 signature over the payload string>"}
 
+Step-7 signing rotation (scratch/ota_rule_engine_design.md §3.4/§7; Firefox
+Remote Settings §1.4 model — pinned ROOT, delivered LEAF): an envelope may
+additionally carry an ADDITIVE "chain" object, in which case "sig" is made by
+the LEAF key and the leaf is vouched for by a pinned ROOT:
+
+    {"v": 2, "alg": "aes-128-cbc", "iv": "...", "payload": "...",
+     "sig": "<base64 ECDSA-P256-SHA256 by the LEAF over the payload string>",
+     "chain": {"leafPubB64": "<leaf SPKI-DER base64>",
+               "rootSig":   "<base64 ECDSA-P256-SHA256 by the ROOT over the
+                             CANONICAL bytes of leafPubB64, i.e. the exact
+                             ASCII/base64 string bytes as serialized>",
+               "alg":       "P256-SHA256"}}
+
+An envelope WITHOUT "chain" behaves exactly as before (payload signed by the
+pinned key itself) — v2 compatibility is sacred: the legacy emission path is
+byte-identical to pre-chain output.
+
+The app pins BOTH root-1 (the historical key, bytes untouched) and root-2 and
+verifies "first that succeeds"; a chain envelope under root-2 therefore needs
+NO app release while leaves rotate (rotation drill: docs/SIGNING_ROTATION.md).
+
 Security model:
 - Confidentiality stays obfuscation-grade (AES key ships in the APK) — it
-  stops casual reading of the scraping logic, not dedicated analysis.
-- INTEGRITY/AUTHENTICITY is real: the payload is signed with an ECDSA
-  P-256 key whose private half exists ONLY as the GitHub Actions secret
-  OTA_SIGNING_PRIVATE_KEY. The app embeds the public half and rejects any
-  payload that fails verification. A repo hijack or CDN MITM can no longer
-  feed users fake rules.
+  stops casual reading of the scraping logic, not dedicated analysis. The
+  SIGNATURE is the real integrity boundary.
+- INTEGRITY/AUTHENTICITY is real: the payload is signed with an ECDSA P-256
+  key whose private half exists ONLY as the GitHub Actions secret
+  OTA_SIGNING_PRIVATE_KEY (root-1 legacy) or in the keys/ custody folder
+  (root-2 / leaves — NEVER committed). The app embeds the public halves and
+  rejects any payload that fails verification. A repo hijack or CDN MITM can
+  no longer feed users fake rules.
 - The IV is random per encryption (upgrades the historical fixed-IV CBC).
 
 Usage:
   python encrypt_rules.py                # validate + encrypt + sign (if key found)
   python encrypt_rules.py --no-sign      # validate + encrypt only (legacy-style output)
-  python encrypt_rules.py --gen-keys     # generate the keypair locally
+  python encrypt_rules.py --gen-keys     # generate the legacy keypair locally
+  python encrypt_rules.py --inspect <pem>            # print pub-b64 + fingerprint
+  python encrypt_rules.py --generate-root            # ROOT keypair into keys/
+  python encrypt_rules.py --generate-leaf --root <pem> [--leaf-name leaf1]
+  python encrypt_rules.py --root-key <pem> --leaf-key <pem>   # chain envelope
 
-Key lookup order for signing: --key <pem path> | $OTA_SIGNING_PRIVATE_KEY |
+Key lookup order for legacy signing: --key <pem path> |
+$OTA_SIGNING_PRIVATE_KEY |
 ~/anon-serverless-app-maintenance-build/ota_signing_private_key.pem
 (the dedicated maintenance folder OUTSIDE both repos — never committed).
+Chain-mode keys live in <repo>/keys/ (gitignored) — private halves never
+leave that folder except into CI secrets as documented.
 """
 import argparse
 import base64
+import hashlib
 import json
 import os
 import re
@@ -73,10 +104,64 @@ OTA_PUB_B64 = (
     "0uN9JP0HKkYUJB1wSL3Q928+lQ=="
 )
 
+# ---- step 7: ROOT pin set (dual-pin overlap) ------------------------------
+# The APK verifies payloads against BOTH roots ("verify first that succeeds",
+# docs/SIGNING_ROTATION.md). root-1 above is byte-untouched; root-2 is the
+# rotation root generated 2026-10-15 (leaf keys rotate under it via the
+# envelope "chain" object — zero app releases). Its PRIVATE half lives only
+# in <repo>/keys/ (cold, gitignored). This public string is safe to publish:
+# it can VERIFY, never sign.
+ROOT2_PUB_B64 = (
+    "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEr6faxWOcnYb9PN7Qtb1kZPm55ZzZ0tlUTpacE7BHBwowx+dxVpqHVLHAE6Ji"
+    "U6pDyGEvpta/+vSMxjjNVM5Rag=="
+)
+# Pinned trust set for CI/fleet parity checks: [root-1, root-2].
+ROOT_PINS_B64 = [OTA_PUB_B64, ROOT2_PUB_B64]
+CHAIN_ALG = "P256-SHA256"
+# keys/ holds the cold custody material (root-2 root, leaf keys). Gitignored
+# explicitly AND every PEM pattern is ignored — private halves never ship.
+KEYS_DIR = os.path.join(REPO_ROOT, "keys")
+
+
+def pub_to_b64(pub) -> str:
+    """SPKI-DER base64 of an EC public key — the exact string format the app
+    pins and the envelope's chain.leafPubB64 carries."""
+    der = pub.public_bytes(
+        serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
+    return base64.b64encode(der).decode("ascii")
+
+
+def pub_fingerprint(pub) -> str:
+    """SHA-256 over the SPKI DER, colon-separated hex (the fingerprint format
+    carried in docs/SIGNING_ROTATION.md and the pin comments)."""
+    der = pub.public_bytes(
+        serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
+    h = hashlib.sha256(der).hexdigest().upper()
+    return ":".join(h[i:i + 2] for i in range(0, len(h), 2))
+
+
+def load_any_key(path: str):
+    """Loads a PEM that may be a PRIVATE or PUBLIC key (custody inspection)."""
+    with open(path, "rb") as f:
+        data = f.read()
+    try:
+        return serialization.load_pem_private_key(data, password=None)
+    except Exception:
+        return serialization.load_pem_public_key(data)
+
 # --- strict schema guards (a bad payload must be rejected BEFORE commit) ---
 MAX_PLAINTEXT_BYTES = 512 * 1024
 MAX_SELECTOR_LEN = 600
 MAX_RULES_ARRAY = 64
+
+# Phase-2 payload families — must equal the exact top-level keys
+# DynamicRulesManager.parseRulesJson consumes (docs/PHASE_2_PLAN.md P2-1).
+FAMILY_IDS = [
+    "domains", "mirrors", "sites", "resolvers", "directMediaExtensions",
+    "hostPolicies", "urlTemplates", "knownDead", "lockerHosts",
+    "searchStrategies", "pipelines", "dynamic_providers",
+]
+FLAG_SUBKEYS = ("enabled", "percent", "minApp", "expiresMs", "shadow")
 REQUIRED_TOP_KEYS_VERSIONED = ("version",)
 
 # --- step-pipeline vocabulary (must mirror providers/RulesPipeline.kt) ---
@@ -589,12 +674,25 @@ def validate_pipelines(obj) -> list:
     return problems
 
 
-def verify_envelope(text: str, pub_b64: str = OTA_PUB_B64) -> bool:
+def verify_envelope(text: str, pub_b64: str = OTA_PUB_B64,
+                    root_pins_b64=None) -> bool:
     """Authenticity check for CI/app parity: ECDSA-P256-SHA256 over the
     payload string. False for unsigned envelopes, tampered payloads or
-    unknown keys. Raises SystemExit with a reason on invalid JSON."""
+    unknown keys. Raises SystemExit with a reason on invalid JSON.
+
+    Chain-aware (step 7): an envelope WITH a "chain" object verifies in two
+    steps — (1) the delivered leaf public key must be signed by one of the
+    PINNED ROOTS (root_pins_b64, default [pub_b64]; dual-pin lists emulate
+    the app's "verify first that succeeds") over the canonical ASCII bytes
+    of the leafPubB64 string; (2) the payload signature must verify against
+    the DELIVERED leaf. A malformed or failing chain REJECTS outright — it
+    never falls back to legacy verification. An envelope WITHOUT "chain" is
+    verified against the pin list: callers passing only pub_b64 (the CI
+    workflow's default) get the FULL app pin set [root-1, root-2] so CI is
+    in lockstep with the fleet; callers passing a CUSTOM pub_b64 keep the
+    single-key check unless they pass root_pins_b64 explicitly (pre-step-7
+    verifier emulation: pass root_pins_b64=[OTA_PUB_B64])."""
     import base64 as b64
-    from cryptography.exceptions import InvalidSignature
     from cryptography.hazmat.primitives import hashes
     from cryptography.hazmat.primitives.asymmetric import ec
     from cryptography.hazmat.primitives.serialization import load_der_public_key
@@ -603,13 +701,62 @@ def verify_envelope(text: str, pub_b64: str = OTA_PUB_B64) -> bool:
     sig = env.get("sig")
     if not sig:
         raise SystemExit("UNSIGNED envelope — refused")
-    pub = load_der_public_key(b64.b64decode(pub_b64))
-    try:
-        pub.verify(b64.b64decode(env["sig"]), env["payload"].encode("ascii"),
-                   ec.ECDSA(hashes.SHA256()))
-        return True
-    except InvalidSignature:
-        raise SystemExit("SIGNATURE INVALID — payload tampered or wrong key")
+    if root_pins_b64 is not None:
+        pins = list(root_pins_b64)
+    elif pub_b64 != OTA_PUB_B64:
+        pins = [pub_b64]
+    else:
+        pins = list(ROOT_PINS_B64)
+
+    chain = env.get("chain")
+    if chain is not None:
+        if not isinstance(chain, dict):
+            raise SystemExit("CHAIN malformed (not an object) — refused, no legacy fallback")
+        leaf_b64 = chain.get("leafPubB64")
+        root_sig = chain.get("rootSig")
+        if not leaf_b64 or not root_sig:
+            raise SystemExit("CHAIN incomplete (missing leafPubB64/rootSig) — refused")
+        if chain.get("alg") != CHAIN_ALG:
+            raise SystemExit(f"CHAIN alg {chain.get('alg')!r} unknown — refused (fail closed)")
+        # Step 1: the leaf is trusted only to the extent a PINNED ROOT signed
+        # its canonical bytes. First root pin that verifies wins; none → reject.
+        root_ok = False
+        for pin in pins:
+            try:
+                pub = load_der_public_key(b64.b64decode(pin))
+                pub.verify(b64.b64decode(root_sig), leaf_b64.encode("ascii"),
+                           ec.ECDSA(hashes.SHA256()))
+                root_ok = True
+                break
+            except Exception:
+                continue
+        if not root_ok:
+            raise SystemExit("CHAIN REJECTED — leaf is signed by no pinned root")
+        # Step 2: the payload signature must come from the delivered leaf.
+        try:
+            leaf_pub = load_der_public_key(b64.b64decode(leaf_b64))
+            leaf_pub.verify(b64.b64decode(sig), env["payload"].encode("ascii"),
+                            ec.ECDSA(hashes.SHA256()))
+            return True
+        except Exception:
+            raise SystemExit("SIGNATURE INVALID (chain/leaf mode) — payload "
+                             "tampered or signed by a leaf other than the enveloped one")
+
+    # Legacy path — byte-for-byte today's semantics for the default call
+    # (pins == [pub_b64] is a single check against pub_b64). When a pin SET
+    # is supplied (dual-pin rotation window, app parity), verify-first-that-
+    # succeeds applies here too: a legacy envelope may be signed by ANY
+    # pinned root.
+    last_pin_error = "SIGNATURE INVALID — payload tampered or wrong key"
+    for pin in pins:
+        try:
+            pub = load_der_public_key(b64.b64decode(pin))
+            pub.verify(b64.b64decode(env["sig"]), env["payload"].encode("ascii"),
+                       ec.ECDSA(hashes.SHA256()))
+            return True
+        except Exception:
+            continue
+    raise SystemExit(last_pin_error)
 
 
 def validate_schema(plain: bytes) -> list:
@@ -627,6 +774,51 @@ def validate_schema(plain: bytes) -> list:
     ver = obj.get("version")
     if not isinstance(ver, str) or not ver or len(ver) > 40:
         problems.append("version must be a non-empty short string")
+
+    # --- Phase-2: rev + flags (additive payload fields; hard-validated here
+    # because the client treats malformed flags as a fleet-wide kill switch). ---
+    rev = obj.get("rev")
+    if rev is not None and (isinstance(rev, bool) or not isinstance(rev, int) or rev <= 0 or rev > 2**31 - 1):
+        # F6 (OTA red-team P2): a date-as-rev typo (e.g. 20261016) would
+        # permanently floor the fleet's monotonic pointer — bound to int32.
+        problems.append("rev must be a positive integer <= 2^31-1")
+
+    flags = obj.get("flags")
+    if flags is not None:
+        if not isinstance(flags, dict):
+            problems.append("flags must be an object")
+        elif len(flags) > 32:
+            problems.append("flags: too many entries (<= 32)")
+        else:
+            for fam, fcfg in flags.items():
+                if fam not in FAMILY_IDS:
+                    problems.append(
+                        f"flags.{fam}: unknown family id (allowed: {', '.join(FAMILY_IDS)})")
+                    continue
+                if not isinstance(fcfg, dict):
+                    problems.append(f"flags.{fam}: must be an object")
+                    continue
+                for sk, sv in fcfg.items():
+                    if sk not in FLAG_SUBKEYS:
+                        problems.append(
+                            f"flags.{fam}.{sk}: unknown sub-key "
+                            f"(allowed: {', '.join(FLAG_SUBKEYS)})")
+                    elif sk in ("enabled", "shadow") and not isinstance(sv, bool):
+                        problems.append(f"flags.{fam}.{sk}: must be a bool")
+                    elif sk == "percent":
+                        if isinstance(sv, bool) or not isinstance(sv, int) or not 0 <= sv <= 100:
+                            problems.append(f"flags.{fam}.percent: must be an int 0..100")
+                    elif sk == "expiresMs":
+                        if isinstance(sv, bool) or not isinstance(sv, int) or sv <= 0:
+                            problems.append(f"flags.{fam}.expiresMs: must be a positive int")
+                    elif sk == "minApp":
+                        # F2 (OTA red-team P1): the client parses minApp as an
+                        # integer VERSION_CODE — a "3.2.10"-style string fails
+                        # toIntOrNull there and the whole flag is SKIPPED,
+                        # shipping the family fully ON to old builds. Require
+                        # an integer string at publish time.
+                        if not isinstance(sv, str) or not sv.isdigit() or not (1 <= len(sv) <= 9):
+                            problems.append(f"flags.{fam}.minApp: must be an integer VERSION_CODE string (e.g. \"32910\")")
 
     def check_selector(val, where):
         if not isinstance(val, str):
@@ -712,9 +904,16 @@ def validate_schema(plain: bytes) -> list:
             continue
         if not isinstance(arr, list) or len(arr) > 512:
             problems.append(f"{name}: list <= 512")
-        elif not all(isinstance(x, str) and 0 < len(x) <= 120 and " " not in x
-                     for x in arr):
-            problems.append(f"{name}: bare host strings (<= 120, no spaces)")
+        elif not all(
+            isinstance(x, str) and 0 < len(x) <= 120 and " " not in x
+            and ("." in x or (len(x) >= 5 and x.replace("-", "").isalnum()))
+            for x in arr):
+            # F4 (OTA red-team P0): the client does a CONTAINS match on these
+            # fragments — a tiny string like "a" would match nearly every url
+            # and freeze resolution fleet-wide from one typo. Host-like
+            # (dot) OR a real token (>= 5 alnum chars) is required; the live
+            # playbook ships both shapes ("vidsrc.buzz", "jiminido", "waffi").
+            problems.append(f"{name}: host-like fragments (dot) or >=5-char alnum tokens, <= 120, no spaces")
 
     ut = obj.get("urlTemplates")
     if ut is not None:
@@ -756,7 +955,8 @@ def validate_schema(plain: bytes) -> list:
                        "directMediaExtensions", "dynamic_providers", "lockerHosts",
                        "hostPolicies", "searchStrategies", "urlTemplates",
                        "knownDead", "tokenTtlMinutes", "validation",
-                       "minAppVersion", "pipelines", "remote_logging_url"):
+                       "minAppVersion", "pipelines", "remote_logging_url",
+                       "rev", "flags"):
             problems.append(f"unknown top-level field '{key}' (add it to the "
                             "allow-list in encrypt_rules.py AND DynamicRulesManager)")
 
@@ -822,16 +1022,78 @@ def decrypt_envelope_or_legacy(text: str) -> bytes:
     return padder.update(dec.update(ct) + dec.finalize()) + padder.finalize()
 
 
+def _generate_hierarchy_key(tag: str) -> None:
+    """Generates an ECDSA P-256 keypair for the ROOT/LEAF hierarchy into
+    keys/ (gitignored). REFUSES to overwrite an existing key of the same
+    tag — a cold root must never be silently clobbered by a re-run."""
+    os.makedirs(KEYS_DIR, exist_ok=True)
+    priv_path = os.path.join(KEYS_DIR, f"ota_{tag}_private_key.pem")
+    pub_path = os.path.join(KEYS_DIR, f"ota_{tag}_public_key.pem")
+    if os.path.exists(priv_path) or os.path.exists(pub_path):
+        print(f"REFUSING to overwrite existing keys/ota_{tag}_*_key.pem — "
+              "rename or remove the previous pair deliberately, then re-run "
+              "(custody rule: a cold key is never silently clobbered).")
+        sys.exit(1)
+    priv = ec.generate_private_key(ec.SECP256R1())
+    with open(priv_path, "wb") as f:
+        f.write(priv.private_bytes(
+            serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption()))
+    with open(pub_path, "wb") as f:
+        f.write(priv.public_key().public_bytes(
+            serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo))
+    pub_b64 = pub_to_b64(priv.public_key())
+    b64_lines = [pub_b64[i:i + 96] for i in range(0, len(pub_b64), 96)]
+    print(f"wrote {priv_path}")
+    print(f"wrote {pub_path}")
+    print(f"public key (SPKI-DER base64) — this EXACT string is what the app pins:")
+    for ln in b64_lines:
+        print(f"  \"{ln}\"")
+    print(f"SHA-256 fingerprint (SPKI DER): {pub_fingerprint(priv.public_key())}")
+    return priv_path, pub_path
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=os.path.join(SERVERLESS, "scraper_rules.json.enc"))
     ap.add_argument("--in", dest="inp", default=os.path.join(SERVERLESS, "scraper_rules.json"))
-    ap.add_argument("--key", default=None, help="PEM private key path")
+    ap.add_argument("--key", default=None, help="PEM private key path (legacy single-key mode)")
     ap.add_argument("--no-sign", action="store_true")
     ap.add_argument("--gen-keys", action="store_true")
+    # --- step 7: root-pin + leaf signing rotation (additive flags) ---
+    ap.add_argument("--root-key", default=None,
+                    help="ROOT private-key PEM (signs the leaf's public key "
+                         "into envelope.chain; pass together with --leaf-key)")
+    ap.add_argument("--leaf-key", default=None,
+                    help="LEAF private-key PEM (signs the payload in chain "
+                         "mode; pass together with --root-key)")
+    ap.add_argument("--generate-root", action="store_true",
+                    help="generate the ROOT keypair into keys/ (default tag "
+                         "root2; private half = cold custody on this PC)")
+    ap.add_argument("--generate-leaf", action="store_true",
+                    help="generate a LEAF keypair into keys/ (needs --root)")
+    ap.add_argument("--leaf-name", default="leaf1",
+                    help="leaf key tag for --generate-leaf (leaf1, leaf2, ...)")
+    ap.add_argument("--root", default=None, metavar="PEM",
+                    help="root key PEM (private or public) for --generate-leaf")
+    ap.add_argument("--inspect", default=None, metavar="PEM",
+                    help="print SPKI-DER base64 + SHA-256 fingerprint of any key PEM and exit")
     args = ap.parse_args()
 
+    if args.inspect:
+        k = load_any_key(args.inspect)
+        pub = k.public_key() if hasattr(k, "sign") else k
+        print(f"{args.inspect}")
+        if hasattr(k, "sign"):
+            print("  kind: PRIVATE key")
+        else:
+            print("  kind:  public key")
+        print(f"  pub_b64: {pub_to_b64(pub)}")
+        print(f"  fingerprint (SHA-256, SPKI DER): {pub_fingerprint(pub)}")
+        return
+
     if args.gen_keys:
+        # Legacy single-key generation (pre-step-7 path, unchanged behavior).
         priv = ec.generate_private_key(ec.SECP256R1())
         os.makedirs(os.path.dirname(KEY_PATH), exist_ok=True)
         open(KEY_PATH, "wb").write(priv.private_bytes(
@@ -844,6 +1106,43 @@ def main():
         print("ACTION REQUIRED: paste the PRIVATE pem into the GitHub secret "
               "OTA_SIGNING_PRIVATE_KEY.")
         return
+
+    if args.generate_root:
+        _generate_hierarchy_key("root2")
+        print("ACTION REQUIRED: private half = COLD. Keep it ONLY in keys/ "
+              "(gitignored); the public half gets pinned into "
+              "DynamicRulesManager.kt (ROTATION_ROOT2_PUB_B64) and "
+              "scripts/encrypt_rules.py (ROOT2_PUB_B64). See "
+              "docs/SIGNING_ROTATION.md.")
+        return
+
+    if args.generate_leaf:
+        if not args.root:
+            ap.error("--generate-leaf needs the custodial root PEM: --root <pem>")
+        root = load_any_key(args.root)
+        if root is None:
+            print(f"could not load root PEM: {args.root}", file=sys.stderr)
+            sys.exit(1)
+        root_pub = root.public_key() if hasattr(root, "sign") else root
+        print(f"custodial root: {args.root}")
+        print(f"  root fingerprint (SHA-256, SPKI DER): {pub_fingerprint(root_pub)}")
+        _generate_hierarchy_key(args.leaf_name)
+        print("Custody: leaf private half may be promoted into the CI secret "
+              "OTA_LEAF_PRIVATE_KEY for chain builds; rotate freely — the app "
+              "verifies it only through the pinned root (no app release for a "
+              "leaf rotation). See docs/SIGNING_ROTATION.md.")
+        return
+
+    # Chain mode: BOTH --root-key and --leaf-key, or neither (legacy).
+    chain_mode = args.root_key is not None or args.leaf_key is not None
+    if chain_mode and (args.root_key is None or args.leaf_key is None):
+        ap.error("chain mode needs BOTH --root-key and --leaf-key, or neither "
+                 "(legacy single-key envelope)")
+    if chain_mode and args.key is not None:
+        ap.error("--key is the legacy single-key signer; chain mode signs the "
+                 "payload with --leaf-key (omit --key)")
+    if chain_mode and args.no_sign:
+        ap.error("chain mode always signs: drop --no-sign")
 
     with open(args.inp, "rb") as f:
         plain = f.read()
@@ -859,17 +1158,56 @@ def main():
     ct = encrypt_random_iv(plain, iv)
     payload_b64 = base64.b64encode(ct).decode("ascii")
 
-    key = None if args.no_sign else load_private_key(args.key)
+    # Chain mode signs the payload with the LEAF only: the legacy default-key
+    # lookup (env OTA_SIGNING_PRIVATE_KEY / maintenance folder) must NEVER be
+    # consulted here — with --key absent it loads root-1 and would silently
+    # downgrade the envelope to legacy while printing "chain".
+    key = None if (args.no_sign or chain_mode) else load_private_key(args.key)
+    leaf_priv = root_priv = None
+    if chain_mode:
+        # validate -> encrypt -> sign order preserved: signing material is
+        # loaded only AFTER validation succeeded.
+        leaf_priv = load_private_key(args.leaf_key)
+        root_priv = load_private_key(args.root_key)
+        if leaf_priv is None:
+            print(f"CHAIN MODE: could not load leaf private key: {args.leaf_key}", file=sys.stderr)
+            sys.exit(1)
+        if root_priv is None:
+            print(f"CHAIN MODE: could not load root private key: {args.root_key}", file=sys.stderr)
+            sys.exit(1)
+
     if key is not None:
         sk = key.sign(payload_b64.encode("ascii"), ec.ECDSA(hashes.SHA256()))
         sig_b64 = base64.b64encode(sk).decode("ascii")
         env = {"v": 2, "alg": "aes-128-cbc", "iv": iv.hex(),
                "payload": payload_b64, "sig": sig_b64}
+    elif chain_mode:
+        # Chain envelope (step 7): payload sig by the LEAF; chain.rootSig is
+        # the ROOT's signature over the CANONICAL bytes of the leaf pubkey —
+        # the exact ASCII bytes of the base64 string as serialized below.
+        # ADDITIVE-ONLY: keys are exactly today's order plus "chain" last.
+        sk = leaf_priv.sign(payload_b64.encode("ascii"), ec.ECDSA(hashes.SHA256()))
+        sig_b64 = base64.b64encode(sk).decode("ascii")
+        leaf_pub_b64 = pub_to_b64(leaf_priv.public_key())
+        root_sig = root_priv.sign(leaf_pub_b64.encode("ascii"), ec.ECDSA(hashes.SHA256()))
+        env = {"v": 2, "alg": "aes-128-cbc", "iv": iv.hex(),
+               "payload": payload_b64, "sig": sig_b64,
+               "chain": {"leafPubB64": leaf_pub_b64,
+                         "rootSig": base64.b64encode(root_sig).decode("ascii"),
+                         "alg": CHAIN_ALG}}
     else:
         if not args.no_sign:
-            print("WARNING: no signing key found — emitting UNSIGNED payload "
-                  "(app accepts it until enforcement flips). Add the "
-                  "OTA_SIGNING_PRIVATE_KEY secret or pass --key/--no-sign.")
+            # F9 (OTA red-team P2): the fleet REJECTS unsigned envelopes — the
+            # old "app accepts it until enforcement flips" note was wrong.
+            # Refuse to write a would-be-dead artifact; explicit --no-sign
+            # remains for local/dev-only runs.
+            print("ERROR: no signing key found and --no-sign not passed — "
+                  "refusing to emit an UNSIGNED payload (the app/fleet "
+                  "REJECTS unsigned envelopes). Add OTA_SIGNING_PRIVATE_KEY "
+                  "or pass --key.")
+            sys.exit(2)
+        print("WARNING: emitting UNSIGNED payload via explicit --no-sign "
+              "(fleet REJECTS it — local/dev artifact only).")
         env = {"v": 1, "alg": "aes-128-cbc", "iv": iv.hex(), "payload": payload_b64}
 
     out_text = json.dumps(env, separators=(",", ":"))
@@ -877,10 +1215,24 @@ def main():
     # round-trip self-check with this implementation before writing
     assert decrypt_envelope_or_legacy(out_text) == plain, "round-trip mismatch"
 
+    # publish-gate parity: the envelope MUST verify with this exact
+    # implementation before it may be written. Chain envelopes self-verify
+    # against the root that produced rootSig (CI/fleet verifies against the
+    # pinned root set; see docs/SIGNING_ROTATION.md for the drill).
+    if key is not None:
+        verify_envelope(out_text, pub_to_b64(key.public_key()))
+    elif chain_mode:
+        verify_envelope(out_text, root_pins_b64=[pub_to_b64(root_priv.public_key())])
+
     with open(args.out, "w", encoding="utf-8") as f:
         f.write(out_text)
 
-    mode = "SIGNED" if key is not None else "unsigned"
+    if chain_mode:
+        mode = "SIGNED chain (root + leaf)"
+        print(f"chain: leaf fingerprint {pub_fingerprint(leaf_priv.public_key())}")
+        print(f"chain: root fingerprint {pub_fingerprint(root_priv.public_key())}")
+    else:
+        mode = "SIGNED" if key is not None else "unsigned"
     print(f"wrote {args.out} ({mode}, v{env['v']}, {len(plain)} bytes plaintext)")
 
 

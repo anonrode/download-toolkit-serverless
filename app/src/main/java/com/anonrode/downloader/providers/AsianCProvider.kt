@@ -221,7 +221,9 @@ object AsianCProvider : SiteProvider {
                     if (src.startsWith("http") && src !in candidates) candidates.add(src)
                 }
                 if (candidates.isNotEmpty()) {
-                    direct = ResolverRegistry.resolveAny(candidates, quality)
+                    // Provider-issued fan-out: stale HostHealth backoff must not
+                    // pre-skip this episode's own page servers (share-31).
+                    direct = ResolverRegistry.resolveAny(candidates, quality, bypassHealth = true)
                 }
             } catch (_: Exception) {}
         }

@@ -43,7 +43,6 @@ import com.anonrode.downloader.ui.screens.SettingsScreen
 import com.anonrode.downloader.ui.theme.AccentPrimary
 import com.anonrode.downloader.ui.theme.BackgroundDark
 import com.anonrode.downloader.ui.theme.Motion
-import com.anonrode.downloader.ui.theme.SurfaceElevated
 import com.anonrode.downloader.ui.theme.TextMuted
 import com.anonrode.downloader.viewmodel.MainViewModel
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -286,13 +285,21 @@ private fun BottomNavBar(
 }
 
 @Composable
-private fun navBarItemColors() = NavigationBarItemDefaults.colors(
-    selectedIconColor = AccentPrimary,
-    selectedTextColor = AccentPrimary,
-    unselectedIconColor = TextMuted,
-    unselectedTextColor = TextMuted,
-    indicatorColor = SurfaceElevated
-)
+private fun navBarItemColors() {
+    // §5.2 explicit indicator lock: the active-tab pill must be clearly
+    // visible in BOTH themes — light = 8% ink (0x140F1115), dark = 12% white
+    // (0x1FFFFFFF) on the obsidian surface (previously SurfaceElevated, a
+    // solid gray that vanished against the bar).
+    val isDark = com.anonrode.downloader.ui.theme.AnonTheme.colors.isDark
+    return NavigationBarItemDefaults.colors(
+        selectedIconColor = AccentPrimary,
+        selectedTextColor = AccentPrimary,
+        unselectedIconColor = TextMuted,
+        unselectedTextColor = TextMuted,
+        indicatorColor = if (isDark) androidx.compose.ui.graphics.Color(0x1FFFFFFF)
+        else androidx.compose.ui.graphics.Color(0x140F1115)
+    )
+}
 
 /** Downloads-tab badge, isolated so the task-list observation recomposes
  *  only this icon. The derived flow emits only when the COUNT changes

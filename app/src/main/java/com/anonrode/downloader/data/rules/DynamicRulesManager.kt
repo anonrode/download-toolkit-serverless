@@ -5,6 +5,8 @@ import com.anonrode.downloader.data.net.HttpClient
 import com.anonrode.downloader.providers.DynamicSiteConfig
 import com.anonrode.downloader.providers.GenericDeclarativeProvider
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -12,9 +14,6 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
-import java.security.KeyFactory
-import java.security.Signature
-import java.security.spec.X509EncodedKeySpec
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
@@ -49,18 +48,82 @@ object DynamicRulesManager {
     private const val RULES_KEY_HEX = "8f3a9c21d4e65b0789a2c4f6d1e3b5a7"
     private const val RULES_IV_HEX = "5b7e9d2f4a6c8e10f3a5c7d9b1e2f4a6"
     private const val RULES_URL = "https://raw.githubusercontent.com/anonrode/download-toolkit-serverless/master/scraper_rules.json.enc"
+
+    // Ordered delivery chain (Phase 0). every source serves the SAME signed
+    // payload byte-for-byte; the ECDSA/AES verification happens AFTER download
+    // exactly as before (transport never trusted — a CDN or the mirror box
+    // cannot feed the app fake logic, a bad payload is refused and the NEXT
+    // source is tried). Rationale: app v3.2.9 on carrier networks could not
+    // reach raw.githubusercontent.com at all ("could not reach GitHub" toast,
+    // log share-31) while desktop was fine — carrier DNS poisoning/rate-
+    // limiting is invisible to our DoH fallback (it only engages on lookup
+    // failure, never on poisoned-but-resolvable answers), so delivery needs
+    // independent hosts, not just one GitHub URL.
+    //   1. raw.githubusercontent.com  — canonical
+    //   2. cdn.jsdelivr.net/gh        — global CDN, different network path
+    //   3. cdn.statically.io          — second independent CDN
+    //   4. our own box (raw IP, cleartext exception in
+    //      network_security_config)  — needs no DNS at all; last resort that
+    //      answers even when every DNS path is broken or GitHub is blocked.
+    private const val MIRROR_JSDELIVR = "https://cdn.jsdelivr.net/gh/anonrode/download-toolkit-serverless@master/scraper_rules.json.enc"
+    private const val MIRROR_STATICALLY = "https://cdn.statically.io/gh/anonrode/download-toolkit-serverless/master/scraper_rules.json.enc"
+    private const val MIRROR_SELF = "http://68.155.146.145:8000/ota/scraper_rules.json.enc"
+
+    private data class OtaSource(val label: String, val host: String, val url: String)
+
+    private val RULES_SOURCES = listOf(
+        OtaSource("raw.githubusercontent", "raw.githubusercontent.com", RULES_URL),
+        OtaSource("jsdelivr", "cdn.jsdelivr.net", MIRROR_JSDELIVR),
+        OtaSource("statically", "cdn.statically.io", MIRROR_STATICALLY),
+        OtaSource("self-box", "68.155.146.145", MIRROR_SELF)
+    )
+
+    /** Label of the delivery-chain source that served the currently active
+     *  rules payload ("" = bundled/cached rules never OTA-refreshed). */
+    @Volatile
+    var lastSyncSource: String = ""
+        private set
     private const val CACHE_FILE = "dynamic_scraper_rules.enc"
 
     // ECDSA P-256 public key (X509/SPKI DER, base64). Private half lives ONLY
     // in the GitHub Actions secret OTA_SIGNING_PRIVATE_KEY; ota-rules.yml signs
     // every payload. Any payload whose signature doesn't verify is refused —
     // a repo hijack or CDN MITM cannot feed this app fake scraping logic.
-    // Rotate by shipping a new app release with a new public key.
+    // Since step 7 (signing rotation, docs/SIGNING_ROTATION.md) this is
+    // ROOT-1 = pin slot 1 of a dual-pin set: retirement/rotation no longer
+    // requires an app release (leaf keys rotate via the envelope "chain"
+    // object under any pinned root).
     // internal var (not const) solely so JVM tests can inject an ephemeral
     // keypair and exercise sign -> verify end-to-end.
     internal var rulesSigningPubB64: String =
         "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAELW5uNxiti768q9f1YPvjaMyd0b60W7tEn6hCCQBtu6YyguDIMtKvefov9uwD" +
         "0uN9JP0HKkYUJB1wSL3Q928+lQ=="
+
+    // ---- Step 7: pinned ROOT trust set (dual-pin overlap) ------------------
+    // ROOT-2 of the signing hierarchy (design doc §3.4/§7; Firefox Remote
+    // Settings §1.4 model — pinned ROOT in the app, delivered LEAF inside
+    // the envelope). Generated 2026-10-15; public half only — the private
+    // half NEVER ships and lives ONLY in this PC's keys/ cold custody
+    // (docs/SIGNING_ROTATION.md carries the fingerprints + drill). Leaves
+    // rotate under this pin with ZERO app releases; retiring root-1 is a
+    // deliberate future-release edit (same block, one line removed).
+    internal const val ROTATION_ROOT2_PUB_B64: String =
+        "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEr6faxWOcnYb9PN7Qtb1kZPm55ZzZ0tlUTpacE7BHBwowx+dxVpqHVLHAE6Ji" +
+        "U6pDyGEvpta/+vSMxjjNVM5Rag=="
+
+    /**
+     * Effective pinned ROOT set used by EVERY signature verification here:
+     * [rulesSigningPubB64 (root-1 slot; kept byte-identical and still the
+     * test-injection surface — existing JVM tests assign an ephemeral key
+     * here)] + [ROTATION_ROOT2_PUB_B64 (root-2)]. Rotation overlap semantics
+     * ("verify first that succeeds"): a payload signed by EITHER root is
+     * accepted, so nothing in the fleet is stranded during the window; a
+     * chain envelope under root-2 still verifies even while slot 1 is
+     * overridden by tests. Mirror pin set in scripts/encrypt_rules.py
+     * (ROOT_PINS_B64) — keep both lists in lockstep.
+     */
+    internal fun signingRootPins(): List<String> =
+        listOf(rulesSigningPubB64, ROTATION_ROOT2_PUB_B64)
 
     // Built-in fallback policies — mirrors the historical hardcoded referer
     // map in DownloadEngine (behavior-identical when no OTA rule matches).
@@ -153,6 +216,168 @@ object DynamicRulesManager {
     // keep their compiled code as per-call fallback.
     @Volatile private var activePipelines: Map<String, SitePipeline> = emptyMap()
 
+    // Per-family flags + kill switches (P2-1). Published with the atomic swap
+    // like every other collection; an payload without "flags" publishes an
+    // empty map = every family on its safe default (Firebase in-app-defaults
+    // floor — flags are durable only inside the payload that carried them).
+    @Volatile private var activeFlags: Map<String, FamilyFlag> = emptyMap()
+
+    /** Resolved flag for one family id (see RulesFlags.FAMILY_IDS), or the
+     *  safe default when the active payload carried no flag for it. */
+    fun getFamilyFlag(family: String): FamilyFlag =
+        try { activeFlags[family] ?: RulesFlags.DEFAULT } catch (_: Exception) { RulesFlags.DEFAULT }
+
+    // ---- P2-2: rev monotonicity + last-known-good ladder + sticky source ---
+    // Application context for prefs persistence; captured in init() and
+    // null-guarded everywhere so the JVM-test path (parseRulesJson called
+    // without init) behaves exactly as before.
+    @Volatile private var appContext: android.content.Context? = null
+
+    private const val PREFS_NAME = "downloader_settings"
+    private const val PREF_ACTIVE_REV = "ota_rules_active_rev"
+    private const val PREF_LAST_SOURCE = "ota_rules_last_source"
+    private const val PREV_CACHE_1 = "rules_prev_1.enc"
+    private const val PREV_CACHE_2 = "rules_prev_2.enc"
+
+    /** Highest rev ever ACTIVATED (never set by payloads without "rev").
+     *  Prefs-persisted; 0 = none. CRLSet semantics: only a strictly newer rev
+     *  may win — a stale CDN serving an old-but-signed payload is REJECTED. */
+    @Volatile private var activeRev: Long = 0L
+
+    /** Currently active payload rev, 0 when none (bundled rules / legacy
+     *  payloads never set it). Surfaced for telemetry and diagnostics. */
+    fun getActiveRev(): Long = activeRev
+
+    private fun prefs(): android.content.SharedPreferences? = try {
+        appContext?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    } catch (_: Exception) { null }
+
+    /** One rev-rejection telemetry event per session, max (stale CDNs retry
+     *  the same stale body across all 4 sources — one record says enough). */
+    private val revRejectReported = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /** Caps-WARN telemetry budget (P2-3): max 2 aggregate records per session. */
+    private val capsWarnReported = java.util.concurrent.atomic.AtomicLong(0)
+
+    // ---- P2-6: activation + delivery-chain telemetry -----------------------
+    private const val PREF_ACTIVATION_REPORT_AT = "ota_activation_report_at"
+    private const val PREF_ACTIVATION_REPORT_KEY = "ota_activation_report_key"
+    private const val ACTIVATION_AGGREGATE_WINDOW_MS = 24 * 60 * 60_000L
+
+    /** Per-source delivery counters (the plan's Attempt-record roll-up — the
+     *  Attempt list itself has no read-back API, so the loop tallies at the
+     *  same decision points; process-lifetime, in-memory). */
+    private val sourceFailCount = java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicLong>()
+    private val sourceSuccessCount = java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicLong>()
+
+    /** Exact-payload dedup so a restored cache (same version+rev) on every
+     *  app start cannot re-report within the 24h window. */
+    @Volatile private var lastActivationReportKey: String = ""
+
+    /** P2-6 deferred activation report. Built by the atomic publish block
+     *  (which doesn't yet know the winning chain source — lastSyncSource is
+     *  set by the sync loop AFTER parse returns), flushed by the sync success
+     *  path (or the bundled/cached restore path in init with a blank source).
+     *  One-payload-lifetime: each publish overwrites it. */
+    private class PendingActivation(
+        val ver: String,
+        val rev: Long?,
+        val durationMs: Long,
+        val applied: Map<String, Int>,
+        val skippedEntries: Int
+    )
+
+    @Volatile private var pendingActivationReport: PendingActivation? = null
+
+    private fun flushActivationReport() {
+        val pending = pendingActivationReport ?: return
+        pendingActivationReport = null
+        reportActivation(pending.ver, pending.rev, pending.durationMs, pending.applied, pending.skippedEntries, lastSyncSource)
+    }
+
+    private fun countSourceAttempt(label: String, success: Boolean) {
+        try {
+            val map = if (success) sourceSuccessCount else sourceFailCount
+            map.getOrPut(label) { java.util.concurrent.atomic.AtomicLong() }.incrementAndGet()
+        } catch (_: Exception) {}
+    }
+
+    /** "label=N | ..." roll-up over one counter map (sorted for stable diffs). */
+    private fun tallyCounts(map: java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicLong>): String {
+        return try {
+            map.entries.sortedBy { it.key }
+                .joinToString("|") { "${it.key}=${it.value.get()}" }
+                .ifBlank { "none" }
+        } catch (_: Exception) { "none" }
+    }
+
+    /** The single activation record (plan P2-6): rev, version, winning
+     *  source, duration, applied/skipped family counts, chain roll-up.
+     *  [source] is passed IN (flushActivationReport) because the winning
+     *  chain source is only known after parse returns. Dedup: exact payload
+     *  within a session; 1/24h aggregate per payload across sessions (prefs).
+     *  Sink-gated; never throws. */
+    private fun reportActivation(ver: String, rev: Long?, durationMs: Long, applied: Map<String, Int>, skippedEntries: Int, source: String) {
+        try {
+            val identity = "$ver/${rev ?: 0L}"
+            if (lastActivationReportKey == identity) return // same payload, this session
+            lastActivationReportKey = identity
+
+            val store = prefs()
+            val now = System.currentTimeMillis()
+            if (store != null) {
+                if (store.getString(PREF_ACTIVATION_REPORT_KEY, "") == identity &&
+                    now - store.getLong(PREF_ACTIVATION_REPORT_AT, 0L) < ACTIVATION_AGGREGATE_WINDOW_MS
+                ) return // 1/24h aggregate cap for the same payload
+            }
+            if (getRemoteLoggingUrl().isBlank()) return
+
+            com.anonrode.downloader.util.RemoteLogger.report(
+                type = "ota_activation",
+                message = "OTA rules activated: $ver (rev ${rev ?: "none"}) via ${source.ifBlank { "bundled-or-cached" }}",
+                context = mapOf(
+                    "version" to ver,
+                    "rev" to (rev ?: 0L),
+                    "source" to source.ifBlank { "bundled-or-cached" },
+                    "duration_ms" to durationMs,
+                    "applied_families" to applied.entries.joinToString("|") { "${it.key}=${it.value}" },
+                    "skipped_entries" to skippedEntries,
+                    "chain_success" to tallyCounts(sourceSuccessCount),
+                    "chain_fail" to tallyCounts(sourceFailCount),
+                    "app_version" to com.anonrode.downloader.BuildConfig.VERSION_NAME
+                )
+            )
+            try {
+                store?.edit()
+                    ?.putLong(PREF_ACTIVATION_REPORT_AT, now)
+                    ?.putString(PREF_ACTIVATION_REPORT_KEY, identity)
+                    ?.apply()
+            } catch (_: Exception) {}
+        } catch (_: Exception) {}
+    }
+
+    /** Aggregate telemetry for load-time caps violations (WARN phase). One
+     *  record carries the count + first samples; billed against the session
+     *  cap above so a poisoned payload can't stream reports. Sink-gated. */
+    private fun reportCapsWarn(violations: List<String>) {
+        try {
+            val n = capsWarnReported.incrementAndGet()
+            if (n > 2) return
+            if (getRemoteLoggingUrl().isBlank()) return
+            com.anonrode.downloader.util.RemoteLogger.report(
+                type = "ota_caps_warn",
+                message = "load-time caps violations: ${violations.size} (WARN phase — payload still applied)",
+                context = mapOf(
+                    "count" to violations.size,
+                    "samples" to violations.take(8).joinToString(" | "),
+                    "active_version" to _version.value,
+                    "active_rev" to activeRev,
+                    "app_version" to com.anonrode.downloader.BuildConfig.VERSION_NAME
+                )
+            )
+        } catch (_: Exception) {}
+    }
+
     @Volatile
     var tokenTtlMinutes: Long = 10
         private set
@@ -162,11 +387,39 @@ object DynamicRulesManager {
 
     fun init(context: Context) {
         try {
-            val file = File(context.filesDir, CACHE_FILE)
-            if (file.exists()) {
-                val raw = file.readText()
-                val plain = decryptRules(raw) ?: raw  // old plaintext cache still parses
-                parseRulesJson(plain)
+            appContext = context.applicationContext
+            // ShadowRunner sampler prefs home (P2-4).
+            com.anonrode.downloader.pipeline.ShadowRunner.attach(context)
+            // NoSourceLedger prefs home (search-hiding ledger; cleared per
+            // rules activation like every other derived state).
+            com.anonrode.downloader.pipeline.NoSourceLedger.attach(context)
+            // Persisted rev survives process death: a stale-CDN payload must
+            // still lose against the rev this install is already past.
+            activeRev = prefs()?.getLong(PREF_ACTIVE_REV, 0L) ?: 0L
+        } catch (_: Exception) {}
+        try {
+            val dir = context.filesDir
+            // F3 (OTA red-team): a crash-truncated primary cache must not drop
+            // the device to the bundled floor when a VERIFIED prev payload
+            // survives — walk the restore ladder (primary → prev1 → prev2),
+            // first parse wins. Restore is never rev-gated (bedrock), and a
+            // ladder entry that fails to decrypt is skipped, not trusted.
+            for (name in listOf(CACHE_FILE, PREV_CACHE_1, PREV_CACHE_2)) {
+                val f = File(dir, name)
+                if (!f.exists()) continue
+                val raw = try { f.readText() } catch (_: Exception) { null } ?: continue
+                // Primary cache may predate encryption (legacy plaintext);
+                // prev-ladder entries are always verified envelopes.
+                val decrypted = try { decryptRules(raw) } catch (_: Exception) { null }
+                val plain = if (name == CACHE_FILE) (decrypted ?: raw) else (decrypted ?: continue)
+                if (parseRulesJson(plain)) {
+                    // P2-6: cache-restore activation flushes with its blank
+                    // source ("bundled-or-cached"); fresh installs with no
+                    // cache simply arm nothing (the bundled floor is not an
+                    // activation).
+                    flushActivationReport()
+                    break
+                }
             }
         } catch (_: Exception) {}
     }
@@ -265,30 +518,234 @@ object DynamicRulesManager {
         return null
     }
 
+    /**
+     * Ordered multi-source rules sync (Phase 0 delivery chain). Fetches the
+     * signed payload from [RULES_SOURCES] in order; the first source whose
+     * payload decrypts, verifies, and parses wins. The cached last-known-good
+     * .enc is written ONLY after full verification of a fresh payload — a
+     * total delivery failure can NEVER destroy it (same guarantee as before
+     * the chain: the file write was already gated on decrypt+parse).
+     *
+     * The returned message names the failed STAGE of the last attempt so the
+     * Settings toast reads e.g. "Sync error: Could not reach GitHub (DNS) —
+     * 4 sources tried, cached logic kept" instead of an opaque generic line.
+     * Every attempt is journaled via OtaFetchDiagnostics; a total failure
+     * additionally reports one encrypted aggregate event to the client-error
+     * telemetry sink.
+     */
+    private val syncMutex = Mutex()
+
     suspend fun syncFromGitHub(context: Context): Pair<Boolean, String> = withContext(Dispatchers.IO) {
+        // F1 (OTA red-team): startup auto-sync and a manual Settings sync can
+        // race — serialize whole sync attempts so two chains can never
+        // interleave a parse/publish. Only syncs serialize; callers unaffected.
+        syncMutex.withLock { syncFromGitHubLocked(context) }
+    }
+
+    private suspend fun syncFromGitHubLocked(context: Context): Pair<Boolean, String> = withContext(Dispatchers.IO) {
         try {
-            // Append cache-buster timestamp to bypass GitHub CDN's 5-minute cache
-            val cacheBustedUrl = "$RULES_URL?t=${System.currentTimeMillis()}"
-            val jsonStr = HttpClient.getText(cacheBustedUrl, tag = "ota_rules")
-            if (jsonStr.isNullOrBlank()) {
-                return@withContext Pair(false, "Could not reach GitHub rules repository")
+        val totalStarted = System.currentTimeMillis()
+        val attempts = mutableListOf<OtaFetchDiagnostics.Attempt>()
+        var lastStage = OtaFetchDiagnostics.STAGE_UNKNOWN
+        var lastHttpCode: Int? = null
+        var lastErrorClass = ""
+        var lastDetail = ""
+
+        // Sticky source ordering (P2-2, uBO origin+CDN model §1.1): the source
+        // that served the LAST successful sync is tried first this time, then
+        // the canonical order. Receipts (share-31, carrier DNS poisoning) show
+        // hosts fail independently and stay reachable once known-good — never
+        // re-punish ourselves by starting from raw.githubusercontent every
+        // sync. A dead sticky costs exactly one failed attempt before the
+        // canonical chain resumes (its failure is journaled like any other).
+        val stickyLabel = try {
+            prefs()?.getString(PREF_LAST_SOURCE, null)
+        } catch (_: Exception) { null }
+        val stickySource = stickyLabel?.let { label -> RULES_SOURCES.firstOrNull { it.label == label } }
+        val orderedSources = if (stickySource != null) {
+            listOf(stickySource) + (RULES_SOURCES - stickySource)
+        } else RULES_SOURCES
+
+        for (source in orderedSources) {
+            // Append cache-buster timestamp to bypass the GitHub CDN's 5-minute
+            // cache (and any future CDN edge cache on the mirrors).
+            val cacheBustedUrl = "${source.url}?t=${System.currentTimeMillis()}"
+            val startedAt = System.currentTimeMillis()
+            var failure: Throwable? = null
+            val body = try {
+                HttpClient.getText(
+                    cacheBustedUrl,
+                    tag = "ota_rules",
+                    onFailure = { _, e -> failure = e }
+                )
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (t: Throwable) {
+                failure = t
+                null
+            }
+            val elapsed = System.currentTimeMillis() - startedAt
+
+            if (body.isNullOrBlank()) {
+                val e = failure
+                val stage = if (e != null) OtaFetchDiagnostics.classify(e) else OtaFetchDiagnostics.STAGE_UNKNOWN
+                lastStage = stage
+                lastHttpCode = e?.let { OtaFetchDiagnostics.httpCodeOf(it) }
+                lastErrorClass = e?.javaClass?.simpleName ?: "null-body"
+                lastDetail = e?.message ?: "empty response body"
+                countSourceAttempt(source.label, false)
+                attempts.add(
+                    OtaFetchDiagnostics.Attempt(
+                        source = source.label, url = cacheBustedUrl, stage = stage,
+                        errorClass = lastErrorClass, detail = lastDetail, elapsedMs = elapsed,
+                        httpCode = lastHttpCode
+                    )
+                )
+                // DNS-stage failures get IP evidence: which addresses the
+                // phone's pipeline actually produced for this host.
+                if (stage == OtaFetchDiagnostics.STAGE_DNS) {
+                    val (ips, doh) = OtaFetchDiagnostics.snapshotDns(source.host)
+                    OtaFetchDiagnostics.noteAttempt(
+                        source.label, cacheBustedUrl, stage, lastErrorClass,
+                        "dns=[$ips] doh=$doh ${lastDetail}", elapsed, lastHttpCode
+                    )
+                } else {
+                    OtaFetchDiagnostics.noteAttempt(
+                        source.label, cacheBustedUrl, stage, lastErrorClass, lastDetail, elapsed, lastHttpCode
+                    )
+                }
+                continue // next source in the chain — never end the sync early
             }
 
-            // Payload is base64(AES-CBC) — decrypt before parsing.
-            val plain = decryptRules(jsonStr)
+            // P2-2, uBO hardening ("consider an empty result to be an error",
+            // "Not a text file", §1.1): CDNs answer soft failures with empty
+            // bodies or HTML error pages. Sniffed BEFORE decrypt so a mirror's
+            // interstitial burns a cheap content check instead of a
+            // signature/decrypt failure that would read as tampering.
+            val sniffProblem = payloadBodyProblem(body)
+            if (sniffProblem != null) {
+                countSourceAttempt(source.label, false)
+                lastStage = OtaFetchDiagnostics.STAGE_PARSE
+                lastHttpCode = null
+                lastErrorClass = sniffProblem
+                lastDetail = "non-payload body from source (first-byte sniff)"
+                attempts.add(
+                    OtaFetchDiagnostics.Attempt(
+                        source = source.label, url = cacheBustedUrl, stage = lastStage,
+                        errorClass = lastErrorClass, detail = lastDetail, elapsedMs = elapsed
+                    )
+                )
+                OtaFetchDiagnostics.noteAttempt(source.label, cacheBustedUrl, lastStage, lastErrorClass, lastDetail, elapsed)
+                continue
+            }
+
+            // Payload is base64(AES-CBC) / signed envelope — verify + decrypt
+            // AFTER download, exactly as today (transport never trusted).
+            val plain = decryptRules(body)
             if (plain == null) {
-                return@withContext Pair(false, "Rules payload failed to decrypt — keeping bundled defaults")
+                countSourceAttempt(source.label, false)
+                lastStage = OtaFetchDiagnostics.STAGE_VERIFY
+                lastHttpCode = null
+                lastErrorClass = "SignatureOrDecryptFailure"
+                lastDetail = "payload failed signature/decrypt"
+                attempts.add(
+                    OtaFetchDiagnostics.Attempt(
+                        source = source.label, url = cacheBustedUrl, stage = lastStage,
+                        errorClass = lastErrorClass, detail = lastDetail, elapsedMs = elapsed
+                    )
+                )
+                OtaFetchDiagnostics.noteAttempt(source.label, cacheBustedUrl, lastStage, lastErrorClass, lastDetail, elapsed)
+                continue
             }
-            if (!parseRulesJson(plain)) {
-                return@withContext Pair(false, "Rules payload failed to parse — keeping bundled defaults")
+            // otaFetch = true: an OTA-fetched payload passes the CRLSet-style
+            // monotonic rev gate (P2-2). A stale rev rejects THIS source but
+            // the chain keeps trying the others — a slow CDN is skipped, a
+            // fresh mirror still delivers.
+            if (!parseRulesJson(plain, otaFetch = true, syncElapsedMs = System.currentTimeMillis() - totalStarted)) {
+                countSourceAttempt(source.label, false)
+                lastStage = OtaFetchDiagnostics.STAGE_PARSE
+                lastHttpCode = null
+                lastErrorClass = "ParseFailure"
+                lastDetail = "payload failed to parse"
+                attempts.add(
+                    OtaFetchDiagnostics.Attempt(
+                        source = source.label, url = cacheBustedUrl, stage = lastStage,
+                        errorClass = lastErrorClass, detail = lastDetail, elapsedMs = elapsed
+                    )
+                )
+                OtaFetchDiagnostics.noteAttempt(source.label, cacheBustedUrl, lastStage, lastErrorClass, lastDetail, elapsed)
+                continue
             }
 
-            val file = File(context.filesDir, CACHE_FILE)
-            file.writeText(jsonStr)  // cache stays encrypted
+            // Verified: cache stays encrypted, byte-identical to what was
+            // served. P2-2: the previous cache (also raw verified bytes) is
+            // kept TWO deep on disk (rules_prev_1/2.enc, the restore ladder —
+            // CRLSet/Remote-Settings "prefer verified-old" semantics §1.3/§1.4)
+            // and rotated only when a genuinely NEW body arrives, so re-syncs
+            // of the same rev never churn the ladder.
+            try {
+                val file = File(context.filesDir, CACHE_FILE)
+                val prev1 = File(context.filesDir, PREV_CACHE_1)
+                val prev2 = File(context.filesDir, PREV_CACHE_2)
+                val existing = if (file.exists()) try { file.readText() } catch (_: Exception) { null } else null
+                if (existing == null || existing != body) {
+                    if (prev1.exists()) prev1.copyTo(prev2, overwrite = true)
+                    if (file.exists()) file.copyTo(prev1, overwrite = true)
+                    atomicWrite(file, body)
+                }
+                try {
+                    prefs()?.edit()?.putString(PREF_LAST_SOURCE, source.label)?.apply()
+                } catch (_: Exception) {}
+            } catch (_: Exception) {
+                // Cache bookkeeping must never fail an otherwise-verified sync;
+                // the pre-P2 chain threw here only on disk errors, preserved.
+            }
+            lastSyncSource = source.label
+            countSourceAttempt(source.label, true)
+            // P2-6: winning source is now known — emit the pending activation
+            // record (dedup/caps apply inside).
+            flushActivationReport()
+            OtaFetchDiagnostics.reportSuccess(
+                "rules", source.label, _version.value,
+                System.currentTimeMillis() - totalStarted, attempts.size + 1
+            )
+            return@withContext Pair(true, "${_version.value} (via ${source.label})")
+        }
 
-            Pair(true, _version.value)
+        // Total failure: record + telemetry, keep last-known-good state.
+        val totalMs = System.currentTimeMillis() - totalStarted
+        OtaFetchDiagnostics.reportTotalFailure(
+            kind = "GitHub rules repo",
+            attempts = attempts,
+            totalMs = totalMs,
+            dnsEvidenceHost = RULES_SOURCES.first().host
+        )
+        val stageDesc = OtaFetchDiagnostics.friendlyStage(lastStage, lastHttpCode)
+        Pair(
+            false,
+            "Could not reach GitHub ($stageDesc) — ${RULES_SOURCES.size} sources tried, cached logic kept"
+        )
         } catch (t: Throwable) {
-            Pair(false, t.message ?: "Failed to sync rules")
+            // Belt-and-braces: an unexpected local error (e.g. a cache-file IO
+            // failure) must surface as a failure Pair exactly like the
+            // pre-chain version, never as a throw into the Settings coroutine.
+            Pair(false, "Failed to sync rules: ${t.message ?: t.javaClass.simpleName}")
+        }
+    }
+
+    /** F3 (OTA red-team): write-then-rename so a crash mid-write can never
+     *  leave a truncated last-known-good cache behind (rename-on-same-volume
+     *  is atomic; the tmp file is cleaned up on failure). */
+    private fun atomicWrite(file: File, body: String) {
+        val tmp = File(file.parentFile, file.name + ".tmp")
+        try {
+            tmp.writeText(body)
+            if (!tmp.renameTo(file)) {
+                file.delete()
+                if (!tmp.renameTo(file)) tmp.delete()
+            }
+        } catch (_: Exception) {
+            try { tmp.delete() } catch (_: Exception) {}
         }
     }
 
@@ -298,12 +755,177 @@ object DynamicRulesManager {
         }
     }
 
+    /** Optional payload "rev": JSON integer (or integer string — authoring
+     *  comfort, publish-side uses ints). null when absent or not a number; a
+     *  non-positive rev is treated as absent by the caller (publish-side
+     *  validator only ever ships positive ints — additive-only tolerance). */
+    private fun parseRev(obj: JSONObject): Long? {
+        if (!obj.has("rev")) return null
+        return when (val v = obj.opt("rev")) {
+            is Number -> v.toLong()
+            is String -> v.trim().toLongOrNull()
+            else -> null
+        }
+    }
+
+    /** P2-2 first-byte sniff (uBO "consider an empty result to be an error" /
+     *  "Not a text file", §1.1): a mirror that answers with an empty body, an
+     *  HTML error/interstitial page, or a truncated fragment is a DELIVERY
+     *  failure, not a signature failure — classed before decrypt. Pure,
+     *  lenient: the v2 JSON envelope starts with '{' and base64 bodies start
+     *  with [A-Za-z0-9], so anything beginning with '<' (or a body shorter
+     *  than any real envelope) is shown the door. Returns an error-class
+     *  string, or null when plausible. */
+    private fun payloadBodyProblem(body: String): String? {
+        val t = body.trim()
+        if (t.isEmpty()) return "empty-body"
+        if (t.length < 64) return "body-too-short"
+        val head = t.take(256).lowercase()
+        if (head.startsWith("<") || head.contains("<!doctype") || head.contains("<html")) return "html-body"
+        return null
+    }
+
+    /** Telemetry for a rev rejection (plan P2-2: "DebugLog.engine + telemetry").
+     *  Once per session — the same stale CDN body typically fails all 4 chain
+     *  sources in one sync and one record is enough. Sink-gated like every
+     *  RemoteLogger call; never throws. */
+    private fun reportRevRejection(staleRev: Long) {
+        try {
+            if (!revRejectReported.compareAndSet(false, true)) return
+            if (getRemoteLoggingUrl().isBlank()) return
+            com.anonrode.downloader.util.RemoteLogger.report(
+                type = "ota_rev_rejected",
+                message = "stale OTA payload rejected: rev=$staleRev <= active=$activeRev",
+                context = mapOf(
+                    "stale_rev" to staleRev,
+                    "active_rev" to activeRev,
+                    "active_version" to _version.value,
+                    "last_source" to lastSyncSource,
+                    "app_version" to com.anonrode.downloader.BuildConfig.VERSION_NAME
+                )
+            )
+        } catch (_: Exception) {}
+    }
+
+    // ---- P2-7: activation diff ---------------------------------------------
+
+    /**
+     * The set of host targets whose policy changed between the previously
+     * active collections and the new ones [HostHealth.clearBackoffsFor] should
+     * release. Families compared: knownDead, lockerHosts, hostPolicies
+     * (per-match fragment), pipelines (per-site structural signature).
+     * A member of the old set MISSING from the new one is changed by
+     * definition — removal (confirmed fix) clears immediately; a purely
+     * re-ordered but content-identical list is NOT changed (compare keyed
+     * signatures, not positions). Pure.
+     */
+    private fun computeChangedHosts(
+        oldKnownDead: List<String>,
+        oldLockerHosts: List<String>,
+        oldHostPolicies: List<HostPolicyRule>,
+        oldPipelines: Map<String, SitePipeline>,
+        newKnownDead: List<String>,
+        newLockerHosts: List<String>,
+        newHostPolicies: List<HostPolicyRule>,
+        newPipelines: Map<String, SitePipeline>
+    ): Set<String> {
+        val changed = HashSet<String>()
+        try {
+            // Member-set families: any leave or arrival is a change.
+            diffSets(oldKnownDead.toSet(), newKnownDead.toSet(), changed)
+            diffSets(oldLockerHosts.toSet(), newLockerHosts.toSet(), changed)
+
+            // hostPolicies: first-match-wins per `match` fragment — a changed
+            // referer/ua (or a removed/added rule) invalidates that fragment's
+            // targets; equality uses the data class (agents are value fields).
+            val oldPol = oldHostPolicies.associateBy { it.match }
+            val newPol = newHostPolicies.associateBy { it.match }
+            for (m in oldPol.keys + newPol.keys) {
+                if (oldPol[m] != newPol[m]) changed.add(m)
+            }
+
+            // Pipelines: per-site structural signature (the executed fetches +
+            // bindings + terminal governance), NOT object identity — every
+            // parse builds fresh JSONObject items, so identity would flag the
+            // whole family changed on every activation of identical content.
+            val keys = oldPipelines.keys + newPipelines.keys
+            for (k in keys) {
+                val oldSig = oldPipelines[k]?.let { pipelineSignature(it) } ?: ""
+                val newSig = newPipelines[k]?.let { pipelineSignature(it) } ?: ""
+                if (oldSig != newSig) {
+                    changed.add(k)
+                    oldPipelines[k]?.terminal?.hosts?.let { changed.addAll(it) }
+                    newPipelines[k]?.terminal?.hosts?.let { changed.addAll(it) }
+                }
+            }
+        } catch (_: Exception) {
+            // Diff computed by hand: on any surprise return everything, so
+            // the invalidation degrades to the coarse-but-correct behavior.
+            (oldKnownDead + oldLockerHosts + newKnownDead + newLockerHosts).forEach { changed.add(it) }
+        }
+        changed.removeAll { it.isBlank() }
+        return changed
+    }
+
+    private fun diffSets(old: Set<String>, new: Set<String>, out: MutableSet<String>) {
+        for (x in old) if (!new.contains(x)) out.add(x)
+        for (x in new) if (!old.contains(x)) out.add(x)
+    }
+
+    /** Comparable text signature of a compiled pipeline: what it fetches
+     *  (sources/urls/modes/delays/dead-patterns), how it binds (names/specs),
+     *  what it extracts (items spec text), and its terminal governance.
+     *  Deliberately NOT the JSONObject's runtime identity. */
+    private fun pipelineSignature(sp: SitePipeline): String {
+        val sb = StringBuilder()
+        for (p in listOf(sp.search, sp.episodes, sp.resolve)) {
+            if (p == null) {
+                sb.append("∅")
+            } else {
+                for (st in p.steps) {
+                    sb.append('[').append(st.mode).append('/').append(st.asFormat)
+                        .append('/').append(st.delayMs).append('/').append(st.deadPatterns).append(']')
+                    for (s in st.sources) {
+                        sb.append('(').append(s.method).append(' ').append(s.url)
+                            .append(' h').append(s.headers.size).append(' f').append(s.form.size).append(')')
+                    }
+                    for (b in st.bind) {
+                        sb.append('<').append(b.name).append('=').append(b.sourceVar)
+                            .append(b.regex).append(b.jsonPath).append(b.selector).append(b.attr)
+                            .append(b.header).append(b.cookie).append(b.unpackJs)
+                            .append(b.powSha256 != null).append(b.transforms).append('>')
+                    }
+                    st.items?.let { sb.append('{').append(it.toString()).append('}') }
+                }
+                for (b in p.urlBinds) {
+                    sb.append('u').append(b.name).append('/').append(b.regex)
+                        .append('/').append(b.group).append('/').append(b.decode)
+                }
+            }
+            sb.append('#')
+        }
+        val t = sp.terminal
+        if (t != null) {
+            sb.append("T").append(t.source).append(t.regex).append(t.group).append(t.spec)
+                .append(t.hosts).append(t.mode).append(t.referer).append(t.decode)
+                .append(t.stripQueryParams)
+        }
+        return sb.toString()
+    }
+
     /** Decrypts the OTA payload -> JSON text; null on any failure.
      *
      *  Accepts only SIGNED envelopes:
      *   - v2 envelope JSON {"v":2,"iv":..,"payload":<b64>,"sig":<b64>} —
      *     signature verified BEFORE decryption; v2 without a signature or
      *     with a bad one is refused outright.
+     *   - v2 envelope + optional "chain" object (step 7 signing rotation,
+     *     docs/SIGNING_ROTATION.md): "sig" is then by a LEAF key delivered in
+     *     chain.leafPubB64, which must first be vouched for by a PINNED ROOT
+     *     (dual-pin set root-1/root-2, "verify first that succeeds") over the
+     *     canonical leaf bytes — see SignatureChain.verifyChainMode. A
+     *     malformed or failing chain REJECTS outright: it never falls back to
+     *     legacy verification and never accepts an unsigned payload.
      *  Legacy formats are refused — both are indistinguishable from a
      *  hijacked unsigned payload:
      *   - v1/versionless envelope {"v":1,"payload":<b64>} with no "sig": a
@@ -331,8 +953,14 @@ object DynamicRulesManager {
                     return null
                 }
                 if (isV2 || sigB64.isNotBlank()) {
-                    // Envelope claims authenticity: verify before decrypting.
-                    if (sigB64.isBlank() || !verifySignature(payloadB64, sigB64)) {
+                    // Envelope claims authenticity: verify BEFORE decrypting.
+                    // Chain dispatch (step 7): the mere PRESENCE of "chain"
+                    // selects chain mode EXCLUSIVELY — a vouched-leaf failure
+                    // or a malformed chain is a hard reject with the same
+                    // semantics as any other signature failure (REJECT the
+                    // payload, keep current state; the sync ladder continues
+                    // with the next source / last-known-good).
+                    if (sigB64.isBlank() || !verifyEnvelopeSignature(env, payloadB64, sigB64)) {
                         com.anonrode.downloader.util.DebugLog.error(
                             "OTA rules REJECTED: signature missing/invalid"
                         )
@@ -362,25 +990,51 @@ object DynamicRulesManager {
         return String(cipher.doFinal(data), Charsets.UTF_8)
     }
 
-    /** ECDSA-P256-SHA256 over the ASCII payload string; testable directly. */
-    internal fun verifySignature(payloadB64: String, sigB64: String): Boolean {
-        return try {
-            val pub = KeyFactory.getInstance("EC").generatePublic(
-                X509EncodedKeySpec(java.util.Base64.getDecoder().decode(rulesSigningPubB64))
+    /**
+     * Signature dispatch for one v2 envelope (step 7 signing rotation). The
+     * PRESENCE of the "chain" key selects chain mode EXCLUSIVELY (pinned-root
+     * vouch for the delivered leaf, then the leaf's payload signature); every
+     * other envelope verifies in legacy mode against the dual-pin set. The
+     * pure crypto policy lives in [SignatureChain] (pure file, JVM-testable);
+     * this function only reads the envelope field and supplies the pins.
+     *
+     * Fail-closed rules (a chain envelope is a chain or it is REJECTED —
+     * never a silent fallback, never an unsigned acceptance):
+     *  - "chain" present but not an object -> false.
+     *  - chain missing leafPubB64/rootSig/alg, or alg != "P256-SHA256" -> false.
+     *  - legacy mode: first pinned root that verifies wins; none -> false.
+     * Keeps the envelope-verification failure semantics of every caller:
+     * reject THIS payload, keep the current rules state, climb the ladder.
+     */
+    private fun verifyEnvelopeSignature(env: JSONObject, payloadB64: String, sigB64: String): Boolean {
+        val pins = signingRootPins()
+        if (env.has("chain")) {
+            val chain = env.optJSONObject("chain") ?: return false
+            return SignatureChain.verifyChainMode(
+                payloadB64 = payloadB64,
+                sigB64 = sigB64,
+                leafPubB64 = chain.optString("leafPubB64"),
+                rootSigB64 = chain.optString("rootSig"),
+                chainAlg = chain.optString("alg"),
+                rootPinsB64 = pins
             )
-            val s = Signature.getInstance("SHA256withECDSA")
-            s.initVerify(pub)
-            s.update(payloadB64.toByteArray(Charsets.US_ASCII))
-            s.verify(java.util.Base64.getDecoder().decode(sigB64))
-        } catch (_: Exception) {
-            false
         }
+        return SignatureChain.verifyLegacyMode(payloadB64, sigB64, pins)
     }
 
-    /** Returns false when the payload is malformed; the previously active
-     *  rules (bundled defaults on first run) stay in place untouched.
-     *  internal so JVM unit tests can exercise the full parse path. */
-    internal fun parseRulesJson(jsonStr: String): Boolean {
+    /** ECDSA-P256-SHA256 over the ASCII payload string against the pinned
+     *  root set ("verify first that succeeds" — legacy envelope shape).
+     *  Delegates to [SignatureChain.verifyLegacyMode]; testable directly. */
+    internal fun verifySignature(payloadB64: String, sigB64: String): Boolean =
+        SignatureChain.verifyLegacyMode(payloadB64, sigB64, signingRootPins())
+
+    /** Returns false when the payload is malformed (or, for OTA-fetched
+     *  payloads only, when its rev is not strictly newer than the active one);
+     *  the previously active rules (bundled defaults on first run) stay in
+     *  place untouched. internal so JVM unit tests can exercise the full parse
+     *  path (default otaFetch=false keeps every existing caller behaving
+     *  exactly as before — bundled/cached activation is never rev-gated). */
+    internal fun parseRulesJson(jsonStr: String, otaFetch: Boolean = false, syncElapsedMs: Long = 0L): Boolean {
         // Build-then-swap: every collection is populated locally and the
         // whole state is published at the end. Readers never observe a
         // half-applied playbook, a parse failure leaves the previous state
@@ -398,9 +1052,34 @@ object DynamicRulesManager {
         val lockerHosts = mutableListOf<String>()
         val searchStrategies = mutableMapOf<String, List<JSONObject>>()
         val dynProviders = mutableListOf<GenericDeclarativeProvider>()
+        // P2-6 activation telemetry: applied/skipped entry counts (the
+        // lenient parser's journals, counted).
+        var skippedPipelines = 0
+        var skippedDynProviders = 0
         return try {
             val obj = JSONObject(jsonStr)
             val ver = obj.optString("version", "2026.08.22.1")
+
+            // P2-3: load-time validation caps — WARN phase this rev cycle
+            // (plan canary rule): journal + count every violation, never reject.
+            // The publish-side validator already enforces the same caps hard;
+            // the client flips to enforce after a clean payload cycle.
+            val capsViolations = RuleCaps.scan(jsonStr, obj)
+            if (capsViolations.isNotEmpty()) {
+                com.anonrode.downloader.util.DebugLog.engine(
+                    "OTA rules[$ver] caps WARN: ${capsViolations.size} violation(s) — payload still applied (WARN phase)"
+                )
+                capsViolations.take(8).forEach { v ->
+                    com.anonrode.downloader.util.DebugLog.engine("OTA rules[$ver] cap WARN: $v")
+                }
+                reportCapsWarn(capsViolations)
+            }
+
+            // Per-family flags (P2-1): lenient parse, journal every decision —
+            // unknown family keys and sub-keys are skipped, never fatal.
+            val familyFlags = RulesFlags.parse(obj.optJSONObject("flags")) { msg ->
+                com.anonrode.downloader.util.DebugLog.engine("OTA rules[$ver] $msg")
+            }
 
             // Fleet guard: a payload that declares it needs a newer app is
             // rejected wholesale and the previous state stays — an older
@@ -413,6 +1092,26 @@ object DynamicRulesManager {
                     "OTA rules REJECTED: payload requires app v$minApp, this is ${com.anonrode.downloader.BuildConfig.VERSION_CODE} — keeping previous rules"
                 )
                 return false
+            }
+
+            // P2-2 — CRLSet-style monotonic rev (prior art §1.3: "strictly
+            // monotonically increasing sequence numbers"; Remote Settings CDN-
+            // staleness guard "CDN served staled data, ignore", §1.4). Applies
+            // ONLY to OTA-fetched payloads: the cached/bundled activation path
+            // is the restore ladder and must never be bricked or discarded
+            // because of a rev comparison (bedrock constraint 5). A rev-less
+            // payload is legacy-tolerant — it passes and never moves the
+            // activeRev pointer.
+            val rev = parseRev(obj)
+            if (otaFetch) {
+                val r = rev
+                if (r != null && activeRev > 0L && r in 1..activeRev) {
+                    com.anonrode.downloader.util.DebugLog.engine(
+                        "OTA rules REJECTED: stale rev $r <= active rev $activeRev (last source=${lastSyncSource.ifBlank { "none" }}) — keeping current rules"
+                    )
+                    reportRevRejection(r)
+                    return false
+                }
             }
 
             val domainsObj = obj.optJSONObject("domains")
@@ -592,6 +1291,7 @@ object DynamicRulesManager {
                     if (parsed != null) {
                         pipelines[k.lowercase()] = parsed
                     } else {
+                        skippedPipelines++
                         com.anonrode.downloader.util.DebugLog.error(
                             "OTA rules: skipping pipeline for \"$k\" (malformed or unknown schema)"
                         )
@@ -624,10 +1324,98 @@ object DynamicRulesManager {
                         posterSelector = item.optString("poster_selector", "img"),
                         episodeLinkSelector = item.optString("episode_link_selector", "a[href*='download']")
                     )
-                    if (cfg.id.isBlank() || cfg.baseUrl.isBlank()) continue
+                    if (cfg.id.isBlank() || cfg.baseUrl.isBlank()) {
+                        skippedDynProviders++
+                        continue
+                    }
                     dynProviders.add(GenericDeclarativeProvider(cfg))
                 }
             }
+
+            // P2-1/P2-5 enforcement — no provider edits: a family the flags
+            // hold back (kill switch off, build below the family's minApp
+            // floor, shadow measurement mode, or this device's stable bucket
+            // outside a partial rollout) publishes its section EMPTY,
+            // byte-for-byte the "missing/malformed section" state every
+            // compiled fallback already engages on. The knownDead/lockerHosts
+            // note from the plan holds: emptying those only loosens
+            // pre-filtering, it can never break a resolution. A payload with
+            // no "flags" object leaves every family at DEFAULT (enabled,
+            // percent 100) — flags expire with the payload that carried them.
+            val deviceUuid = RulesFlags.installUuid(appContext)
+            fun familyGateBlank(family: String, blank: () -> Unit) {
+                val flag = familyFlags[family] ?: return
+                if (RulesFlags.isFamilyActiveForDevice(flag, family, deviceUuid)) return
+                val bucket = RulesFlags.stableBucket(deviceUuid, family)
+                when {
+                    !flag.enabled ->
+                        com.anonrode.downloader.util.DebugLog.engine(
+                            "OTA rules[$ver] family \"$family\" disabled by kill flag — publishing empty (compiled fallback engages)"
+                        )
+                    !flag.minAppSatisfied ->
+                        com.anonrode.downloader.util.DebugLog.engine(
+                            "OTA rules[$ver] family \"$family\" needs app ${flag.minAppVersion}; this is " +
+                                com.anonrode.downloader.BuildConfig.VERSION_CODE + " — publishing empty (minApp guard)"
+                        )
+                    flag.shadow ->
+                        com.anonrode.downloader.util.DebugLog.engine(
+                            "OTA rules[$ver] family \"$family\" in shadow mode — publishing empty (compiled control serves users)"
+                        )
+                    else ->
+                        com.anonrode.downloader.util.DebugLog.engine(
+                            "OTA rules[$ver] family \"$family\" percent rollup ${flag.percent}: bucket $bucket not selected — publishing empty for this device"
+                        )
+                }
+                blank()
+            }
+            familyGateBlank("domains") { domains.clear() }
+            familyGateBlank("mirrors") { mirrors.clear() }
+            familyGateBlank("sites") { siteConfigs.clear() }
+            familyGateBlank("resolvers") { resolverConfigs.clear() }
+            familyGateBlank("directMediaExtensions") { mediaExts.clear() }
+            familyGateBlank("hostPolicies") { hostPolicies.clear() }
+            familyGateBlank("urlTemplates") { urlTemplates.clear() }
+            familyGateBlank("knownDead") { knownDead.clear() }
+            familyGateBlank("lockerHosts") { lockerHosts.clear() }
+            familyGateBlank("searchStrategies") { searchStrategies.clear() }
+
+            // P2-4 SHADOW MODE for the behavior family (Scientist rule, plan
+            // slice 4): when the payload flags `pipelines` shadow, the section
+            // publishes EMPTY — every provider runs its compiled control and
+            // the USER-FACING RESULT IS ALWAYS CONTROL — while the parsed
+            // candidate set is handed to ShadowRunner for sampled, deferred,
+            // never-user-facing measurement. Promotion/kill is all payload
+            // data: shadow=false + percent buckets promotes; enabled=false
+            // (or no flag at all) disarms via the updateCandidates(emptyMap).
+            var shadowArmed = false
+            var pipelinesShadowArmed = 0
+            val pipelinesFlag = familyFlags["pipelines"]
+            if (pipelinesFlag != null && pipelinesFlag.enabled && pipelinesFlag.minAppSatisfied &&
+                pipelinesFlag.shadow && pipelines.isNotEmpty()
+            ) {
+                pipelinesShadowArmed = pipelines.size
+                com.anonrode.downloader.pipeline.ShadowRunner.updateCandidates(pipelines.toMap(), pipelinesFlag)
+                com.anonrode.downloader.util.DebugLog.engine(
+                    "OTA rules[$ver] pipelines SHADOW mode: ${pipelines.size} candidate(s) armed; published section EMPTY (compiled control serves users)"
+                )
+                pipelines.clear()
+                shadowArmed = true
+            } else {
+                familyGateBlank("pipelines") { pipelines.clear() }
+            }
+            if (!shadowArmed) {
+                com.anonrode.downloader.pipeline.ShadowRunner.updateCandidates(emptyMap(), null)
+            }
+
+            familyGateBlank("dynamic_providers") { dynProviders.clear() }
+
+            // P2-7 set-up: previous family target-hosts for the diff —
+            // captured BEFORE the atomic swap so the old/new comparison is
+            // exact. Empty collections = no rules were active yet (defaults).
+            val prevKnownDead = activeKnownDead
+            val prevLockerHosts = activeLockerHosts
+            val prevHostPolicies = activeHostPolicies
+            val prevPipelines = activePipelines
 
             // Atomic publish — readers see either the old playbook or the new
             // one, never a mix.
@@ -643,9 +1431,103 @@ object DynamicRulesManager {
             activeSearchStrategies = searchStrategies
             activePipelines = pipelines
             dynamicProviders = dynProviders
+            activeFlags = familyFlags
             remoteLoggingUrl = remoteLogSink
             tokenTtlMinutes = ttl
+            // P2-2: a payload that carries a rev and survived the gate becomes
+            // the new activation floor. Rev-less (legacy) payloads never move
+            // the pointer — they must stay able to run on any install.
+            val revNow = rev
+            if (revNow != null && revNow > 0L) {
+                // F11 (OTA red-team): the pointer is monotonic — a cache-
+                // restore (otaFetch=false) must never REGRESS the persisted
+                // floor to an older cached rev.
+                val newFloor = maxOf(activeRev, revNow)
+                if (newFloor != activeRev) {
+                    activeRev = newFloor
+                    try {
+                        prefs()?.edit()?.putLong(PREF_ACTIVE_REV, newFloor)?.apply()
+                    } catch (_: Exception) {}
+                }
+            }
+            // P2-6: ONE activation telemetry record per activation — version,
+            // rev, winning source, duration, applied/skipped family entry
+            // counts and the delivery-chain per-source roll-up. Content-free
+            // (no URLs beyond the well-known chain source labels, no payload
+            // fragments). Built here, FLUSHED by the sync path once it knows
+            // the winning source (or by init's bundled/cached restore with a
+            // blank source). Deduped per version+rev AND capped 1/24h aggregate.
+            pendingActivationReport = PendingActivation(
+                ver = ver,
+                rev = rev,
+                durationMs = syncElapsedMs,
+                applied = mapOf(
+                    "domains" to domains.size,
+                    "mirrors" to mirrors.size,
+                    "sites" to siteConfigs.size,
+                    "resolvers" to resolverConfigs.size,
+                    "directMediaExtensions" to mediaExts.size,
+                    "hostPolicies" to hostPolicies.size,
+                    "urlTemplates" to urlTemplates.size,
+                    "knownDead" to knownDead.size,
+                    "lockerHosts" to lockerHosts.size,
+                    "searchStrategies" to searchStrategies.size,
+                    "pipelines" to pipelines.size,
+                    "pipelines_shadow_armed" to pipelinesShadowArmed,
+                    "dynamic_providers" to dynProviders.size
+                ),
+                skippedEntries = skippedPipelines + skippedDynProviders
+            )
+            // Rules-rev state invalidation (Remote Settings sync-event
+            // semantics, §3.7). P2-7 upgrade: with a rev present the drop is
+            // DIFF-SCOPED — only hosts whose knownDead/lockerHosts/hostPolicy/
+            // pipeline entry changed or was removed get their stale backoff
+            // verdict cleared, so a truly-dead host's live backoff survives
+            // unrelated updates. Hosts REMOVED from knownDead/lockerHosts are
+            // in the changed set by construction (the confirmed
+            // "remembers-dead-after-fix" bug). Legacy payloads without a rev
+            // cannot be diffed reliably, so they fall back to the existing
+            // coarse whole-ledger clearing. Both paths drop only the judgment;
+            // ok/fail history and 429 cooldowns stay.
+            val prevVer = _version.value
+            // F7 (OTA red-team): capture the pre-publish rev — a rev-ONLY bump
+            // must invalidate stale verdicts too, not just version-string bumps.
+            val prevActiveRev = activeRev
+            // NoSourceLedger: new payload may add platforms — hidden titles
+            // get re-judged against the new playbook.
+            com.anonrode.downloader.pipeline.NoSourceLedger.clear()
             _version.value = ver
+            if (ver != prevVer || activeRev != prevActiveRev) {
+                val revForDiff = rev
+                if (revForDiff != null && revForDiff > 0L) {
+                    val changedHosts = computeChangedHosts(
+                        prevKnownDead, prevLockerHosts, prevHostPolicies, prevPipelines,
+                        knownDead, lockerHosts, hostPolicies, pipelines
+                    )
+                    if (changedHosts.isEmpty()) {
+                        com.anonrode.downloader.util.DebugLog.engine(
+                            "OTA rules $prevVer -> $ver (rev $revForDiff): no host-policy changes detected — backoff verdicts kept"
+                        )
+                    } else {
+                        val cleared = com.anonrode.downloader.pipeline.HostHealth.clearBackoffsFor(changedHosts)
+                        com.anonrode.downloader.util.DebugLog.engine(
+                            "OTA rules $prevVer -> $ver (rev $revForDiff): diff cleared $cleared backoff verdict(s) across ${changedHosts.size} changed host target(s)"
+                        )
+                        if (cleared == 0) {
+                            com.anonrode.downloader.util.DebugLog.trace(
+                                "OTA rules diff: changed targets [${changedHosts.take(8).joinToString(", ")}]"
+                            )
+                        }
+                    }
+                } else {
+                    val cleared = com.anonrode.downloader.pipeline.HostHealth.clearBackoffsOnNewRules()
+                    if (cleared > 0) {
+                        com.anonrode.downloader.util.DebugLog.engine(
+                            "OTA rules $prevVer -> $ver (no rev on payload): cleared $cleared stale host backoff verdicts (coarse fallback)"
+                        )
+                    }
+                }
+            }
             true
         } catch (_: Exception) {
             false
