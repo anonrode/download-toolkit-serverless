@@ -721,7 +721,7 @@ object RulesPipeline {
         applyUrlBinds(pipeline?.urlBinds ?: emptyList(), vars)
         var consumed = 0L
 
-        pipeline?.steps?.forEachIndexed { idx, step ->
+        for ((idx, step) in (pipeline?.steps ?: emptyList()).withIndex()) {
             val dynamicDelayMs = if (step.delayVar.isNotBlank()) {
                 val raw = vars[step.delayVar]?.trim().orEmpty()
                 val num = Regex("""\d+""").find(raw)?.value?.toLongOrNull() ?: 0L
@@ -749,6 +749,10 @@ object RulesPipeline {
                 if (step.mode != "merge") break
             }
             if (!bound) {
+                if (step.optional) {
+                    DebugLog.resolve("$site pipeline resolve: optional step $idx produced no response — continuing")
+                    continue
+                }
                 DebugLog.resolve("$site pipeline resolve: step $idx produced no response — refusing")
                 return null
             }

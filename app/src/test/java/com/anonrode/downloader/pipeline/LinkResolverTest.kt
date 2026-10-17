@@ -74,6 +74,11 @@ class LinkResolverTest {
         // resolver must crack it (429 lesson, commit 0a5b1df):
         assertFalse(LinkResolver.isProvablyDirectFile("https://vikingfile.com/d/wtKpY7FHW2/Lanterns.S01E01.mkv"))
         assertTrue(LinkResolver.isKnownLockerHost("https://vikingfile.com/d/wtKpY7FHW2/Lanterns.S01E01.mkv"))
+
+        // Dynamic streaming endpoints (HLS manifests) are provably direct:
+        assertTrue(LinkResolver.isProvablyDirectFile("https://megaplays.se/api/playlist.php?t=12345"))
+        assertTrue(LinkResolver.isProvablyDirectFile("https://embed.vidrift.net/api/orion/abcdef1234567890/master.m3u8"))
+        assertTrue(LinkResolver.isProvablyDirectFile("https://example.com/stream-proxy?url=xyz"))
     }
 
     @Test

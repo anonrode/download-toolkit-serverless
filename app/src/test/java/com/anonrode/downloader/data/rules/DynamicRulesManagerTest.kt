@@ -181,7 +181,7 @@ class DynamicRulesManagerTest {
             {
               "version": "test.policies",
               "hostPolicies": [
-                {"match": "anivideo.sbs", "referer": "none"},
+                {"match": "anivideo.sbs", "referer": "none", "ua": "CustomAnimeUA/2.0"},
                 {"match": "mycdn.example", "referer": "exact:https://origin.example/"}
               ]
             }
@@ -189,16 +189,19 @@ class DynamicRulesManagerTest {
         )
         // OTA rule overrides the built-in megaplay referer for anivideo.sbs.
         assertEquals("", DynamicRulesManager.resolveReferer("https://fntb0.anivideo.sbs/hls/x.m3u8"))
+        assertEquals("CustomAnimeUA/2.0", DynamicRulesManager.resolveUserAgent("https://fntb0.anivideo.sbs/hls/x.m3u8"))
         // OTA exact rule resolves to its URL.
         assertEquals("https://origin.example/",
             DynamicRulesManager.resolveReferer("https://mycdn.example/file.mkv"))
+        assertEquals("", DynamicRulesManager.resolveUserAgent("https://mycdn.example/file.mkv"))
         // Built-in defaults still apply where no OTA rule matches.
         assertEquals("https://my9jarocks.bz/",
             DynamicRulesManager.resolveReferer("https://loadedfiles.xyz/d/f.mkv"))
         assertEquals("https://megaplay.buzz/",
             DynamicRulesManager.resolveReferer("https://megap.abc/stream"))
-        // Unknown host -> no referer.
+        // Unknown host -> no referer or UA.
         assertEquals("", DynamicRulesManager.resolveReferer("https://unmatched.host/v.mp4"))
+        assertEquals("", DynamicRulesManager.resolveUserAgent("https://unmatched.host/v.mp4"))
     }
 
     @Test

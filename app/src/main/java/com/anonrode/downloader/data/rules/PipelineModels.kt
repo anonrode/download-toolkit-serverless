@@ -136,7 +136,8 @@ data class PipelineStep(
     val delayMs: Long = 0L,
     val delayVar: String = "",
     val maxBytes: Long = 0L,
-    val deadPatterns: List<String> = emptyList()
+    val deadPatterns: List<String> = emptyList(),
+    val optional: Boolean = false
 )
 
 /** Pre-step binding from a pipeline VARIABLE (the resolve stage binds names
@@ -368,7 +369,8 @@ private fun parseStep(obj: JSONObject): PipelineStep? {
         delayMs = obj.optLong("delayMs", 0L).coerceIn(0L, 60_000L),
         delayVar = obj.optString("delayVar"),
         maxBytes = obj.optLong("maxBytes", 0L).coerceIn(0L, 3_000_000L),
-        deadPatterns = jsonStringList(obj.optJSONArray("deadPatterns"))
+        deadPatterns = jsonStringList(obj.optJSONArray("deadPatterns")),
+        optional = obj.optBoolean("optional", false)
     )
 }
 

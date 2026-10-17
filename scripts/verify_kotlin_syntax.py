@@ -117,6 +117,7 @@ if __name__ == "__main__":
     repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     target_files = [
         "app/src/main/java/com/anonrode/downloader/data/models/Models.kt",
+        "app/src/main/java/com/anonrode/downloader/data/rules/DynamicRulesManager.kt",
         "app/src/main/java/com/anonrode/downloader/data/rules/PipelineModels.kt",
         "app/src/main/java/com/anonrode/downloader/engine/Aria2Control.kt",
         "app/src/main/java/com/anonrode/downloader/engine/DownloadEngine.kt",

@@ -116,9 +116,10 @@ object StrictLinkClassifier {
         // Provably direct file endpoints (cracked CDN tokens, R2/S3 signatures, kissorgrab /dl/, downloadwella /d/)
         // must be classified as DirectMedia even if their domain matches a locker domain name.
         if (LinkResolver.isProvablyDirectFile(clean)) {
+            val isDynamicHls = clean.contains("playlist.php") || clean.contains("/api/orion/") || clean.contains("stream-proxy") || clean.contains(".m3u8")
             val ext = clean.substringBefore('?').substringAfterLast('.', "").lowercase()
-            val effectiveExt = if (ext in DIRECT_EXTENSIONS) ext else "mp4"
-            return LinkClass.DirectMedia(effectiveExt, effectiveExt == "m3u8")
+            val effectiveExt = if (isDynamicHls) "m3u8" else if (ext in DIRECT_EXTENSIONS) ext else "mp4"
+            return LinkClass.DirectMedia(effectiveExt, isDynamicHls || effectiveExt == "m3u8")
         }
 
         // 4. Known locker hosts (dynamic OTA + defaults + HostHealth learned)

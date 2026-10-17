@@ -1085,8 +1085,10 @@ object VidsrcResolver : BaseResolver {
     private val ORIGIN_PATTERN = Pattern.compile("""https?://[^/]+""")
     internal val missingTmdb = ConcurrentHashMap<String, Long>()
     internal val availableTmdb = ConcurrentHashMap<String, Long>()
+    internal val transientMissingTmdb = ConcurrentHashMap<String, Long>()
     private const val MISSING_TMDB_TTL_MS = 15 * 60_000L
     private const val AVAILABLE_TMDB_TTL_MS = 60 * 60_000L
+    private const val TRANSIENT_BACKOFF_TTL_MS = 30_000L
     @Volatile private var lastFailure: String? = null
 
     // ------------------------------------------------------------------
@@ -1261,10 +1263,9 @@ object VidsrcResolver : BaseResolver {
                 lastFailure = "Vidsrc: sources fill wait timeout for tmdb=$tmdb"
                 return null
             }
-            // The machine around the content is alive (page + bootstrap +
-            // signature) but no source server exists for this title: a
-            // proven-dead content verdict.
-            missingTmdb["$mediaType:$tmdb:${season.orEmpty()}:${episode.orEmpty()}"] = System.currentTimeMillis()
+            // Empty SSR or no mintable servers: transient response decoupled
+            // from permanent negative caching. Do NOT write to missingTmdb
+            // (15m TTL). Sibling mirrors and retry passes can still proceed.
             lastFailure = "Vidsrc: vidsrc.buzz has no mintable sources for tmdb=$tmdb (ssr empty)"
             return null
         }
@@ -1499,7 +1500,7 @@ object VidsrcResolver : BaseResolver {
             val root = JSONObject(json)
             val sc = root.optInt("status_code", 0)
             val data = root.optJSONObject("data")
-            if (sc == 404 || (sc == 0 && data == null)) {
+            if (sc == 404) {
                 missingTmdb[cacheKey] = System.currentTimeMillis()
                 false
             } else if (data != null || sc == 200) {
@@ -1612,6 +1613,9 @@ object VidsrcResolver : BaseResolver {
             }
             val mediaType = if (embedUrl.contains("/tv/") || embedUrl.contains("/serie/") || embedUrl.contains("embedtv") || season != null) "tv" else "movie"
             val cacheKey = "$mediaType:$tmdb:${season.orEmpty()}:${episode.orEmpty()}"
+            val mirrorHost = HttpClient.parsedHost(embedUrl) ?: ""
+            val mirrorKey = if (mirrorHost.isNotBlank()) "$mirrorHost:$cacheKey" else cacheKey
+
             val cachedMissingAt = missingTmdb[cacheKey]
             if (cachedMissingAt != null) {
                 if (System.currentTimeMillis() - cachedMissingAt < MISSING_TMDB_TTL_MS) {
@@ -1620,14 +1624,26 @@ object VidsrcResolver : BaseResolver {
                 }
                 missingTmdb.remove(cacheKey, cachedMissingAt)
             }
+            val cachedTransientAt = transientMissingTmdb[mirrorKey]
+            if (cachedTransientAt != null) {
+                if (System.currentTimeMillis() - cachedTransientAt < TRANSIENT_BACKOFF_TTL_MS) {
+                    lastFailure = "Vidsrc: mirror $mirrorHost in transient backoff for tmdb=$tmdb"
+                    return null
+                }
+                transientMissingTmdb.remove(mirrorKey, cachedTransientAt)
+            }
             // LIVE PATH FIRST — vidsrc.buzz player's own relay, verified live
             // 2026-10-15 (~4-10s to a playable playlist; page carries the SSR
             // servers + signed token, /pl/api.php mints, /_stream serves HLS).
             // The dead legacy API below only runs when the live path cannot.
             resolveViaBuzz(mediaType, tmdb, season, episode)?.let { minted ->
                 availableTmdb[cacheKey] = System.currentTimeMillis()
+                transientMissingTmdb.remove(mirrorKey)
                 return minted
             }
+            // Transient backoff isolated per-mirror so sibling mirrors in a multi-mirror race proceed
+            transientMissingTmdb[mirrorKey] = System.currentTimeMillis()
+
             val legacyApi = otaLegacyApiHost()
             val apiUrl = if (mediaType == "tv") {
                 val s = season ?: "1"
@@ -1653,12 +1669,13 @@ object VidsrcResolver : BaseResolver {
             }
             val root = JSONObject(json)
             val data = root.optJSONObject("data") ?: run {
-                val sc = root.optInt("status_code", 404)
+                val sc = root.optInt("status_code", 0)
                 if (sc == 404) missingTmdb[cacheKey] = System.currentTimeMillis()
                 lastFailure = "Vidsrc: API returned status $sc for tmdb=$tmdb"
                 return null
             }
             availableTmdb[cacheKey] = System.currentTimeMillis()
+            transientMissingTmdb.remove(mirrorKey)
             val streamUrl: String = when (val su = data.opt("stream_urls")) {
                 is JSONArray -> if (su.length() > 0) su.getString(0) else null
                 is String -> {

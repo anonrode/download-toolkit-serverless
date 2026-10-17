@@ -75,9 +75,14 @@ class NepuAvailabilityTest {
     }
 
     @Test
-    fun testNepuBuildMirrorsContainsAll14Servers() {
+    fun testNepuBuildMirrorsContainsAllServers() {
         val mirrors = NepuProvider.buildMirrors("movie", "550", primaryUrl = "https://nepu.gd/watch/movie/550")
-        assertEquals(14, mirrors.size)
+        assertEquals(19, mirrors.size)
+        assertTrue(mirrors.any { it.contains("net79.cc") })
+        assertTrue(mirrors.any { it.contains("vidbolt.xyz") })
+        assertTrue(mirrors.any { it.contains("embed.vidrift.net") })
+        assertTrue(mirrors.any { it.contains("nsrplay.space") })
+        assertTrue(mirrors.any { it.contains("streamvaultsrc.click") })
         assertTrue(mirrors.any { it.contains("vidsrc.mov") })
         assertTrue(mirrors.any { it.contains("vidsrc.fyi") })
         assertTrue(mirrors.any { it.contains("vidrock.net") })
@@ -99,6 +104,6 @@ class NepuAvailabilityTest {
         val details = NepuProvider.loadEpisodes("https://nepu.gd/watch/movie/550")
         assertEquals(1, details.episodes.size)
         val mirrors = details.episodes[0].mirrorUrls
-        assertTrue("Expected mirrors to contain alternative embed servers, got ${mirrors.size}", mirrors.size >= 14)
+        assertTrue("Expected mirrors to contain alternative embed servers, got ${mirrors.size}", mirrors.size >= 19)
     }
 }

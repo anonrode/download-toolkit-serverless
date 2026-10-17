@@ -288,10 +288,11 @@ object DynamicRulesManager {
         val skippedEntries: Int
     )
 
+    private val rulesLock = Any()
     @Volatile private var pendingActivationReport: PendingActivation? = null
 
-    private fun flushActivationReport() {
-        val pending = pendingActivationReport ?: return
+    private fun flushActivationReport() = synchronized(rulesLock) {
+        val pending = pendingActivationReport ?: return@synchronized
         pendingActivationReport = null
         reportActivation(pending.ver, pending.rev, pending.durationMs, pending.applied, pending.skippedEntries, lastSyncSource)
     }
@@ -409,10 +410,16 @@ object DynamicRulesManager {
                 val f = File(dir, name)
                 if (!f.exists()) continue
                 val raw = try { f.readText() } catch (_: Exception) { null } ?: continue
+                if (raw.isBlank()) continue
                 // Primary cache may predate encryption (legacy plaintext);
                 // prev-ladder entries are always verified envelopes.
                 val decrypted = try { decryptRules(raw) } catch (_: Exception) { null }
-                val plain = if (name == CACHE_FILE) (decrypted ?: raw) else (decrypted ?: continue)
+                val isEnvelope = raw.trim().let { it.startsWith("{") && it.contains("\"payload\"") }
+                val plain = if (name == CACHE_FILE) {
+                    decrypted ?: if (!isEnvelope && raw.trim().startsWith("{")) raw else null
+                } else {
+                    decrypted
+                } ?: continue
                 if (parseRulesJson(plain)) {
                     // P2-6: cache-restore activation flushes with its blank
                     // source ("bundled-or-cached"); fresh installs with no
@@ -469,6 +476,16 @@ object DynamicRulesManager {
         }
     }
 
+    /** Resolve the user-agent for a CDN/media URL: OTA hostPolicies first,
+     *  then built-in defaults. Blank string if unspecified. */
+    fun resolveUserAgent(url: String): String {
+        val low = url.lowercase()
+        val rule = (activeHostPolicies.asSequence() + DEFAULT_HOST_POLICIES.asSequence())
+            .firstOrNull { low.contains(it.match) }
+            ?: return ""
+        return rule.ua.trim()
+    }
+
     /** True when the playbook flags this host fragment as known-dead, so the
      *  app can skip it without burning a request. */
     fun isKnownDead(hostOrUrl: String): Boolean {
@@ -505,17 +522,11 @@ object DynamicRulesManager {
     fun getPipeline(site: String): SitePipeline? =
         activePipelines[site.lowercase()]
 
-    /** Look up a pipeline key matching the host or any terminal.hosts allowlist. */
+    /** Look up a pipeline key matching the host directly. */
     fun findPipelineKey(host: String): String? {
         val cleanHost = host.lowercase().removePrefix("www.")
         val direct = activePipelines[cleanHost]
         if (direct != null) return cleanHost
-        for ((key, pipeline) in activePipelines) {
-            val t = pipeline.terminal
-            if (t != null && t.hosts.any { cleanHost == it || cleanHost.endsWith(".$it") }) {
-                return key
-            }
-        }
         return null
     }
 
@@ -1036,30 +1047,37 @@ object DynamicRulesManager {
      *  path (default otaFetch=false keeps every existing caller behaving
      *  exactly as before — bundled/cached activation is never rev-gated). */
     internal fun parseRulesJson(jsonStr: String, otaFetch: Boolean = false, syncElapsedMs: Long = 0L): Boolean {
-        // Build-then-swap: every collection is populated locally and the
-        // whole state is published at the end. Readers never observe a
-        // half-applied playbook, a parse failure leaves the previous state
-        // intact (the old clear-then-fill left an EMPTY state on failure),
-        // and no live collection is mutated while download threads iterate
-        // it mid-sync.
-        val domains = mutableMapOf<String, String>()
-        val mirrors = mutableMapOf<String, List<String>>()
-        val siteConfigs = mutableMapOf<String, SiteRuleConfig>()
-        val resolverConfigs = mutableMapOf<String, JSONObject>()
-        val mediaExts = mutableListOf<String>()
-        val hostPolicies = mutableListOf<HostPolicyRule>()
-        val urlTemplates = mutableMapOf<String, String>()
-        val knownDead = mutableListOf<String>()
-        val lockerHosts = mutableListOf<String>()
-        val searchStrategies = mutableMapOf<String, List<JSONObject>>()
-        val dynProviders = mutableListOf<GenericDeclarativeProvider>()
-        // P2-6 activation telemetry: applied/skipped entry counts (the
-        // lenient parser's journals, counted).
-        var skippedPipelines = 0
-        var skippedDynProviders = 0
-        return try {
-            val obj = JSONObject(jsonStr)
-            val ver = obj.optString("version", "2026.08.22.1")
+        return synchronized(rulesLock) {
+            // Build-then-swap: every collection is populated locally and the
+            // whole state is published at the end. Readers never observe a
+            // half-applied playbook, a parse failure leaves the previous state
+            // intact (the old clear-then-fill left an EMPTY state on failure),
+            // and no live collection is mutated while download threads iterate
+            // it mid-sync.
+            val domains = mutableMapOf<String, String>()
+            val mirrors = mutableMapOf<String, List<String>>()
+            val siteConfigs = mutableMapOf<String, SiteRuleConfig>()
+            val resolverConfigs = mutableMapOf<String, JSONObject>()
+            val mediaExts = mutableListOf<String>()
+            val hostPolicies = mutableListOf<HostPolicyRule>()
+            val urlTemplates = mutableMapOf<String, String>()
+            val knownDead = mutableListOf<String>()
+            val lockerHosts = mutableListOf<String>()
+            val searchStrategies = mutableMapOf<String, List<JSONObject>>()
+            val dynProviders = mutableListOf<GenericDeclarativeProvider>()
+            // P2-6 activation telemetry: applied/skipped entry counts (the
+            // lenient parser's journals, counted).
+            var skippedPipelines = 0
+            var skippedDynProviders = 0
+            try {
+                val obj = JSONObject(jsonStr)
+                if (obj.has("payload") && !obj.has("domains") && !obj.has("sites") && !obj.has("pipelines")) {
+                    com.anonrode.downloader.util.DebugLog.error(
+                        "OTA rules REJECTED: raw encrypted envelope passed to parseRulesJson without decryption"
+                    )
+                    return false
+                }
+                val ver = obj.optString("version", "2026.08.22.1")
 
             // P2-3: load-time validation caps — WARN phase this rev cycle
             // (plan canary rule): journal + count every violation, never reject.
@@ -1534,4 +1552,5 @@ object DynamicRulesManager {
             false
         }
     }
+}
 }

@@ -19,6 +19,11 @@ class StrictLinkClassifierTest {
         assertTrue(m3u8 is StrictLinkClassifier.LinkClass.DirectMedia)
         assertEquals("m3u8", (m3u8 as StrictLinkClassifier.LinkClass.DirectMedia).ext)
         assertTrue(m3u8.isHls)
+
+        val dynamicHls = StrictLinkClassifier.classify("https://megaplays.se/api/playlist.php?t=12345")
+        assertTrue(dynamicHls is StrictLinkClassifier.LinkClass.DirectMedia)
+        assertEquals("m3u8", (dynamicHls as StrictLinkClassifier.LinkClass.DirectMedia).ext)
+        assertTrue((dynamicHls as StrictLinkClassifier.LinkClass.DirectMedia).isHls)
     }
 
     @Test

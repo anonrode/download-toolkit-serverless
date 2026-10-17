@@ -1540,12 +1540,18 @@ class DownloadEngine(
         return com.anonrode.downloader.data.rules.DynamicRulesManager.resolveReferer(url)
     }
 
+    private fun getUserAgentForUrl(url: String): String {
+        val policyUa = com.anonrode.downloader.data.rules.DynamicRulesManager.resolveUserAgent(url)
+        return if (policyUa.isNotBlank()) policyUa else com.anonrode.downloader.data.net.HttpClient.DEFAULT_UA
+    }
+
     // Adaptive-streaming manifest detection (monolith is_streaming_link parity):
     // DASH/ISM/F4M manifests and player-token URLs must go to yt-dlp, or the
     // segmented downloader grabs manifest XML and produces a corrupt file.
     private fun isStreamingLink(url: String): Boolean {
         val low = url.lowercase()
         if (low.contains(".m3u8") || low.contains("manifest") || low.contains("kickassanime")) return true
+        if (low.contains("playlist.php") || low.contains("/api/orion/") || low.contains("stream-proxy")) return true
         val path = low.substringBefore('?').substringBefore('#')
         if (path.endsWith(".mpd") || path.endsWith(".m3u") || path.endsWith(".ism") || path.endsWith(".f4m")) return true
         return STREAMING_QUERY_PATTERN.containsMatchIn(low)
@@ -1557,7 +1563,7 @@ class DownloadEngine(
         // absolute-https rewrite as segment URIs.
         private val URI_VALUE = Pattern.compile("URI=\"([^\"]+)\"")
 
-        private val STREAMING_QUERY_PATTERN = Regex("""[?&][^=&]*=(?:mpd|dash|hls)(?:&|$)""")
+        private val STREAMING_QUERY_PATTERN = Regex("""[?&][^=&]*=(?:mpd|dash|hls|m3u8)(?:&|$)""")
 
         // KNOWN_LOCKER_HOSTS + the isKnownLockerHost/isProvablyDirectFile
         // classifiers moved to pipeline.LinkResolver (2026-09-14) so the
@@ -2313,7 +2319,7 @@ class DownloadEngine(
                 // Routing those through yt-dlp's generic extractor (the old
                 // behavior) was slower and could misfire. Only non-media URLs
                 // (pages/embeds) are extractor tasks for yt-dlp to crack.
-                val isProvablyDirect = isProvablyDirectFile(streamUrl) || isDirectMediaUrl(streamUrl)
+                val isProvablyDirect = isProvablyDirectFile(streamUrl) || isDirectMediaUrl(streamUrl) || isHlsStream
                 val isEmbedOrPage = !isMagnet && !isProvablyDirect && run {
                     if (task.site.isNotBlank() || task.backend.contains("aria2c")) {
                         // Scraped tasks from supported sites (NaijaVault, Nkiri, 9jaRocks, DramaRain, etc.)
@@ -2353,7 +2359,7 @@ class DownloadEngine(
                 repository.update(task.id) { t ->
                     t.copy(
                         status = TaskStatus.DOWNLOADING,
-                        directUrl = if (isDirectMediaUrl(streamUrl) || isProvablyDirectFile(streamUrl)) streamUrl else t.directUrl
+                        directUrl = if (isDirectMediaUrl(streamUrl) || isProvablyDirectFile(streamUrl) || isHlsStream) streamUrl else t.directUrl
                     )
                 }
                 updateServiceState(force = true)
@@ -2614,9 +2620,23 @@ class DownloadEngine(
                             "Enable \"All files access\" for Anonrode (Settings > Apps > Anonrode > Permissions)."
                     )
                 }
-                // var: recomputed whenever a token refresh swaps streamUrl,
-                // so the fallback backends never run with a stale referer.
-                var refererToPass = getRefererForUrl(streamUrl)
+                // Header propagation: honor task headers first (from queue/recipe),
+                // falling back to host policy rules from OTA playbook, and finally default UA.
+                val taskReferer = task.headers.entries.firstOrNull { it.key.equals("referer", ignoreCase = true) }?.value?.takeIf { it.isNotBlank() }
+                val taskUa = task.headers.entries.firstOrNull { it.key.equals("user-agent", ignoreCase = true) }?.value?.takeIf { it.isNotBlank() }
+                var refererToPass = taskReferer ?: getRefererForUrl(streamUrl)
+                var uaToPass = taskUa ?: getUserAgentForUrl(streamUrl)
+                fun buildHeaders(ref: String, ua: String): MutableMap<String, String> {
+                    val m = mutableMapOf("User-Agent" to ua)
+                    if (ref.isNotBlank()) m["Referer"] = ref
+                    for ((k, v) in task.headers) {
+                        if (!k.equals("user-agent", ignoreCase = true) && !k.equals("referer", ignoreCase = true)) {
+                            m[k] = v
+                        }
+                    }
+                    return m
+                }
+                var hdrs = buildHeaders(refererToPass, uaToPass)
 
                 // HLS pre-flight: probe the segment CDN before yt-dlp so a dead
                 // stream host fails cleanly in seconds instead of pinning the
@@ -2649,14 +2669,16 @@ class DownloadEngine(
                             throw Exception("Stream link expired and no fresh link could be fetched — try again later.")
                         }
                         streamUrl = fresh
-                        refererToPass = getRefererForUrl(streamUrl)
+                        refererToPass = taskReferer ?: getRefererForUrl(streamUrl)
+                        uaToPass = taskUa ?: getUserAgentForUrl(streamUrl)
+                        hdrs = buildHeaders(refererToPass, uaToPass)
                         repository.update(task.id) { t ->
                             t.copy(
-                                directUrl = if (isDirectMediaUrl(streamUrl) || isProvablyDirectFile(streamUrl)) streamUrl else t.directUrl
+                                directUrl = if (isDirectMediaUrl(streamUrl) || isProvablyDirectFile(streamUrl) || isHlsStream) streamUrl else t.directUrl
                             )
                         }
                         hlsMasterFile = preflightHls(
-                            context, task.id, streamUrl, getRefererForUrl(streamUrl),
+                            context, task.id, streamUrl, refererToPass,
                             hlsSizeEstimate, task.quality ?: defaultQuality, hlsResolution
                         )
                     }
@@ -2705,9 +2727,9 @@ class DownloadEngine(
                                 if (!fresh.isNullOrBlank() && fresh != streamUrl &&
                                     (isDirectMediaUrl(fresh) || isProvablyDirectFile(fresh))) {
                                     streamUrl = fresh
-                                    refererToPass = getRefererForUrl(fresh)
-                                    hdrs.remove("Referer")
-                                    if (refererToPass.isNotBlank()) hdrs["Referer"] = refererToPass
+                                    refererToPass = taskReferer ?: getRefererForUrl(fresh)
+                                    uaToPass = taskUa ?: getUserAgentForUrl(fresh)
+                                    hdrs = buildHeaders(refererToPass, uaToPass)
                                     rejection = StreamValidator.validateResult(streamUrl, hdrs)
                                     coroutineContext.ensureActive()
                                     repository.update(task.id) { it.copy(directUrl = streamUrl) }
@@ -2756,7 +2778,7 @@ class DownloadEngine(
                                     refererToPass.substringBefore("://") + "://" + refererToPass.substringAfter("://").substringBefore('/')
                                 } else "",
                                 customHeaders = hdrs,
-                                ua = HttpClient.DEFAULT_UA,
+                                ua = uaToPass,
                                 parallelSockets = effectiveSockets,
                                 quality = task.quality ?: defaultQuality,
                                 isExtractorTask = false,
@@ -2823,10 +2845,12 @@ class DownloadEngine(
                                 repository.update(task.id) { it.copy(status = TaskStatus.DOWNLOADING, directUrl = streamUrl) }
                                 updateServiceState(force = true)
 
-                                val freshReferer = getRefererForUrl(streamUrl)
+                                val freshReferer = taskReferer ?: getRefererForUrl(streamUrl)
                                 refererToPass = freshReferer
-                                val freshHdrs = mutableMapOf("User-Agent" to HttpClient.DEFAULT_UA)
-                                if (freshReferer.isNotBlank()) freshHdrs["Referer"] = freshReferer
+                                val freshUa = taskUa ?: getUserAgentForUrl(streamUrl)
+                                uaToPass = freshUa
+                                val freshHdrs = buildHeaders(freshReferer, freshUa)
+                                hdrs = freshHdrs
                                 StreamValidator.validateResult(streamUrl, freshHdrs)?.let {
                                     throw PipelineError.ValidationFailed(it.reason)
                                 }
@@ -2869,9 +2893,9 @@ class DownloadEngine(
                             if (!nextStream.isNullOrBlank() &&
                                 (isDirectMediaUrl(nextStream) || isProvablyDirectFile(nextStream))
                             ) {
-                                val nextReferer = getRefererForUrl(nextStream)
-                                val nextHeaders = mutableMapOf("User-Agent" to HttpClient.DEFAULT_UA)
-                                if (nextReferer.isNotBlank()) nextHeaders["Referer"] = nextReferer
+                                val nextReferer = taskReferer ?: getRefererForUrl(nextStream)
+                                val nextUa = taskUa ?: getUserAgentForUrl(nextStream)
+                                val nextHeaders = buildHeaders(nextReferer, nextUa)
                                 // A dead alternate must not replace the original
                                 // failure state or throw out of the task coroutine.
                                 if (StreamValidator.validateResult(nextStream, nextHeaders) == null) {
@@ -2885,8 +2909,8 @@ class DownloadEngine(
                                     }
                                     updateServiceState(force = true)
                                     refererToPass = nextReferer
-                                    hdrs.clear()
-                                    hdrs.putAll(nextHeaders)
+                                    uaToPass = nextUa
+                                    hdrs = nextHeaders
                                     turboResult = TurboDownloader.download(
                                         url = nextStream,
                                         dest = dest,
@@ -2986,7 +3010,7 @@ class DownloadEngine(
                                 refererToPass.substringBefore("://") + "://" + refererToPass.substringAfter("://").substringBefore('/')
                             } else "",
                             customHeaders = hdrs,
-                            ua = HttpClient.DEFAULT_UA,
+                            ua = uaToPass,
                             parallelSockets = effectiveSockets,
                             quality = task.quality ?: defaultQuality,
                             isExtractorTask = false,
@@ -3060,9 +3084,9 @@ class DownloadEngine(
 
                             if (resumeBase != null) {
                                 android.util.Log.w("AnonDownload", "Resuming partial download with Turbo")
-                                val rescueHdrs = mutableMapOf("User-Agent" to HttpClient.DEFAULT_UA)
-                                val rescueReferer = getRefererForUrl(streamUrl)
-                                if (rescueReferer.isNotBlank()) rescueHdrs["Referer"] = rescueReferer
+                                val rescueReferer = taskReferer ?: getRefererForUrl(streamUrl)
+                                val rescueUa = taskUa ?: getUserAgentForUrl(streamUrl)
+                                val rescueHdrs = buildHeaders(rescueReferer, rescueUa)
                                 turboResult = TurboDownloader.download(
                                     url = streamUrl,
                                     dest = resumeBase,
@@ -3079,41 +3103,50 @@ class DownloadEngine(
                         } catch (_: Throwable) {}
                     }
                 } else {
-                    suspend fun runYtdlp(url: String, masterFile: File?): File? = YoutubeDlDownloader.download(
-                        context = context,
-                        taskId = task.id,
-                        sourceUrl = url,
-                        targetDir = targetFolder,
-                        preferredFilename = File(task.filePath).name,
-                        backend = finalBackend,
-                        referer = getRefererForUrl(url),
-                        ua = HttpClient.DEFAULT_UA,
-                        parallelSockets = effectiveSockets.coerceIn(1, 16),
-                        quality = task.quality ?: defaultQuality,
-                        isExtractorTask = isExtractor,
-                        audioOnly = task.audioOnly,
-                        onProgress = { dl, tot, spd, eta ->
-                            repository.updateProgress(
-                                taskId = task.id,
-                                downloaded = dl,
-                                total = tot,
-                                speed = spd,
-                                eta = eta
-                            )
-                            updateServiceState(force = false)
-                        },
-                        onTorrentFiles = onTorrentFileSelection,
-                        magnetMaxAttempts = magnetMaxAttempts,
-                        ytdlpMaxAttempts = ytdlpMaxAttempts,
-                        hlsFragments = hlsFragmentConcurrency,
-                        speedLimitKbs = globalSpeedLimitKbs,
-                        torrentPeers = torrentPeers,
-                        privacyMode = torrentPrivacyMode,
-                        downloadSubs = downloadSubtitles && isExtractor,
-                        subLang = subtitleLanguage,
-                        hlsMasterFile = masterFile?.absolutePath,
-                        estimatedTotal = if (hlsSizeEstimate[0] > 0L) hlsSizeEstimate[0] else task.totalBytes
-                    )
+                    suspend fun runYtdlp(url: String, masterFile: File?): File? {
+                        val runReferer = taskReferer ?: getRefererForUrl(url)
+                        val runUa = taskUa ?: getUserAgentForUrl(url)
+                        val runHdrs = buildHeaders(runReferer, runUa)
+                        return YoutubeDlDownloader.download(
+                            context = context,
+                            taskId = task.id,
+                            sourceUrl = url,
+                            targetDir = targetFolder,
+                            preferredFilename = File(task.filePath).name,
+                            backend = finalBackend,
+                            referer = runReferer,
+                            origin = if (runReferer.isNotBlank() && runReferer.contains("://")) {
+                                runReferer.substringBefore("://") + "://" + runReferer.substringAfter("://").substringBefore('/')
+                            } else "",
+                            ua = runUa,
+                            customHeaders = runHdrs,
+                            parallelSockets = effectiveSockets.coerceIn(1, 16),
+                            quality = task.quality ?: defaultQuality,
+                            isExtractorTask = isExtractor,
+                            audioOnly = task.audioOnly,
+                            onProgress = { dl, tot, spd, eta ->
+                                repository.updateProgress(
+                                    taskId = task.id,
+                                    downloaded = dl,
+                                    total = tot,
+                                    speed = spd,
+                                    eta = eta
+                                )
+                                updateServiceState(force = false)
+                            },
+                            onTorrentFiles = onTorrentFileSelection,
+                            magnetMaxAttempts = magnetMaxAttempts,
+                            ytdlpMaxAttempts = ytdlpMaxAttempts,
+                            hlsFragments = hlsFragmentConcurrency,
+                            speedLimitKbs = globalSpeedLimitKbs,
+                            torrentPeers = torrentPeers,
+                            privacyMode = torrentPrivacyMode,
+                            downloadSubs = downloadSubtitles && isExtractor,
+                            subLang = subtitleLanguage,
+                            hlsMasterFile = masterFile?.absolutePath,
+                            estimatedTotal = if (hlsSizeEstimate[0] > 0L) hlsSizeEstimate[0] else task.totalBytes
+                        )
+                    }
 
                     // YoutubeDlDownloader.download throws on final failure (after
                     // ytdlpMaxAttempts), so the re-resolve below must catch it —
@@ -3143,7 +3176,7 @@ class DownloadEngine(
                             var freshMaster: File? = null
                             if (isHlsStream) {
                                 try {
-                                    freshMaster = preflightHls(context, task.id, freshUrl, getRefererForUrl(freshUrl), hlsSizeEstimate, task.quality ?: defaultQuality, hlsResolution)
+                                    freshMaster = preflightHls(context, task.id, freshUrl, taskReferer ?: getRefererForUrl(freshUrl), hlsSizeEstimate, task.quality ?: defaultQuality, hlsResolution)
                                 } catch (e: kotlinx.coroutines.CancellationException) {
                                     throw e
                                 } catch (e: Exception) {

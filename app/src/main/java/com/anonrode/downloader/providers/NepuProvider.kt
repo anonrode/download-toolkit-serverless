@@ -17,11 +17,13 @@ import kotlinx.coroutines.sync.withPermit
 import org.json.JSONObject
 import org.jsoup.Jsoup
 import java.net.URLEncoder
+import java.util.concurrent.ConcurrentHashMap
 import java.util.regex.Pattern
 
 object NepuProvider : SiteProvider {
     override val name: String = "nepu"
     override val mainUrl: String get() = DynamicRulesManager.getBaseUrl(name)
+    internal val srvMapCache = ConcurrentHashMap<String, Map<String, String>>()
 
     override suspend fun search(query: String): List<ShowCard> {
         // OTA pipeline first (JSON API + URL synthesis live in the playbook);
@@ -127,15 +129,32 @@ object NepuProvider : SiteProvider {
         primaryUrl: String = ""
     ): List<String> {
         val mirrors = mutableListOf<String>()
+        val isTv = mediaType == "tv" && season != null && episode != null
+        val tvPath = if (isTv) "tv/$tmdbId/$season/$episode" else "movie/$tmdbId"
+
+        // 5 live proven clusters (raced first ahead of legacy endpoints)
+        val liveClusters = listOf(
+            if (isTv) "https://net79.cc/api/embed-tmdb/$tmdbId?type=tv&se=$season&ep=$episode" else "https://net79.cc/api/embed-tmdb/$tmdbId?type=movie",
+            if (isTv) "https://vidbolt.xyz/api/resolve?type=tv&id=$tmdbId&season=$season&episode=$episode" else "https://vidbolt.xyz/api/resolve?type=movie&id=$tmdbId",
+            "https://embed.vidrift.net/embed/$tvPath",
+            "https://nsrplay.space/embed/$tvPath",
+            "https://streamvaultsrc.click/embed/$tvPath"
+        )
+        liveClusters.forEach { sUrl ->
+            if (sUrl != primaryUrl && !mirrors.contains(sUrl)) {
+                mirrors.add(sUrl)
+            }
+        }
+
+        // Dynamic server mappings extracted from site HTML
         srvMap.values.forEach { url ->
             val clean = url.trim()
             if (clean.isNotBlank() && clean != primaryUrl && !mirrors.contains(clean)) {
                 mirrors.add(clean)
             }
         }
-        val isTv = mediaType == "tv" && season != null && episode != null
-        val tvPath = if (isTv) "tv/$tmdbId/$season/$episode" else "movie/$tmdbId"
-        val synthetic = listOf(
+
+        val legacySynthetic = listOf(
             "https://vidsrc.mov/embed/$tvPath",
             "https://vidsrc.fyi/embed/$tvPath",
             "https://vidrock.net/" + (if (isTv) "tv/$tmdbId/$season/$episode" else "movie/$tmdbId"),
@@ -151,7 +170,7 @@ object NepuProvider : SiteProvider {
             if (isTv) "https://superflixapi.co/serie/$tmdbId/$season/$episode" else "https://superflixapi.co/filme/$tmdbId",
             "https://peachify.top/embed/$tvPath"
         )
-        synthetic.forEach { sUrl ->
+        legacySynthetic.forEach { sUrl ->
             if (sUrl != primaryUrl && !mirrors.contains(sUrl)) {
                 mirrors.add(sUrl)
             }
@@ -188,6 +207,9 @@ object NepuProvider : SiteProvider {
             try {
                 val html = fetchUnlockedHtml(showUrl)
                 val srvMap = extractSrvMap(html)
+                if (srvMap.isNotEmpty() && tmdbId.isNotBlank()) {
+                    srvMapCache[tmdbId] = srvMap
+                }
                 val doc = Jsoup.parse(html, showUrl)
 
                 extractedTitle = doc.selectFirst("h1")?.text()?.replace(Regex("""(?i)\s*(S\d+\s*E\d+|Season\s*\d+).*"""), "")?.trim()
@@ -264,6 +286,9 @@ object NepuProvider : SiteProvider {
             fetchUnlockedHtml(showUrl)
         } catch (_: Exception) { "" }
         val srvMap = extractSrvMap(html)
+        if (srvMap.isNotEmpty() && tmdbId.isNotBlank()) {
+            srvMapCache[tmdbId] = srvMap
+        }
         val doc = Jsoup.parse(html, showUrl)
         val movieTitle = doc.selectFirst("h1")?.text()?.trim()
             ?: doc.selectFirst("meta[property=og:title]")?.attr("content")?.substringBefore(" |")?.trim()
@@ -288,7 +313,7 @@ object NepuProvider : SiteProvider {
         val ota = RulesPipeline.runResolveForSite(name, episodeUrl, quality)
         var direct = ota ?: ResolverRegistry.resolve(episodeUrl, quality)
 
-        // If primary URL didn't resolve to a stream, try the other 13 embed servers!
+        // If primary URL didn't resolve to a stream, try the other embed servers!
         if (direct.isNullOrBlank()) {
             val tvMatch = Regex("""watch/tv/(\d+)(?:/(\d+)/(\d+))?""").find(episodeUrl)
             val movieMatch = Regex("""watch/movie/(\d+)""").find(episodeUrl)
@@ -301,6 +326,11 @@ object NepuProvider : SiteProvider {
             val mediaType = if (isTv) "tv" else "movie"
 
             if (tmdbId.isNotBlank() && tmdbId.all { it.isDigit() }) {
+                val srvMap = srvMapCache[tmdbId] ?: try {
+                    val html = fetchUnlockedHtml(episodeUrl)
+                    extractSrvMap(html).also { if (it.isNotEmpty()) srvMapCache[tmdbId] = it }
+                } catch (_: Exception) { emptyMap() }
+
                 // Mirror sweep via resolveAny (boundedFirstSuccess, 3-wide
                 // sliding window, first success cancels the rest — the same
                 // bounded race the AsianC sweep uses) instead of the
@@ -315,7 +345,7 @@ object NepuProvider : SiteProvider {
                 // mirror that is genuinely dead re-earns its backoff on this
                 // very pass.
                 direct = ResolverRegistry.resolveAny(
-                    buildMirrors(mediaType, tmdbId, season, episode, primaryUrl = episodeUrl),
+                    buildMirrors(mediaType, tmdbId, season, episode, srvMap = srvMap, primaryUrl = episodeUrl),
                     quality,
                     bypassHealth = true
                 )

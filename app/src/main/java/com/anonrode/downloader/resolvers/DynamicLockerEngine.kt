@@ -51,10 +51,10 @@ object DynamicLockerEngine {
      * Pure re-entry guard for one locker hop — JVM-testable core of
      * [resolve]'s recursion control:
      *  - `depth >= RESOLVE_DEPTH_LIMIT` → refuse (null);
-     *  - the candidate site key or host already on the chain's visited set
+     *  - the candidate site key already on the chain's visited set
      *    → refuse (null) — this is the A -> B -> A cycle stop;
      *  - otherwise → the chain's NEXT visited set (previous sites + this
-     *    hop's key + host), to be threaded into the `runResolveForSite`
+     *    hop's siteKey), to be threaded into the `runResolveForSite`
      *    call. Depth is carried as +1 by the caller — matching the
      *    `runResolveForSite(siteKey, url, quality, depth + 1, ...)` contract
      *    (pinned by ResolverDefectRegressionTest.otaHandoffCarriesResolverDepth).
@@ -70,8 +70,9 @@ object DynamicLockerEngine {
         visitedSites: Set<String>
     ): Set<String>? {
         if (depth >= ResolverRegistry.RESOLVE_DEPTH_LIMIT) return null
-        if (siteKey in visitedSites || host in visitedSites) return null
-        return visitedSites + siteKey + host
+        val cleanKey = siteKey.trim().lowercase()
+        if (cleanKey.isNotEmpty() && cleanKey in visitedSites) return null
+        return if (cleanKey.isNotEmpty()) visitedSites + cleanKey else visitedSites
     }
 
     /** A provider/search-only pipeline is not a locker resolver. */

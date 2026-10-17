@@ -86,6 +86,7 @@ object LinkResolver {
         if (path.contains("/api/file/") || path.contains("/api/download/") || path.contains("/token/download/")) return true
         if (host.contains("lightdl.cc") && (path.contains("/api/download/") || path.contains("/api/files/"))) return true
         if (path.endsWith(".m3u8") || path.endsWith(".mpd") || lower.contains(".m3u8?") || lower.contains(".mpd?")) return true
+        if (lower.contains("playlist.php") || lower.contains("/api/orion/") || lower.contains("stream-proxy")) return true
         if ((host.startsWith("hls.") || host.startsWith("stream.")) && (host.contains("vidbasic.") || host.contains("vidb.top"))) return true
         if (host.contains("lisaido.top") || host.contains("premilkyway.com")) return true
 
