@@ -64,7 +64,7 @@ data class FamilyFlag(
     /** True when the flag carries no signals beyond the defaults — kept so a
      *  no-op flag entry can be distinguished from a real rollout decision. */
     val isDefault: Boolean
-        get() = this == DEFAULT
+        get() = this == RulesFlags.DEFAULT
 }
 
 object RulesFlags {

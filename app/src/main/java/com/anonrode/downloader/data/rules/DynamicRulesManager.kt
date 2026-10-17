@@ -2,6 +2,7 @@ package com.anonrode.downloader.data.rules
 
 import android.content.Context
 import com.anonrode.downloader.data.net.HttpClient
+import com.anonrode.downloader.util.OtaFetchDiagnostics
 import com.anonrode.downloader.providers.DynamicSiteConfig
 import com.anonrode.downloader.providers.GenericDeclarativeProvider
 import kotlinx.coroutines.Dispatchers
@@ -887,7 +888,7 @@ object DynamicRulesManager {
                         .append('/').append(st.delayMs).append('/').append(st.deadPatterns).append(']')
                     for (s in st.sources) {
                         sb.append('(').append(s.method).append(' ').append(s.url)
-                            .append(' h').append(s.headers.size).append(' f').append(s.form.size).append(')')
+                            .append(" h").append(s.headers.size).append(" f").append(s.form.size).append(')')
                     }
                     for (b in st.bind) {
                         sb.append('<').append(b.name).append('=').append(b.sourceVar)

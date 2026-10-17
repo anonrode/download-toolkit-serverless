@@ -1308,7 +1308,7 @@ object VidsrcResolver : BaseResolver {
                     when (classifyMintedStream(absolute, pageUrl)) {
                         MintHeadVerdict.AD -> {
                             // AD verdict needs POSITIVE payload evidence
-                            // (image/* type or PNG magic) — a transport miss
+                            // (image-type or PNG magic) — a transport miss
                             // on the probe is UNKNOWN and must NOT veto the
                             // mint (same transport-vs-content doctrine the
                             // failure branches above follow).
@@ -1373,7 +1373,7 @@ object VidsrcResolver : BaseResolver {
             if (withRange) builder.header("Range", "bytes=0-512")
             if (referer.isNotBlank()) builder.header("Referer", referer)
             HttpClient.executeCancellable(client, builder.build()) { res ->
-                val bytes = try { res.peekBody(maxPeek).bytes() } catch (_: Exception) { ByteArray(0) }
+                val bytes = try { res.peekBody(maxPeek.toLong()).bytes() } catch (_: Exception) { ByteArray(0) }
                 Triple(res.code, res.header("Content-Type")?.lowercase() ?: "", bytes)
             }
         } catch (cancelled: CancellationException) {
@@ -1385,7 +1385,7 @@ object VidsrcResolver : BaseResolver {
 
     /**
      * Payload verdict on ONE probed head. AD: PNG magic regardless of claimed
-     * type, or image/* Content-Type over non-media bytes (the ad segments are
+     * type, or an image-typed Content-Type over non-media bytes (the ad segments are
      * image/jpeg|png). MEDIA: MPEG-TS sync byte, EBML, MP4 'ftyp'@4. MANIFEST:
      * playlist/XML text ("#EXT…" or mpegurl/dash Content-Type). BODY EVIDENCE
      * IS CHECKED BEFORE HEADER CLAIMS: the megaplays.se preview proxy serves

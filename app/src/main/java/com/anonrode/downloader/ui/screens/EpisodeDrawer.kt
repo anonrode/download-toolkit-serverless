@@ -216,10 +216,6 @@ fun EpisodeDrawer(
     // picked) vs a plain selection batch — the confirm button enqueues
     // accordingly.
     var pendingForceAll by rememberSaveable { mutableStateOf(false) }
-    // §2.7: the batch confirm must remember it holds a "Download All" (zero
-    // picked) vs a plain selection batch — the confirm button enqueues
-    // accordingly.
-    var pendingForceAll by rememberSaveable { mutableStateOf(false) }
 
     val allTasks by viewModel.engine.tasks.collectAsState()
     val downloadedOrQueuedUrls = remember(allTasks, show.title) {
@@ -1309,6 +1305,7 @@ fun EpisodeDrawer(
  * spec's "hide unless metadata" condition is met), and a 22dp rounded check
  * indicator (selected = white fill + dark check; unselected = hairline).
  */
+@Composable
 fun EpisodeRow(
     episode: EpisodeItem,
     isSelected: Boolean,
@@ -1318,7 +1315,7 @@ fun EpisodeRow(
     displayTitle: String = episode.title,
     groupIndex: Int = 0,
     groupSize: Int = 1,
-    groupColor: Color = GroupedInsetDark
+    groupColor: Color = Color(0xFF141419)
 ) {
     // Feature #26: details preview BEFORE enqueue — an info toggle that shows
     // which locker will serve this episode and the filename its URL carries,

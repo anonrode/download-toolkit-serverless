@@ -285,7 +285,7 @@ private fun BottomNavBar(
 }
 
 @Composable
-private fun navBarItemColors() {
+private fun navBarItemColors(): NavigationBarItemColors {
     // §5.2 explicit indicator lock: the active-tab pill must be clearly
     // visible in BOTH themes — light = 8% ink (0x140F1115), dark = 12% white
     // (0x1FFFFFFF) on the obsidian surface (previously SurfaceElevated, a

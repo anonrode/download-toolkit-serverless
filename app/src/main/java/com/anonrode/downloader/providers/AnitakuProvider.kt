@@ -362,7 +362,7 @@ object AnitakuProvider : SiteProvider {
                             form = form,
                             referer = episodeUrl,
                             headers = mapOf("X-Requested-With" to "XMLHttpRequest")
-                        )
+                        ) else null
                         if (!body.isNullOrBlank()) {
                             val dlHtml = JSONObject(body).optJSONObject("data")?.optString("result") ?: ""
                             if (dlHtml.isNotBlank()) {
