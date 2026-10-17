@@ -78,12 +78,15 @@ object TitleFormatting {
         val stripped = stripTrailingYtDlpId(
             trailingDownloadSuffix.replace(rawTitle.orEmpty(), "").trim()
         )
-        val informative = stripped.isNotBlank() && !nonInformativeEpisodeTitle.matches(stripped)
+        val downloadAnchorMatch = Regex("""(?i)^(episode\s*)?download(\s+\d{3,4}p|\s+mp4|\s+mkv)?$""").matches(stripped)
+        val informative = stripped.isNotBlank() && !downloadAnchorMatch && !nonInformativeEpisodeTitle.matches(stripped)
         val display = if (informative) stripped else ""
         return if (display.isNotBlank()) {
             display
         } else if (seasonNumber != null && seasonNumber > 0) {
-            "Season $seasonNumber · Episode ${index + 1}"
+            "S%02dE%02d".format(seasonNumber, index + 1)
+        } else if (index == 0) {
+            "Full Movie"
         } else {
             "Episode ${index + 1}"
         }

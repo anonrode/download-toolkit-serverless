@@ -33,14 +33,19 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
+import coil.compose.AsyncImage
+import coil.imageLoader
+import coil.request.ImageRequest
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -126,6 +131,21 @@ fun HomeScreen(
         }
         cm.addPrimaryClipChangedListener(listener)
         onDispose { cm.removePrimaryClipChangedListener(listener) }
+    }
+
+    // Fast poster prefetching: prefetch the first 18 trending poster URLs with singleton ImageLoader
+    LaunchedEffect(uiState.trending) {
+        if (uiState.trending.isNotEmpty()) {
+            val urls = uiState.trending.take(18).map { it.posterUrl }.filter { it.isNotBlank() }
+            val imageLoader = context.imageLoader
+            urls.forEach { url ->
+                val request = ImageRequest.Builder(context)
+                    .data(url)
+                    .size(coil.size.Size.ORIGINAL)
+                    .build()
+                imageLoader.enqueue(request)
+            }
+        }
     }
 
     Box(
@@ -394,6 +414,7 @@ fun HomeScreen(
             ) {
                 filters.forEach { (key, label) ->
                     val isSelected = uiState.selectedFilter == key
+                    val isDark = AnonTheme.colors.isDark
                     FilterChip(
                         selected = isSelected,
                         onClick = { viewModel.onFilterSelected(key) },
@@ -402,18 +423,22 @@ fun HomeScreen(
                                 text = label,
                                 fontSize = Type.label.fontSize,
                                 fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-                                color = if (isSelected) BackgroundDark else TextSecondary
+                                color = if (isSelected) {
+                                    if (isDark) Color(0xFF090B10) else Color.White
+                                } else {
+                                    if (isDark) Color(0xFFD0D7E2) else TextSecondary
+                                }
                             )
                         },
                         colors = FilterChipDefaults.filterChipColors(
-                            selectedContainerColor = AccentPrimary,
+                            selectedContainerColor = if (isDark) Color(0xFFF3F5F9) else AccentPrimary,
                             containerColor = SurfaceCard
                         ),
                         border = FilterChipDefaults.filterChipBorder(
                             enabled = true,
                             selected = isSelected,
-                            borderColor = BorderHairline,
-                            selectedBorderColor = AccentPrimary
+                            borderColor = if (isDark) Color.White.copy(alpha = 0.12f) else BorderHairline,
+                            selectedBorderColor = if (isDark) Color(0xFFF3F5F9) else AccentPrimary
                         ),
                         shape = RoundedCornerShape(Radius.full)
                     )
@@ -924,6 +949,41 @@ private fun TrendingCard(
  * surface — eliminating the broken "A" poster and the duplicate artwork the
  * View More tile used to inherit. The tiles NAVIGATE — they are not filters.
  */
+private val GENRE_POSTER_PREVIEWS: Map<String, Pair<String, String>> = mapOf(
+    "Action" to Pair(
+        "https://image.tmdb.org/t/p/w300/8cdWjvZQUExUUTzyp4t6EDMubfO.jpg",
+        "https://image.tmdb.org/t/p/w300/mKOBErGAKvQAh95Nq1t71v9gK6z.jpg"
+    ),
+    "Romance" to Pair(
+        "https://image.tmdb.org/t/p/w300/2vP9kivc871s9s88qXzP8xJ87q0.jpg",
+        "https://image.tmdb.org/t/p/w300/o70rO8q83uD1e5Gz4b9z1s9q3r5.jpg"
+    ),
+    "Comedy" to Pair(
+        "https://image.tmdb.org/t/p/w300/gKkl37BQuKTanygYQG1pyYgLVgf.jpg",
+        "https://image.tmdb.org/t/p/w300/qJ2tW6WMUDux911r6m7haRef0WH.jpg"
+    ),
+    "Horror" to Pair(
+        "https://image.tmdb.org/t/p/w300/bShgiqB0Qy1QZc7d3d7r0.jpg",
+        "https://image.tmdb.org/t/p/w300/5qHoazZiaKoJnmeebOnjhq8Z4.jpg"
+    ),
+    "Sci-Fi" to Pair(
+        "https://image.tmdb.org/t/p/w300/6KErczPBROQty7QoIsxWZaEAY8j.jpg",
+        "https://image.tmdb.org/t/p/w300/gEU2QniE6EwfNDRA5reOqwqq9JS.jpg"
+    ),
+    "Thriller" to Pair(
+        "https://image.tmdb.org/t/p/w300/d5NXSklXo0qyIYkgV94XAgMIckC.jpg",
+        "https://image.tmdb.org/t/p/w300/vQWk5YBFWF4bZaofAbv0tShwBvQ.jpg"
+    ),
+    "Anime" to Pair(
+        "https://image.tmdb.org/t/p/w300/9k9h9cq04P3s1G0a2x8Z4.jpg",
+        "https://image.tmdb.org/t/p/w300/hE24GYddaxB9MVZl1CaiI86M3kp.jpg"
+    )
+)
+
+/**
+ * Browse by Genre grid: compact 2-column cards (H=80dp, R=14dp) with 2-poster
+ * mini-stacks on the left and bold typography.
+ */
 @Composable
 private fun CategoryTilesGrid(
     onOpen: (CategoryFeed.Category) -> Unit,
@@ -936,160 +996,222 @@ private fun CategoryTilesGrid(
             fontSize = Type.sectionTitle.fontSize,
             fontWeight = FontWeight.Bold
         )
-        val allCategories = CategoryFeed.CATEGORIES
-        val totalSlots = allCategories.size + 1 // 7 categories + 1 View More = 8
-        val rows = (totalSlots + 2) / 3 // 3 rows
+        Spacer(modifier = Modifier.height(Spacing.sm))
 
-        for (rowIndex in 0 until rows) {
+        val allCategories = CategoryFeed.CATEGORIES
+        val items = allCategories.map { it to false } + listOf(CategoryFeed.Category("all", "All Genres", emptyList()) to true)
+        val rows = items.chunked(2)
+
+        rows.forEach { rowPairs ->
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(top = Spacing.sm),
-                horizontalArrangement = Arrangement.spacedBy(Spacing.sm)
+                    .padding(bottom = 10.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                for (colIndex in 0 until 3) {
-                    val itemIndex = rowIndex * 3 + colIndex
-                    if (itemIndex < allCategories.size) {
-                        val category = allCategories[itemIndex]
-                        Box(modifier = Modifier.weight(1f)) {
+                rowPairs.forEach { (cat, isMore) ->
+                    Box(modifier = Modifier.weight(1f)) {
+                        if (isMore) {
+                            ViewMoreTileCard(onClick = onMore)
+                        } else {
                             GenreTileCard(
-                                label = category.label,
-                                onClick = { onOpen(category) }
+                                category = cat,
+                                onClick = { onOpen(cat) }
                             )
                         }
-                    } else if (itemIndex == allCategories.size) {
-                        // The "View More" tile: sits beside "Anime" on Row 3.
-                        Box(modifier = Modifier.weight(1f)) {
-                            ViewMoreTileCard(onClick = onMore)
-                        }
-                    } else {
-                        // Keep 3-column alignment for the remaining slot on the last row
-                        Spacer(modifier = Modifier.weight(1f))
                     }
+                }
+                if (rowPairs.size == 1) {
+                    Spacer(modifier = Modifier.weight(1f))
                 }
             }
         }
     }
 }
 
-/** §4.3 View More tile: the duplicate-poster tile is now a matching 2:1
- *  gradient card with the Add icon — nothing duplicated, nothing broken. */
+/** 2-column View More tile: H=80dp, R=14dp with explore compass icon. */
 @Composable
 private fun ViewMoreTileCard(onClick: () -> Unit) {
     val isDark = AnonTheme.colors.isDark
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .aspectRatio(2f)
-            .clip(RoundedCornerShape(Radius.md))
+            .height(80.dp)
+            .clip(RoundedCornerShape(14.dp))
             .background(
-                Brush.horizontalGradient(
-                    if (isDark) listOf(Color(0xFF20202C), Color(0xFF101016))
-                    else listOf(Color(0xFFE9ECEF), Color(0xFFF8F9FA))
-                )
+                if (isDark) Color(0xFF141822)
+                else Color(0xFFFFFFFF)
             )
-            .border(1.dp, BorderHairline, RoundedCornerShape(Radius.md))
+            .border(
+                width = 1.dp,
+                color = if (isDark) Color.White.copy(alpha = 0.08f) else Color(0x140F172A),
+                shape = RoundedCornerShape(14.dp)
+            )
             .clickable(onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 10.dp),
+            .padding(horizontal = 10.dp, vertical = 8.dp),
         contentAlignment = Alignment.CenterStart
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth()
+        ) {
             Box(
-                modifier = Modifier
-                    .size(26.dp)
-                    .clip(CircleShape)
-                    .background(AccentPrimary),
+                modifier = Modifier.size(width = 56.dp, height = 62.dp),
                 contentAlignment = Alignment.Center
             ) {
-                Icon(
-                    imageVector = Icons.Rounded.Add,
-                    contentDescription = null,
-                    tint = if (isDark) Color.Black else Color.White,
-                    modifier = Modifier.size(16.dp)
-                )
+                Box(
+                    modifier = Modifier
+                        .size(44.dp)
+                        .clip(CircleShape)
+                        .background(AccentPrimary.copy(alpha = 0.15f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Explore,
+                        contentDescription = null,
+                        tint = AccentPrimary,
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
             }
-            Spacer(modifier = Modifier.width(8.dp))
-            Column {
+
+            Spacer(modifier = Modifier.width(10.dp))
+
+            Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = "View More",
+                    text = "ALL GENRES",
                     color = TextPrimary,
-                    fontSize = Type.label.fontSize,
-                    fontWeight = FontWeight.Bold,
+                    fontSize = 13.5.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    letterSpacing = 0.5.sp,
                     maxLines = 1
                 )
+                Spacer(modifier = Modifier.height(2.dp))
                 Text(
-                    text = "All genres",
+                    text = "Browse catalog ▾",
                     color = TextMuted,
-                    fontSize = Type.micro.fontSize,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Medium,
                     maxLines = 1
                 )
             }
-            Spacer(modifier = Modifier.weight(1f))
-            Icon(
-                imageVector = Icons.Rounded.ArrowForward,
-                contentDescription = null,
-                tint = TextMuted,
-                modifier = Modifier.size(13.dp)
-            )
         }
     }
 }
 
-/** §4.3 genre card: a 2:1 horizontal gradient category card with a bold
- *  label and a per-category icon — no poster wells, no broken monograms. */
+/** 2-column genre card: H=80dp, R=14dp with 2-poster mini-stack (56×62dp) on the left. */
 @Composable
 private fun GenreTileCard(
-    label: String,
+    category: CategoryFeed.Category,
     onClick: () -> Unit
 ) {
     val isDark = AnonTheme.colors.isDark
+    val posters = GENRE_POSTER_PREVIEWS[category.label]
+
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .aspectRatio(2f)
-            .clip(RoundedCornerShape(Radius.md))
+            .height(80.dp)
+            .clip(RoundedCornerShape(14.dp))
             .background(
-                Brush.horizontalGradient(
-                    if (isDark) listOf(Color(0xFF20202C), Color(0xFF101016))
-                    else listOf(Color(0xFFE9ECEF), Color(0xFFF8F9FA))
-                )
+                if (isDark) Color(0xFF141822)
+                else Color(0xFFFFFFFF)
             )
-            .border(1.dp, BorderHairline, RoundedCornerShape(Radius.md))
+            .border(
+                width = 1.dp,
+                color = if (isDark) Color.White.copy(alpha = 0.08f) else Color(0x140F172A),
+                shape = RoundedCornerShape(14.dp)
+            )
             .clickable(onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 10.dp),
+            .padding(horizontal = 10.dp, vertical = 8.dp),
         contentAlignment = Alignment.CenterStart
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Icon(
-                imageVector = genreIconFor(label),
-                contentDescription = null,
-                tint = AccentViolet,
-                modifier = Modifier.size(18.dp)
-            )
-            Spacer(modifier = Modifier.width(8.dp))
-            Column {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            // 2-poster mini-stack container (56×62 dp)
+            Box(
+                modifier = Modifier.size(width = 56.dp, height = 62.dp)
+            ) {
+                // Back poster (40×54 dp, rotated 6 deg, alpha 0.70)
+                Box(
+                    modifier = Modifier
+                        .offset(x = 12.dp, y = 4.dp)
+                        .size(width = 40.dp, height = 54.dp)
+                        .graphicsLayer { rotationZ = 6f }
+                        .alpha(0.70f)
+                        .clip(RoundedCornerShape(6.dp))
+                ) {
+                    val backUrl = posters?.second.orEmpty()
+                    if (backUrl.isNotBlank()) {
+                        AsyncImage(
+                            model = backUrl,
+                            contentDescription = null,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    } else {
+                        PosterFallbackWell(
+                            modifier = Modifier.fillMaxSize(),
+                            shape = RoundedCornerShape(6.dp),
+                            icon = genreIconFor(category.label),
+                            iconSize = 16.dp
+                        )
+                    }
+                }
+
+                // Front poster (44×60 dp, 1dp border, corner radius 6dp)
+                Box(
+                    modifier = Modifier
+                        .size(width = 44.dp, height = 60.dp)
+                        .clip(RoundedCornerShape(6.dp))
+                        .border(
+                            1.dp,
+                            if (isDark) Color.White.copy(alpha = 0.12f) else Color(0x140F172A),
+                            RoundedCornerShape(6.dp)
+                        )
+                ) {
+                    val frontUrl = posters?.first.orEmpty()
+                    if (frontUrl.isNotBlank()) {
+                        AsyncImage(
+                            model = frontUrl,
+                            contentDescription = null,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    } else {
+                        PosterFallbackWell(
+                            modifier = Modifier.fillMaxSize(),
+                            shape = RoundedCornerShape(6.dp),
+                            icon = genreIconFor(category.label),
+                            iconSize = 18.dp
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.width(10.dp))
+
+            Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = label,
+                    text = category.label.uppercase(),
                     color = TextPrimary,
-                    fontSize = Type.label.fontSize,
-                    fontWeight = FontWeight.Bold,
+                    fontSize = 13.5.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    letterSpacing = 0.5.sp,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
+                Spacer(modifier = Modifier.height(2.dp))
                 Text(
-                    text = "Browse",
+                    text = "Explore ▾",
                     color = TextMuted,
-                    fontSize = Type.micro.fontSize,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Medium,
                     maxLines = 1
                 )
             }
-            Spacer(modifier = Modifier.weight(1f))
-            Icon(
-                imageVector = Icons.Rounded.ArrowForward,
-                contentDescription = null,
-                tint = TextMuted,
-                modifier = Modifier.size(13.dp)
-            )
         }
     }
 }
@@ -1729,29 +1851,42 @@ private fun AsianDramaHeroSection(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(Spacing.sm)
         ) {
-            // K-Drama Hero Card (§4.3: rich gradient + subtle violet accent
-            // border — a deliberate destination, not a gray box).
+            // K-Drama Hero Card: rich photographic backdrop + subtle violet accent border
             Box(
                 modifier = Modifier
                     .weight(1f)
                     .height(96.dp)
                     .clip(RoundedCornerShape(Radius.md))
                     .background(
-                        Brush.horizontalGradient(
-                            if (AnonTheme.colors.isDark) listOf(Color(0xFF1C1B2E), Color(0xFF0F0F16))
-                            else listOf(Color(0xFFEDE9FE), Color(0xFFF8F9FA))
-                        )
+                        if (AnonTheme.colors.isDark) Color(0xFF141822)
+                        else Color(0xFFFFFFFF)
                     )
                     .border(
                         1.dp,
                         if (AnonTheme.colors.isDark) Color(0x338B5CF6) else Color(0x337C3AED),
                         RoundedCornerShape(Radius.md)
                     )
-                    .clickable(onClick = onOpenKdrama)
-                    .padding(Spacing.md),
+                    .clickable(onClick = onOpenKdrama),
                 contentAlignment = Alignment.CenterStart
             ) {
-                Column {
+                // Subtle photographic backdrop
+                AsyncImage(
+                    model = "https://image.tmdb.org/t/p/w500/2vP9kivc871s9s88qXzP8xJ87q0.jpg",
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize().alpha(if (AnonTheme.colors.isDark) 0.32f else 0.22f)
+                )
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(
+                            Brush.horizontalGradient(
+                                if (AnonTheme.colors.isDark) listOf(Color(0xF2141822), Color(0xD91C1B2E), Color(0x66090B10))
+                                else listOf(Color(0xF8FFFFFF), Color(0xE6EDE9FE), Color(0x99F8F9FA))
+                            )
+                        )
+                )
+                Column(modifier = Modifier.padding(Spacing.md)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
                             text = "K-DRAMA",
@@ -1797,28 +1932,42 @@ private fun AsianDramaHeroSection(
                 }
             }
 
-            // C-Drama Hero Card (§4.3: matching gradient destination).
+            // C-Drama Hero Card: rich photographic backdrop + subtle pink accent border
             Box(
                 modifier = Modifier
                     .weight(1f)
                     .height(96.dp)
                     .clip(RoundedCornerShape(Radius.md))
                     .background(
-                        Brush.horizontalGradient(
-                            if (AnonTheme.colors.isDark) listOf(Color(0xFF2A1B24), Color(0xFF140F14))
-                            else listOf(Color(0xFFFCE7F3), Color(0xFFF8F9FA))
-                        )
+                        if (AnonTheme.colors.isDark) Color(0xFF141822)
+                        else Color(0xFFFFFFFF)
                     )
                     .border(
                         1.dp,
                         if (AnonTheme.colors.isDark) Color(0x33EC4899) else Color(0x33DB2777),
                         RoundedCornerShape(Radius.md)
                     )
-                    .clickable(onClick = onOpenCdrama)
-                    .padding(Spacing.md),
+                    .clickable(onClick = onOpenCdrama),
                 contentAlignment = Alignment.CenterStart
             ) {
-                Column {
+                // Subtle photographic backdrop
+                AsyncImage(
+                    model = "https://image.tmdb.org/t/p/w500/vQWk5YBFWF4bZaofAbv0tShwBvQ.jpg",
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize().alpha(if (AnonTheme.colors.isDark) 0.32f else 0.22f)
+                )
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(
+                            Brush.horizontalGradient(
+                                if (AnonTheme.colors.isDark) listOf(Color(0xF2141822), Color(0xD92A1B24), Color(0x66090B10))
+                                else listOf(Color(0xF8FFFFFF), Color(0xE6FCE7F3), Color(0x99F8F9FA))
+                            )
+                        )
+                )
+                Column(modifier = Modifier.padding(Spacing.md)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
                             text = "C-DRAMA",

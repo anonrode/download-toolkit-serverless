@@ -296,22 +296,50 @@ object CategoryFeed {
      * a late site interleaves its own cards between what's on screen but
      * never reorders, removes, or duplicates a card already painted.
      */
+    internal fun normalizeTitleKey(title: String, year: String = ""): String {
+        var s = title.lowercase()
+        // Strip trailing movie/region markers like | Movie, | Korean Movie, - Korean, - Chinese, [Chinese], etc.
+        s = s.replace(Regex("""\s*\|\s*(korean\s+movie|chinese\s+movie|asian\s+movie|nollywood\s+movie|movie)\b.*"""), "")
+        s = s.replace(Regex("""\s*-\s*(korean|chinese|asian|nollywood|yoruba|cinema)\b.*"""), "")
+        s = s.replace(Regex("""\s*\[(chinese|korean|subbed|dubbed|complete)\]"""), "")
+        val extractedYear = Regex("""\b(19\d\d|20\d\d)\b""").find(s)?.value ?: year.trim()
+        s = s.replace(Regex("""\((?:19|20)\d{2}\)"""), "")
+        val clean = s.filter { it.isLetterOrDigit() }.trim()
+        return if (extractedYear.isNotBlank()) "${clean}_$extractedYear" else clean
+    }
+
     internal fun mixCards(
         pairs: List<Pair<String, List<ShowCard>>>,
         filterExplicit: Boolean = true,
         limit: Int = Int.MAX_VALUE
     ): List<ShowCard> {
         val out = mutableListOf<ShowCard>()
-        val seen = mutableSetOf<String>()
+        val seen = mutableMapOf<String, Int>()
         var idx = 0
         while (out.size < limit) {
             var advanced = false
             for ((_, cards) in pairs) {
                 if (idx < cards.size) {
                     val card = cards[idx]
-                    val key = card.title.lowercase().filter { it.isLetterOrDigit() }
                     val isSafe = !filterExplicit || !com.anonrode.downloader.util.ExplicitContentFilter.isExplicit(card)
-                    if (out.size < limit && key.isNotBlank() && isSafe && seen.add(key)) out.add(card)
+                    if (isSafe) {
+                        val key = normalizeTitleKey(card.title, card.year)
+                        if (key.isNotBlank()) {
+                            val existingIdx = seen[key]
+                            if (existingIdx == null) {
+                                if (out.size < limit) {
+                                    seen[key] = out.size
+                                    out.add(card)
+                                }
+                            } else {
+                                // If duplicate is already present but incoming card has valid poster artwork, prefer it
+                                val existing = out[existingIdx]
+                                if (existing.posterUrl.isBlank() && card.posterUrl.isNotBlank()) {
+                                    out[existingIdx] = card
+                                }
+                            }
+                        }
+                    }
                     advanced = true
                 }
             }

@@ -24,20 +24,14 @@ data class AnonColors(
 
 val DarkAnonColors = AnonColors(
     isDark = true,
-    background = Color(0xFF000000),
-    surfaceCard = Color(0xFF0B0B0E),
-    surfaceElevated = Color(0xFF1E1E26),
-    borderHairline = Color(0x12FFFFFF),
+    background = Color(0xFF090B10),
+    surfaceCard = Color(0xFF141822),
+    surfaceElevated = Color(0xFF1A1F2C),
+    borderHairline = Color.White.copy(alpha = 0.08f),
     accentPrimary = Color(0xFFFFFFFF),
     textPrimary = Color(0xFFF4F4F6),
-    // Secondary/subtitle text: #8E8E99 reads 6.0:1 on #0B0B0E and 5.7:1 on
-    // #141419 (UI overhaul spec §1.1 "onSurfaceVariant"). The two-tier
-    // hierarchy below it is preserved — #84848E (muted) is the dimmest
-    // neutral that still holds ~5.3:1 on #0B0B0E and ~4.5:1 on #1E1E26, so
-    // 9-11sp captions never drop under the small-text floor while a real
-    // gap to #8E8E99 remains.
-    textSecondary = Color(0xFF8E8E99),
-    textMuted = Color(0xFF84848E),
+    textSecondary = Color(0xFF94A3B8),
+    textMuted = Color(0xFF64748B),
     accentViolet = Color(0xFF8B5CF6),
     accentPink = Color(0xFFEC4899),
     statusSuccess = Color(0xFF10B981),
@@ -50,14 +44,11 @@ val LightAnonColors = AnonColors(
     background = Color(0xFFF8F9FA),
     surfaceCard = Color(0xFFFFFFFF),
     surfaceElevated = Color(0xFFF1F3F5),
-    borderHairline = Color(0x14000000),
+    borderHairline = Color(0x1A0F172A),
     accentPrimary = Color(0xFF0F1115),
     textPrimary = Color(0xFF0F1115),
-    textSecondary = Color(0xFF5C606B),
-    // #686D79 (was #55627A): the same "quiet metadata" step one shade lighter
-    // in the overhauled neutral palette — 5.2:1 on #FFFFFF and 4.7:1 on
-    // #F1F3F5, still above the 4.5:1 floor the previous value was tuned for.
-    textMuted = Color(0xFF686D79),
+    textSecondary = Color(0xFF475569),
+    textMuted = Color(0xFF64748B),
     accentViolet = Color(0xFF7C3AED),
     accentPink = Color(0xFFDB2777),
     statusSuccess = Color(0xFF059669),

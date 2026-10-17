@@ -112,7 +112,12 @@ class AnonApp : Application(), ImageLoaderFactory {
     }
 
     override fun newImageLoader(): ImageLoader {
+        val dispatcher = okhttp3.Dispatcher().apply {
+            maxRequests = 64
+            maxRequestsPerHost = 16
+        }
         val client = HttpClient.shared.newBuilder()
+            .dispatcher(dispatcher)
             .addInterceptor { chain ->
                 val request = chain.request().newBuilder()
                     .header("User-Agent", HttpClient.DEFAULT_UA)
@@ -123,7 +128,18 @@ class AnonApp : Application(), ImageLoaderFactory {
 
         return ImageLoader.Builder(this)
             .okHttpClient(client)
-            .crossfade(true)
+            .memoryCache {
+                coil.memory.MemoryCache.Builder(this)
+                    .maxSizePercent(0.25)
+                    .build()
+            }
+            .diskCache {
+                coil.disk.DiskCache.Builder()
+                    .directory(cacheDir.resolve("image_cache"))
+                    .maxSizeBytes(150L * 1024 * 1024)
+                    .build()
+            }
+            .crossfade(120)
             .build()
     }
 

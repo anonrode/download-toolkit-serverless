@@ -69,6 +69,8 @@ import com.anonrode.downloader.ui.util.TitleFormatting
 import com.anonrode.downloader.ui.util.rejectHaptic
 import com.anonrode.downloader.viewmodel.MainViewModel
 import java.io.File
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 private const val PREF_SORT = "downloader_settings"
 private const val PREF_SORT_KEY = "pref_downloads_sort"
@@ -408,6 +410,7 @@ fun DownloadsScreen(
     // superseded by the mock's per-card RETRY circle — every failed row now
     // carries its own filled retry affordance.
     val hasPaused = tasks.any { it.status == TaskStatus.PAUSED }
+    val hasActive = tasks.any { it.status == TaskStatus.DOWNLOADING || it.status == TaskStatus.RESOLVING || it.status == TaskStatus.QUEUED }
 
     Column(
         modifier = Modifier
@@ -462,27 +465,36 @@ fun DownloadsScreen(
             }
         }
 
-        // ── STORAGE METER (§3.1: sleek rounded 4dp LinearProgressIndicator) ──
-        if (uiState.totalStorageGb > 0L) {
-            val usedGb = (uiState.totalStorageGb - uiState.freeStorageGb).coerceAtLeast(0L)
-            val fillFraction = (usedGb.toFloat() / uiState.totalStorageGb.toFloat()).coerceIn(0f, 1f)
-            val animatedFill by animateFloatAsState(
-                targetValue = fillFraction,
-                animationSpec = tween(durationMillis = 350),
-                label = "storageMeter"
-            )
-            LinearProgressIndicator(
-                progress = { animatedFill },
+        // ── STORAGE GUARD WARNING BANNER (Free space < 2GB or usedRatio >= 0.95) ──
+        val isStorageLow = uiState.totalStorageGb > 0L &&
+            (uiState.freeStorageGb < 2L || ((uiState.totalStorageGb - uiState.freeStorageGb).toFloat() / uiState.totalStorageGb.toFloat()) >= 0.95f)
+
+        if (isStorageLow) {
+            Surface(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(top = 12.dp)
-                    .height(4.dp)
-                    .clip(RoundedCornerShape(2.dp))
-                    .semantics { contentDescription = "Storage used" },
-                color = TextSecondary,
-                trackColor = SurfaceElevated,
-                strokeCap = StrokeCap.Square
-            )
+                    .padding(top = 10.dp),
+                shape = RoundedCornerShape(8.dp),
+                color = Color(0x26F59E0B),
+                border = BorderStroke(1.dp, Color(0x66F59E0B))
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = "⚠️",
+                        fontSize = 13.sp
+                    )
+                    Text(
+                        text = "Storage Low (${uiState.freeStorageGb} GB free). Downloads may pause if space runs out.",
+                        color = Color(0xFFFBBF24),
+                        fontSize = 11.5.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+            }
         }
 
         // ── §3.1 INTERACTIVE FILTER CHIP ROW: one horizontal LazyRow of
@@ -497,14 +509,23 @@ fun DownloadsScreen(
                 .fillMaxWidth()
         )
 
-        // ── ACTIONS RAIL (§3.1): "Resume all" ghost on the left, the compact
-        //    "Sort: Date ▾" dropdown menu aligned right — everything one line. ──
+        // ── ACTIONS RAIL: "Pause all" and "Resume all" pills on the left, sort on the right ──
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(top = 10.dp),
-            verticalAlignment = Alignment.CenterVertically
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
+            if (hasActive) {
+                ToolbarPill(
+                    label = "Pause all",
+                    icon = Icons.Rounded.Pause,
+                    iconTint = TextPrimary,
+                    labelColor = TextPrimary,
+                    onClick = { viewModel.engine.pauseAll() }
+                )
+            }
             if (hasPaused) {
                 ToolbarPill(
                     label = "Resume all",
@@ -1102,19 +1123,95 @@ private fun InlineRemainingAction(count: Int, onClick: () -> Unit) {
     }
 }
 
-/** §3.2 activity card — strict THREE-COLUMN geometry inside one Card:
- *  LEFT  52×72 poster thumb (SxxExx micro badge anchored BottomStart — the
- *        tag is EXTRACTED out of the title and stamped onto the thumb);
- *  CENTER  tight 2-row stack (clean sanitized title; then the source badge
- *        pill INLINE on the same row as the status word + unified detail —
- *        the source badge never gets its own third vertical row);
- *  RIGHT  vertically centered 36dp circular action (+ ⋮ kebab), with the
- *        contrast LOCK: dark = white circle + black glyph, light = ink
- *        circle + white glyph — the white-on-white play bug is impossible.
- *  For active/paused rows a 3dp progress bar sits FLUSH along the card's
- *  bottom edge (inside the same Box, Alignment.BottomCenter); failed/done
- *  cards carry no bar at all. Failure copy lives on the status row itself;
- *  the full raw error is reachable in the ⋮ dialog. */
+/** Extract video frame thumbnail for social/local downloads when poster is absent. */
+@Composable
+private fun rememberVideoThumbnail(task: DownloadTask): String? {
+    val context = LocalContext.current
+    var thumbPath by remember(task.id, task.status) { mutableStateOf<String?>(null) }
+    LaunchedEffect(task.id, task.status) {
+        if (task.posterUrl.isNotBlank()) return@LaunchedEffect
+        val filePath = task.filePath
+        if (filePath.isBlank()) return@LaunchedEffect
+        val file = File(filePath)
+        if (!file.exists() || file.length() < 50_000) return@LaunchedEffect
+        val thumbFile = File(context.cacheDir, "social_thumbs/${task.id}.jpg")
+        if (thumbFile.exists()) {
+            thumbPath = thumbFile.absolutePath
+            return@LaunchedEffect
+        }
+        withContext(Dispatchers.IO) {
+            try {
+                thumbFile.parentFile?.mkdirs()
+                val retriever = android.media.MediaMetadataRetriever()
+                retriever.setDataSource(file.absolutePath)
+                val bitmap = retriever.getFrameAtTime(1_000_000, android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                    ?: retriever.frameAtTime
+                if (bitmap != null) {
+                    java.io.FileOutputStream(thumbFile).use { out ->
+                        bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, out)
+                    }
+                    thumbPath = thumbFile.absolutePath
+                }
+                retriever.release()
+            } catch (_: Throwable) {}
+        }
+    }
+    return thumbPath
+}
+
+/** Full progress metrics string for Line 3 of download cards (zero truncation). */
+private fun cardProgressMetrics(task: DownloadTask): String {
+    val totalKnown = task.totalBytes > 0
+    val transferring = task.status == TaskStatus.DOWNLOADING
+    val pctText = if (totalKnown) {
+        "${(((task.downloadedBytes.toFloat() / task.totalBytes.toFloat()).coerceIn(0f, 1f)) * 100).toInt()}%"
+    } else null
+
+    val speedMb = task.speedBytesPerSec / (1024.0 * 1024.0)
+    val speedText = when {
+        !transferring -> null
+        speedMb >= 0.1 -> "%.1f MB/s".format(java.util.Locale.US, speedMb)
+        task.speedBytesPerSec >= 1024.0 -> "%.0f KB/s".format(java.util.Locale.US, task.speedBytesPerSec / 1024.0)
+        task.speedBytesPerSec > 0.0 -> "%.0f B/s".format(java.util.Locale.US, task.speedBytesPerSec)
+        else -> null
+    }
+    val etaText = if (transferring && task.etaSeconds > 0) "ETA " + formatEta(task.etaSeconds) else null
+
+    return when (task.status) {
+        TaskStatus.DOWNLOADING -> {
+            val parts = mutableListOf<String>()
+            val byteSpan = formatBytesSpan(task.downloadedBytes, task.totalBytes)
+            if (pctText != null) {
+                parts.add("$byteSpan ($pctText)")
+            } else {
+                parts.add(byteSpan)
+            }
+            speedText?.let { parts.add(it) }
+            etaText?.let { parts.add(it) }
+            parts.joinToString(" · ")
+        }
+        TaskStatus.PAUSED -> {
+            val byteSpan = formatBytesSpan(task.downloadedBytes, task.totalBytes)
+            if (pctText != null) "$byteSpan ($pctText) · Tap to resume" else "$byteSpan · Tap to resume"
+        }
+        TaskStatus.RESOLVING -> {
+            if (task.downloadedBytes > 0) "Resolving stream · ${formatBytes(task.downloadedBytes)}"
+            else "Resolving video stream..."
+        }
+        TaskStatus.VALIDATING -> "Checking media integrity..."
+        TaskStatus.QUEUED -> "Waiting in queue..."
+        TaskStatus.COMPLETED -> {
+            val size = formatBytes(if (task.totalBytes > 0) task.totalBytes else task.downloadedBytes)
+            "$size · Downloaded"
+        }
+        TaskStatus.FAILED -> humanizeFailure(task.errorMessage ?: "").trim().ifBlank { "Download failed" }
+    }
+}
+
+/** §3.2 activity card — clean 3-line layout:
+ *  LEFT: 52×72 poster thumb (guarded SxxExx badge only when real episode series);
+ *  CENTER: 3-line column (Line 1 = Title, Line 2 = Source pill + status, Line 3 = Metrics or multi-line error);
+ *  RIGHT: 36dp action + kebab. */
 @Composable
 private fun ActivityRow(
     task: DownloadTask,
@@ -1135,9 +1232,7 @@ private fun ActivityRow(
     val chroma = downloadsChroma(AnonTheme.colors.isDark)
     val style = downloadStatusStyle(task.status, chroma)
 
-    // §3.2 title sanitizer: the SxxExx tag MOVES to the thumbnail badge and
-    // trailing [yt-dlp-id] brackets + scraper suffixes never paint ("Video by
-    // lolita [Defo4HhjcWO]" renders as "Video by lolita" — §5.3).
+    // Title sanitizer: clean title and extract season/episode tag
     val titleDetail = remember(task.episodeTitle) {
         TitleFormatting.extractSeasonEpisodeTag(task.episodeTitle)
     }
@@ -1146,8 +1241,23 @@ private fun ActivityRow(
             TitleFormatting.collapseSpaces(titleDetail?.first ?: task.episodeTitle)
         ).ifBlank { task.episodeTitle }
     }
-    // §5.4 source badge: stamped provider site, or "SOCIAL" for the direct/
-    // one-off social downloads that never carry a site stamp.
+    // Guard thumbnail stamp: never render on standalone movies or social clips
+    val isSocialOrMovie = task.showTitle.contains("Social", ignoreCase = true) ||
+        task.showTitle.contains("Movie", ignoreCase = true) ||
+        task.showTitle == "Direct Downloads" ||
+        task.site.equals("social", ignoreCase = true) ||
+        task.episodeNum <= 0
+
+    val showEpisodeStamp = !isSocialOrMovie &&
+        titleDetail != null &&
+        !titleDetail.second.equals("S00E00", ignoreCase = true) &&
+        !titleDetail.second.equals("S0E0", ignoreCase = true)
+
+    // Video frame thumbnail extraction for social or posterless items
+    val videoThumb = rememberVideoThumbnail(task)
+    val effectivePoster = task.posterUrl.ifBlank { videoThumb ?: "" }
+
+    // Source badge: stamped provider site, or "SOCIAL" for direct social downloads
     val sourceBadge = task.site.uppercase().ifBlank {
         if (task.showTitle.contains("Social", ignoreCase = true) ||
             task.showTitle == "Direct Downloads" ||
@@ -1155,8 +1265,7 @@ private fun ActivityRow(
         ) "SOCIAL" else ""
     }
 
-    // Flush bottom progress bar (§3.2): active + paused only; unknown total +
-    // bytes in flight = the honest indeterminate sweep.
+    // Flush bottom progress bar: active + paused only
     val totalKnown = task.totalBytes > 0
     val barTarget = if (totalKnown) {
         (task.downloadedBytes.toFloat() / task.totalBytes.toFloat()).coerceIn(0f, 1f)
@@ -1175,8 +1284,6 @@ private fun ActivityRow(
         border = BorderStroke(1.dp, BorderHairline),
         modifier = Modifier
             .fillMaxWidth()
-            // DONE rows open in the player; FAILED rows retry on top of the
-            // primary RETRY control.
             .clickable(
                 enabled = isDone || isFailed,
                 onClickLabel = if (isFailed) "Retry" else "Play"
@@ -1191,8 +1298,6 @@ private fun ActivityRow(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    // +3dp when the flush bar rides the bottom edge so the
-                    // bar never covers row content.
                     .padding(
                         start = 12.dp, end = 12.dp,
                         top = 10.dp, bottom = if (barVisible) 13.dp else 10.dp
@@ -1200,17 +1305,17 @@ private fun ActivityRow(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                // ── LEFT: 52×72 poster thumb (2:3.46), SxxExx badge overlay ──
+                // ── LEFT: 52×72 poster thumb, guarded SxxExx badge overlay ──
                 Box(modifier = Modifier.size(width = 52.dp, height = 72.dp)) {
                     PosterImageOrFallback(
-                        posterUrl = task.posterUrl,
+                        posterUrl = effectivePoster,
                         showTitle = cleanTitle,
                         modifier = Modifier.size(width = 52.dp, height = 72.dp),
                         shape = RoundedCornerShape(8.dp),
                         fallbackIcon = Icons.Rounded.Videocam,
                         showFallbackTitle = false
                     )
-                    if (titleDetail != null) {
+                    if (showEpisodeStamp && titleDetail != null) {
                         Text(
                             text = titleDetail.second,
                             fontSize = 9.sp,
@@ -1226,11 +1331,12 @@ private fun ActivityRow(
                     }
                 }
 
-                // ── CENTER: tight 2-row stack ──
+                // ── CENTER: clean 3-line stack (Line 1: Title, Line 2: Source+Status, Line 3: Metrics or multi-line error) ──
                 Column(
                     modifier = Modifier.weight(1f),
                     verticalArrangement = Arrangement.Center
                 ) {
+                    // Line 1: Sanitized Title (max 1 line, ellipsis)
                     Text(
                         text = cleanTitle,
                         fontSize = 14.sp,
@@ -1239,9 +1345,8 @@ private fun ActivityRow(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
-                    Spacer(modifier = Modifier.height(4.dp))
-                    // Row 2: [SOURCE] pill INLINE with the unified status +
-                    // size string — never a third vertical row.
+                    Spacer(modifier = Modifier.height(3.dp))
+                    // Line 2: Source pill + status badge (never jammed with metrics)
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -1266,15 +1371,32 @@ private fun ActivityRow(
                             color = style.accent,
                             maxLines = 1
                         )
+                    }
+                    Spacer(modifier = Modifier.height(3.dp))
+                    // Line 3: Progress metrics or full multi-line error (zero truncation)
+                    if (isFailed) {
+                        val errorText = task.errorMessage?.takeIf { it.isNotBlank() } ?: "Download failed"
                         Text(
-                            text = cardStatusDetail(task),
+                            text = humanizeFailure(errorText),
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Medium,
-                            color = TextMuted,
-                            maxLines = 1,
+                            color = chroma.failed,
+                            maxLines = 3,
                             overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f, fill = false)
+                            lineHeight = 15.sp
                         )
+                    } else {
+                        val metrics = cardProgressMetrics(task)
+                        if (metrics.isNotBlank()) {
+                            Text(
+                                text = metrics,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Normal,
+                                color = if (isActive) TextSecondary else TextMuted,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
                     }
                 }
 
@@ -1345,11 +1467,10 @@ private fun ActivityRow(
     }
 }
 
-/** §1.3 CONTRAST-LOCKED 36dp circular action (§3.2 geometry, was 38dp ink):
+/** §1.3 CONTRAST-LOCKED 36dp circular action:
  *  the container color and the glyph tint are bound together EXPLICITLY per
- *  theme — Dark = white circle + black glyph, Light = ink (#0F1115) circle +
- *  white glyph. Never relies on LocalContentColor, so the white-on-white
- *  play button bug cannot recur. */
+ *  theme — Dark = #F3F5F9 circle + #090B10 glyph, Light = #0F172A circle +
+ *  white glyph. */
 @Composable
 private fun SolidActionButton(icon: ImageVector, description: String, onClick: () -> Unit) {
     val isDark = AnonTheme.colors.isDark
@@ -1357,15 +1478,15 @@ private fun SolidActionButton(icon: ImageVector, description: String, onClick: (
         modifier = Modifier
             .size(36.dp)
             .clip(CircleShape)
-            .background(if (isDark) Color(0xFFFFFFFF) else Color(0xFF0F1115))
+            .background(if (isDark) Color(0xFFF3F5F9) else Color(0xFF0F172A))
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center
     ) {
         Icon(
             imageVector = icon,
             contentDescription = description,
-            tint = if (isDark) Color(0xFF000000) else Color(0xFFFFFFFF),
-            modifier = Modifier.size(14.dp)
+            tint = if (isDark) Color(0xFF090B10) else Color(0xFFFFFFFF),
+            modifier = Modifier.size(15.dp)
         )
     }
 }
@@ -1427,10 +1548,11 @@ private fun StatusDot(color: Color, pulse: Boolean = false) {
  *  colors come from DownloadsChroma so both themes read. */
 @Composable
 private fun SiteTagChip(site: String, kind: DownloadStateKind, chroma: DownloadsChroma = downloadsChroma(AnonTheme.colors.isDark)) {
+    val isDark = AnonTheme.colors.isDark
     val tinted = when (kind) {
         DownloadStateKind.LIVE -> chroma.liveTint to chroma.live
         DownloadStateKind.FAILED -> chroma.failedTint to chroma.failed
-        else -> chroma.neutralTint to chroma.neutralInk
+        else -> if (isDark) Color.White.copy(alpha = 0.11f) to Color(0xFFE2E8F0) else chroma.neutralTint to chroma.neutralInk
     }
     Row(
         modifier = Modifier

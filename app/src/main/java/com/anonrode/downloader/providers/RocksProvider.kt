@@ -276,6 +276,8 @@ object RocksProvider : SiteProvider {
                         } else null
 
                         val isSeries = isSeriesPage
+                        val isDownloadAnchor = Regex("""(?i)^(episode\s*)?download(\s+\d{3,4}p|\s+mp4|\s+mkv)?$""").matches(text.trim()) ||
+                            Regex("""(?i)^download\s*(\d{3,4}p)?$""").matches(text.trim())
 
                         when {
                             mirrorMark != null -> episodes.add(
@@ -295,28 +297,46 @@ object RocksProvider : SiteProvider {
                                 )
                             )
                             !isSeries && explicitSm == null && epMatch == null -> {
-                                val movieLabel = if (episodes.isEmpty()) "Full Movie$qualitySuffix" else "Server ${count}$qualitySuffix"
-                                episodes.add(
-                                    EpisodeItem(
-                                        title = movieLabel,
-                                        url = href,
-                                        episodeNum = count,
-                                        site = name
+                                if (episodes.isNotEmpty()) {
+                                    val existing = episodes[0]
+                                    if (href !in existing.mirrorUrls && href != existing.url) {
+                                        episodes[0] = existing.copy(mirrorUrls = existing.mirrorUrls + href)
+                                    }
+                                } else {
+                                    episodes.add(
+                                        EpisodeItem(
+                                            title = "Full Movie$qualitySuffix",
+                                            url = href,
+                                            episodeNum = 1,
+                                            site = name
+                                        )
                                     )
-                                )
+                                }
                             }
                             else -> {
                                 val epNum = explicitSm?.groupValues?.getOrNull(2)?.toIntOrNull()
                                     ?: epMatch?.groupValues?.getOrNull(1)?.toIntOrNull()
-                                    ?: count
-                                episodes.add(
-                                    EpisodeItem(
-                                        title = "S%02dE%02d".format(itemSeason, epNum) + qualitySuffix,
-                                        url = href,
-                                        episodeNum = itemSeason * 100 + epNum,
-                                        site = name
+                                    ?: if (isDownloadAnchor && episodes.isNotEmpty()) (episodes.last().episodeNum % 100) else count
+                                val targetEpNum = if (isSeries) itemSeason * 100 + epNum else epNum
+
+                                val existingIndex = episodes.indexOfFirst { it.episodeNum == targetEpNum }
+                                if (existingIndex >= 0) {
+                                    val existing = episodes[existingIndex]
+                                    if (href !in existing.mirrorUrls && href != existing.url) {
+                                        episodes[existingIndex] = existing.copy(mirrorUrls = existing.mirrorUrls + href)
+                                    }
+                                } else {
+                                    val displayTitle = if (isSeries) "S%02dE%02d".format(itemSeason, epNum) + qualitySuffix
+                                        else if (epNum == 1) "Full Movie$qualitySuffix" else "Episode $epNum$qualitySuffix"
+                                    episodes.add(
+                                        EpisodeItem(
+                                            title = displayTitle,
+                                            url = href,
+                                            episodeNum = targetEpNum,
+                                            site = name
+                                        )
                                     )
-                                )
+                                }
                             }
                         }
                         count++
