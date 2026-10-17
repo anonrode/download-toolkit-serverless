@@ -43,7 +43,7 @@ object OtaFetchDiagnostics {
     /** Hardcoded last-resort telemetry sink: same box that already serves the
      *  log/telemetry pipeline (see scripts/read_client_errors.py). Used ONLY
      *  when the OTA-configured sink is blank (no rules ever arrived). */
-    const val FALLBACK_SINK = "http://68.155.146.145:8000/api/logs/client-error"
+    const val FALLBACK_SINK = "http://68.155.146.145/api/logs/client-error"
 
     // Stage constants (stable wire strings — server-side dashboards key on them).
     const val STAGE_DNS = "DNS"

@@ -307,8 +307,9 @@ object LogUploader {
                 "${BuildConfig.VERSION_NAME}(${BuildConfig.VERSION_CODE})"
             )
             conn.setRequestProperty("User-Agent", "AnonDownloader/${BuildConfig.VERSION_NAME}")
-            OutputStreamWriter(conn.outputStream, Charsets.ISO_8859_1).use { w ->
-                w.write(String(gz, Charsets.ISO_8859_1))
+            conn.outputStream.use { os ->
+                os.write(gz)
+                os.flush()
             }
             conn.responseCode in 200..299
         } catch (_: Exception) {
