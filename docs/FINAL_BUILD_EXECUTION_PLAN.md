@@ -358,3 +358,9 @@ Rollback: revert commit + republish previous payload rev (kill switches make cod
   PackageInstaller + VPS mirror moved in scope; §11 rewritten — **CI build + tag + watch + fix is the FINAL
   FINAL stage, nothing runs after it**; Desktop deliverables consolidated into
   `Desktop\ANON_DOWNLOADER_FINAL\` (16 files moved; no loose saves from now on).
+- 2026-10-18 16:4x — **"proceed" received. PHASE 1 LAUNCHED** — 4 subordinate agents in flight:
+  S1 rules/OTA plane (sections+flags+validator+gate expansion+tests+dry-run), S2 engine/audit fixes (F-01..F-09,
+  F-12, UpdateChecker :8000, vidsrcme seeds, HLS 1-byte gate), S3 UI cleanups (dead code/resources,
+  active-definition unification, parallel-sockets control, About/Check-for-updates skeleton, player
+  sub-language swap), S4 hardening (R8 on + keep-rules, IntegrityCheck.kt, REQUEST_INSTALL_PACKAGES).
+  Next: my review gate per §10 as each agent reports; then PHASE 2.
