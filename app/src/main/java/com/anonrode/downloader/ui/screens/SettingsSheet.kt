@@ -114,6 +114,44 @@ internal class SettingsState(
     var isUpdatingYtDlp by mutableStateOf(false)
     var isSyncingRules by mutableStateOf(false)
     var updateState by mutableStateOf<UpdateUiState>(UpdateUiState.Idle)
+
+    /**
+     * Re-read every engine-backed field (2026-10 fix): this state object is
+     * remembered for the whole Settings screen lifetime, but other surfaces —
+     * QuickShareActivity's instant-social toggle, SocialModal, OTA-applied
+     * engine changes — can move engine fields while it sits in memory. Without
+     * this re-read, the next persist() wrote the STALE captured snapshot back
+     * and clobbered them (pref_instant_social was the live repro: QuickShare
+     * ON, return to Settings, flip any control → instant mode silently OFF).
+     * Runs on ON_RESUME, where the racing surfaces (separate activities) have
+     * already paused this one, so there is no in-flight edit to clobber.
+     */
+    fun refreshFromEngine() {
+        maxConcurrent = viewModel.engine.maxConcurrentDownloads
+        sockets = viewModel.engine.parallelSocketsPerFile
+        quality = viewModel.engine.defaultQuality
+        autoOrganize = viewModel.engine.autoOrganizeByShow
+        instantSocial = viewModel.engine.instantSocialDownload
+        wifiOnlyTorrents = viewModel.engine.downloadTorrentsWifiOnly
+        showPosters = viewModel.engine.showPostersInResults
+        storageGuard = viewModel.engine.storageGuardGb.toFloat()
+        stallTimeout = viewModel.engine.stallTimeoutSec
+        magnetRetries = viewModel.engine.magnetMaxAttempts
+        ytdlpRetries = viewModel.engine.ytdlpMaxAttempts
+        hlsFragments = viewModel.engine.hlsFragmentConcurrency
+        speedLimit = viewModel.engine.globalSpeedLimitKbs
+        torrentPeers = viewModel.engine.torrentPeers
+        torrentPrivacy = viewModel.engine.torrentPrivacyMode
+        wifiOnlyAll = viewModel.engine.wifiOnlyAll
+        clipboardDetect = viewModel.engine.clipboardDetect
+        completionNotifications = viewModel.engine.completionNotifications
+        debugLogging = viewModel.engine.debugLogging
+        logRetention = viewModel.engine.logRetentionDays
+        downloadSubs = viewModel.engine.downloadSubtitles
+        subLang = viewModel.engine.subtitleLanguage
+        filterExplicit = viewModel.engine.filterExplicitContent
+    }
+
     // yt-dlp core transparency (user directive: the sync button must work and
     // the nightly channel must be reachable): the installed extractor version
     // is surfaced right in the row; the channel choice rides YtDlpCore.
@@ -285,7 +323,13 @@ fun SettingsScreen(
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
                 Lifecycle.Event.ON_PAUSE -> viewModel.flushPendingSettings()
-                Lifecycle.Event.ON_RESUME -> viewModel.refreshStorageInfo()
+                Lifecycle.Event.ON_RESUME -> {
+                    viewModel.refreshStorageInfo()
+                    // External surfaces (QuickShare/SocialModal/OTA) may have
+                    // moved engine fields while this state sat in memory — the
+                    // stale snapshot must not clobber them on the next persist.
+                    state.refreshFromEngine()
+                }
                 else -> {}
             }
         }

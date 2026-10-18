@@ -186,16 +186,20 @@ class QuickShareActivity : ComponentActivity() {
                             } else {
                                 val appEngine = (application as? AnonApp)?.engine
                                 if (makeInstant) {
-                                    prefs.edit().putBoolean("pref_instant_social", true).apply()
-                                    appEngine?.instantSocialDownload = true
+                                    // engine.setInstantSocial is the ONE writer of
+                                    // pref_instant_social (it persists the pref and
+                                    // sets the field in one step). The direct
+                                    // prefs.edit() + field poke that used to live
+                                    // here was a second, racing write path — the
+                                    // dual-path asymmetry the Settings snapshot
+                                    // could clobber.
+                                    appEngine?.setInstantSocial(true)
                                 } else if (appEngine != null && appEngine.instantSocialDownload) {
                                     // Un-checking here must be able to turn instant
                                     // mode OFF — it is settable from SocialModal in
-                                    // the SAME process, so the pref read at
-                                    // onCreate can be stale-true while the sheet
-                                    // still showed (race between the two writes).
+                                    // the SAME process, so the sheet's state could
+                                    // be stale-true while this sheet is showing.
                                     appEngine.setInstantSocial(false)
-                                    prefs.edit().putBoolean("pref_instant_social", false).apply()
                                 }
                                 dispatchDownload(parsed, sharedText, quality, audioOnly, engineOverride)
                                 Toast.makeText(this@QuickShareActivity, "Download queued in background", Toast.LENGTH_SHORT).show()

@@ -20,12 +20,12 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.anonrode.downloader.ui.components.PosterFallbackWell
 import com.anonrode.downloader.ui.components.SegmentBar
 import com.anonrode.downloader.ui.components.SegmentCell
 import com.anonrode.downloader.ui.theme.*
@@ -142,21 +142,13 @@ fun SocialModal(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(Spacing.md)
             ) {
-                Box(
-                    modifier = Modifier
-                        .size(56.dp)
-                        .clip(RoundedCornerShape(Radius.sm))
-                        .background(SurfaceElevated)
-                        .border(1.dp, Color.White.copy(alpha = 0.1f), RoundedCornerShape(Radius.sm)),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = cleanPlatform.take(2).uppercase(),
-                        fontSize = Type.label.fontSize,
-                        fontWeight = FontWeight.Black,
-                        color = TextSecondary
-                    )
-                }
+                // Shared stylized well (MediaFallback) instead of a raw
+                // 2-letter initial block — one fallback language app-wide.
+                PosterFallbackWell(
+                    modifier = Modifier.size(56.dp),
+                    shape = RoundedCornerShape(Radius.sm),
+                    title = null
+                )
                 Text(
                     text = url,
                     fontSize = Type.micro.fontSize,

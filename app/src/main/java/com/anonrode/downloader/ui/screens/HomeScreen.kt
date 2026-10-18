@@ -423,10 +423,14 @@ fun HomeScreen(
                                 text = label,
                                 fontSize = Type.label.fontSize,
                                 fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                // Token ink, not navy literals: chip ink follows
+                                // the 0xFFF3F5F9 selected chip in dark and the
+                                // accent-fill chip in light; muted labels are
+                                // TextSecondary in both themes.
                                 color = if (isSelected) {
-                                    if (isDark) Color(0xFF090B10) else Color.White
+                                    if (isDark) BackgroundDark else Color.White
                                 } else {
-                                    if (isDark) Color(0xFFD0D7E2) else TextSecondary
+                                    TextSecondary
                                 }
                             )
                         },
@@ -573,6 +577,7 @@ fun HomeScreen(
                     )
                     Spacer(modifier = Modifier.height(Spacing.lg))
                     CategoryTilesGrid(
+                        liveTiles = uiState.genreTiles,
                         onOpen = { category -> viewModel.openCategory(category) },
                         onMore = { viewModel.openCatalog() }
                     )
@@ -944,10 +949,10 @@ private fun TrendingCard(
 
 /**
  * Genre tiles under the trending row (blank-query landing only), §4.3:
- * a WRAPPING 3-per-row grid of sleek 2:1 horizontal-gradient category cards
- * with bold typography and a per-category icon. Posters are gone from this
- * surface — eliminating the broken "A" poster and the duplicate artwork the
- * View More tile used to inherit. The tiles NAVIGATE — they are not filters.
+ * a WRAPPING two-per-row grid of compact 80dp cards with 2-poster mini-stacks
+ * and bold typography. Static previews come from GENRE_POSTER_PREVIEWS; a
+ * genre missing there (or a blank slot) falls back to the live cached poster
+ * from uiState.genreTiles. The tiles NAVIGATE — they are not filters.
  */
 private val GENRE_POSTER_PREVIEWS: Map<String, Pair<String, String>> = mapOf(
     "Action" to Pair(
@@ -986,6 +991,7 @@ private val GENRE_POSTER_PREVIEWS: Map<String, Pair<String, String>> = mapOf(
  */
 @Composable
 private fun CategoryTilesGrid(
+    liveTiles: List<CategoryFeed.GenreTile>,
     onOpen: (CategoryFeed.Category) -> Unit,
     onMore: () -> Unit
 ) {
@@ -1016,6 +1022,7 @@ private fun CategoryTilesGrid(
                         } else {
                             GenreTileCard(
                                 category = cat,
+                                liveTiles = liveTiles,
                                 onClick = { onOpen(cat) }
                             )
                         }
@@ -1032,19 +1039,15 @@ private fun CategoryTilesGrid(
 /** 2-column View More tile: H=80dp, R=14dp with explore compass icon. */
 @Composable
 private fun ViewMoreTileCard(onClick: () -> Unit) {
-    val isDark = AnonTheme.colors.isDark
     Box(
         modifier = Modifier
             .fillMaxWidth()
             .height(80.dp)
             .clip(RoundedCornerShape(14.dp))
-            .background(
-                if (isDark) Color(0xFF141822)
-                else Color(0xFFFFFFFF)
-            )
+            .background(SurfaceCard)
             .border(
                 width = 1.dp,
-                color = if (isDark) Color.White.copy(alpha = 0.08f) else Color(0x140F172A),
+                color = BorderHairline,
                 shape = RoundedCornerShape(14.dp)
             )
             .clickable(onClick = onClick)
@@ -1103,23 +1106,38 @@ private fun ViewMoreTileCard(onClick: () -> Unit) {
 @Composable
 private fun GenreTileCard(
     category: CategoryFeed.Category,
+    liveTiles: List<CategoryFeed.GenreTile>,
     onClick: () -> Unit
 ) {
     val isDark = AnonTheme.colors.isDark
-    val posters = GENRE_POSTER_PREVIEWS[category.label]
+    // Static previews win; a genre missing from the map — or a blank slot in
+    // it — falls back to the live cached poster from uiState.genreTiles
+    // (the fetch that used to be cached and never rendered).
+    val posters: Pair<String, String>? = remember(category.label, liveTiles) {
+        val live = liveTiles
+            .firstOrNull { it.category.label.equals(category.label, ignoreCase = true) }
+            ?.posterUrl?.takeIf { it.isNotBlank() }
+        val stat = GENRE_POSTER_PREVIEWS[category.label]
+        when {
+            stat != null -> {
+                val first = stat.first.ifBlank { live ?: "" }
+                val second = stat.second.ifBlank { live ?: first }
+                if (first.isBlank()) null else first to second
+            }
+            live != null -> live to live
+            else -> null
+        }
+    }
 
     Box(
         modifier = Modifier
             .fillMaxWidth()
             .height(80.dp)
             .clip(RoundedCornerShape(14.dp))
-            .background(
-                if (isDark) Color(0xFF141822)
-                else Color(0xFFFFFFFF)
-            )
+            .background(SurfaceCard)
             .border(
                 width = 1.dp,
-                color = if (isDark) Color.White.copy(alpha = 0.08f) else Color(0x140F172A),
+                color = BorderHairline,
                 shape = RoundedCornerShape(14.dp)
             )
             .clickable(onClick = onClick)
@@ -1857,10 +1875,9 @@ private fun AsianDramaHeroSection(
                     .weight(1f)
                     .height(96.dp)
                     .clip(RoundedCornerShape(Radius.md))
-                    .background(
-                        if (AnonTheme.colors.isDark) Color(0xFF141822)
-                        else Color(0xFFFFFFFF)
-                    )
+                    // Base token surface; the art-directed gradient below is
+                    // deliberately kept as-is (overlay covers it in practice).
+                    .background(SurfaceCard)
                     .border(
                         1.dp,
                         if (AnonTheme.colors.isDark) Color(0x338B5CF6) else Color(0x337C3AED),
@@ -1938,10 +1955,7 @@ private fun AsianDramaHeroSection(
                     .weight(1f)
                     .height(96.dp)
                     .clip(RoundedCornerShape(Radius.md))
-                    .background(
-                        if (AnonTheme.colors.isDark) Color(0xFF141822)
-                        else Color(0xFFFFFFFF)
-                    )
+                    .background(SurfaceCard)
                     .border(
                         1.dp,
                         if (AnonTheme.colors.isDark) Color(0x33EC4899) else Color(0x33DB2777),

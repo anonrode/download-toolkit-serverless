@@ -160,6 +160,11 @@ if __name__ == "__main__":
         "app/src/main/java/com/anonrode/downloader/ui/screens/HomeScreen.kt",
         "app/src/main/java/com/anonrode/downloader/ui/components/MediaPlayerModal.kt",
         "app/src/main/java/com/anonrode/downloader/ui/components/MediaPlayerPrefs.kt",
+        "app/src/main/java/com/anonrode/downloader/ui/components/QualityChipRow.kt",
+        "app/src/main/java/com/anonrode/downloader/ui/screens/SettingsSheet.kt",
+        "app/src/main/java/com/anonrode/downloader/ui/screens/SocialModal.kt",
+        "app/src/main/java/com/anonrode/downloader/ui/screens/QuickShareActivity.kt",
+        "app/src/main/java/com/anonrode/downloader/data/settings/AppSettings.kt",
         "app/src/test/java/com/anonrode/downloader/pipeline/FullAppPipelineSimulationTest.kt"
     ]
 

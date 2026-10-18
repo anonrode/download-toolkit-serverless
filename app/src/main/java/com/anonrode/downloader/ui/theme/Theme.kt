@@ -24,14 +24,16 @@ data class AnonColors(
 
 val DarkAnonColors = AnonColors(
     isDark = true,
-    background = Color(0xFF090B10),
-    surfaceCard = Color(0xFF141822),
-    surfaceElevated = Color(0xFF1A1F2C),
-    borderHairline = Color.White.copy(alpha = 0.08f),
+    // True OLED Obsidian (UI overhaul spec §1): matches DarkMaterialColorScheme
+    // so tokens, Material surfaces and the nav bar share one black hierarchy.
+    background = Color(0xFF000000),
+    surfaceCard = Color(0xFF0B0B0E),
+    surfaceElevated = Color(0xFF141419),
+    borderHairline = Color(0x12FFFFFF),
     accentPrimary = Color(0xFFFFFFFF),
     textPrimary = Color(0xFFF4F4F6),
-    textSecondary = Color(0xFF94A3B8),
-    textMuted = Color(0xFF64748B),
+    textSecondary = Color(0xFF8E8E99),
+    textMuted = Color(0xFF5A5A66),
     accentViolet = Color(0xFF8B5CF6),
     accentPink = Color(0xFFEC4899),
     statusSuccess = Color(0xFF10B981),
@@ -111,12 +113,6 @@ val LightSplashColors = SplashThemeColors(
     progressTrack = Color(0xFFD5DEE7),
     progressFill = Color(0xFF07131A)
 )
-
-// Backward-compatible fallback accessors
-val SplashBackground = Color(0xFF000000)
-val SplashOnBackground = Color(0xFFFFFFFF)
-val SplashMuted = Color(0xFF94A3B8)
-val SplashElevated = Color(0xFF181B22)
 
 // True OLED Obsidian dark scheme (UI overhaul spec §1.1): pure #000000
 // background, cards/sheets on #0B0B0E, grouped containers on #141419, pressed

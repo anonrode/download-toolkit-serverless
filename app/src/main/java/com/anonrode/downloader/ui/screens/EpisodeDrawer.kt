@@ -29,6 +29,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -57,9 +58,13 @@ import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
@@ -82,6 +87,8 @@ import coil.compose.AsyncImage
 import androidx.lifecycle.viewModelScope
 import com.anonrode.downloader.data.models.EpisodeItem
 import com.anonrode.downloader.data.models.ShowCard
+import com.anonrode.downloader.data.models.TaskStatus
+import com.anonrode.downloader.ui.components.PosterFallbackWell
 import com.anonrode.downloader.ui.components.SkeletonBox
 import com.anonrode.downloader.ui.components.rememberReduceMotion
 import com.anonrode.downloader.ui.components.rememberShimmerX
@@ -219,22 +226,42 @@ fun EpisodeDrawer(
     var pendingForceAll by rememberSaveable { mutableStateOf(false) }
 
     val allTasks by viewModel.engine.tasks.collectAsState()
-    val downloadedOrQueuedUrls = remember(allTasks, show.title) {
+    // Task-title join shared by both URL sets below.
+    val showTasks = remember(allTasks, show.title) {
         val cleanTitle = show.title.trim().lowercase()
         allTasks.filter { task ->
             task.showTitle.trim().lowercase() == cleanTitle ||
             (cleanTitle.isNotBlank() && task.showTitle.contains(show.title, ignoreCase = true))
+        }
+    }
+    // COMPLETED only: the green "✓ Downloaded" pill (and the 0.78 dim) must
+    // never claim a FAILED/QUEUED/PAUSED episode — the old single set kept
+    // every matching task, so failed episodes rendered as downloaded AND were
+    // excluded from Remaining.
+    val completedUrls = remember(showTasks) {
+        showTasks.filter { it.status == TaskStatus.COMPLETED }
+            .map { it.sourceUrl }.filter { it.isNotBlank() }.toSet()
+    }
+    // In-flight set (running or waiting) — excluded from Remaining, but
+    // deliberately NOT shown as downloaded.
+    val activeOrQueuedUrls = remember(showTasks) {
+        showTasks.filter {
+            it.status == TaskStatus.DOWNLOADING || it.status == TaskStatus.RESOLVING ||
+                it.status == TaskStatus.VALIDATING || it.status == TaskStatus.QUEUED ||
+                it.status == TaskStatus.PAUSED
         }.map { it.sourceUrl }.filter { it.isNotBlank() }.toSet()
     }
-    val remainingEpisodes = remember(episodes, downloadedOrQueuedUrls) {
-        episodes.filter { it.url !in downloadedOrQueuedUrls }
+    // Remaining = not completed AND not in flight: FAILED episodes stay here
+    // so they can be re-downloaded in one tap.
+    val remainingEpisodes = remember(episodes, completedUrls, activeOrQueuedUrls) {
+        episodes.filter { it.url !in completedUrls && it.url !in activeOrQueuedUrls }
     }
 
     // One-shot auto-selection: fires once the drawer's live scrape lands. The
     // applied flag keeps a later episodes emission (provider refresh, cache
     // update) from re-selecting episodes the user manually deselected.
     var autoApplied by remember(show.url) { mutableStateOf(false) }
-    LaunchedEffect(preselectRemaining, episodes, downloadedOrQueuedUrls) {
+    LaunchedEffect(preselectRemaining, episodes, completedUrls, activeOrQueuedUrls) {
         if (preselectRemaining && !autoApplied && !enqueued && remainingEpisodes.isNotEmpty()) {
             autoApplied = true
             selectedUrlsList = remainingEpisodes.map { it.url }
@@ -362,11 +389,11 @@ fun EpisodeDrawer(
             decorFitsSystemWindows = false
         )
     ) {
-        // The dialog covers the whole screen and its sheet is dark in BOTH
-        // themes, but a Light-theme user's dialog window inherits the light
-        // appearance flag — dark status-bar icons painted over the dark
-        // sheet, i.e. an invisible clock at FULL. Force light (white) icons
-        // on the dialog's own window; the app window's flag re-applies
+        // The sheet follows the app theme (DarkSheetPalette / LightSheetPalette),
+        // so the dialog window's status-bar icons must follow it too — white
+        // icons over the dark sheet, DARK icons over the light sheet. Forcing
+        // light icons unconditionally painted an invisible clock over the
+        // light sheet at the FULL detent. The app window's own flag re-applies
         // untouched the moment the dialog dismisses.
         val dialogWindow = (LocalView.current.parent as? DialogWindowProvider)?.window
         SideEffect {
@@ -375,7 +402,7 @@ fun EpisodeDrawer(
                 // `window.isAppearanceLightStatusBars` property needs a newer
                 // core-ktx than the dependency graph carries.
                 WindowCompat.getInsetsController(w, w.decorView)
-                    .isAppearanceLightStatusBars = false
+                    .isAppearanceLightStatusBars = !AnonTheme.colors.isDark
             }
         }
         BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
@@ -561,9 +588,6 @@ fun EpisodeDrawer(
             val isFull by remember { derivedStateOf { anim.value <= halfTopPx / 2f } }
 
             val statusBarDp = with(density) { WindowInsets.statusBars.getBottom(density).toDp() }
-            // Bottom inset so the sticky footer and the last rows never hide
-            // behind the gesture navigation bar.
-            val navBottomDp = with(density) { WindowInsets.navigationBars.getBottom(density).toDp() }
 
             val gutter = 16.dp                                           // grid gutter G = 16
             val gripZoneH = 30.dp                                        // HALF grip zone (sheet-y 0→30)
@@ -647,13 +671,15 @@ fun EpisodeDrawer(
                         .height(artBandH)
                         .clip(sheetShape)
                 ) {
-                    // Charcoal gradient base
+                    // Obsidian gradient base (was navy-slate #3A4254→#1B2029;
+                    // the band is theme-independent dark imagery, so it now
+                    // matches the OLED palette's bandStart→bandEnd).
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
                             .background(
                                 Brush.verticalGradient(
-                                    listOf(Color(0xFF3A4254), Color(0xFF1B2029))
+                                    listOf(Color(0xFF1C1C24), Color(0xFF0B0B0E))
                                 )
                             )
                     )
@@ -680,7 +706,7 @@ fun EpisodeDrawer(
                             .fillMaxSize()
                             .background(
                                 Brush.verticalGradient(
-                                    listOf(Color.Black.copy(alpha = 0.45f), Color(0xEB0B0E14))
+                                    listOf(Color.Black.copy(alpha = 0.45f), Color(0xEB0B0B0E))
                                 )
                             )
                     )
@@ -744,12 +770,15 @@ fun EpisodeDrawer(
                                 modifier = Modifier.fillMaxSize()
                             )
                         } else {
-                            Text(
-                                text = show.title.trim().split(Regex("\\s+")).take(2)
-                                    .mapNotNull { it.firstOrNull()?.uppercaseChar() }
-                                    .joinToString(""),
-                                fontSize = 24.sp, fontWeight = FontWeight.Black,
-                                color = BandAccent, modifier = Modifier.align(Alignment.Center)
+                            // Shared stylized well instead of the old 2-letter
+                            // initial glyph; the keyed AsyncImage above is kept
+                            // for its memory-cache reuse (the well needs no
+                            // request, so the cache contract is untouched).
+                            PosterFallbackWell(
+                                modifier = Modifier.fillMaxSize(),
+                                shape = RoundedCornerShape(10.dp),
+                                icon = Icons.Rounded.PlayArrow,
+                                title = null
                             )
                         }
                     }
@@ -799,6 +828,12 @@ fun EpisodeDrawer(
                                 fontSize = 18.sp,
                                 fontWeight = FontWeight.Bold,
                                 lineHeight = 23.sp,
+                                // Deliberately the LIGHT band ink in BOTH themes:
+                                // the header lives on the art band, which is
+                                // theme-independent dark imagery (see the over-band
+                                // constants below). pal.textPrimary would paint
+                                // LIGHT-theme dark ink (#0F1115) on the dark band —
+                                // the exact invisibility this constant avoids.
                                 color = Color(0xFFF4F4F6),
                                 maxLines = 2,
                                 overflow = TextOverflow.Ellipsis
@@ -838,7 +873,27 @@ fun EpisodeDrawer(
                     modifier = Modifier
                         .offset(y = listTop)
                         .fillMaxWidth()
-                        .height((Hdp - listTop).coerceAtLeast(120.dp))
+                        // ── VISIBLE-BOTTOM CLAMP (handover fix, 2026-10) ─────────
+                        // The sheet is a FULL-H layout slid down by anim.value, so
+                        // at the HALF detent the raw region height (H − listTop)
+                        // extended 0.40·H past the screen edge: the list's
+                        // viewport bottom (and every row past ~60%) lived
+                        // off-screen. Measure against the CURRENTLY VISIBLE
+                        // height instead. Reading anim.value during MEASURE
+                        // invalidates layout only (never composition), so the
+                        // "drag frames do not recompose" contract above holds.
+                        .layout { measurable, constraints ->
+                            val visiblePx = (Hpx - anim.value).roundToInt().coerceAtLeast(0)
+                            val clamped = (visiblePx - listTop.roundToPx())
+                                .coerceAtLeast(120.dp.roundToPx())
+                                .coerceAtMost(constraints.maxHeight)
+                            val placeable = measurable.measure(
+                                constraints.copy(minHeight = 0, maxHeight = clamped)
+                            )
+                            layout(placeable.width, placeable.height) {
+                                placeable.place(0, 0)
+                            }
+                        }
                 ) {
                     when {
                         isLoading -> {
@@ -912,8 +967,12 @@ fun EpisodeDrawer(
                                             }
                                         )
 
-                                        // Remaining Episodes Chip (when some episodes are already downloaded/queued)
-                                        if (downloadedOrQueuedUrls.isNotEmpty() && remainingEpisodes.isNotEmpty()) {
+                                        // Remaining Episodes Chip (when some episodes are already
+                                        // completed or in flight). FAILED episodes count as
+                                        // Remaining, so they are re-downloadable from here.
+                                        if ((completedUrls.isNotEmpty() || activeOrQueuedUrls.isNotEmpty()) &&
+                                            remainingEpisodes.isNotEmpty()
+                                        ) {
                                             val isRemainingSelected = remainingEpisodes.all { it.url in selectedUrls }
                                             DrawerChip(
                                                 label = "Remaining (${remainingEpisodes.size})",
@@ -1024,83 +1083,6 @@ fun EpisodeDrawer(
                                     }
                                 }
 
-                                // ── PINNED DOWNLOAD CTA BAR (100% visible immediately in half-screen mode) ──
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(start = gutter, end = gutter, bottom = 8.dp),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text(
-                                        text = buildAnnotatedString {
-                                            append("Selected ")
-                                            withStyle(SpanStyle(color = pal.textPrimary, fontWeight = FontWeight.ExtraBold)) {
-                                                append("$uniqueSelectedCount episode${if (uniqueSelectedCount == 1) "" else "s"}")
-                                            }
-                                            selectedSizeLabel?.let { append(" · $it") }
-                                        },
-                                        fontSize = 12.5.sp,
-                                        color = pal.textSub,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                        modifier = Modifier.weight(1f, fill = false)
-                                    )
-
-                                    Spacer(modifier = Modifier.width(10.dp))
-
-                                    val queueSrc = remember { MutableInteractionSource() }
-                                    val isDownloadAll = uniqueSelectedCount == 0
-                                    val ctaLabel = when {
-                                        isDownloadAll && isSingleMovie -> "⬇ Download Movie"
-                                        isDownloadAll -> "⬇ Download All (${episodes.size})"
-                                        else -> "⬇ Download Selected ($uniqueSelectedCount)"
-                                    }
-
-                                    Button(
-                                        onClick = {
-                                            val uniqueCount = selectedEpisodes.distinctBy { it.url }.size
-                                            pendingForceAll = uniqueCount == 0
-                                            when {
-                                                pendingForceAll ->
-                                                    if (episodes.distinctBy { it.url }.size > 10) showBatchConfirmation = true
-                                                    else enqueueSelected(forceAll = true)
-                                                uniqueCount > 10 -> showBatchConfirmation = true
-                                                else -> enqueueSelected()
-                                            }
-                                        },
-                                        enabled = !isEnqueuing && !enqueued,
-                                        interactionSource = queueSrc,
-                                        modifier = Modifier
-                                            .height(38.dp)
-                                            .pressScale(queueSrc),
-                                        colors = ButtonDefaults.buttonColors(
-                                            containerColor = pal.textPrimary,
-                                            contentColor = pal.chipInk,
-                                            disabledContainerColor = pal.textPrimary.copy(alpha = 0.35f),
-                                            disabledContentColor = pal.chipInk.copy(alpha = 0.60f)
-                                        ),
-                                        shape = RoundedCornerShape(Radius.pill),
-                                        contentPadding = PaddingValues(horizontal = 16.dp)
-                                    ) {
-                                        if (isEnqueuing) {
-                                            CircularProgressIndicator(
-                                                modifier = Modifier.size(14.dp),
-                                                strokeWidth = 2.dp,
-                                                color = pal.chipInk
-                                            )
-                                            Spacer(modifier = Modifier.width(6.dp))
-                                            Text("Queueing...", fontSize = 12.sp, fontWeight = FontWeight.ExtraBold)
-                                        } else {
-                                            Text(
-                                                text = ctaLabel,
-                                                fontSize = 12.sp,
-                                                fontWeight = FontWeight.ExtraBold
-                                            )
-                                        }
-                                    }
-                                }
-
                                 LazyColumn(
                                     state = listState,
                                     modifier = Modifier
@@ -1110,7 +1092,10 @@ fun EpisodeDrawer(
                                     contentPadding = PaddingValues(
                                         start = gutter,
                                         end = gutter,
-                                        bottom = 24.dp + navBottomDp
+                                        // The docked footer below owns the nav-bar
+                                        // inset now; the list just needs breathing
+                                        // room above the footer hairline.
+                                        bottom = 12.dp
                                     )
                                 ) {
                                     // ── SEASON SLABS + GROUPED INSET CONTAINERS
@@ -1156,7 +1141,7 @@ fun EpisodeDrawer(
                                                 key = { i, ep -> "season-$season-${ep.url}|$i" }
                                             ) { i, ep ->
                                                 val isSelected = ep.url in selectedUrls
-                                                val isDownloaded = ep.url in downloadedOrQueuedUrls
+                                                val isDownloaded = ep.url in completedUrls
                                                 EpisodeRow(
                                                     episode = ep,
                                                     isSelected = isSelected,
@@ -1205,6 +1190,101 @@ fun EpisodeDrawer(
                                                     groupIndex = i,
                                                     groupSize = seasonEpisodes.size,
                                                     groupColor = pal.group
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // ── BOTTOM-DOCKED ACTION FOOTER (handover fix, 2026-10)
+                                //    The CTA used to sit ABOVE the list while the list's
+                                //    viewport ran off-screen at the HALF detent. Now the
+                                //    list (weight 1f) ends at the clamped visible bottom
+                                //    and this footer is the last child — a thumb-reach
+                                //    target in BOTH detents. It owns the nav-bar inset. ──
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .background(pal.card)
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(1.dp)
+                                            .background(pal.hairline)
+                                    )
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .navigationBarsPadding()
+                                            .padding(start = gutter, end = gutter, top = 8.dp, bottom = 8.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = buildAnnotatedString {
+                                                append("Selected ")
+                                                withStyle(SpanStyle(color = pal.textPrimary, fontWeight = FontWeight.ExtraBold)) {
+                                                    append("$uniqueSelectedCount episode${if (uniqueSelectedCount == 1) "" else "s"}")
+                                                }
+                                                selectedSizeLabel?.let { append(" · $it") }
+                                            },
+                                            fontSize = 12.5.sp,
+                                            color = pal.textSub,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.weight(1f, fill = false)
+                                        )
+
+                                        Spacer(modifier = Modifier.width(10.dp))
+
+                                        val queueSrc = remember { MutableInteractionSource() }
+                                        val isDownloadAll = uniqueSelectedCount == 0
+                                        val ctaLabel = when {
+                                            isDownloadAll && isSingleMovie -> "⬇ Download Movie"
+                                            isDownloadAll -> "⬇ Download All (${episodes.size})"
+                                            else -> "⬇ Download Selected ($uniqueSelectedCount)"
+                                        }
+
+                                        Button(
+                                            onClick = {
+                                                val uniqueCount = selectedEpisodes.distinctBy { it.url }.size
+                                                pendingForceAll = uniqueCount == 0
+                                                when {
+                                                    pendingForceAll ->
+                                                        if (episodes.distinctBy { it.url }.size > 10) showBatchConfirmation = true
+                                                        else enqueueSelected(forceAll = true)
+                                                    uniqueCount > 10 -> showBatchConfirmation = true
+                                                    else -> enqueueSelected()
+                                                }
+                                            },
+                                            enabled = !isEnqueuing && !enqueued,
+                                            interactionSource = queueSrc,
+                                            modifier = Modifier
+                                                .height(38.dp)
+                                                .pressScale(queueSrc),
+                                            colors = ButtonDefaults.buttonColors(
+                                                containerColor = pal.textPrimary,
+                                                contentColor = pal.chipInk,
+                                                disabledContainerColor = pal.textPrimary.copy(alpha = 0.35f),
+                                                disabledContentColor = pal.chipInk.copy(alpha = 0.60f)
+                                            ),
+                                            shape = RoundedCornerShape(Radius.pill),
+                                            contentPadding = PaddingValues(horizontal = 16.dp)
+                                        ) {
+                                            if (isEnqueuing) {
+                                                CircularProgressIndicator(
+                                                    modifier = Modifier.size(14.dp),
+                                                    strokeWidth = 2.dp,
+                                                    color = pal.chipInk
+                                                )
+                                                Spacer(modifier = Modifier.width(6.dp))
+                                                Text("Queueing...", fontSize = 12.sp, fontWeight = FontWeight.ExtraBold)
+                                            } else {
+                                                Text(
+                                                    text = ctaLabel,
+                                                    fontSize = 12.sp,
+                                                    fontWeight = FontWeight.ExtraBold
                                                 )
                                             }
                                         }
@@ -1387,13 +1467,17 @@ fun EpisodeRow(
                 }
             }
 
-            // 24dp info circle (CONTRACT) — details preview toggle.
+            // 24dp info circle (CONTRACT) — details preview toggle. The glyph
+            // "i" is its only child, so the label rides in semantics explicitly.
             Box(
                 modifier = Modifier
                     .size(24.dp)
                     .clip(CircleShape)
                     .border(1.dp, if (expanded) pal.textSub else pal.hairline, CircleShape)
-                    .clickable { expanded = !expanded },
+                    .clickable { expanded = !expanded }
+                    .semantics {
+                        contentDescription = if (expanded) "Hide episode details" else "Episode details"
+                    },
                 contentAlignment = Alignment.Center
             ) {
                 Text(
@@ -1405,27 +1489,11 @@ fun EpisodeRow(
                 )
             }
 
-            // Direct 1-Tap Download Button on row
-            val dlSrc = remember { MutableInteractionSource() }
-            Box(
-                modifier = Modifier
-                    .size(34.dp)
-                    .clip(CircleShape)
-                    .background(pal.textPrimary.copy(alpha = 0.08f))
-                    .clickable(
-                        interactionSource = dlSrc,
-                        indication = null,
-                        onClick = onDownloadSingle
-                    ),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = Icons.Rounded.Download,
-                    contentDescription = "Download episode",
-                    tint = pal.textPrimary,
-                    modifier = Modifier.size(17.dp)
-                )
-            }
+            // (The 34dp 1-tap download circle retired 2026-10: it sat between
+            // the ℹ️ toggle and the checkbox, and a mis-tap launched a silent
+            // single download which immediately dismissed the whole drawer.
+            // Single-episode download still lives in the ℹ️ panel below;
+            // deliberate flows go through selection + the docked CTA.)
 
             // Checkbox indicator with high contrast in both Light and Dark mode
             Box(
@@ -1439,13 +1507,21 @@ fun EpisodeRow(
                             Modifier.border(1.5.dp, pal.textPrimary.copy(alpha = 0.45f), RoundedCornerShape(7.dp))
                         }
                     )
-                    .clickable(onClick = onToggle),
+                    // toggleable, not clickable: the tick icon only exists when
+                    // checked, so the unchecked state had no semantics node at
+                    // all. The checkbox role + checked state now ride in the
+                    // semantics for TalkBack.
+                    .toggleable(
+                        value = isSelected,
+                        role = Role.Checkbox,
+                        onValueChange = { onToggle() }
+                    ),
                 contentAlignment = Alignment.Center
             ) {
                 if (isSelected) {
                     Icon(
                         imageVector = Icons.Rounded.Check,
-                        contentDescription = if (isSelected) "Selected" else "Not selected",
+                        contentDescription = null,
                         tint = pal.chipInk,
                         modifier = Modifier.size(14.dp)
                     )
@@ -1900,11 +1976,10 @@ private fun sheetPalette(isDark: Boolean): SheetPalette =
     if (isDark) DarkSheetPalette else LightSheetPalette
 
 // Over-band constants: the art band is theme-independent dark IMAGERY, so the
-// header's poster well / accent / hairlines keep the dark values in BOTH
-// themes — light-theme text on the dark band must stay light.
+// header's poster well / hairlines keep the dark values in BOTH themes —
+// light-theme text on the dark band must stay light.
 private val BandHairline = Color(0x12FFFFFF)
 private val BandPosterWell = Color(0xFF1E1E26)   // §1.4 fallback-art well
-private val BandAccent = Color(0xFF4FB3D9)       // initials on the poster well
 
 /** §2.5 grouped-inset row shape: first row rounds its top corners, last row
  *  its bottom — interior rows stay square so the block reads as ONE surface

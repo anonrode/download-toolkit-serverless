@@ -86,3 +86,52 @@ after any edit run the local static gate: `python scripts/verify_kotlin_syntax.p
 *Two additional investigator passes (app-wide wiring + subsystems) are still running; if they
 surface anything that interacts with these files, an addendum will follow. Nothing above depends
 on them.*
+
+---
+
+## D. EXECUTED (2026-10-18) — what actually changed, and the deviations from the vetted spec
+
+All items of Sections A–C are implemented EXCEPT the deliberate deviations below. Post-batch gates:
+Kotlin syntax gate (now covering every edited file — 49 targets) clean; adversarial 134/134;
+Nollywood sim 18/18. No local gradle (CI-only compile); the commit is local, no push (the
+maintainer decides when CI runs).
+
+Deviations (with reasons — per the standing "state the reason you went against the directive" rule):
+
+1. **§3 status-bar:** implemented ONLY the `!AnonTheme.colors.isDark` icon flip. No `fullTopPx` /
+   inset change — the header already insets via `artTop` and the grip fades out at FULL; adding an
+   offset would double-inset (vetting verdict #9, WRONG as stated).
+2. **§3.3 palette:** `DarkSheetPalette` was ALREADY OLED (bg `#0B0B0E`, sunk/card/group
+   `#141419`) — nothing to change there. Only the art-band gradient (`#3A4254→#1B2029` →
+   `#1C1C24→#0B0B0E`) and its scrim (`#0B0E14` → `#0B0B0E`) were actually navy.
+3. **§3.3 header title:** the vet's "use `pal.textPrimary`" suggestion would paint LIGHT-theme
+   dark ink (`#0F1115`) on the theme-independent DARK art band — the exact invisibility the
+   hardcoded `#F4F4F6` avoids (see the file's own over-band doctrine at the palette constants).
+   Kept the light ink; the reason is now documented inline.
+4. **§3.3 poster fallback:** used `PosterFallbackWell` (shared well) instead of
+   `PosterImageOrFallback` — the existing keyed `AsyncImage` (memoryCacheKey reuse) is a
+   deliberate perf contract; swapping the whole image path would drop it. The 2-letter glyph is
+   gone either way.
+5. **§4.2 (shelf / empty guard):** NOT touched — it is already
+   `filteredGroups.isEmpty() && visibleShelf.isEmpty()` (verdict #18). Verified only.
+6. **§4.3 (chip count):** NOT "fixed" — the claim was WRONG (#19): the chip count and the filter
+   predicate already agree (both include QUEUED). The smaller real inconsistency
+   (`stats.active` excludes QUEUED and feeds the header meta + nav badge) was left as-is and
+   documented — "active = actively transferring" is a legitimate reading. Relabel or align on
+   request.
+7. **Optional "Queued" pill** in EpisodeRow skipped (not in the verified spec; new UI surface).
+8. **Extra verified fixes folded in** (all from the vet's corroborated findings):
+   - Remaining-chip condition + auto-select now ride the completed/in-flight split; FAILED counts
+     as Remaining (re-downloadable).
+   - Downloads `seriesRemaining` no longer decrements on FAILED tasks.
+   - QuickShareActivity's dual pref write normalized to `engine.setInstantSocial(...)` only.
+   - Shelf tiles gained `semantics { onClick / onLongClick }` (TalkBack previously could not
+     activate them at all).
+   - `SettingsState.refreshFromEngine()` + ON_RESUME call — the stale-snapshot clobber of
+     `pref_instant_social` is closed.
+   - Cleanup: `BandAccent` + `navBottomDp` removed (now dead), Explorer `genres` dead val +
+     3 unused imports removed (`TILE_COLORS`/`tileColor` KEPT — the new card uses them, mirroring
+     TrendingCard), HomeScreen genre-tiles comment corrected (2-per-row reality), Downloads
+     FilterChip ink + genre tiles + both hero bases + View-More tile tokenized to
+     `SurfaceCard`/`BorderHairline`/`BackgroundDark`.
+

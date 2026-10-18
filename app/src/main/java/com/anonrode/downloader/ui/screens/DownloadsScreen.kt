@@ -43,6 +43,8 @@ import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.onLongClick
 import androidx.compose.ui.semantics.progressBarRangeInfo
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.buildAnnotatedString
@@ -360,7 +362,13 @@ fun DownloadsScreen(
             .filter { it.seriesUrl.isNotBlank() }
             .groupBy { it.showTitle }
         byShow.mapValues { (_, items) ->
-            (items.maxOf { it.seriesTotal } - items.size).coerceAtLeast(0)
+            // Only COMPLETED or in-flight tasks count against the remaining
+            // total — a FAILED task used to decrement this chip, so a series
+            // with failures read "0 left" while episodes were still missing.
+            // FAILED rows now stay counted as remaining (mirrors the drawer's
+            // Remaining semantics).
+            val doneOrInFlight = items.count { it.status != TaskStatus.FAILED }
+            (items.maxOf { it.seriesTotal } - doneOrInFlight).coerceAtLeast(0)
         }.filterValues { it > 0 }
     }
     val seriesInfo = remember(structureSig) {
@@ -1285,12 +1293,19 @@ private fun ActivityRow(
         modifier = Modifier
             .fillMaxWidth()
             .clickable(
-                enabled = isDone || isFailed,
-                onClickLabel = if (isFailed) "Retry" else "Play"
+                // PAUSED joined the clickable set (2026-10): tapping a paused
+                // card body used to do nothing. engine.retry() is the single
+                // sanctioned resume path — it clears the user-pause mark.
+                enabled = isDone || isFailed || isPaused,
+                onClickLabel = when {
+                    isDone -> "Play"
+                    isPaused -> "Resume"
+                    else -> "Retry"
+                }
             ) {
                 when {
-                    isFailed -> onRetry()
                     isDone -> onPlay()
+                    isPaused || isFailed -> onRetry()
                 }
             }
     ) {
@@ -1859,6 +1874,13 @@ private fun SocialShelfTile(
                         onTap = { onPlay() },
                         onLongPress = { onOpenActions() }
                     )
+                }
+                // Raw pointerInput carries no semantics — TalkBack could not
+                // activate this tile at all. These actions mirror the gestures
+                // 1:1 so the Play/long-press flows are reachable.
+                .semantics {
+                    onClick(label = "Play") { onPlay(); true }
+                    onLongClick(label = "More actions") { onOpenActions(); true }
                 },
             contentAlignment = Alignment.Center
         ) {

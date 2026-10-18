@@ -17,7 +17,7 @@ data class AppSettings(
     val stallTimeoutSec: Int = 60,
     val magnetMaxAttempts: Int = 3,
     val ytdlpMaxAttempts: Int = 3,
-    val hlsFragmentConcurrency: Int = 8,
+    val hlsFragmentConcurrency: Int = 16,
     val globalSpeedLimitKbs: Int = 0,       // 0 = unlimited
     val torrentPeers: Int = -1,             // -1 = auto (RAM tier)
     val torrentPrivacyMode: Boolean = false, // qBittorrent anonymous-mode lessons

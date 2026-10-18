@@ -21,7 +21,8 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.anonrode.downloader.ui.theme.AccentViolet
+import com.anonrode.downloader.ui.theme.AccentPrimary
+import com.anonrode.downloader.ui.theme.BackgroundDark
 import com.anonrode.downloader.ui.theme.BorderHairline
 import com.anonrode.downloader.ui.theme.Radius
 import com.anonrode.downloader.ui.theme.Spacing
@@ -30,7 +31,8 @@ import com.anonrode.downloader.ui.theme.TextSecondary
 
 /** Equal-width quality selector chips shared by the social downloader and
  *  quick-share sheets, so both entry points offer the same 48dp targets,
- *  corner radius and selection treatment (violet = selected state). */
+ *  corner radius and selection treatment — the SAME accent-fill language as
+ *  SegmentBar (accent fill + dark ink = selected). */
 @Composable
 fun QualityChipRow(
     options: List<String>,
@@ -44,7 +46,7 @@ fun QualityChipRow(
     ) {
         options.forEach { option ->
             val isSelected = option.equals(selected, ignoreCase = true)
-            // selectable(), not clickable(): the violet fill + bold text are
+            // selectable(), not clickable(): the accent fill + bold text are
             // VISUAL-only selection signals — TalkBack heard "button" for both
             // the selected and the unselected chip. RadioButton role + the
             // selected state now ride in the semantics.
@@ -54,12 +56,12 @@ fun QualityChipRow(
                     .height(48.dp)
                     .clip(RoundedCornerShape(Radius.md))
                     .background(
-                        if (isSelected) AccentViolet else SurfaceCard,
+                        if (isSelected) AccentPrimary else SurfaceCard,
                         RoundedCornerShape(Radius.md)
                     )
                     .border(
                         width = 1.dp,
-                        color = if (isSelected) AccentViolet else BorderHairline,
+                        color = if (isSelected) AccentPrimary else BorderHairline,
                         shape = RoundedCornerShape(Radius.md)
                     )
                     .selectable(
@@ -73,7 +75,7 @@ fun QualityChipRow(
                     text = option,
                     fontSize = Type.body.fontSize,
                     fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                    color = if (isSelected) Color.White else TextSecondary
+                    color = if (isSelected) BackgroundDark else TextSecondary
                 )
             }
         }
