@@ -1,0 +1,311 @@
+# FINAL BUILD — MASTER EXECUTION PLAN
+**Target release: v3.3.0 (versionCode 331) — platform surfaces + hardening + every audit finding, in ONE build.**
+Status: PLAN — awaiting the maintainer's "proceed". Created 2026-10-18. Owner: main agent (orchestrator).
+Companion docs: `scratch/app_platform_features_design.md` (platform research), `scratch/audit_app_subsystems.md`,
+`scratch/audit_app_wiring.md`, `scratch/activity_log_audit.md`, `docs/UI_OVERHAUL_DIRECTIVE_VETTED.md`.
+
+---
+
+## 0. Operating protocol (read first)
+
+- **No local Gradle, ever.** Static gates locally (syntax gate, Python sims, adversarial suite, payload dry-run).
+  The ONE real compile is CI at the end (push → `build-apk.yml`), and fixing its errors is part of this plan.
+- **Subordinates make the edits; I review every phase boundary.** Agents never commit, never push, never run Gradle.
+- **Python-first for new logic:** every new pure-logic block (gate evaluation, version compare, frequency caps,
+  engagement scheduling math, payload parsing) is simulated in `scratch/` BEFORE/ALONGSIDE the Kotlin port.
+- **Test contracts are frozen:** `DownloadCardStateTest`, `DownloadStatusStyleTest`, `DownloadsSorterTest`,
+  `SplashMotionTest`, `SubtitleAutoPickTest`, `RegexEngineCompatTest` keep their pinned symbols/strings.
+- **Charter rules stand:** zero AI attribution anywhere; never delete/replace `.agents/AGENTS.md`; live probes
+  ≤1024 bytes; VPS is a static-serve/telemetry sink only; data budget 300 MB (currently ~30 MB used).
+- **Every phase ends with:** syntax gate clean + agent report + my line-level diff review + explicit "phase N
+  approved" note appended to §14 of this document.
+
+---
+
+## 1. Mission
+
+One final build that ships, together:
+1. **Remote messaging he can send at will** — arbitrary title/body announcements (popup, sheet or banner),
+   dismissible, percent-rollable, OTA-controlled, no APK rebuild to send.
+2. **Soft update notice + true in-app update flow** — "update available" → download in-app → SHA-256 verified
+   → install (FileProvider + `REQUEST_INSTALL_PACKAGES`), with release-page fallback.
+3. **Force-obsolete gate** — a message that forces users onto the new version (soft-warn and hard modes,
+   brick-safety rails, escape hatch), fully remote.
+4. **Re-engagement** — "it's been a while" notifications + welcome-back in-app card, remote-controlled.
+5. **Ads readiness** — slot architecture + house ads (which double as another arbitrary-message surface),
+   OTA toggled, zero ad-SDK lock-in.
+6. **Anti-decompile / anti-mod mitigation** — realistic layered hardening (details §5), honestly documented.
+7. **Every open audit finding fixed** — subsystems F-01..F-15, wiring P1/P2s, log-audit still-reachable bugs.
+
+---
+
+## 2. Decisions (the 10 open questions, answered — and additional senior calls)
+
+| # | Question | Decision |
+|---|---|---|
+| 1 | Retroactive scope of gate/announcements | **Ship the groundwork NOW in v3.3.0** — it is the first version that can ever be gated; fleet-forward accepted and documented. |
+| 2 | `REQUEST_INSTALL_PACKAGES` | **YES, add it.** Default action = in-app install (verified APK); secondary = open release page. Documented one-time "allow installs from this source" UX. |
+| 3 | Gate aggressiveness | **Default = soft** (dismissible, 24h snooze). Hard mode only when the payload explicitly sets `force.mode:"hard"`. **`escapeHatch: true` is the house default** (§4.5 rails) — never a brick. |
+| 4 | APK hosting | **FULL dual hosting — not optional.** BOTH GitHub Releases AND the VPS static mirror ship for real: `scripts/publish_apk.py` mirrors `arm64-v8a` + `universal` APKs + a `latest.json` (version, size, SHA-256) onto the box; the `update` payload carries BOTH source bases; `UpdateManager` walks sources in order (VPS first — it is the fast, unmetered pipe; GitHub fallback) with the **same SHA-256 pin from the signed payload on every attempt**, so neither source can serve a wrong/fake binary. Mirroring is a release-day step, verified by re-downloading from both sources. |
+| 5 | Sync cadence | Keep 24h floor; **add resume-triggered refresh when >6h since last sync** (small `AnonApp`/lifecycle change) so announcements/gates land timely. |
+| 6 | FCM | **NO.** Confirmed — no GMS dependency; local notifications + AlarmManager cover re-engagement. |
+| 7 | Ads network | **Readiness + house ads now; AdMob/AppLovin deferred.** Tripwire documented (revisit only if a store listing exists or the maintainer explicitly accepts GMS + AD_ID + EEA consent + app-ads.txt gap). |
+| 8 | Release-key hygiene | CI already REFUSES unsigned releases (`build-apk.yml` signing guard) — good. Release notes will state: debug-build users must uninstall/reinstall to move to signed builds. |
+| 9 | Copy ownership / caps | Maintainer writes all texts; validator caps **title ≤80 chars, body ≤300 chars**; templates in `docs/PLATFORM_OPERATIONS.md`. |
+| 10 | Telemetry additions | **YES** — new event types on the existing encrypted sink, same caps/aggregate-only discipline: `announcement_shown/dismissed`, `update_flow`, `gate_shown`, `engagement_sent`, `tamper_detected`, `ad_impression` (id-only). |
+| 11 | Version | **v3.3.0 / versionCode 331** (current repo: 330 / 3.2.11). Tag `v3.3.0` at release. |
+| 12 | Queue order (F-12) | Comment says FIFO, `addFirst`+`firstOrNull` makes **LIFO**. Senior call: **keep behavior, fix the comment** + one unit test pinning current order — changing scheduler semantics under a no-compile constraint is unjustified risk. |
+| 13 | F-04 payload `sites` reserved fields | Do NOT fake readers. Mark the unread fields **"reserved"** in the ops docs + payload validator emits an INFO note; remove nothing (harmless data). |
+| 14 | F-03 `urlTemplates` | **Wire it for real**: `NepuProvider` reads `getUrlTemplate("nepu")` with the hardcoded shape as fallback. |
+| 15 | F-08 `AppSettings` duplicate | Collapse to a single source: player's `AppSettings.load().subtitleLanguage` migrates to a direct pref read helper; the data class shrinks to what is actually used (or is deleted if nothing remains). |
+
+---
+
+## 3. Workstream A — audit-fix backlog (owner / phase / exit criteria)
+
+### A1. Subsystems findings (`scratch/audit_app_subsystems.md`)
+
+| ID | Fix | Owner · Phase | Exit criteria |
+|---|---|---|---|
+| F-01 | Wire `debugLogging` → `DebugLog.setVerbose` (call at engine loadPreferences/saveAllSettings + an immediate apply) | S2 · P1 | Setting flips verbose live; `trace()` emits; default OFF in release |
+| F-02 | Call `NoSourceLedger.recordUnresolved` at the real no-source sites (resolver-empty/failover-exhausted paths) | S2 · P1 | Ledger records; 3 seeds still work; TTL/clear unchanged |
+| F-03 | `NepuProvider` uses `getUrlTemplate("nepu")` (fallback = current hardcode) — see Decision 14 | S2 · P1 | Payload edit changes the URL shape fleet-wide |
+| F-04 | Reserved-field INFO note in validator + docs table; no fake readers — see Decision 13 | S1 · P1 | Dry-run prints the note; ops doc lists reserved fields |
+| F-05 | Ship `flags` in the payload (families for the 4 new sections + `pipelines` shadow off) | S1 · P1 | Payload dry-run passes; flags parse; families gate (unit-tested) |
+| F-06 | Delete `providers/TmdbPosterResolver.kt` | S2 · P1 | Zero refs, builds (CI) |
+| F-07 | Remove `SiteProvider.requiresSingleSocket` | S2 · P1 | Zero refs |
+| F-08 | `AppSettings` consolidation — see Decision 15 | S2 · P1 | One settings source; player still reads sub language |
+| F-09 | `TaskRuntimeRegistry.forget` on the 4 terminal-FAILED paths + startTask guard-fail | S2 · P1 | Every terminal path forgets; sim proves pairing |
+| F-10 | Doc §9 "capped to 1" → mark superseded by §12 (audit builder text) | Me · P3 | Doc regenerated without the stale line |
+| F-11/F-14/F-15 | Informational — no change (recorded) | — | — |
+| F-12 | Queue-order comment fix + pinned test — see Decision 12 | S2 · P1 | Comment matches code; test documents LIFO |
+| F-13 | Syntax gate covers ALL main Kotlin files (120) + all tests; add Kotlin unit tests: `RulesFlags`, `ContentPolicy` parse, rev monotonicity, `NollywoodFilter`, `UpdatePolicy` evaluation | S1 · P1 (gate+parser tests) / S3 · P2 (filter+update tests) | Gate runs 120+54 files; new tests exist (run in CI) |
+
+### A2. Wiring findings (`scratch/audit_app_wiring.md`)
+
+| Finding | Fix | Owner · Phase |
+|---|---|---|
+| P1 drawer preselect-remaining never passed | **DONE (01c28ca)** | — |
+| P1 clipboard toggle inert | **DONE (01c28ca)** | — |
+| P1 settings snapshot clobber | **DONE (d032de7)** | — |
+| `MainActivity.handleShareIntent` unreachable | Delete the dead method (QuickShareActivity is the real share surface) | S3 · P1 |
+| "Parallel sockets" has no UI control | Add the missing control in the Settings → Network drawer (engine field + pref already wired) | S3 · P1 |
+| `cardStatusDetail` dead + lying KDoc | Delete; fix KDoc references (test files don't touch it — verified) | S3 · P1 |
+| `downloadEpisode`/`downloadAllEpisodes` dead | Delete both | S3 · P1 |
+| Four definitions of "active" in Downloads | Unify to ONE helper in `DownloadsSorter` (chips/header/badge); keep pinned test strings intact | S3 · P1 |
+| Dead resources (`ic_anon_mark`, `@color/black|white`, `app_name` fallback, `pref_window_brightness` pair) | Remove after a zero-ref grep proof | S3 · P1 |
+| Debug/release coexistence | Verify `app/build.gradle`: add `applicationIdSuffix ".debug"` to the debug buildType if absent (debug + signed release install side-by-side; FileProvider authority is `${applicationId}`-scoped — verify); release notes carry the Decision-8 uninstall line for anyone on an old debug-signed build | S4 · P1 |
+| Genre-tile pipeline orphan | **DONE in d032de7** (live fallback) | — |
+| 41-field `HomeUiState` orphan table | Re-audit after P1 fixes; delete orphan fields only with zero-reader proof | S3 · P2 |
+
+### A3. Activity-log still-reachable bugs (`scratch/activity_log_audit.md`)
+
+| Bug | Fix | Owner · Phase |
+|---|---|---|
+| `UpdateChecker.kt:49` points at the dead `:8000` mirror | Repoint to `:80` (same host) **and unify with the new `UpdateManager`** so there is exactly ONE update path | S2 (repoint) / S4 (unify) · P1/P2 |
+| Cold-start `data.vidsrcme.ru` ConnectException wave (~30/cold start) | Seed into the compiled dead-host list + `knownDead` payload entry; verify the in-session dead-flag persists across cold starts (pref-backed flag) | S2 · P1 |
+| HLS branch accepts a 1-byte `.m3u8` terminal | Extend the terminal-size gate (1024-byte class) to the HLS branch + sim | S2 · P1 |
+| Watchdog-kill / CanceledException / stub / linkage classes | Already fixed in un-pushed tree — record as regression-tested via the audit report reference | — |
+
+---
+
+## 4. Workstream B — platform surfaces (the part that makes messages/updates/ads real)
+
+### 4.1 Payload schema (exact; added to `scraper_rules.json`, validated in lockstep)
+
+```json
+"announcements": [
+  { "id": "2026-10-18-a", "title": "≤80 chars", "body": "≤300 chars",
+    "mode": "dialog|sheet|banner", "action": "none|url|update",
+    "actionLabel": "Update now", "actionUrl": "https://…",
+    "oncePer": "id|rev", "minApp": 0, "expiresAtMs": 0 }
+],
+"update": {
+  "latestVersionName": "3.3.0", "latestVersionCode": 331,
+  "sources": [
+    { "kind": "vps",    "base": "http://68.155.146.145/apk/" },
+    { "kind": "github", "base": "https://github.com/anonrode/download-toolkit-serverless/releases/download/v3.3.0/" }
+  ],
+  "apkArm64": "AnonDownloader-3.3.0-arm64-v8a.apk",
+  "apkUniversal": "AnonDownloader-3.3.0-universal.apk",
+  "sha256Arm64": "<hex>", "sha256Universal": "<hex>",
+  "message": "≤300 chars",
+  "force": { "enabled": false, "minSupportedVersionCode": 0, "mode": "soft|hard",
+             "snoozeHours": 24, "escapeHatch": true }
+},
+"ads": { "enabled": false, "provider": "house|none", "placements": ["downloads_shelf","home_footer"],
+         "frequencyPerDay": 2,
+         "house": { "title": "…", "body": "…", "actionLabel": "…", "actionUrl": "…", "id": "h-1" } },
+"engagement": { "enabled": false, "inactiveDays": 7, "cooldownDays": 14,
+                "title": "…", "body": "…", "welcomeBack": true }
+```
+
+Rules: sections absent = feature OFF (pure pass-through); unknown fields rejected by the validator (existing
+discipline); `flags.<family>` (announcements/update/ads/engagement) gate percent/shadow/kill like every family.
+
+### 4.2 Client modules (new; owners)
+
+| Module | Purpose | Owner |
+|---|---|---|
+| `DynamicRulesManager` extensions | Parse + typed getters for the 4 sections (`getAnnouncements()`, `getUpdatePolicy()`, `getAdsConfig()`, `getEngagementConfig()`) | S1 · P1 |
+| `RulesFlags` + `encrypt_rules.py` | 4 new family ids in lockstep (client list == validator list) | S1 · P1 |
+| `update/UpdateManager.kt` | Version compare vs `BuildConfig.VERSION_CODE`; ABI pick; download to cache with progress; **SHA-256 verify against the payload pin on EVERY source attempt**; source-walk (VPS → GitHub); FileProvider URI; `ACTION_VIEW` install intent; unknown-sources redirect; release-page fallback; telemetry `update_flow` | S4 · P2 |
+| `update/AnnouncementManager.kt` | Active-announcement selection (oncePer id/rev, minApp, expiry), shown-store (prefs) | S1 · P1 (logic) + S3 · P2 (UI) |
+| `update/EngagementScheduler.kt` | Last-open stamp; `AlarmManager` (inexact, `setInexactRepeating`-free: one-shot + re-arm); boot receiver re-arm; channel (LOW importance); dedupe cooldown | S4 · P2 |
+| `util/IntegrityCheck.kt` | Runtime signing-cert SHA-256 vs payload pinned expected; verdict → telemetry `tamper_detected` (+ Settings diagnostics row) | S4 · P1 |
+| `ui/components/AnnouncementHost.kt` | Renders dialog/sheet/banner per payload; dismiss/snooze/action | S3 · P2 |
+| `ui/components/UpdateGate.kt` | Soft card / hard dialog with `Update now` (in-app install) + escape hatch; never renders if payload evaluation is stale (>14 days) | S3 · P2 |
+| `ui/components/AdSlot.kt` + house provider | Slot composable + `HouseAd` render (uses `PosterFallbackWell`-grade styling); no ad SDK | S3 · P2 |
+
+### 4.3 Integration points (file:line targets)
+
+- `AnonApp.kt` (OTA sync块): after each successful rules activation → IntegrityCheck.run + UpdateManager.refresh + AnnouncementManager.pick + EngagementScheduler.arm. Resume-refresh (>6h) hook (Decision 5).
+- `MainActivity.kt` root overlay: `AnnouncementHost` + `UpdateGate` above the Scaffold (same layer as existing modals).
+- `MainScaffold.kt`: banner-slot anchor for `mode:"banner"` announcements + `home_footer` ad slot anchor.
+- `DownloadsScreen.kt`: `downloads_shelf` ad slot (under the shelf row).
+- `SettingsSheet.kt` → About card: version row, "Check for updates" (calls UpdateManager manually), diagnostics rows (tamper verdict, last sync, rules rev).
+- `AndroidManifest.xml`: `REQUEST_INSTALL_PACKAGES`; `RECEIVE_BOOT_COMPLETED` + boot receiver for the engagement re-arm; engagement channel is runtime-created (no manifest change).
+
+### 4.4 "Any message I want" — the operational contract
+
+He writes plain JSON (or uses the templates in `docs/PLATFORM_OPERATIONS.md`), runs
+`python scripts/publish_rules.py --dry-run` (validator enforces caps + schema) then `--write-repo`
+and/or `--sync-box`, and the fleet picks it up on the next sync (≤24h, or on next resume >6h).
+Any of: announcement (3 display modes), house ad text, update message, force-update message.
+Kill switch for each surface = remove the section or `flags.<family>.enabled:false`.
+
+### 4.5 Brick-safety rails (non-negotiable)
+
+1. Hard gate NEVER renders when: payload older than 14 days, evaluation failed, or `minSupportedVersionCode` is 0.
+2. `escapeHatch: true` default = long-press the gate title 5× → "Continue anyway (not recommended)" → logs an
+   `gate_bypass` telemetry event (we SEE bypasses; abuse is measurable, not silent).
+3. The gate blocks UI only — background downloads continue (updates are not hostage to a slow download).
+4. Every new surface is percent-rollable via `flags` (5 → 25 → 100) with the existing telemetry as the watch signal.
+5. Rollback = republish the previous payload rev (existing mirror/rollback discipline).
+
+---
+
+## 5. Workstream C — anti-decompile / anti-mod mitigation (honest layering)
+
+| Layer | Change | Owner · Phase | Honest limit |
+|---|---|---|---|
+| R8 (release) | `minifyEnabled true`, `shrinkResources true`, `-repackageclasses`, `-allowaccessmodification`, full keep-rule audit (kotlinx.serialization plugin rules, okhttp/okio, coil, media3 consumer rules, jsoup, org.json) | S4 · P1 | Obfuscation raises cost, never prevents decompilation |
+| Secrets-in-code | Site URLs/selectors already live in the ENCRYPTED OTA payload (not in the APK) — document this as the primary IP shield; audit for any hardcoded selector leftovers | S2 · P1 | Embedded AES key in the client is extractable by a determined modder |
+| Runtime integrity | `IntegrityCheck` (signing-cert SHA-256 vs payload pin) → `tamper_detected` telemetry + Settings row | S4 · P1 | A patched app can lie; the value is that WE see repackages |
+| OTA signature | Already in place: payloads are ECDSA-signed (ROOT-1) and rev-monotonic — a modded client that ignores it gets nothing NEW from us; our lever is refusing to serve/fleet-gating by terra | S1 (verify) | Local-only |
+| Release-signing guard | CI already refuses debug-signed releases (verified in `build-apk.yml`) | — | — |
+| Manifest hygiene | `debuggable` false (release default), remove dead permissions if any, keep backup/log exclusions | S4 · P1 | — |
+| Play Integrity | **Rejected** (needs Play/GMS; sideloaded product) — documented in ops doc | — | — |
+
+**Documented verdict (goes in the ops doc):** sideloaded APKs can always be repackaged; our goal is cost +
+visibility + a server-side lever (signed payloads, version gates, tamper telemetry). Nothing here pretends
+to be DRM.
+
+---
+
+## 6. Workstream D — release engineering
+
+1. `versionCode 331` / `versionName "3.3.0"` (single edit, S4 · P3).
+2. **`CHANGELOG.md`** created (Keep-a-Changelog, this release's entries) — repo currently has none.
+3. **`README.md`** created (purpose, build via CI, release process, operations-doc link) — repo currently has none.
+4. Annotated tag `v3.3.0` on the release commit → CI `build-apk.yml` builds + publishes per-ABI release APKs.
+5. **Release day ops**: mirror the two APKs + `latest.json` to the VPS (`python scripts/publish_apk.py
+   --sync-box`), populate the `update` section (both source bases + SHA-256s), publish payload
+   (dry-run → write-repo → sync-box), flip `update`/`announcements` flags on. Mirroring verified by
+   re-downloading from BOTH sources and matching hashes against the payload pins.
+6. CI failure loop: I watch the run, fix red, re-push (each fix = normal commit, still no local gradle).
+
+---
+
+## 7. Workstream E — documentation deliverables
+
+- `docs/PLATFORM_OPERATIONS.md` (the "how I send messages / force updates" bible): payload recipes
+  (announcement/ad/house/update/force, copy-paste JSON), publish commands, rollback, caps table, flag rollouts,
+  brick-safety behavior, telemetry meanings, troubleshooting.
+- `docs/FINAL_BUILD_EXECUTION_PLAN.md` — this file (updated live: §14 log).
+- `CHANGELOG.md`, `README.md` (§6).
+- Audit doc: new Sections 16 (platform surfaces) + 17 (hardening) via the builder script.
+- Desktop refresh at the end: audit doc, ops doc, plan doc.
+
+---
+
+## 8. Roster & phase schedule (4 subordinates max, edit-capable, reporting per phase)
+
+| Sub | Owns (files) — never touches others' files in the same phase |
+|---|---|
+| **S1 — Rules/OTA plane** | `data/rules/*`, `scripts/encrypt_rules.py`, `scripts/publish_rules.py`, `scraper_rules.json` (local), payload tests |
+| **S2 — Engine/pipeline** | `engine/*`, `pipeline/*`, `providers/*`, `resolvers/*`, `util/DebugLog.kt`, `util/CachePaths*` as needed |
+| **S3 — UI surfaces** | `ui/*`, `viewmodel/MainViewModel.kt` (UI state only), `MainActivity.kt`, `AnonApp.kt` (UI-adjacent hooks only) |
+| **S4 — Hardening + update mechanics + mirroring + docs** | `app/build.gradle` (+debug appId hygiene), `proguard-rules.pro`, `AndroidManifest.xml`, `update/*` (new), `util/IntegrityCheck.kt`, `scripts/publish_apk.py` (new APK-mirror tool), `docs/PLATFORM_OPERATIONS.md`, CHANGELOG/README |
+
+**PHASE 1 — Foundation (no UI feature work):** S1 schema+flags+tests, S2 all Workstream-A fixes, S3 dead-code/
+resource/wiring cleanups + "About" row skeleton, S4 R8 config + IntegrityCheck + manifest prep.
+**→ my review gate: syntax gate (now all 120+54 files), sims, diff review, "phase 1 approved".**
+
+**PHASE 2 — Features:** S1 parser tests + adversarial additions (NN-6+), S3 all UI hosts (announcements, gate,
+ads, settings rows, engagement in-app), S4 UpdateManager + install flow + engagement scheduler + telemetry events,
+S2 any engine interplay (none expected beyond update-flow hooks).
+**→ my review gate: same + Python sims for new logic green + "phase 2 approved".**
+
+**PHASE 3 — Release:** S4 version bump + CHANGELOG/README, S1 payload republish dry-run, S3/S2 self-review
+passes, **me**: integration sweep, audit-doc rebuild, Desktop refresh, final full suite, commit → push →
+tag v3.3.0 → CI watch → fix loop → verify release artifacts → final report.
+
+---
+
+## 9. Verification matrix
+
+| Layer | What | When |
+|---|---|---|
+| Python sims (new) | `test_update_policy.py` (version compare, force rails, escape hatch, staleness), `test_announcement_pick.py` (oncePer/minApp/expiry/frequency), `test_engagement_math.py` (inactive window + cooldown), `test_ads_frequency.py`, `test_integrity_verdict.py` | P1/P2 |
+| Python sims (existing) | `adversarial_qa_audit.py` (+NN-6..), `test_nollywood_filter.py`, drop/probe/work-steal/zero-redo suites | every phase boundary |
+| Static | `verify_kotlin_syntax.py` expanded to ALL main+test files; zero-warning target | every phase boundary |
+| Payload | `publish_rules.py --dry-run` (validator incl. new caps + reserved-field notes) | P1, P3 |
+| Kotlin unit tests (new) | `RulesFlagsTest`, `ContentPolicyParseTest`, `NollywoodFilterTest`, `UpdatePolicyTest`, `QueueOrderTest` — executed by CI | CI (P3) |
+| Compile | CI `build-apk.yml` on push; fix-loop until green | P3 |
+| Live | none in this cycle (device testing is the maintainer's L1-L6 protocol) | post-release |
+
+---
+
+## 10. Review protocol (what I check at each phase boundary)
+
+1. `git status --short` + full `git diff` review of every file the phase touched (line-level; I re-read risky hunks).
+2. Gates re-run (matrix row 2+3); payload dry-run at P1/P3.
+3. Targeted READ of every integration point the phase claims (hosts actually hosted, hooks actually called).
+4. Cross-file contract check (S1's getters ↔ S3/S4 consumers; names, types, null-safety).
+5. Anything the phase couldn't do — recorded in §14 with the reason, not silently skipped.
+
+## 11. Release protocol (phase 3, exact)
+
+```
+git add <explicit paths>                         # never -A in a multi-writer window
+git commit -m "feat: platform surfaces (announcements/update/gate/engagement/ads), hardening, audit fixes" 
+git push origin master                           # WITHOUT [skip ci] — the compile IS the point now
+git tag -a v3.3.0 -m "v3.3.0 — platform surfaces + hardening" && git push origin v3.3.0
+# watch CI: gh run watch  (fix red → amend-fix commit → re-push; repeat until green)
+# verify release artifacts + notes on the GitHub Release; bump live via payload (docs §7)
+```
+Rollback: revert commit + republish previous payload rev (kill switches make code rollback rarely necessary).
+
+## 12. Risk register
+
+| Risk | Mitigation |
+|---|---|
+| R8 breaks reflection in release (worst case: CI-only discovery) | S4 writes keep-rules for every reflective lib; `-dontwarn` only with justification; CI is the gate |
+| Parallel agents touch the same file | Ownership matrix (§8); any shared file change is serialized through me |
+| No local compile: syntax slips | Syntax gate on all files + my line-level review + small diffs; CI is the final compiler |
+| Hard gate bricks someone | §4.5 rails (staleness, escape hatch, background downloads unaffected, percent rollout) |
+| Payload cap/negotiation drift | S1 owns validator lockstep; dry-run at every phase |
+
+## 13. Deferred with reasons (not silently skipped)
+
+- PackageInstaller session install (design §3.5) — later; `ACTION_VIEW` path is sufficient for v3.3.0.
+- AdMob/AppLovin adapters — Decision 7/IQ-7 tripwire.
+- FCM — Decision 6.
+- Play Integrity — §5 (not viable sideloaded).
+- VPS APK mirroring: **MOVED IN SCOPE** — both hosting sources ship in v3.3.0 (Decision 4).
+- Kotlin unit-test coverage for the entire legacy engine — ratchet beyond the new tests in A1/F-13.
+
+## 14. Execution log (append at every phase boundary)
+
+- 2026-10-18 — plan written; awaiting "proceed".
