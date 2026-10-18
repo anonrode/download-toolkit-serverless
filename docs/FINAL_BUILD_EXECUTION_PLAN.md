@@ -58,6 +58,7 @@ One final build that ships, together:
 | 13 | F-04 payload `sites` reserved fields | Do NOT fake readers. Mark the unread fields **"reserved"** in the ops docs + payload validator emits an INFO note; remove nothing (harmless data). |
 | 14 | F-03 `urlTemplates` | **Wire it for real**: `NepuProvider` reads `getUrlTemplate("nepu")` with the hardcoded shape as fallback. |
 | 15 | F-08 `AppSettings` duplicate | Collapse to a single source: player's `AppSettings.load().subtitleLanguage` migrates to a direct pref read helper; the data class shrinks to what is actually used (or is deleted if nothing remains). |
+| 16 | Future-capability pre-wiring | **Ship every future SDK/adapter DISABLED in v3.3.0** so later registration is an OTA/config flip wherever the vendor accepts runtime credentials (§4.6 honest matrix; AdMob manifest app-id = the one possible two-line rebuild). Cost accepted: +2–4 MB APK + GMS-inert code paths + visible AD_ID permission. |
 
 ---
 
@@ -183,6 +184,28 @@ Kill switch for each surface = remove the section or `flags.<family>.enabled:fal
 4. Every new surface is percent-rollable via `flags` (5 → 25 → 100) with the existing telemetry as the watch signal.
 5. Rollback = republish the previous payload rev (existing mirror/rollback discipline).
 
+### 4.6 Future-capability pre-wiring — "register later, activate by OTA" (honest matrix)
+
+Rule stated plainly: **OTA can ship CONFIG and CREDENTIALS, never CODE.** So v3.3.0 compiles every
+future SDK + adapter in, DISABLED, with every credential exposed as a payload field; activation later =
+payload edit only where the vendor accepts runtime credentials.
+
+| Capability | Ships in v3.3.0 (disabled) | Credential source later | Pure-OTA activation? |
+|---|---|---|---|
+| AppLovin | `applovin-sdk` + adapter; key = payload field | AppLovin dashboard SDK key (runtime API) | **YES — fully OTA** |
+| Unity Ads | `unity-ads` + adapter; gameId = payload field | Unity dashboard gameId (runtime API) | **YES — fully OTA** |
+| AdMob | `play-services-ads` + UMP adapter; unit IDs = payload fields | AdMob account: ad unit IDs (runtime strings) + **App ID** | **PARTIAL — honest:** current SDKs read the App ID from manifest meta-data (the old runtime app-id overload is deprecated). I verify against the pinned SDK version during implementation; if it is truly manifest-only, registration costs ONE two-line rebuild — every other AdMob field stays OTA |
+| FCM | `firebase-messaging` + registrar using **manual `FirebaseOptions` (deliberately NO google-services.json)** | Firebase project: apiKey/appId/senderId/projectId = payload fields | **YES — fully OTA** (the manual-options path is exactly why we skip the build-time file) |
+| Play Integrity | `play-integrity` + client attestor + VPS verify hook | Google Cloud project + Play Console link (server-side; not a client credential) | **PRE-WIRED, honestly caveated:** enabling needs the server-side project + verify endpoint; verdict strength on sideloaded apps is weak — enable only if you decide you want it |
+| PackageInstaller session install | **Implemented now** — framework API, zero registration, zero deps — primary install path with `ACTION_VIEW` fallback | none | n/a — nothing to register |
+
+Honest costs of pre-wiring (stated because "don't be lazy" cuts both ways):
+- APK size + roughly 2–4 MB across the SDKs (exact figure measured and reported at phase 2).
+- GMS-dependent code paths compiled in but **inert while disabled** (nothing initializes).
+- `AD_ID` permission becomes visible in app-info (required by the ads SDKs; harmless while ads are off).
+- Registration day = fill the payload fields, `publish_rules.py --dry-run`, publish. The ops doc gains a
+  **"Registration rollout"** chapter with exact per-service steps + copy-paste payload recipes.
+
 ---
 
 ## 5. Workstream C — anti-decompile / anti-mod mitigation (honest layering)
@@ -236,7 +259,7 @@ to be DRM.
 | **S1 — Rules/OTA plane** | `data/rules/*`, `scripts/encrypt_rules.py`, `scripts/publish_rules.py`, `scraper_rules.json` (local), payload tests |
 | **S2 — Engine/pipeline** | `engine/*`, `pipeline/*`, `providers/*`, `resolvers/*`, `util/DebugLog.kt`, `util/CachePaths*` as needed |
 | **S3 — UI surfaces** | `ui/*`, `viewmodel/MainViewModel.kt` (UI state only), `MainActivity.kt`, `AnonApp.kt` (UI-adjacent hooks only) |
-| **S4 — Hardening + update mechanics + mirroring + docs** | `app/build.gradle` (+debug appId hygiene), `proguard-rules.pro`, `AndroidManifest.xml`, `update/*` (new), `util/IntegrityCheck.kt`, `scripts/publish_apk.py` (new APK-mirror tool), `docs/PLATFORM_OPERATIONS.md`, CHANGELOG/README |
+| **S4 — Hardening + update mechanics + mirroring + future-SDK pre-wiring + docs** | `app/build.gradle` (+debug appId hygiene, +SDK deps), `proguard-rules.pro`, `AndroidManifest.xml` (permissions/meta-data), `update/*` (new: UpdateManager, AnnouncementManager, EngagementScheduler, FcmRegistrar), `ads/*` (new: slot interface + house + AppLovin/Unity/AdMob adapters), `util/IntegrityCheck.kt`, `scripts/publish_apk.py` (APK-mirror tool), `docs/PLATFORM_OPERATIONS.md`, CHANGELOG/README |
 
 **PHASE 1 — Foundation (no UI feature work):** S1 schema+flags+tests, S2 all Workstream-A fixes, S3 dead-code/
 resource/wiring cleanups + "About" row skeleton, S4 R8 config + IntegrityCheck + manifest prep.
@@ -295,16 +318,19 @@ Rollback: revert commit + republish previous payload rev (kill switches make cod
 | Parallel agents touch the same file | Ownership matrix (§8); any shared file change is serialized through me |
 | No local compile: syntax slips | Syntax gate on all files + my line-level review + small diffs; CI is the final compiler |
 | Hard gate bricks someone | §4.5 rails (staleness, escape hatch, background downloads unaffected, percent rollout) |
+| APK bloat / GMS coupling / AD_ID visibility from pre-wired SDKs | Accepted deliberately (§4.6); size measured + reported at phase 2; every adapter inert while disabled |
 | Payload cap/negotiation drift | S1 owns validator lockstep; dry-run at every phase |
 
 ## 13. Deferred with reasons (not silently skipped)
 
-- PackageInstaller session install (design §3.5) — later; `ACTION_VIEW` path is sufficient for v3.3.0.
-- AdMob/AppLovin adapters — Decision 7/IQ-7 tripwire.
-- FCM — Decision 6.
-- Play Integrity — §5 (not viable sideloaded).
-- VPS APK mirroring: **MOVED IN SCOPE** — both hosting sources ship in v3.3.0 (Decision 4).
-- Kotlin unit-test coverage for the entire legacy engine — ratchet beyond the new tests in A1/F-13.
+- **Future-capability pre-wiring: MOVED IN SCOPE** — AppLovin / Unity Ads / AdMob / FCM / Play-Integrity
+  adapters all ship DISABLED in v3.3.0; registration later = OTA flip per the §4.6 honest matrix
+  (AdMob's manifest App-ID is the one possible two-line rebuild, verified during implementation).
+- **PackageInstaller session install: MOVED IN SCOPE** — implemented as the primary install path in
+  v3.3.0 (no registration, no dependencies).
+- **VPS APK mirroring: MOVED IN SCOPE** — both hosting sources ship in v3.3.0 (Decision 4).
+- Kotlin unit-test coverage for the entire legacy engine — ratchet beyond the new tests in A1/F-13
+  (a codebase-wide coverage program is not a release blocker).
 
 ## 14. Execution log (append at every phase boundary)
 
