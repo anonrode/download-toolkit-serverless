@@ -17,6 +17,8 @@ Companion docs: `scratch/app_platform_features_design.md` (platform research), `
   `SplashMotionTest`, `SubtitleAutoPickTest`, `RegexEngineCompatTest` keep their pinned symbols/strings.
 - **Charter rules stand:** zero AI attribution anywhere; never delete/replace `.agents/AGENTS.md`; live probes
   ≤1024 bytes; VPS is a static-serve/telemetry sink only; data budget 300 MB (currently ~30 MB used).
+- **Maintainer deliverables live in `C:\Users\user\Desktop\ANON_DOWNLOADER_FINAL\`** — never saved loose on the
+  Desktop (convention set 2026-10-18; the existing 16 deliverables have been moved into that folder).
 - **Every phase ends with:** syntax gate clean + agent report + my line-level diff review + explicit "phase N
   approved" note appended to §14 of this document.
 
@@ -244,11 +246,12 @@ to be DRM.
 
 - `docs/PLATFORM_OPERATIONS.md` (the "how I send messages / force updates" bible): payload recipes
   (announcement/ad/house/update/force, copy-paste JSON), publish commands, rollback, caps table, flag rollouts,
-  brick-safety behavior, telemetry meanings, troubleshooting.
+  brick-safety behavior, telemetry meanings, troubleshooting, **Registration rollout** chapter (§4.6).
 - `docs/FINAL_BUILD_EXECUTION_PLAN.md` — this file (updated live: §14 log).
 - `CHANGELOG.md`, `README.md` (§6).
 - Audit doc: new Sections 16 (platform surfaces) + 17 (hardening) via the builder script.
-- Desktop refresh at the end: audit doc, ops doc, plan doc.
+- **Every deliverable is copied to `Desktop\ANON_DOWNLOADER_FINAL\`** — the single maintainer folder; nothing
+  goes loose on the Desktop.
 
 ---
 
@@ -298,15 +301,30 @@ tag v3.3.0 → CI watch → fix loop → verify release artifacts → final repo
 4. Cross-file contract check (S1's getters ↔ S3/S4 consumers; names, types, null-safety).
 5. Anything the phase couldn't do — recorded in §14 with the reason, not silently skipped.
 
-## 11. Release protocol (phase 3, exact)
+## 11. Release protocol — THE FINAL FINAL STAGE (nothing happens after this)
+
+Order is fixed (maintainer directive 2026-10-18): push → watch the GitHub CI build → fix anything that
+pops up → only then tag → watch the release job → fix → verify the Release. Nothing else runs after.
 
 ```
+# ── FINAL FINAL STAGE — step 1: push master (triggers build-apk.yml WITHOUT [skip ci]) ──
 git add <explicit paths>                         # never -A in a multi-writer window
-git commit -m "feat: platform surfaces (announcements/update/gate/engagement/ads), hardening, audit fixes" 
-git push origin master                           # WITHOUT [skip ci] — the compile IS the point now
-git tag -a v3.3.0 -m "v3.3.0 — platform surfaces + hardening" && git push origin v3.3.0
-# watch CI: gh run watch  (fix red → amend-fix commit → re-push; repeat until green)
-# verify release artifacts + notes on the GitHub Release; bump live via payload (docs §7)
+git commit -m "feat: platform surfaces (announcements/update/gate/engagement/ads), hardening, audit fixes"
+git push origin master
+
+# ── step 2: WATCH the build+test jobs (Tier0 unit / Tier1 Robolectric / emulator gate) ──
+#   gh run watch  (gh authed) — else watch the Actions page manually
+#   any red → fix → commit → push → watch again; loop until GREEN. No tag while red.
+
+# ── step 3: only after step 2 is green — tag under Releases ──
+git tag -a v3.3.0 -m "v3.3.0 — platform surfaces + hardening"
+git push origin v3.3.0
+#   the tag fires the `release` job (signing guard refuses unsigned builds)
+
+# ── step 4: watch the release job; fix + re-tag (delete+recreate the tag) if it pops ──
+# ── step 5: verify the GitHub Release: per-ABI APKs present, SHA-256s match, notes correct ──
+# ── step 6 (ops, documented in PLATFORM_OPERATIONS.md): mirror APKs to the VPS,
+#    populate the `update` payload (both sources + SHA-256s), publish, flip flags ──
 ```
 Rollback: revert commit + republish previous payload rev (kill switches make code rollback rarely necessary).
 
@@ -335,3 +353,8 @@ Rollback: revert commit + republish previous payload rev (kill switches make cod
 ## 14. Execution log (append at every phase boundary)
 
 - 2026-10-18 — plan written; awaiting "proceed".
+- 2026-10-18 — plan v2: dual APK hosting (GitHub + VPS) as first-class scope (Decision 4 revised).
+- 2026-10-18 — plan v3 (FINAL): future SDKs pre-wired disabled for OTA-only activation (§4.6, Decision 16);
+  PackageInstaller + VPS mirror moved in scope; §11 rewritten — **CI build + tag + watch + fix is the FINAL
+  FINAL stage, nothing runs after it**; Desktop deliverables consolidated into
+  `Desktop\ANON_DOWNLOADER_FINAL\` (16 files moved; no loose saves from now on).
