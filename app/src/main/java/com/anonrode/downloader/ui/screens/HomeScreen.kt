@@ -100,13 +100,6 @@ fun HomeScreen(
     // around with polling (background clipboard reads are blocked since
     // Android 10 for non-accessibility apps).
     DisposableEffect(Unit) {
-        val detectEnabled = try {
-            context.getSharedPreferences("downloader_settings", android.content.Context.MODE_PRIVATE)
-                .getBoolean("pref_clipboard_detect", true)
-        } catch (_: Exception) { true }
-        if (!detectEnabled) {
-            return@DisposableEffect onDispose { }
-        }
         val cm = try {
             context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
         } catch (_: Exception) { null }
@@ -123,11 +116,20 @@ fun HomeScreen(
             val text = try {
                 cm.primaryClip?.getItemAt(0)?.text?.toString()?.trim()
             } catch (_: Exception) { null }
-            // Clear on a non-URL so a stale "Paste link:" banner does not
-            // linger after the user copies something unrelated (e.g. a
-            // password). Compose skips equal state, so identical re-copies
-            // don't cause flicker.
-            clipboardSnippet = if (!text.isNullOrBlank() && UrlExtractor.isLikelyUrl(text)) text else null
+            // The detect toggle is read PER EVENT, not captured once at
+            // composition: Home stays composed across tab switches, so a
+            // captured boolean only applied after a process restart — the
+            // Settings toggle had no runtime effect.
+            val detectEnabled = try {
+                context.getSharedPreferences("downloader_settings", android.content.Context.MODE_PRIVATE)
+                    .getBoolean("pref_clipboard_detect", true)
+            } catch (_: Exception) { true }
+            // Clear on a non-URL (or when detection is off) so a stale
+            // "Paste link:" banner does not linger after the user copies
+            // something unrelated (e.g. a password). Compose skips equal
+            // state, so identical re-copies don't cause flicker.
+            clipboardSnippet =
+                if (detectEnabled && !text.isNullOrBlank() && UrlExtractor.isLikelyUrl(text)) text else null
         }
         cm.addPrimaryClipChangedListener(listener)
         onDispose { cm.removePrimaryClipChangedListener(listener) }
@@ -674,6 +676,12 @@ fun HomeScreen(
             EpisodeDrawer(
                 show = currentShow,
                 viewModel = viewModel,
+                // The host MUST forward the VM's preselect flag: without it the
+                // drawer always ran with its default (false), so the
+                // "Download remaining episodes" flow (openRemainingEpisodes ->
+                // drawerPreselectRemaining=true) could never preselect — dead
+                // since the feature commit.
+                preselectRemaining = uiState.drawerPreselectRemaining,
                 onDismiss = { viewModel.closeEpisodeDrawer() }
             )
         }
