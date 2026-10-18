@@ -14,6 +14,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.map
 
 import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.launch
@@ -169,7 +170,14 @@ object ProviderRegistry {
         }
     }.flowOn(Dispatchers.IO)
 
-    fun searchFlow(query: String, siteFilter: String? = null): Flow<List<ShowCard>> = searchStreaming(query, siteFilter)
+    // Search is deliberately INCLUDED in Nollywood suppression (unlike the
+    // explicit filter's documented search bypass): a content-type block that
+    // search can circumvent is only half-effective. Filtering happens at
+    // EMISSION so the unfiltered list stays cached and a mid-TTL policy flip
+    // still applies immediately on the next read.
+    fun searchFlow(query: String, siteFilter: String? = null): Flow<List<ShowCard>> =
+        searchStreaming(query, siteFilter)
+            .map { com.anonrode.downloader.util.NollywoodFilter.filterSafe(it) }
 
     suspend fun loadEpisodes(show: ShowCard): ShowDetails {
         val provider = getProvider(show.site) ?: return ShowDetails(show = show)

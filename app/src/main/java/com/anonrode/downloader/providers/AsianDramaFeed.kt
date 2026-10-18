@@ -35,7 +35,9 @@ object AsianDramaFeed {
         if (page == 1 && !forceRefresh && FeedCache.isCategoryFresh(key)) {
             val cached = FeedCache.categoryCards(key)
             if (cached.isNotEmpty()) {
-                val filtered = if (filterExplicit) ExplicitContentFilter.filterSafe(cached) else cached
+                val filtered = com.anonrode.downloader.util.NollywoodFilter.filterSafe(
+                    if (filterExplicit) ExplicitContentFilter.filterSafe(cached) else cached
+                )
                 onPartial(filtered)
                 return filtered
             }

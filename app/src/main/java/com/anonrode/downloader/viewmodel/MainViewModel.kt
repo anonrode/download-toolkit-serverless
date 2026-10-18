@@ -270,12 +270,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // silently only when a group is stale (>30 min) or forced.
         val cached = com.anonrode.downloader.providers.FeedCache.snapshot
         val filterExplicit = engine.filterExplicitContent
-        val cachedTrending = if (filterExplicit) com.anonrode.downloader.util.ExplicitContentFilter.filterSafe(cached.trending) else cached.trending
-        val cachedCategories = if (filterExplicit) {
-            cached.categories.mapValues { e ->
-                e.value.copy(cards = com.anonrode.downloader.util.ExplicitContentFilter.filterSafe(e.value.cards))
-            }
-        } else cached.categories
+        val cachedTrending = com.anonrode.downloader.util.NollywoodFilter.filterSafe(
+            if (filterExplicit) com.anonrode.downloader.util.ExplicitContentFilter.filterSafe(cached.trending) else cached.trending
+        )
+        val cachedCategories = cached.categories.mapValues { e ->
+            val cards = if (filterExplicit) {
+                com.anonrode.downloader.util.ExplicitContentFilter.filterSafe(e.value.cards)
+            } else e.value.cards
+            e.value.copy(cards = com.anonrode.downloader.util.NollywoodFilter.filterSafe(cards))
+        }
 
         if (cachedTrending.isNotEmpty() || cachedCategories.isNotEmpty()) {
             categoryCache.putAll(cachedCategories.mapValues { it.value.cards })

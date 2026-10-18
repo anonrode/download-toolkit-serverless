@@ -87,7 +87,8 @@ object RulesFlags {
         "lockerHosts",
         "searchStrategies",
         "pipelines",
-        "dynamic_providers"
+        "dynamic_providers",
+        "contentPolicy"
     )
 
     /** Allowed per-family flag sub-keys; anything else voids that family's

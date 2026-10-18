@@ -118,7 +118,10 @@ object TrendingFeed {
                 if (idx < site.size) {
                     val card = site[idx]
                     val key = card.title.lowercase().replace(Regex("[^a-z0-9]"), "")
-                    val isSafe = !filterExplicit || !com.anonrode.downloader.util.ExplicitContentFilter.isExplicit(card)
+                    // Nollywood suppression rides the SAME purity-preserving
+                    // gate as the explicit filter (OTA-switch-gated inside).
+                    val isSafe = (!filterExplicit || !com.anonrode.downloader.util.ExplicitContentFilter.isExplicit(card)) &&
+                        !com.anonrode.downloader.util.NollywoodFilter.isNollywood(card)
                     if (out.size < limit && key.isNotBlank() && isSafe && seenTitles.add(key)) {
                         out.add(card)
                     }

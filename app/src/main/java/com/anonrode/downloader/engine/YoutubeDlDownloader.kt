@@ -2,11 +2,17 @@ package com.anonrode.downloader.engine
 
 import android.content.Context
 import com.anonrode.downloader.data.settings.AppSettings
+import com.anonrode.downloader.pipeline.HostPolicyRegistry
 import com.anonrode.downloader.security.TorrentSecurityShield
 import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.youtubedl_android.YoutubeDLRequest
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.runInterruptible
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.coroutines.coroutineContext
 import java.io.File
@@ -233,8 +239,8 @@ object YoutubeDlDownloader {
         }
 
         // Direct HTTP downloads explicitly routed to aria2c (CDNs, movie lockers, etc.).
-        // Native aria2c executable handles HTTP downloads directly. If aria2c fails,
-        // it falls through to yt-dlp as the final, final safety net.
+        // Native aria2c executable handles HTTP downloads directly. On failure the
+        // exception propagates to the engine, which owns the park/fail/retry decision.
         if (backend.equals("aria2c", true) && !isM3u8 && !isExtractorTask) {
             val aria2Exec = findAria2Executable(context)
             if (aria2Exec != null) {
@@ -263,23 +269,11 @@ object YoutubeDlDownloader {
                     com.anonrode.downloader.util.DebugLog.backend(
                         "task=$taskId aria2c HTTP failed (${e.message})"
                     )
-                    // If this is a direct media file (e.g. .mkv, .mp4, or locker CDN stream),
-                    // yt-dlp will fail with "Unsupported URL" or time out trying to parse binary
-                    // as HTML. Return null so the caller engine retry loop handles it.
-                    val cleanUrl = sourceUrl.substringBefore('?').substringBefore('#').lowercase()
-                    val isDirectMedia = cleanUrl.endsWith(".mp4") || cleanUrl.endsWith(".mkv") || cleanUrl.endsWith(".avi") ||
-                        cleanUrl.endsWith(".webm") || cleanUrl.endsWith(".flv") ||
-                        com.anonrode.downloader.pipeline.LinkResolver.isProvablyDirectFile(sourceUrl) ||
-                        com.anonrode.downloader.resolvers.isDirectMediaUrl(sourceUrl) ||
-                        sourceUrl.contains(".static.", ignoreCase = true) ||
-                        sourceUrl.contains("kissorgrab.com", ignoreCase = true) ||
-                        sourceUrl.contains("downloadwella.com", ignoreCase = true) ||
-                        sourceUrl.contains("vikingfile.com", ignoreCase = true) ||
-                        sourceUrl.contains("wetafiles.com", ignoreCase = true) ||
-                        sourceUrl.contains("loadedfiles", ignoreCase = true)
-                    if (isDirectMedia || backend == "aria2c") {
-                        return null
-                    }
+                    // aria2c failures must reach the engine's park/fail classifier with
+                    // their HTTP status intact (the 429/403 message powers
+                    // isRateLimitedError and parkInsteadOfFail); swallowing them into a
+                    // null return hid throttling and expiry errors from that logic.
+                    throw e
                 }
             }
         }
@@ -357,9 +351,16 @@ object YoutubeDlDownloader {
                 // Embed/watch-page cracks (nepu, social, etc.) often resolve to HLS.
                 // Parallel fragments keep multi-socket speed instead of a single
                 // rate-capped connection.
-                // Floor 1: the engine forces single-socket for hosts that reject
-                // multi-connection downloads; clamping the floor to 4 overrode that.
-                val frags = if (hlsFragments > 0) hlsFragments.coerceIn(1, 16) else parallelSockets.coerceIn(1, 16)
+                // Floor 1, ceiling 16; per-host caps arrive pre-applied through
+                // HostPolicyRegistry (6/12 on the sensitive lockers, OTA-tunable
+                // via contentPolicy.socketCaps) and — after Fix 6b — the HLS
+                // path applies the host cap too (minOf below).
+                // Fix 6b: host caps must bind on the HLS/extractor path too —
+                // hlsFragments > 0 is always true from the engine, which used
+                // to bypass every per-host socket cap entirely.
+                val hostCap = HostPolicyRegistry.effectiveSocketsForUrl(sourceUrl, 16)
+                val rawFrags = if (hlsFragments > 0) hlsFragments else parallelSockets
+                val frags = minOf(rawFrags.coerceIn(1, 16), hostCap)
                 addOption("-N", "$frags")
                 addOption("--concurrent-fragments", "$frags")
                 addOption("--buffer-size", "1M")
@@ -393,7 +394,12 @@ object YoutubeDlDownloader {
                     addOption("--merge-output-format", "mp4")
                 }
                 addOption("--no-playlist")
-                val frags = if (hlsFragments > 0) hlsFragments.coerceIn(1, 16) else parallelSockets.coerceIn(1, 16)
+                // Fix 6b: host caps must bind on the HLS/extractor path too —
+                // hlsFragments > 0 is always true from the engine, which used
+                // to bypass every per-host socket cap entirely.
+                val hostCap = HostPolicyRegistry.effectiveSocketsForUrl(sourceUrl, 16)
+                val rawFrags = if (hlsFragments > 0) hlsFragments else parallelSockets
+                val frags = minOf(rawFrags.coerceIn(1, 16), hostCap)
                 addOption("-N", "$frags")
                 addOption("--concurrent-fragments", "$frags")
                 addOption("--buffer-size", "1M")
@@ -432,7 +438,9 @@ object YoutubeDlDownloader {
 
             addOption("--no-mtime")
             addOption("--no-warnings")
-            addOption("--no-check-certificate")
+            if (HostPolicyRegistry.allowsPermissiveTlsFallback(sourceUrl)) {
+                addOption("--no-check-certificate")
+            }
             // --no-restrict-filenames: yt-dlp refuses "unusual" extensions like
             // .mkv by default ("The extracted extension ('matroska') is unusual
             // and will be skipped for safety reasons" — fired 8 times on
@@ -623,14 +631,14 @@ object YoutubeDlDownloader {
             // successful completion. Without this, an attempt that exits 0
             // while a straggler range request died could hand the engine a
             // truncated file that the structure tier then blesses.
-            fun isFinal(f: File) = (f.length() > 0 || f.isDirectory) &&
+            fun isFinal(f: File) = f.exists() && f.isFile && f.length() > 0L &&
                 !f.name.endsWith(".aria2") && !f.name.endsWith(".part") && !f.name.endsWith(".ytdl") &&
                 // Subtitle sidecars (write-subs/embed-subs output; embed
                 // normally deletes them, a half-finished pass may not) were
                 // never artifacts.
                 f.extension.lowercase() !in SUBTITLE_ARTIFACT_EXTS &&
                 !formatShard.containsMatchIn(f.name) &&
-                !(f.isFile && File(f.absolutePath + ".aria2").exists())
+                !File(f.absolutePath + ".aria2").exists()
 
             val candidates = outDir.listFiles { f -> isFinal(f) }?.toList() ?: emptyList()
 
@@ -980,9 +988,22 @@ object YoutubeDlDownloader {
                 return null
             }
             val fetchOk = withTimeoutOrNull(45_000) {
-                fetchProc.waitFor()
+                val handle = coroutineContext[Job]?.invokeOnCompletion {
+                    if (fetchProc.isAlive) fetchProc.destroyForcibly()
+                }
+                try {
+                    runInterruptible(Dispatchers.IO) { fetchProc.waitFor() }
+                } catch (ce: CancellationException) {
+                    // The interrupt only unblocks the waiter; the child process
+                    // itself must still be destroyed (it is not registered in
+                    // activeNativeProcesses, so nothing else can reach it).
+                    fetchProc.destroyForcibly()
+                    throw ce
+                } finally {
+                    handle?.dispose()
+                }
             } ?: run {
-                fetchProc.destroy()
+                fetchProc.destroyForcibly()
                 return null
             }
             if (fetchOk != 0 || !torrentFile.exists()) {
@@ -1006,9 +1027,21 @@ object YoutubeDlDownloader {
             return null
         }
         val output = withTimeoutOrNull(15_000) {
-            showProc.inputStream.bufferedReader().readText()
+            val handle = coroutineContext[Job]?.invokeOnCompletion {
+                if (showProc.isAlive) showProc.destroyForcibly()
+            }
+            try {
+                runInterruptible(Dispatchers.IO) {
+                    showProc.inputStream.bufferedReader().use { it.readText() }
+                }
+            } catch (ce: CancellationException) {
+                showProc.destroyForcibly()
+                throw ce
+            } finally {
+                handle?.dispose()
+            }
         } ?: run {
-            showProc.destroy()
+            showProc.destroyForcibly()
             return null
         }
 
@@ -1148,20 +1181,23 @@ object YoutubeDlDownloader {
         var produced: File? = null
         var attempts = 0
 
-        fun runOnce(): File? {
+        suspend fun runOnce(): File? {
             val pb = ProcessBuilder(cmd)
             // Statically linked binary (see NOTICE): no LD_LIBRARY_PATH/PATH needed.
             pb.environment()["TMPDIR"] = context.cacheDir.absolutePath
             pb.directory(targetDir)
             pb.redirectErrorStream(true)
+
+            coroutineContext.ensureActive()
+            activeNativeProcesses.remove(taskId)?.destroyForcibly()
             val process = pb.start()
-
-            if (Thread.currentThread().isInterrupted) {
-                process.destroy()
-                throw InterruptedException("Task was cancelled before process started")
-            }
-
             activeNativeProcesses[taskId] = process
+
+            val completionHandle = coroutineContext[Job]?.invokeOnCompletion {
+                if (process.isAlive) {
+                    process.destroyForcibly()
+                }
+            }
 
             // aria2c stdout stream: parse with parseProgressTick and smooth ETA
             var lastDl = 0L
@@ -1175,6 +1211,7 @@ object YoutubeDlDownloader {
             try {
                 var line: String? = reader.readLine()
                 while (line != null) {
+                    coroutineContext.ensureActive()
                     if (logBuffer.size < 50) {
                         logBuffer.add(line)
                     } else {
@@ -1191,18 +1228,28 @@ object YoutubeDlDownloader {
                         val fb = fallbackRegex.find(line)
                         if (fb != null) {
                             val spd = parseSpeedString(fb.groupValues[2])
-                            onProgress(0L, 0L, spd, 0L)
+                            val pct = fb.groupValues[1].toLongOrNull() ?: 0L
+                            val inferredDl = if (lastDl > 0L) lastDl else if (lastTot > 0L && pct in 1..100) (lastTot * pct) / 100L else 0L
+                            val eta = etaCalc.update(inferredDl, lastTot, spd)
+                            onProgress(inferredDl, lastTot, spd, eta)
                         }
                     }
                     line = reader.readLine()
                 }
                 exitCode = process.waitFor()
+            } catch (e: CancellationException) {
+                process.destroyForcibly()
+                throw e
             } catch (e: Exception) {
-                process.destroy()
+                process.destroyForcibly()
                 errors.append("run ").append(attempts).append(": ").append(e.message ?: e.javaClass.simpleName).append('\n')
                 return null
             } finally {
-                activeNativeProcesses.remove(taskId)
+                completionHandle?.dispose()
+                activeNativeProcesses.remove(taskId, process)
+                if (process.isAlive) {
+                    process.destroyForcibly()
+                }
             }
 
             if (exitCode != 0) {
@@ -1211,7 +1258,7 @@ object YoutubeDlDownloader {
                 return null
             }
 
-            fun isFinal(f: File) = (f.length() > 0 || f.isDirectory) &&
+            fun isFinal(f: File) = f.exists() && f.isFile && f.length() > 0L &&
                     !f.name.endsWith(".aria2") && !f.name.endsWith(".part") &&
                     !f.name.endsWith(".ytdl") && !f.name.endsWith(".torrent")
 
@@ -1275,17 +1322,28 @@ object YoutubeDlDownloader {
         onProgress: (downloaded: Long, total: Long, speed: Double, eta: Long) -> Unit,
         isActiveCheck: suspend () -> Boolean = { true },
         estimatedTotal: Long = 0L
-    ): File? {
-        val before = targetDir.listFiles()?.map { it.absolutePath }?.toSet() ?: emptySet()
+    ): File? = withContext(Dispatchers.IO) {
         val aria2Exec = findAria2Executable(context)
             ?: throw IllegalStateException("aria2c binary missing: libaria2c.so not found in native libs")
 
+        targetDir.mkdirs()
+
+        // BUG FIX: Only resume an existing file if it matches preferredFilename directly
+        // OR has an active `.aria2` control file next to it. Never match arbitrary files
+        // by stem alone (which previously matched and overwrote .srt subtitles or finished files).
         val stem = preferredFilename.substringBeforeLast('.')
         val existingPartial = targetDir.listFiles { f ->
-            (f.name == preferredFilename || f.nameWithoutExtension == stem) &&
-            f.length() > 0 && !f.name.endsWith(".aria2") && !f.name.endsWith(".part") && !f.name.endsWith(".turbo")
+            f.isFile && f.length() > 0 && (
+                f.name == preferredFilename ||
+                (f.nameWithoutExtension == stem && File(f.absolutePath + ".aria2").exists())
+            )
         }?.firstOrNull()
         val effOutputName = existingPartial?.name ?: preferredFilename
+        val expectedOutputFile = File(targetDir, effOutputName)
+        val expectedControlFile = File(expectedOutputFile.absolutePath + ".aria2")
+
+        val sockets = HostPolicyRegistry.effectiveSocketsForUrl(url, parallelSockets)
+        val allowInsecure = HostPolicyRegistry.allowsPermissiveTlsFallback(url)
 
         val cmd = mutableListOf(
             aria2Exec.absolutePath,
@@ -1293,27 +1351,30 @@ object YoutubeDlDownloader {
             "-d", targetDir.absolutePath,
             "-o", effOutputName,
             "--file-allocation=none",
-            "--check-certificate=false",
+            "--check-certificate=${!allowInsecure}",
             "--summary-interval=1",
             "--max-tries=5",
             "--retry-wait=2",
             "--connect-timeout=15",
             "--timeout=30",
             "--auto-file-renaming=false",
-            "--allow-overwrite=true",
-            "--console-log-level=error"
+            // Only allow overwrite if an aria2 control file exists or we are resuming a partial
+            "--allow-overwrite=${expectedControlFile.exists() || existingPartial != null}",
+            "--console-log-level=error",
+            "-s", "$sockets",
+            "-x", "$sockets",
+            "-j", "$sockets",
+            "--max-connection-per-server=$sockets",
+            "--min-split-size=1M",
+            // Directive Fix 6 (aria2c 1DM parity). --lowest-speed-limit is
+            // deliberately OMITTED: aria2c applies it absolutely, so a 25K
+            // value aborts every download on a genuinely slow link (the
+            // maintainer connection measured 8.7 KB/s) — the same failure
+            // class the Turbo relative-drop guard exists to avoid.
+            "--stream-piece-selector=inorder",  // clean contiguous prefix for resume
+            "--disk-cache=32M",                 // in-memory write cache, less flash I/O
+            "--http-no-cache=true"              // bypass stale throttling proxy caches
         )
-
-        // Sensitive hosts (kissorgrab, plutomovies) trip 429 if flooded with 16 sockets,
-        // but 1 socket chokes to 6-30 KB/s on mobile networks. Cap at safe 4 sockets.
-        val isSensitiveHost = url.contains("plutomovies.com", ignoreCase = true) ||
-                url.contains("kissorgrab.com", ignoreCase = true)
-        val sockets = if (isSensitiveHost) {
-            minOf(4, parallelSockets.coerceAtLeast(2))
-        } else {
-            parallelSockets.coerceIn(1, 16)
-        }
-        cmd += listOf("-s", "$sockets", "-x", "$sockets", "-j", "$sockets", "--max-connection-per-server=$sockets", "--min-split-size=1M")
 
         if (ua.isNotBlank()) {
             val cleanUa = ua.replace("\r", "").replace("\n", "").trim()
@@ -1330,11 +1391,12 @@ object YoutubeDlDownloader {
         for ((k, v) in customHeaders) {
             if (k.equals("user-agent", ignoreCase = true) ||
                 k.equals("referer", ignoreCase = true) ||
-                k.equals("origin", ignoreCase = true)) continue
+                k.equals("origin", ignoreCase = true)
+            ) continue
             val cleanK = k.replace("\r", "").replace("\n", "").trim()
             val cleanV = v.replace("\r", "").replace("\n", "").trim()
             if (cleanK.isNotBlank() && cleanV.isNotBlank()) {
-                cmd += "--header=$cleanK: $cleanV"
+                cmd += "--header=$cleanK:$cleanV"
             }
         }
         if (speedLimitKbs > 0) {
@@ -1346,98 +1408,114 @@ object YoutubeDlDownloader {
         var produced: File? = null
         var attempts = 0
 
-        fun runOnce(): File? {
-            val pb = ProcessBuilder(cmd)
-            pb.environment()["TMPDIR"] = context.cacheDir.absolutePath
-            pb.directory(targetDir)
-            pb.redirectErrorStream(true)
-            val process = pb.start()
+        suspend fun runOnce(): File? {
+            coroutineContext.ensureActive()
+            // Ensure any previous process for this taskId is terminated before starting a new one
+            activeNativeProcesses.remove(taskId)?.destroyForcibly()
 
-            if (Thread.currentThread().isInterrupted) {
-                process.destroy()
-                throw InterruptedException("Task was cancelled before process started")
+            val pb = ProcessBuilder(cmd).apply {
+                environment()["TMPDIR"] = context.cacheDir.absolutePath
+                directory(targetDir)
+                redirectErrorStream(true)
             }
 
+            val process = pb.start()
             activeNativeProcesses[taskId] = process
 
-            // aria2c stdout stream: parse with parseProgressTick and smooth ETA
-            var lastDl = 0L
+            // Guarantee process termination if the parent coroutine is cancelled while blocked on I/O
+            val completionHandle = coroutineContext[Job]?.invokeOnCompletion {
+                if (process.isAlive) {
+                    process.destroyForcibly()
+                }
+            }
+
+            var lastDl = if (expectedOutputFile.exists()) expectedOutputFile.length() else 0L
             var lastTot = estimatedTotal
             val etaCalc = FlickerFreeEtaCalculator()
             val fallbackRegex = Regex("""\((\d+)%\).*?DL:\s*([\d.]+[KMGT]?i?B)""", RegexOption.IGNORE_CASE)
-            val reader = process.inputStream.bufferedReader()
-            val logBuffer = mutableListOf<String>()
+            val logBuffer = ArrayDeque<String>(50)
             var exitCode: Int? = null
 
             try {
-                var line: String? = reader.readLine()
-                while (line != null) {
-                    if (logBuffer.size < 50) {
-                        logBuffer.add(line)
-                    } else {
-                        logBuffer.removeAt(0)
-                        logBuffer.add(line)
-                    }
-                    val tick = parseProgressTick(line, 0f, lastDl, lastTot)
-                    if (tick.downloadedBytes > 0L || tick.totalBytes > 0L || tick.speedBytesPerSec > 0.0) {
-                        lastDl = maxOf(lastDl, tick.downloadedBytes)
-                        lastTot = maxOf(lastTot, tick.totalBytes)
-                        val eta = if (tick.etaSeconds > 0L) tick.etaSeconds else etaCalc.update(lastDl, lastTot, tick.speedBytesPerSec)
-                        onProgress(lastDl, lastTot, tick.speedBytesPerSec, eta)
-                    } else {
-                        val fb = fallbackRegex.find(line)
-                        if (fb != null) {
-                            val spd = parseSpeedString(fb.groupValues[2])
-                            onProgress(0L, 0L, spd, 0L)
+                process.inputStream.bufferedReader().use { reader ->
+                    var line: String? = reader.readLine()
+                    while (line != null) {
+                        coroutineContext.ensureActive()
+                        if (logBuffer.size >= 50) logBuffer.removeFirst()
+                        logBuffer.addLast(line)
+
+                        val tick = parseProgressTick(line, 0f, lastDl, lastTot)
+                        if (tick.downloadedBytes > 0L || tick.totalBytes > 0L || tick.speedBytesPerSec > 0.0) {
+                            lastDl = maxOf(lastDl, tick.downloadedBytes)
+                            lastTot = maxOf(lastTot, tick.totalBytes)
+                            val eta = if (tick.etaSeconds > 0L) {
+                                tick.etaSeconds
+                            } else {
+                                etaCalc.update(lastDl, lastTot, tick.speedBytesPerSec)
+                            }
+                            onProgress(lastDl, lastTot, tick.speedBytesPerSec, eta)
+                        } else {
+                            val fb = fallbackRegex.find(line)
+                            if (fb != null) {
+                                val spd = parseSpeedString(fb.groupValues[2])
+                                val pct = fb.groupValues[1].toLongOrNull() ?: 0L
+                                val inferredDl = if (lastDl > 0L) lastDl else if (lastTot > 0L && pct in 1..100) (lastTot * pct) / 100L else 0L
+                                val eta = etaCalc.update(inferredDl, lastTot, spd)
+                                // BUG FIX: Never pass (0L, 0L, spd, 0L) which wipes out DB/UI progress!
+                                onProgress(inferredDl, lastTot, spd, eta)
+                            }
                         }
+                        line = reader.readLine()
                     }
-                    line = reader.readLine()
                 }
                 exitCode = process.waitFor()
+            } catch (e: CancellationException) {
+                process.destroyForcibly()
+                throw e
             } catch (e: Exception) {
-                process.destroy()
-                errors.append("run ").append(attempts).append(": ").append(e.message ?: e.javaClass.simpleName).append('\n')
+                process.destroyForcibly()
+                errors.append("run ").append(attempts).append(": ")
+                    .append(e.message ?: e.javaClass.simpleName).append('\n')
                 return null
             } finally {
-                activeNativeProcesses.remove(taskId)
+                completionHandle?.dispose()
+                activeNativeProcesses.remove(taskId, process)
+                if (process.isAlive) {
+                    process.destroyForcibly()
+                }
             }
 
             if (exitCode != 0) {
                 val errSummary = logBuffer.takeLast(3).joinToString(" | ")
-                errors.append("run ").append(attempts).append(" exit ").append(exitCode).append(": ").append(errSummary).append('\n')
+                errors.append("run ").append(attempts).append(" exit ").append(exitCode)
+                    .append(": ").append(errSummary).append('\n')
                 return null
             }
 
-            fun isFinal(f: File) = (f.length() > 0 || f.isDirectory) &&
-                    !f.name.endsWith(".aria2") && !f.name.endsWith(".part") &&
-                    !f.name.endsWith(".ytdl")
-
-            val candidates = targetDir.listFiles { f -> isFinal(f) }?.toList() ?: emptyList()
-            val fresh = candidates.filter { it.absolutePath !in before }
-            val found = fresh.firstOrNull { it.name == effOutputName || it.name == preferredFilename || it.nameWithoutExtension == stem }
-                ?: candidates.firstOrNull { it.name == effOutputName || it.name == preferredFilename || it.nameWithoutExtension == stem }
-                ?: fresh.maxByOrNull { it.lastModified() }
-
-            if (found != null && !File(found.absolutePath + ".aria2").exists()) {
-                return found
+            // BUG FIX: Check the exact expected output file and verify it is a file (never a directory)
+            // and has no lingering .aria2 control file.
+            if (expectedOutputFile.isFile && expectedOutputFile.length() > 0L && !expectedControlFile.exists()) {
+                return expectedOutputFile
             }
 
-            errors.append("run ").append(attempts).append(": no complete file (control file still present)\n")
+            errors.append("run ").append(attempts)
+                .append(": output file missing or incomplete (.aria2 control file still present)\n")
             return null
         }
 
         while (attempts < maxAttempts && produced == null) {
             attempts++
-            if (!isActiveCheck()) throw CancellationException("Task was cancelled before HTTP aria2c retry")
+            if (!isActiveCheck()) throw CancellationException("Task cancelled before aria2c retry")
             produced = runOnce()
             if (produced == null && attempts < maxAttempts) {
                 cancellableRetryWait(2_000L * attempts, isActiveCheck = isActiveCheck)
             }
         }
+
         if (produced == null) {
-            throw Exception("aria2c HTTP download failed after $attempts attempt(s): ${errors.toString().trim()}")
+            throw Exception("aria2c HTTP download failed after $attempts attempt(s):${errors.toString().trim()}")
         }
-        return produced
+        produced
     }
 
     internal fun isGenericPreferredName(name: String): Boolean {

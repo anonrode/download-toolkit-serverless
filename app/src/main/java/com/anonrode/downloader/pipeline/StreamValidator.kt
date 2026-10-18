@@ -97,7 +97,7 @@ object StreamValidator {
                 }
                 break
             } catch (e: Exception) {
-                val tls = isTlsChainFailure(e)
+                val tls = isTlsChainFailure(e) && HostPolicyRegistry.allowsPermissiveTlsFallback(url)
                 PipelineJournal.hop("", "validate", url, ok = true,
                     ms = System.currentTimeMillis() - start,
                     detail = if (tls && !tlsRetried)

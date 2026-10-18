@@ -83,14 +83,19 @@ class TurboDownloaderPauseResumeTest {
         assertTrue("expected Success, got $result", result is TurboDownloader.TurboResult.Success)
         val success = result as TurboDownloader.TurboResult.Success
         assertEquals(payload.size.toLong(), success.bytes)
-        assertFalse(success.segmented) // 2MB < 8MB
+        assertFalse(success.segmented) // 2MB does not exceed the 2MB segmented threshold
         assertTrue(dest.readBytes().contentEquals(payload))
 
-        // The resumed run's first range request must have started where the
-        // paused run left off, not at 0.
+        // The resumed run's range requests must include one that started where
+        // the paused run left off, not at 0. The single-round-trip probe itself
+        // sends Range: bytes=0-1023, so the FIRST recorded range start is
+        // legitimately 0 — filter it and require a past-0 resume start.
         val newRangeStarts = server.rangeStarts.drop(rangeStartsBefore.size)
-        assertTrue("expected at least one range request on resume, got none", newRangeStarts.isNotEmpty())
-        assertTrue("resume should start past 0, started at ${newRangeStarts.first()}", newRangeStarts.first() > 0)
+        val pastZeroStarts = newRangeStarts.filter { it > 0 }
+        assertTrue(
+            "expected at least one resume range request past 0, got ${newRangeStarts}",
+            pastZeroStarts.isNotEmpty()
+        )
     }
 
     @Test
@@ -129,7 +134,7 @@ class TurboDownloaderPauseResumeTest {
         assertTrue("expected Success, got $result", result is TurboDownloader.TurboResult.Success)
         val success = result as TurboDownloader.TurboResult.Success
         assertEquals(payload.size.toLong(), success.bytes)
-        assertTrue(success.segmented) // 20MB > 8MB
+        assertTrue(success.segmented) // 20MB exceeds the 2MB segmented threshold
         assertTrue(dest.readBytes().contentEquals(payload))
     }
 

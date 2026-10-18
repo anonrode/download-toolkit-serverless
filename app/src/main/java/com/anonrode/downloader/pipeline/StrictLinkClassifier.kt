@@ -29,7 +29,12 @@ object StrictLinkClassifier {
     }
 
     private val DIRECT_EXTENSIONS = setOf(
-        "mp4", "mkv", "webm", "avi", "m3u8", "m4v", "ts", "mov", "flv", "mp3"
+        "mp4", "mkv", "webm", "avi", "m3u8", "m4v", "ts", "mov", "flv", "mp3",
+        // Follow-up #8: images are first-class direct artifacts (Instagram photo
+        // tasks, engine image tiers). Deliberately NOT added to MEDIA_EXT_REGEX —
+        // that regex flags same-site DOWNLOAD-PAGE paths, and an image file is
+        // not a download page.
+        "jpg", "jpeg", "png", "webp"
     )
 
     private val DEFAULT_LOCKER_HOSTS = listOf(

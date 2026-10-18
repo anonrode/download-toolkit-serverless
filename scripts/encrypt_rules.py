@@ -159,7 +159,7 @@ MAX_RULES_ARRAY = 64
 FAMILY_IDS = [
     "domains", "mirrors", "sites", "resolvers", "directMediaExtensions",
     "hostPolicies", "urlTemplates", "knownDead", "lockerHosts",
-    "searchStrategies", "pipelines", "dynamic_providers",
+    "searchStrategies", "pipelines", "dynamic_providers", "contentPolicy",
 ]
 FLAG_SUBKEYS = ("enabled", "percent", "minApp", "expiresMs", "shadow")
 REQUIRED_TOP_KEYS_VERSIONED = ("version",)
@@ -956,7 +956,7 @@ def validate_schema(plain: bytes) -> list:
                        "hostPolicies", "searchStrategies", "urlTemplates",
                        "knownDead", "tokenTtlMinutes", "validation",
                        "minAppVersion", "pipelines", "remote_logging_url",
-                       "rev", "flags"):
+                       "rev", "flags", "contentPolicy"):
             problems.append(f"unknown top-level field '{key}' (add it to the "
                             "allow-list in encrypt_rules.py AND DynamicRulesManager)")
 
@@ -977,6 +977,43 @@ def validate_schema(plain: bytes) -> list:
                 "remote_logging_url: http(s) URL string <= 300 chars")
         elif not rlu.split("://", 1)[1]:
             problems.append("remote_logging_url: host part missing")
+
+    # contentPolicy (2026-10): OTA overlay consumed by
+    # DynamicRulesManager.buildContentPolicy / HostPolicyRegistry — keep the
+    # two in lockstep (same as FAMILY_IDS). Lenient on the client, strict here:
+    # a typo'd policy would silently no-op on every device.
+    cp = obj.get("contentPolicy")
+    if cp is not None:
+        if not isinstance(cp, dict):
+            problems.append("contentPolicy: must be an object")
+        else:
+            caps = cp.get("socketCaps")
+            if caps is not None:
+                if not isinstance(caps, dict) or len(caps) > 64:
+                    problems.append(
+                        "contentPolicy.socketCaps: object of <= 64 host->int entries")
+                else:
+                    for h, v in caps.items():
+                        if (not isinstance(h, str) or not h.strip()
+                                or isinstance(v, bool) or not isinstance(v, int)
+                                or not 1 <= v <= 16):
+                            problems.append(
+                                f"contentPolicy.socketCaps.{h}: host->int 1..16")
+            if "suppressNollywood" in cp and not isinstance(cp["suppressNollywood"], bool):
+                problems.append("contentPolicy.suppressNollywood: must be a bool")
+            for arr_name, cap in (("nollywoodSites", 64),
+                                  ("nollywoodOnlySites", 64),
+                                  ("nollywoodTerms", 128)):
+                arr = cp.get(arr_name)
+                if arr is not None and (not isinstance(arr, list) or len(arr) > cap
+                                        or any(not isinstance(x, str) or not x.strip()
+                                               for x in arr)):
+                    problems.append(
+                        f"contentPolicy.{arr_name}: list of <= {cap} non-empty strings")
+            for key in cp:
+                if key not in ("socketCaps", "suppressNollywood",
+                               "nollywoodSites", "nollywoodOnlySites", "nollywoodTerms"):
+                    problems.append(f"contentPolicy.{key}: unknown field")
 
     problems.extend(validate_pipelines(obj))
     return problems

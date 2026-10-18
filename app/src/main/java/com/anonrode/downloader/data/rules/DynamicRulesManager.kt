@@ -39,6 +39,22 @@ data class HostPolicyRule(
     val ua: String = ""
 )
 
+/**
+ * OTA-tunable content/download policy (optional top-level "contentPolicy").
+ * Absent section => compiled defaults: no socket-cap overlay, no content
+ * suppression — the Firebase in-app-defaults floor every section follows.
+ * Clamp + overlay semantics validated in scratch/test_zero_redo.py (A) before
+ * this port; the content-policy fields are schema-ready (filter feature ships
+ * separately).
+ */
+data class ContentPolicy(
+    val socketCaps: Map<String, Int> = emptyMap(),
+    val suppressNollywood: Boolean = false,
+    val nollywoodOnlySites: List<String> = emptyList(),
+    val nollywoodSites: List<String> = emptyList(),
+    val nollywoodTerms: List<String> = emptyList()
+)
+
 object DynamicRulesManager {
 
     // OTA rules are AES-128-CBC encrypted so the scraping logic is not
@@ -184,7 +200,8 @@ object DynamicRulesManager {
     )
 
     private val defaultMediaExtensions = listOf(
-        ".mp4", ".mkv", ".webm", ".avi", ".ts", ".m3u8", ".m4v", ".mp3", ".zip", ".rar", "-mp4", "-mkv"
+        ".mp4", ".mkv", ".webm", ".avi", ".ts", ".m3u8", ".m4v", ".mp3", ".zip", ".rar", "-mp4", "-mkv",
+        ".jpg", ".jpeg", ".png", ".webp"
     )
 
     // Rule state is published as immutable snapshots behind @Volatile refs.
@@ -223,10 +240,47 @@ object DynamicRulesManager {
     // floor — flags are durable only inside the payload that carried them).
     @Volatile private var activeFlags: Map<String, FamilyFlag> = emptyMap()
 
+    // OTA content/download policy overlay (per-host socket caps live; content-
+    // policy fields parsed for schema readiness). Published with the atomic
+    // swap like every other snapshot; absent section = compiled defaults.
+    @Volatile private var activeContentPolicy: ContentPolicy = ContentPolicy()
+
     /** Resolved flag for one family id (see RulesFlags.FAMILY_IDS), or the
      *  safe default when the active payload carried no flag for it. */
     fun getFamilyFlag(family: String): FamilyFlag =
         try { activeFlags[family] ?: RulesFlags.DEFAULT } catch (_: Exception) { RulesFlags.DEFAULT }
+
+    /** Lenient parse of the optional "contentPolicy" section; never throws.
+     *  Host keys are normalized (lowercase, www. stripped, trailing dot) and
+     *  cap values clamped 1..16; arrays bounded 64/128 like every section. */
+    private fun buildContentPolicy(obj: JSONObject): ContentPolicy {
+        val cp = obj.optJSONObject("contentPolicy") ?: return ContentPolicy()
+        val caps = mutableMapOf<String, Int>()
+        cp.optJSONObject("socketCaps")?.let { capsObj ->
+            if (capsObj.length() <= 64) {
+                val ks = capsObj.keys()
+                while (ks.hasNext()) {
+                    val k = ks.next()
+                    val v = (capsObj.opt(k) as? Number)?.toInt() ?: continue
+                    val host = k.trim().lowercase().removePrefix("www.").trimEnd('.')
+                    if (host.isNotBlank()) caps[host] = v.coerceIn(1, 16)
+                }
+            }
+        }
+        return ContentPolicy(
+            socketCaps = caps,
+            suppressNollywood = cp.optBoolean("suppressNollywood", false),
+            nollywoodOnlySites = lowerTrimmedList(cp.optJSONArray("nollywoodOnlySites"), 64),
+            nollywoodSites = lowerTrimmedList(cp.optJSONArray("nollywoodSites"), 64),
+            nollywoodTerms = lowerTrimmedList(cp.optJSONArray("nollywoodTerms"), 128)
+        )
+    }
+
+    private fun lowerTrimmedList(arr: org.json.JSONArray?, max: Int): List<String> =
+        if (arr == null) emptyList()
+        else (0 until minOf(arr.length(), max)).mapNotNull {
+            arr.optString(it).trim().lowercase().ifBlank { null }
+        }
 
     // ---- P2-2: rev monotonicity + last-known-good ladder + sticky source ---
     // Application context for prefs persistence; captured in init() and
@@ -501,6 +555,11 @@ object DynamicRulesManager {
 
     /** OTA-configured client-error sink for RemoteLogger; "" = disabled. */
     fun getRemoteLoggingUrl(): String = remoteLoggingUrl
+
+    /** Active OTA content policy: per-host socket-cap overlay + content-policy
+     *  fields. Never throws; an absent section returns compiled defaults. */
+    fun getContentPolicy(): ContentPolicy =
+        try { activeContentPolicy } catch (_: Exception) { ContentPolicy() }
 
     /** AES-128 key for RemoteLogger's encrypted report envelopes: the SAME
      *  hex key that obfuscates the OTA rules payload (RULES_KEY_HEX, mirror
@@ -1274,6 +1333,11 @@ object DynamicRulesManager {
                     remoteLogCandidate
                 } else ""
 
+            // OTA content/download policy (2026-10): socket-cap overlay (live
+            // consumer: HostPolicyRegistry) + content-policy fields (schema-
+            // ready). Lenient like every section; absent => compiled defaults.
+            var contentPolicy = buildContentPolicy(obj)
+
             val ttl = obj.optLong("tokenTtlMinutes", 10L).coerceIn(1L, 240L)
 
             // Ordered search strategy chains: when a site's primary search
@@ -1397,6 +1461,7 @@ object DynamicRulesManager {
             familyGateBlank("knownDead") { knownDead.clear() }
             familyGateBlank("lockerHosts") { lockerHosts.clear() }
             familyGateBlank("searchStrategies") { searchStrategies.clear() }
+            familyGateBlank("contentPolicy") { contentPolicy = ContentPolicy() }
 
             // P2-4 SHADOW MODE for the behavior family (Scientist rule, plan
             // slice 4): when the payload flags `pipelines` shadow, the section
@@ -1451,6 +1516,7 @@ object DynamicRulesManager {
             activePipelines = pipelines
             dynamicProviders = dynProviders
             activeFlags = familyFlags
+            activeContentPolicy = contentPolicy
             remoteLoggingUrl = remoteLogSink
             tokenTtlMinutes = ttl
             // P2-2: a payload that carries a rev and survived the gate becomes

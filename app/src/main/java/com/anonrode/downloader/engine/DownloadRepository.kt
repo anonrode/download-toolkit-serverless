@@ -130,8 +130,12 @@ class DownloadRepository {
                     // regress the recorded size. Speed/ETA are only meaningful
                     // while actually transferring — writing them on a PAUSED or
                     // COMPLETED task would re-stamp a stale "0.5 MB/s".
-                    val finalDl = if (downloaded > 0) maxOf(it.downloadedBytes, downloaded) else it.downloadedBytes
-                    val finalTot = when {
+                    // A COMPLETED row is closed: the recorded size is the on-disk
+                    // file length, not a backend estimate — a late tick racing the
+                    // terminal write must never re-stamp downloaded/total.
+                    val finalDl = if (it.status == TaskStatus.COMPLETED) it.downloadedBytes
+                    else if (downloaded > 0) maxOf(it.downloadedBytes, downloaded) else it.downloadedBytes
+                    val finalTot = if (it.status == TaskStatus.COMPLETED) it.totalBytes else when {
                         total <= 0L -> it.totalBytes
                         it.totalBytes <= 0L -> total
                         it.totalBytes > 10_000_000_000L && total < 5_000_000_000L -> total

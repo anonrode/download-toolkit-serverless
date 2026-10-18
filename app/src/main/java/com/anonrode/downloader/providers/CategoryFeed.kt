@@ -321,7 +321,10 @@ object CategoryFeed {
             for ((_, cards) in pairs) {
                 if (idx < cards.size) {
                     val card = cards[idx]
-                    val isSafe = !filterExplicit || !com.anonrode.downloader.util.ExplicitContentFilter.isExplicit(card)
+                    // Nollywood suppression rides the SAME purity-preserving
+                    // gate as the explicit filter (OTA-switch-gated inside).
+                    val isSafe = (!filterExplicit || !com.anonrode.downloader.util.ExplicitContentFilter.isExplicit(card)) &&
+                        !com.anonrode.downloader.util.NollywoodFilter.isNollywood(card)
                     if (isSafe) {
                         val key = normalizeTitleKey(card.title, card.year)
                         if (key.isNotBlank()) {

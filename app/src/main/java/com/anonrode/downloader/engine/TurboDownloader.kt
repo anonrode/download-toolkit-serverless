@@ -2,6 +2,7 @@ package com.anonrode.downloader.engine
 
 import com.anonrode.downloader.data.net.HttpClient
 import com.anonrode.downloader.data.net.isTlsChainFailure
+import com.anonrode.downloader.pipeline.HostPolicyRegistry
 import kotlinx.coroutines.*
 import okhttp3.Call
 import okhttp3.OkHttpClient
@@ -32,9 +33,43 @@ import kotlin.coroutines.coroutineContext
  */
 object TurboDownloader {
 
-    private const val BUFFER = 256 * 1024 // 256 KB high-throughput buffer
-    private const val MIN_SEGMENTED_SIZE = 8L * 1024 * 1024 // 8 MB
+    private const val BUFFER = 256 * 1024 // 256 KB read buffer (okio returns <=8 KiB per read())
+    private const val MIN_SEGMENTED_SIZE = 2L * 1024 * 1024 // 2 MB — small files get parallel lanes too
     private const val MAX_ATTEMPTS = 5 // retries per piece / per single-stream attempt
+
+    // Drop-and-replace (1DM behavior): a lane that lags its siblings after
+    // warm-up gets replaced with a FRESH connection. Semantics validated in
+    // scratch/test_drop_replace.py before this port. NEVER consumes attempts.
+    // Directivete Fix 4: 4s windows/warm-up halve detection latency (first
+    // possible drop now t=8s, was t=16s).
+    private const val DROP_WINDOW_MS = 4_000L
+    private const val DROP_WARMUP_MS = 4_000L
+    private const val DROP_FLOOR_BPS = 40L * 1024
+    private const val MAX_DROPS_PER_PIECE = 4
+    private const val DROP_STRIKE_LIMIT = 2
+    private const val DROP_RELATIVE_FRACTION = 0.3
+    private const val DROP_RETRY_DELAY_MS = 250L
+    // Severe relative lag: when a fast sibling field exists (>= 512 KiB/s),
+    // even a lane ABOVE the absolute floor is dropped if it runs below 12% of
+    // the best window (the 55KB/s-among-1.5MB/s case the floor alone missed).
+    private const val SEVERE_LAG_MIN_BEST_BPS = 512L * 1024
+    private const val SEVERE_LAG_FRACTION = 0.12
+
+    // Read coalescing (directive Fix 5): Okio returns at most one 8 KiB segment
+    // per read(), so a naive loop causes one pwrite64 syscall + atomic update
+    // per 8 KiB (131k syscalls/GiB). Coalesce up to 64 KiB per write, stopping
+    // early on a short read so we never block for network when data is ready.
+    private const val COALESCE_TARGET_BYTES = 64 * 1024
+    private const val OKIO_SEGMENT_SIZE = 8192
+
+    // Work-stealing (directive Fix 3, corrected design D2a/D2b): when all
+    // initial pieces are claimed, a free worker splits the ACTIVE piece with
+    // the largest remaining range. Threshold 512 KiB (not 2 MiB: pieces here
+    // are 1 MiB, so a 2 MiB threshold could never fire); the cap counts
+    // SPLITS (not total pieces: initial plans hold up to 2048 pieces).
+    // Validated in scratch/test_work_steal.py before this port.
+    private const val STEAL_MIN_REMAINING_BYTES = 512L * 1024
+    private const val MAX_DYNAMIC_SPLITS = 32
     private const val RETRY_CAP = 8L // backoff ceiling, in multiples of the base delay
 
     /** Test hook: collapses exponential backoff so retry tests run fast. */
@@ -77,6 +112,32 @@ object TurboDownloader {
         activeCalls.remove(taskId)?.forEach { it.cancel() }
     }
 
+    fun clearCancelledFlag(taskId: String) {
+        fullyCancelledTaskIds.remove(taskId)
+    }
+
+    /**
+     * Returns actual verified bytes written to disk for [dest], properly handling
+     * pre-allocated segmented `.part` files by reading the `.turbo` sidecar first.
+     */
+    fun computeVerifiedDiskBytes(dest: File): Long {
+        val turboFile = File(dest.absolutePath + ".turbo")
+        val partFile = File(dest.absolutePath + ".part")
+        if (turboFile.exists()) {
+            val state = TurboState(turboFile)
+            state.writtenBytes()?.let { return it }
+            state.contiguousPrefixBytes()?.let { return it }
+            return 0L // Pre-allocated .part file with unreadable sidecar has 0 verified bytes
+        }
+        if (partFile.exists()) {
+            return partFile.length()
+        }
+        if (dest.exists()) {
+            return dest.length()
+        }
+        return 0L
+    }
+
     /**
      * taskId → epoch-millis until which the run is deliberately sitting out a
      * server rate-limit. Bytes will NOT move while a deadline is live — the
@@ -100,6 +161,11 @@ object TurboDownloader {
     private fun trackCall(taskId: String, call: Call) {
         if (taskId.isEmpty()) return
         activeCalls.getOrPut(taskId) { CopyOnWriteArrayList() }.add(call)
+        // cancelTask() may have removed the map entry between getOrPut and add:
+        // its snapshot then missed this call — cancel it here instead.
+        if (!activeCalls.containsKey(taskId)) {
+            call.cancel()
+        }
     }
 
     private fun canCommit(taskId: String): Boolean =
@@ -110,29 +176,48 @@ object TurboDownloader {
         activeCalls[taskId]?.remove(call)
     }
 
+    /** One shared zero-idle pool for every post-drop client (directive Fix 4:
+     *  a fresh pool object per drop was wasteful; sharing keeps sockets from
+     *  ever being reused while creating no per-drop garbage). */
+    private val zeroIdlePool =
+        okhttp3.ConnectionPool(0, 1, java.util.concurrent.TimeUnit.NANOSECONDS)
+
+    /** Client for post-drop attempts: zero-idle pool so a fresh connection is
+     *  actually fresh (derived from the passed client to keep any permissive
+     *  TLS choice the caller made). */
+    private fun freshConnectionClient(base: OkHttpClient): OkHttpClient =
+        base.newBuilder().connectionPool(zeroIdlePool).build()
+
+    /** Coalesce Okio's <=8 KiB segment reads into one up-to-64 KiB write.
+     *  Stops early on a short segment read (socket buffer drained) so the
+     *  caller never blocks waiting for packets when bytes are ready. */
+    private fun readCoalesced(src: okio.BufferedSource, buf: ByteArray, maxWant: Int): Int {
+        val target = minOf(maxWant, COALESCE_TARGET_BYTES)
+        var totalRead = 0
+        while (totalRead < target) {
+            val r = src.read(buf, totalRead, maxWant - totalRead)
+            if (r == -1) break
+            totalRead += r
+            if (r < OKIO_SEGMENT_SIZE) break
+        }
+        return if (totalRead == 0) -1 else totalRead
+    }
+
     private fun backoffMillis(attempt: Int): Long {
         val factor = (1L shl (attempt - 1).coerceIn(0, 3)).coerceAtMost(RETRY_CAP)
         return (factor * retryBaseDelayMs).coerceAtMost(RETRY_CAP * retryBaseDelayMs)
     }
 
     /**
-     * Sockets per download: capped at 16, and the 4-way multi-socket default
-     * exists to bypass server-side single-socket 200KB/s throttling — but the
-     * floor is 1, NOT 4. The engine deliberately forces a single socket for
-     * hosts that reject multi-connection downloads (kissorgrab, dl.plutomovies);
-     * a 4 floor silently overrode that policy and recreated the documented
-     * fail→rescue→fail loop for those hosts.
+     * Sockets per download: clamped 1..16 (floor 1, ceiling 16) and capped per
+     * host by HostPolicyRegistry — built-ins start wide (6 on kissorgrab /
+     * dl.plutomovies, 12 on the wetafiles/downloadwella/loadedfiles lockers —
+     * Fix 7) and are OTA-overridable via contentPolicy.socketCaps. Speed
+     * policy: start fast; let the 429 ladder, drop-and-replace, and
+     * work-stealing adapt per connection.
      */
-    fun socketsFor(url: String, configured: Int): Int {
-        val low = url.lowercase()
-        if (low.contains("kissorgrab.") || low.contains("dl.plutomovies.")) {
-            return minOf(4, configured.coerceAtLeast(2))
-        }
-        if (low.contains("wetafiles.") || low.contains("downloadwella.") || low.contains("loadedfiles.")) {
-            return minOf(4, configured.coerceAtLeast(2))
-        }
-        return configured.coerceIn(1, 16)
-    }
+    fun socketsFor(url: String, configured: Int): Int =
+        HostPolicyRegistry.effectiveSocketsForUrl(url, configured)
 
     /** Outcome of a transfer: either a completed file or a failure with the server status when known. */
     sealed interface TurboResult {
@@ -149,6 +234,11 @@ object TurboDownloader {
 
         /** The URL answers with an HTML page (locker page, expired-token error page). */
         object HtmlPage : ProbeResult()
+
+        /** Terminal server verdict (directive Fix 2): the engine must hear
+         *  429/401/403/404/410 immediately instead of watching single() burn
+         *  five attempts on a dead or rate-limited link. */
+        data class HttpError(val code: Int, val message: String) : ProbeResult()
 
         /** The server could not be reached or answered without usable headers. */
         data class Unreachable(val total: Long) : ProbeResult()
@@ -196,99 +286,145 @@ object TurboDownloader {
         client: OkHttpClient = HttpClient.downloadClient,
         taskId: String = ""
     ): TurboResult = withContext(Dispatchers.IO) {
-        dest.parentFile?.mkdirs()
-        val safe = HttpClient.safeUrl(url)
-
-        var effectiveClient = client
-        var probeError: Throwable? = null
-        var probe = probe(safe, headers, effectiveClient) { probeError = it }
-        // Broken TLS chain (wetafiles omits its intermediate): the strict
-        // client can't even finish the handshake, so the probe reports
-        // Unreachable with no total and EVERY segmented socket below would
-        // burn a ~18s handshake failure — which is exactly how v3.0.4 fell
-        // back to yt-dlp (slow start, MB-only progress). One trust-all retry
-        // then runs the whole job on the permissive client.
-        if (probe is ProbeResult.Unreachable && probeError != null && isTlsChainFailure(probeError!!)) {
-            com.anonrode.downloader.util.DebugLog.backend(
-                "task=$taskId probe TLS chain failure (${probeError!!.message?.take(80)}), retrying trust-all"
-            )
-            effectiveClient = HttpClient.permissiveDownloadClient
-            probeError = null
-            probe = probe(safe, headers, effectiveClient) { probeError = it }
-        }
-        val total: Long
-        val acceptsRanges: Boolean
-        when (probe) {
-            is ProbeResult.File -> {
-                total = probe.total
-                acceptsRanges = probe.acceptsRanges
-            }
-            ProbeResult.HtmlPage -> {
-                // The URL answers with an HTML page (locker page, expired-token
-                // error page): fail before downloading any bytes, and mark it so
-                // the engine can re-resolve instead of blaming the file.
-                return@withContext TurboResult.Failure(null, "Server returned an HTML page instead of a file", htmlPage = true)
-            }
-            is ProbeResult.Unreachable -> {
-                total = probe.total
-                acceptsRanges = false
-            }
+        // Clear any stale cancellation flag from a prior run of this taskId
+        if (taskId.isNotBlank()) {
+            fullyCancelledTaskIds.remove(taskId)
         }
 
-        val sockets = socketsFor(safe, configuredSockets)
-        val useSegmented = acceptsRanges && total > MIN_SEGMENTED_SIZE && sockets > 1
+        try {
+            dest.parentFile?.mkdirs()
+            val safe = HttpClient.safeUrl(url)
 
-        val partFile = File(dest.absolutePath + ".part")
-        val state = TurboState(File(dest.absolutePath + ".turbo"))
-        val failureStatus = AtomicInteger(0)
-        val failureMessage = AtomicReference<String?>(null)
+            var effectiveClient = client
+            var probeError: Throwable? = null
+            var probe = probe(safe, headers, effectiveClient) { probeError = it }
 
-        return@withContext if (useSegmented) {
-            val ok = segmented(safe, partFile, headers, total, sockets, state, failureStatus, failureMessage, onProgress, effectiveClient, taskId)
-            if (ok) {
-                state.delete()
-                if (moveVerified(partFile, dest, total)) TurboResult.Success(dest, dest.length(), true)
-                else failure(failureStatus, failureMessage)
-            } else {
-                val landedBytes = state.writtenBytes() ?: 0L
-                val canFallbackToSingle = !partFile.exists() || partFile.length() == 0L || landedBytes == 0L
-                if (canFallbackToSingle) {
-                    partFile.delete()
-                    state.delete()
-                    if (single(safe, partFile, headers, total, failureStatus, failureMessage, onProgress, effectiveClient, taskId)) {
-                        if (moveVerified(partFile, dest, total)) TurboResult.Success(dest, dest.length(), false)
-                        else failure(failureStatus, failureMessage)
-                    } else failure(failureStatus, failureMessage)
-                } else failure(failureStatus, failureMessage)
+            // SECURITY FIX: Only fallback to permissiveDownloadClient if the host is on
+            // the known broken-intermediate allowlist in HostPolicyRegistry.
+            if (probe is ProbeResult.Unreachable &&
+                probeError != null &&
+                isTlsChainFailure(probeError!!) &&
+                HostPolicyRegistry.allowsPermissiveTlsFallback(safe)
+            ) {
+                com.anonrode.downloader.util.DebugLog.backend(
+                    "task=$taskId probe TLS chain failure on allowlisted host (${probeError!!.message?.take(80)}), retrying with permissive client"
+                )
+                effectiveClient = HttpClient.permissiveDownloadClient
+                probeError = null
+                probe = probe(safe, headers, effectiveClient) { probeError = it }
             }
-        } else {
-            // Cross-mode resume guard (engine-audit P1): a `.part` left by a
-            // SEGMENTED run is pre-allocated to the FULL length, so its length
-            // is not a proven prefix — single() resumes from dest.length() and
-            // would either 416 forever (conforming server) or append a short
-            // tail onto a file of zero holes and report Success. When a valid
-            // sidecar describes the file, shrink it to the contiguous prefix
-            // the sidecar vouches for; a null prefix (no/unreadable sidecar)
-            // leaves the length as the only evidence — the sequential-write
-            // case the old behavior was built for.
-            if (partFile.exists() && partFile.length() > 0L) {
-                val prefix = state.contiguousPrefixBytes()
-                    ?: if (File(dest.absolutePath + ".turbo").exists()) 0L else null
-                if (prefix != null && prefix < partFile.length()) {
-                    try {
-                        RandomAccessFile(partFile, "rw").use { it.setLength(prefix) }
-                    } catch (e: Exception) {
-                        failureMessage.set("Could not prepare partial file: ${e.message}")
-                        return@withContext failure(failureStatus, failureMessage)
-                    }
+
+            val total: Long
+            val acceptsRanges: Boolean
+            when (probe) {
+                is ProbeResult.File -> {
+                    total = probe.total
+                    acceptsRanges = probe.acceptsRanges
+                }
+                ProbeResult.HtmlPage -> {
+                    return@withContext TurboResult.Failure(
+                        httpStatus = null,
+                        message = "Server returned an HTML page instead of a media file",
+                        htmlPage = true
+                    )
+                }
+                is ProbeResult.HttpError -> {
+                    // Terminal verdict: hand the code to the engine immediately
+                    // (its self-heal/park logic keys on 401/403/404/410/429).
+                    return@withContext TurboResult.Failure(
+                        httpStatus = probe.code,
+                        message = probe.message,
+                        htmlPage = false
+                    )
+                }
+                is ProbeResult.Unreachable -> {
+                    total = probe.total
+                    acceptsRanges = false
                 }
             }
-            state.delete()
-            if (single(safe, partFile, headers, total, failureStatus, failureMessage, onProgress, effectiveClient, taskId)) {
-                state.delete()
-                if (moveVerified(partFile, dest, total)) TurboResult.Success(dest, dest.length(), false)
-                else failure(failureStatus, failureMessage)
-            } else failure(failureStatus, failureMessage)
+
+            val sockets = HostPolicyRegistry.effectiveSocketsForUrl(safe, configuredSockets)
+            val useSegmented = acceptsRanges && total > MIN_SEGMENTED_SIZE && sockets > 1
+
+            val partFile = File(dest.absolutePath + ".part")
+            val turboSidecar = File(dest.absolutePath + ".turbo")
+            val state = TurboState(turboSidecar)
+            val failureStatus = AtomicInteger(0)
+            val failureMessage = AtomicReference<String?>(null)
+
+            if (useSegmented) {
+                // Defense in depth (audit finding 1): a .turbo without its .part
+                // means the plan's offsets describe bytes that are no longer in
+                // this .part — a sidecar-driven resume would skip those ranges
+                // and zero-fill them. A stale plan can never be trusted here;
+                // delete it and start a fresh plan (correctness over redo).
+                if (!partFile.exists() && turboSidecar.exists()) {
+                    TurboState(turboSidecar).delete()
+                }
+                val ok = segmented(
+                    safe, partFile, headers, total, sockets, state,
+                    failureStatus, failureMessage, onProgress, effectiveClient, taskId
+                )
+                if (ok) {
+                    state.delete()
+                    if (moveVerified(partFile, dest, total)) {
+                        TurboResult.Success(dest, dest.length(), true)
+                    } else {
+                        failure(failureStatus, failureMessage)
+                    }
+                } else {
+                    val landedBytes = state.writtenBytes() ?: 0L
+                    val canFallbackToSingle = canCommit(taskId) && coroutineContext.isActive &&
+                        (!partFile.exists() || partFile.length() == 0L || landedBytes == 0L)
+                    if (canFallbackToSingle) {
+                        partFile.delete()
+                        state.delete()
+                        if (single(safe, partFile, headers, total, failureStatus, failureMessage, onProgress, effectiveClient, taskId)) {
+                            if (moveVerified(partFile, dest, total)) {
+                                TurboResult.Success(dest, dest.length(), false)
+                            } else {
+                                failure(failureStatus, failureMessage)
+                            }
+                        } else {
+                            failure(failureStatus, failureMessage)
+                        }
+                    } else {
+                        failure(failureStatus, failureMessage)
+                    }
+                }
+            } else {
+                // BUG FIX (Cross-Mode Resume): If transitioning from a pre-allocated segmented
+                // `.part` file to single-stream mode, truncate `.part` to the contiguous prefix
+                // AND immediately delete the `.turbo` sidecar so future resumes do not re-truncate
+                // newly appended single-stream bytes!
+                if (partFile.exists() && partFile.length() > 0L && turboSidecar.exists()) {
+                    val prefix = state.contiguousPrefixBytes() ?: 0L
+                    try {
+                        if (prefix < partFile.length()) {
+                            RandomAccessFile(partFile, "rw").use { it.setLength(prefix) }
+                        }
+                        state.delete()
+                    } catch (e: Exception) {
+                        partFile.delete()
+                        state.delete()
+                    }
+                }
+                if (single(safe, partFile, headers, total, failureStatus, failureMessage, onProgress, effectiveClient, taskId)) {
+                    state.delete()
+                    if (moveVerified(partFile, dest, total)) {
+                        TurboResult.Success(dest, dest.length(), false)
+                    } else {
+                        failure(failureStatus, failureMessage)
+                    }
+                } else {
+                    failure(failureStatus, failureMessage)
+                }
+            }
+        } finally {
+            if (taskId.isNotBlank()) {
+                activeCalls.remove(taskId)
+                fullyCancelledTaskIds.remove(taskId)
+            }
         }
     }
 
@@ -316,19 +452,26 @@ object TurboDownloader {
     }
 
     /**
-     * Definitive range probe:
-     * 1. Check HEAD. If Content-Length > 0 and Accept-Ranges is explicit, return (len, true).
-     * 2. If Accept-Ranges is omitted on HEAD (common on CDNs), test Range: bytes=0-1024.
-     * 3. If server responds with HTTP 206 Partial Content, return (total, true).
-     * Any step that proves the URL serves an HTML page (Content-Type text/html)
-     * short-circuits to HtmlPage so the caller never downloads a locker page or
-     * expired-token error page as a video file.
+     * Single-round-trip fast probe (1DM): the first request is a ranged GET
+     * (bytes=0-1023 + Accept-Encoding: identity) returning status, total size,
+     * range support AND the first bytes for a best-effort media sniff in ONE
+     * round trip. Header verdicts decide first; HEAD remains a fallback for
+     * non-206/200 answers (e.g. a rate-limited range server whose HEAD still
+     * answers 200 + Accept-Ranges). Decision table validated in
+     * scratch/test_probe_logic.py before this port.
      */
     private fun probe(url: String, headers: Map<String, String>, client: OkHttpClient, onFailure: (Throwable) -> Unit = {}): ProbeResult {
-        fun buildReq(head: Boolean) = Request.Builder().url(url).apply {
+        fun buildGet() = Request.Builder().url(url).apply {
             header("User-Agent", headers["User-Agent"] ?: HttpClient.DEFAULT_UA)
             headers.forEach { (k, v) -> if (!k.equals("User-Agent", true)) header(k, v) }
-            if (head) head() else header("Range", "bytes=0-1024")
+            header("Range", "bytes=0-1023")
+            header("Accept-Encoding", "identity")
+        }.build()
+
+        fun buildHead() = Request.Builder().url(url).apply {
+            header("User-Agent", headers["User-Agent"] ?: HttpClient.DEFAULT_UA)
+            headers.forEach { (k, v) -> if (!k.equals("User-Agent", true)) header(k, v) }
+            head()
         }.build()
 
         fun isHtmlPage(contentType: String?): Boolean {
@@ -336,44 +479,63 @@ object TurboDownloader {
             return ct.startsWith("text/html") || ct.startsWith("application/xhtml")
         }
 
-        var totalLength = -1L
+        fun sniffHead(r: okhttp3.Response): Boolean {
+            val head = try {
+                r.peekBody(1024).bytes()
+            } catch (_: Exception) {
+                null // mid-body disconnect: never invalidates a header verdict
+            }
+            return head != null && head.isNotEmpty() &&
+                com.anonrode.downloader.pipeline.StreamValidator.sniff(head) != null
+        }
 
-        // 1. Try HEAD request. Registered probe calls so pause/cancel kills
-        // them too (v3.0.4: turborouter traffic outlived a cancel).
-        try {
-            HttpClient.executeRegistered(client.newCall(buildReq(true))).use { r ->
-                val ct = r.header("Content-Type")
-                val len = r.header("Content-Length")?.toLongOrNull() ?: -1L
-                val ranges = r.header("Accept-Ranges")?.contains("bytes", true) == true
-                if (r.isSuccessful && len > 0 && !isHtmlPage(ct)) {
-                    totalLength = len
-                    if (ranges) {
-                        return ProbeResult.File(totalLength, true)
+        fun headFallback(carried: Long): ProbeResult {
+            var total = carried
+            try {
+                // Registered so pause/cancel kills the probe too.
+                HttpClient.executeRegistered(client.newCall(buildHead())).use { r ->
+                    val ct = r.header("Content-Type")
+                    val len = r.header("Content-Length")?.toLongOrNull() ?: -1L
+                    val ranges = r.header("Accept-Ranges")?.contains("bytes", true) == true
+                    if (r.isSuccessful && len > 0 && !isHtmlPage(ct)) {
+                        total = len
+                        if (ranges) return ProbeResult.File(total, true)
                     }
                 }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (e: Exception) {
+                onFailure(e)
             }
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (e: Exception) {
-            onFailure(e)
+            return ProbeResult.Unreachable(total)
         }
 
-        // 2. If Accept-Ranges was not explicit on HEAD (or HEAD returned HTML/unsupported), probe with Range: bytes=0-1024
+        // 1. Ranged GET first — one round trip for status + total + sniff.
+        var getStatus: Int? = null
         try {
-            HttpClient.executeRegistered(client.newCall(buildReq(false))).use { r ->
+            HttpClient.executeRegistered(client.newCall(buildGet())).use { r ->
+                getStatus = r.code
                 val ct = r.header("Content-Type")
+                if (isHtmlPage(ct)) return ProbeResult.HtmlPage
+
                 val cr = r.header("Content-Range")
                 val totalFromCr = cr?.substringAfter('/')?.trim()?.toLongOrNull() ?: -1L
-                val is206 = r.code == 206
-                if (is206) {
-                    val finalTotal = if (totalFromCr > 0) totalFromCr else totalLength
-                    return ProbeResult.File(finalTotal, true)
-                } else if (isHtmlPage(ct)) {
-                    return ProbeResult.HtmlPage
-                } else if (r.isSuccessful && totalLength <= 0) {
-                    val len = r.header("Content-Length")?.toLongOrNull() ?: -1L
-                    if (len > 0) totalLength = len
+                val lenHeader = r.header("Content-Length")?.toLongOrNull() ?: -1L
+
+                if (r.code == 206 && totalFromCr > 0) {
+                    // Header-proven range support: sniff is best-effort AFTER the
+                    // verdict — a body read failure must not discard it
+                    // (TurboDownloaderTest.givesUpAfterMaxAttempts).
+                    if (sniffHead(r)) return ProbeResult.HtmlPage
+                    return ProbeResult.File(totalFromCr, true)
                 }
+                if (r.code == 200 && lenHeader > 0) {
+                    if (sniffHead(r)) return ProbeResult.HtmlPage
+                    return ProbeResult.File(lenHeader, false)
+                }
+                // Deliberately NO carry of Content-Length/Content-Range from
+                // error or unusable responses (audit finding 2): an error
+                // page's byte length must never become the tracked total.
             }
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -381,7 +543,30 @@ object TurboDownloader {
             onFailure(e)
         }
 
-        return ProbeResult.Unreachable(totalLength)
+        // 2. HEAD fallback for non-206/200 answers (416/429/403/...) and for
+        // responses that did not advertise a usable length — ONE try only.
+        // Directive Fix 2, corrected: a 429 whose HEAD still answers 200 +
+        // Accept-Ranges keeps the segmented path alive (that is the
+        // RateLimitedRangeServer storm-survival constraint); only when HEAD is
+        // also unusable does the probe fast-fail.
+        val hb = headFallback(-1L)
+        if (hb is ProbeResult.File) return hb
+        val code = getStatus
+        if (code != null) {
+            if (code == 429) {
+                com.anonrode.downloader.pipeline.HostHealth.recordFail(
+                    url, rateLimited = true, reason = "HTTP 429 in Turbo probe"
+                )
+                return ProbeResult.HttpError(429, "Server rate limited request (HTTP 429)")
+            }
+            if (code in listOf(401, 403, 404, 410)) {
+                return ProbeResult.HttpError(code, "Server rejected link (HTTP $code)")
+            }
+            // 5xx deliberately falls through to Unreachable: the full
+            // 5-attempt retry ladder must stay reachable
+            // (TurboDownloaderTest.givesUpAfterMaxAttempts).
+        }
+        return hb
     }
 
     private suspend fun segmented(
@@ -397,11 +582,25 @@ object TurboDownloader {
         client: OkHttpClient,
         taskId: String = ""
     ): Boolean = coroutineScope {
-        val plan = state.loadOrCreate(total, sockets)
+            // Work-stealing appends split pieces mid-run (Fix 3). CopyOnWrite
+            // makes every append atomically visible to concurrent commits and
+            // telemetry without wrapping a dozen call sites in synchronized —
+            // the steal DECISION itself still runs under synchronized(plan)
+            // so two workers can never split the same victim.
+            val plan = CopyOnWriteArrayList(state.loadOrCreate(total, sockets))
         val initialBytes = plan.sumOf { (it.current - it.start).coerceAtLeast(0L) }
         val done = AtomicLong(initialBytes)
-        val failed = AtomicBoolean(false)
-        val nextPiece = AtomicInteger(0)
+            val failed = AtomicBoolean(false)
+            val nextPiece = AtomicInteger(0)
+            var dynamicSplits = 0  // work-steal splits this run (Fix 3 budget)
+            // Best window throughput seen by ANY lane this run — the relative
+            // drop guard: a lane is dropped only when slow BOTH absolutely
+            // (< DROP_FLOOR_BPS) and relatively (< 30% of the best sibling
+            // window), so a uniformly-slow link (live-verified at ~6-9 KB/s
+            // total on the maintainer connection) never churns lanes and never
+            // wastes multi-second handshakes. Shared-best scenarios validated
+            // in scratch/test_drop_replace.py.
+            val bestWindowBps = AtomicLong(0L)
         // Rate-limit coordination: one shared cooldown deadline every socket
         // sits out (the limiter is per-IP — only a PAUSE heals it; retrying
         // now deepens it), a cycle counter driving the escalating ladder, and
@@ -453,13 +652,46 @@ object TurboDownloader {
             RandomAccessFile(dest, "rw").use { raf ->
                 val channel: FileChannel = raf.channel
 
-                // Shared piece queue (BitTorrent style): workers pull the next unfinished
-                // piece, so a slow connection never holds up the download tail.
-                fun claimNext(): Int? {
+                // Shared piece queue (BitTorrent style): workers pull the next
+                // unfinished piece. When every initial piece is claimed, a free
+                // worker STEALS: it splits the active piece with the largest
+                // remaining range in half and takes the back half (directive
+                // Fix 3, "hurry up"). Threshold/budget corrected per
+                // scratch/test_work_steal.py: 512 KiB minimum remainder (pieces
+                // are 1 MiB, so a 2 MiB threshold could never fire) and the cap
+                // counts SPLITS (initial plans hold up to 2048 pieces).
+                fun claimOrStealNext(): TurboChunk? {
                     while (true) {
                         val idx = nextPiece.getAndIncrement()
-                        if (idx >= plan.size) return null
-                        if (plan[idx].current <= plan[idx].end) return idx
+                        if (idx >= plan.size) break
+                        val c = plan[idx]
+                        if (c.current <= c.end) return c
+                    }
+                    synchronized(plan) {
+                        if (dynamicSplits >= MAX_DYNAMIC_SPLITS) return null
+                        var victim: TurboChunk? = null
+                        var victimRemaining = 0L
+                        for (c in plan) {
+                            if (c.current <= c.end) {
+                                val remaining = c.end - c.current + 1L
+                                if (remaining >= STEAL_MIN_REMAINING_BYTES && remaining > victimRemaining) {
+                                    victim = c
+                                    victimRemaining = remaining
+                                }
+                            }
+                        }
+                        val v = victim ?: return null
+                        val splitOffset = v.current + victimRemaining / 2L
+                        if (splitOffset <= v.current || splitOffset > v.end) return null
+                        val oldEnd = v.end
+                        v.end = splitOffset - 1L
+                        val stolen = TurboChunk(start = splitOffset, end = oldEnd, current = splitOffset)
+                        plan.add(stolen)
+                        dynamicSplits++
+                        com.anonrode.downloader.util.DebugLog.backend(
+                            "task=$taskId work-steal split piece=${v.start}-$oldEnd -> victimEnds=${v.end} stolen=${stolen.start}-${stolen.end}"
+                        )
+                        return stolen
                     }
                 }
 
@@ -476,6 +708,12 @@ object TurboDownloader {
                  */
                 suspend fun downloadPiece(chunk: TurboChunk): Boolean {
                     var attempt = 0
+                    // Drop-and-replace state is PER PIECE (survives retries);
+                    // semantics validated in scratch/test_drop_replace.py.
+                    var drops = 0
+                    var slowAfterDrop = 0
+                    var noMoreDrops = false
+                    var lastConnWasPostDrop = false
                     while (true) {
                         if (failed.get() || !coroutineContext.isActive) return false
                         // Sit out a live cooldown in ≤2s slices so pause/kill
@@ -488,21 +726,47 @@ object TurboDownloader {
                         if (attempt >= MAX_ATTEMPTS) break
                         var completed = false
                         var rateLimited = false
+                        var dropped = false
+                        var connStartedAt = System.currentTimeMillis()
+                        var dropWindowStart = connStartedAt
+                        var dropWindowBytes = 0L
                         try {
+                            // Remember what we ASKED for: if a work-stealer shortens
+                            // chunk.end below this while we are mid-read, the call
+                            // must be cancelled so OkHttp closes the socket instead
+                            // of draining the stolen tail (Fix 3).
+                            val requestedRangeEnd = chunk.end
                             val req = Request.Builder().url(url).apply {
                                 header("User-Agent", headers["User-Agent"] ?: HttpClient.DEFAULT_UA)
                                 headers.forEach { (k, v) -> if (!k.equals("User-Agent", true)) header(k, v) }
-                                header("Range", "bytes=${chunk.current}-${chunk.end}")
+                                header("Range", "bytes=${chunk.current}-$requestedRangeEnd")
+                                // After a drop, force a brand-new connection: the pool
+                                // could otherwise hand back the throttled socket.
+                                if (drops > 0) header("Connection", "close")
                             }.build()
-                            val call = client.newCall(req)
+                            val call = (if (drops > 0) freshConnectionClient(client) else client).newCall(req)
                             trackCall(taskId, call)
                             try {
                                 call.execute().use { res ->
                                 if (res.code == 206) {
+                                    // Audit finding 4: a 206 from the WRONG start
+                                    // offset would write the file head at a piece
+                                    // offset (silent duplication) — verify the
+                                    // server honored the requested Range.
+                                    val crStart = res.header("Content-Range")
+                                        ?.substringAfter("bytes ", "")?.substringBefore('-')?.trim()?.toLongOrNull()
+                                    if (crStart != null && crStart != chunk.current) {
+                                        throw java.io.IOException(
+                                            "range start mismatch: asked ${chunk.current}, server began at $crStart"
+                                        )
+                                    }
                                     val src = res.body?.source() ?: throw IOException("Empty response body from server")
                                     val buf = ByteArray(BUFFER)
                                     var pos = chunk.current
                                     var bytesSinceLastCommit = 0L
+                                    connStartedAt = System.currentTimeMillis()
+                                    dropWindowStart = connStartedAt
+                                    dropWindowBytes = 0L
                                     while (pos <= chunk.end && !failed.get()) {
                                         if (!coroutineContext.isActive) {
                                             if (canCommit(taskId)) {
@@ -510,20 +774,27 @@ object TurboDownloader {
                                             }
                                             return@use
                                         }
-                                        val want = minOf(buf.size.toLong(), chunk.end - pos + 1).toInt()
-                                        val n = src.read(buf, 0, want)
-                                        if (n == -1) break
+                                        val liveEnd = chunk.end
+                                        val remainingInChunk = liveEnd - pos + 1L
+                                        if (remainingInChunk <= 0L) break
+                                        val want = minOf(buf.size.toLong(), remainingInChunk).toInt()
+                                        val n = readCoalesced(src, buf, want)
+                                        if (n <= 0) break
 
-                                        synchronized(channel) {
-                                            // FileChannel.write MAY write fewer bytes than
-                                            // requested (legal per contract). Ignoring the
-                                            // return value left permanent zero holes that the
-                                            // sidecar still reported as downloaded, so the
-                                            // piece was never retried and the run could end
-                                            // "Success" over a corrupt file (engine-audit
-                                            // P2). Drain the buffer; treat a stall as a real
-                                            // failure so the retry policy owns it.
-                                            val bb = ByteBuffer.wrap(buf, 0, n)
+                                        // Lock-free positional writes: FileChannel.write
+                                        // (ByteBuffer, position) is kernel-atomic
+                                        // (pwrite64) and each piece owns a DISJOINT byte
+                                        // range, so lanes no longer queue behind one
+                                        // monitor. The drain loop stays: a short write
+                                        // (legal per contract) must surface as a
+                                        // retryable failure, never as silent zero holes.
+                                        // Re-clamp: a work-stealer may have shortened
+                                        // chunk.end while readCoalesced was in flight —
+                                        // bytes past the new end belong to the stealer.
+                                        val allowedBytes = (chunk.end - pos + 1L).coerceAtLeast(0L).toInt()
+                                        val writeLen = minOf(n, allowedBytes)
+                                        if (writeLen > 0) {
+                                            val bb = ByteBuffer.wrap(buf, 0, writeLen)
                                             var w = 0
                                             while (bb.hasRemaining()) {
                                                 val k = channel.write(bb, pos + w)
@@ -532,13 +803,79 @@ object TurboDownloader {
                                                 )
                                                 w += k
                                             }
+                                            pos += writeLen
+                                            chunk.current = pos
+                                            done.addAndGet(writeLen.toLong())
+                                        }
+                                        if (pos > chunk.end) {
+                                            if (chunk.end < requestedRangeEnd) {
+                                                try { call.cancel() } catch (_: Exception) {}
+                                            }
+                                            break
                                         }
 
-                                        pos += n
-                                        chunk.current = pos
-                                        done.addAndGet(n.toLong())
+                                        // Drop-and-replace window check (1DM): a lane
+                                        // under the floor AFTER warm-up is replaced by
+                                        // a fresh connection. Warm-up windows are not
+                                        // evidence, and the two-strikes latch is set
+                                        // BEFORE the drop decision so IP-wide
+                                        // throttling is bounded (test_drop_replace.py).
+                                        val nowMs = System.currentTimeMillis()
+                                        dropWindowBytes += writeLen
+                                        if (nowMs < throttleUntil.get()) {
+                                            // Cooldown (audit finding 3): window
+                                            // bookkeeping is frozen AND the window
+                                            // anchor resets, so parked time can
+                                            // never count as slow-lane evidence.
+                                            dropWindowBytes = 0L
+                                            dropWindowStart = nowMs
+                                        } else if (nowMs - dropWindowStart >= DROP_WINDOW_MS) {
+                                            val span = (nowMs - dropWindowStart).coerceAtLeast(1L)
+                                            val bps = dropWindowBytes * 1000.0 / span
+                                            dropWindowBytes = 0L
+                                            dropWindowStart = nowMs
+                                            // Shared best FIRST (cold start safe: the
+                                            // first window seeds it with its own bps,
+                                            // so a uniformly slow link never drops).
+                                            if (bps > 0.0) bestWindowBps.accumulateAndGet(bps.toLong()) { a, b ->
+                                                if (a > b) a else b
+                                            }
+                                            val bestBps = bestWindowBps.get()
+                                            val isSlowAbsolute = bps < DROP_FLOOR_BPS &&
+                                                bps < bestBps * DROP_RELATIVE_FRACTION
+                                            // Fix 4: above-floor but far below the sibling
+                                            // field (55KB/s among 1.5MB/s lanes) is still
+                                            // a drop candidate.
+                                            val isSeverelyLagging = bestBps >= SEVERE_LAG_MIN_BEST_BPS &&
+                                                bps < bestBps * SEVERE_LAG_FRACTION
+                                            if (isSlowAbsolute || isSeverelyLagging) {
+                                                val eligible = nowMs - connStartedAt > DROP_WARMUP_MS
+                                                if (eligible && lastConnWasPostDrop) {
+                                                    slowAfterDrop++
+                                                    if (slowAfterDrop >= DROP_STRIKE_LIMIT) noMoreDrops = true
+                                                }
+                                                if (eligible &&
+                                                    chunk.end - pos + 1 > 2L * BUFFER &&
+                                                    !noMoreDrops &&
+                                                    drops < MAX_DROPS_PER_PIECE &&
+                                                    nowMs >= throttleUntil.get()
+                                                ) {
+                                                    drops++
+                                                    lastConnWasPostDrop = true
+                                                    dropped = true
+                                                    com.anonrode.downloader.util.DebugLog.backend(
+                                                        "task=$taskId drop slow socket piece=${chunk.start}-${chunk.end} rate=${(bps / 1024).toInt()}kB/s drops=$drops/$MAX_DROPS_PER_PIECE"
+                                                    )
+                                                    try { call.cancel() } catch (_: Exception) {}
+                                                    break
+                                                }
+                                            } else if (lastConnWasPostDrop && bps >= DROP_FLOOR_BPS &&
+                                                !isSeverelyLagging) {
+                                                slowAfterDrop = 0 // healthy (not merely non-relative-slow) window
+                                            }
+                                        }
 
-                                        bytesSinceLastCommit += n
+                                        bytesSinceLastCommit += writeLen
                                         if (bytesSinceLastCommit >= 2 * 1024 * 1024L || pos > chunk.end) {
                                             if (canCommit(taskId)) {
                                                 state.commit(plan, total, force = false)
@@ -558,29 +895,44 @@ object TurboDownloader {
                                 } finally {
                                     untrackCall(taskId, call)
                                 }
-                            if (completed) return true
-                            if (rateLimited) {
-                                // The server told us to come back later: come
-                                // back later. This is NOT one of the piece's
-                                // 5 tries — counting 429s against the budget
-                                // is what turned a 26 MB/s healthy stream into
-                                // a corpse in share-5.
-                                enterRateLimit()
-                                continue
-                            }
-                            attempt++
+                                if (completed) return true
+                                if (rateLimited) {
+                                    // The server told us to come back later: come
+                                    // back later. This is NOT one of the piece's
+                                    // 5 tries — counting 429s against the budget
+                                    // is what turned a 26 MB/s healthy stream into
+                                    // a corpse in share-5.
+                                    enterRateLimit()
+                                    continue
+                                }
+                                if (dropped) {
+                                    // Drop-and-replace: the next attempt resumes from
+                                    // chunk.current on a fresh connection. NEVER
+                                    // consumes an attempt (mirrors the rateLimited
+                                    // path); persist state first so a crash right
+                                    // after a drop resumes at the committed offset.
+                                    if (canCommit(taskId)) state.commit(plan, total, force = true)
+                                    delay(DROP_RETRY_DELAY_MS)
+                                    continue
+                                }
+                                attempt++
                             if (failed.get() || !coroutineContext.isActive) return false
                             failureMessage.compareAndSet(
                                 null,
                                 "Piece ${chunk.start}-${chunk.end} incomplete (attempt $attempt of $MAX_ATTEMPTS)"
                             )
-                        } catch (_: CancellationException) {
+                        } catch (e: CancellationException) {
                             if (canCommit(taskId)) {
                                 state.commit(plan, total, force = true)
                             }
-                            return false
+                            throw e
                         } catch (e: Exception) {
-                            if (e is java.io.InterruptedIOException || e.message?.contains("Canceled", ignoreCase = true) == true || !coroutineContext.isActive) {
+                            // Only abort without retry if the coroutine itself was cancelled (user
+                            // pause/cancel) or the task was marked for full cancellation. A
+                            // SocketTimeoutException (extends InterruptedIOException) or a
+                            // watchdog socket reset while the coroutine is still active MUST
+                            // count as a normal retryable attempt.
+                            if (!coroutineContext.isActive || !canCommit(taskId)) {
                                 if (canCommit(taskId)) {
                                     state.commit(plan, total, force = true)
                                 }
@@ -610,8 +962,8 @@ object TurboDownloader {
                                     // keep claiming; the shared queue routes the
                                     // rest of the pieces to the survivors.
                                     if (i >= maxWorkers.get()) break
-                                    val idx = claimNext() ?: break
-                                    if (!downloadPiece(plan[idx])) break
+                                    val chunk = claimOrStealNext() ?: break
+                                    if (!downloadPiece(chunk)) break
                                 }
                             } catch (_: CancellationException) {
                                 if (canCommit(taskId)) {
@@ -628,7 +980,6 @@ object TurboDownloader {
             onProgress(committed(), total, speed.getSpeed())
             if (taskId.isNotEmpty()) {
                 throttleDeadlines.remove(taskId)
-                fullyCancelledTaskIds.remove(taskId)
             }
         }
 
@@ -704,9 +1055,9 @@ object TurboDownloader {
                                 var written = startAt
                                 while (true) {
                                     if (!coroutineContext.isActive) return false
-                                    val n = src.read(buf)
-                                    if (n == -1) break
-                                    raf.write(buf, 0, n)
+                                                val n = readCoalesced(src, buf, buf.size)
+                                                if (n <= 0) break
+                                                raf.write(buf, 0, n)
                                     written += n
                                     done.set(written)
                                 }
@@ -764,7 +1115,6 @@ object TurboDownloader {
             onProgress(finalDone, if (total > 0) total else 0L, speed.getSpeed())
             if (taskId.isNotEmpty()) {
                 throttleDeadlines.remove(taskId)
-                fullyCancelledTaskIds.remove(taskId)
             }
         }
         return@coroutineScope success
@@ -772,7 +1122,10 @@ object TurboDownloader {
 }
 
 /** One segment's byte window plus how far it has been committed to disk. */
-class TurboChunk(val start: Long, val end: Long, @Volatile var current: Long)
+/** One segment's byte window plus how far it has been committed to disk.
+ *  [end] is @Volatile: a work-stealing sibling may SHORTEN it in flight
+ *  (directive Fix 3), and the victim must observe the new end immediately. */
+class TurboChunk(val start: Long, @Volatile var end: Long, @Volatile var current: Long)
 
 /**
  * Thread-safe aggregate speed meter utilizing Exponential Moving Average (EMA).
