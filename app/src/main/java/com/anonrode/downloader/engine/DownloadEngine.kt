@@ -159,7 +159,7 @@ class DownloadEngine(
                 // moment the app opens.
                 if (t.status == TaskStatus.DOWNLOADING || t.status == TaskStatus.RESOLVING ||
                     t.status == TaskStatus.VALIDATING || t.status == TaskStatus.QUEUED) {
-                    repository.update(t.id) { it.copy(status = TaskStatus.PAUSED, speedBytesPerSec = 0.0, errorMessage = null) }
+                    repository.update(t.id) { it.copy(status = TaskStatus.PAUSED, speedBytesPerSec = 0.0, errorMessage = null, userPaused = true) }
                 }
             }
             networkObserver.status.collect { net ->
@@ -2702,8 +2702,9 @@ class DownloadEngine(
                 var turboResult: TurboDownloader.TurboResult? = null
 
                 if (finalBackend == "aria2c" && !isMagnet) {
-                    val hdrs = mutableMapOf("User-Agent" to HttpClient.DEFAULT_UA)
-                    if (refererToPass.isNotBlank()) hdrs["Referer"] = refererToPass
+                    var hdrs: Map<String, String> = mutableMapOf("User-Agent" to HttpClient.DEFAULT_UA).apply {
+                        if (refererToPass.isNotBlank()) put("Referer", refererToPass)
+                    }
                     val dest = File(targetFolder, File(task.filePath).name)
 
                     // Strict pre-enqueue validation: one ranged 1KB request with

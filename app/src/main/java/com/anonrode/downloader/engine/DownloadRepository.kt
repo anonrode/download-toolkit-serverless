@@ -37,8 +37,9 @@ class DownloadRepository {
             if (f.exists()) {
                 val raw = f.readText()
                 if (raw.isNotBlank()) {
-                _tasks.value = json.decodeFromString<List<DownloadTask>>(raw)
-                    .map { parkForRestore(it) }
+                    _tasks.value = json.decodeFromString<List<DownloadTask>>(raw)
+                        .map { parkForRestore(it) }
+                    persist()
                 }
             }
         } catch (_: Throwable) {

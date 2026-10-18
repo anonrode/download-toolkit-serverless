@@ -999,7 +999,7 @@ private fun CategoryTilesGrid(
         Spacer(modifier = Modifier.height(Spacing.sm))
 
         val allCategories = CategoryFeed.CATEGORIES
-        val items = allCategories.map { it to false } + listOf(CategoryFeed.Category("all", "All Genres", emptyList()) to true)
+        val items = allCategories.map { it to false } + listOf(CategoryFeed.Category(label = "All Genres") to true)
         val rows = items.chunked(2)
 
         rows.forEach { rowPairs ->

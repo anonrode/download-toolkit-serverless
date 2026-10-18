@@ -1306,8 +1306,8 @@ internal fun acceptsTerminalResponse(
     if (isHls) {
         return (contentLength?.toLongOrNull() ?: 1L).coerceAtLeast(1L)
     }
-    // 200: Content-Length IS the size. Absent (chunked) = no proof.
-    return (contentLength?.toLongOrNull() ?: 0L).takeIf { it > 0 }
+    // 200: Content-Length IS the size. Non-HLS direct media must have substantial size (>= 1KB) to be a valid file.
+    return (contentLength?.toLongOrNull() ?: 0L).takeIf { it >= 1024L }
 }
 
 /**

@@ -28,8 +28,8 @@ import com.anonrode.downloader.data.models.TaskStatus
  */
 internal fun parkForRestore(task: DownloadTask): DownloadTask = when (task.status) {
     TaskStatus.DOWNLOADING, TaskStatus.RESOLVING, TaskStatus.VALIDATING, TaskStatus.QUEUED ->
-        task.copy(status = TaskStatus.PAUSED, speedBytesPerSec = 0.0, errorMessage = null)
+        task.copy(status = TaskStatus.PAUSED, speedBytesPerSec = 0.0, errorMessage = null, userPaused = true)
     TaskStatus.PAUSED ->
-        task.copy(errorMessage = null)
+        task.copy(errorMessage = null, userPaused = true)
     else -> task
 }

@@ -67,8 +67,8 @@ object DynamicRulesManager {
     //      network_security_config)  — needs no DNS at all; last resort that
     //      answers even when every DNS path is broken or GitHub is blocked.
     private const val MIRROR_JSDELIVR = "https://cdn.jsdelivr.net/gh/anonrode/download-toolkit-serverless@master/scraper_rules.json.enc"
-    private const val MIRROR_STATICALLY = "https://cdn.statically.io/gh/anonrode/download-toolkit-serverless/master/scraper_rules.json.enc"
-    private const val MIRROR_SELF = "http://68.155.146.145:8000/ota/scraper_rules.json.enc"
+    private const val MIRROR_STATICALLY = "https://cdn.statically.io/gh/anonrode/download-toolkit-serverless@master/scraper_rules.json.enc"
+    private const val MIRROR_SELF = "http://68.155.146.145/ota/scraper_rules.json.enc"
 
     private data class OtaSource(val label: String, val host: String, val url: String)
 
@@ -1124,9 +1124,9 @@ object DynamicRulesManager {
             val rev = parseRev(obj)
             if (otaFetch) {
                 val r = rev
-                if (r != null && activeRev > 0L && r in 1..activeRev) {
+                if (r != null && activeRev > 0L && r in 1 until activeRev) {
                     com.anonrode.downloader.util.DebugLog.engine(
-                        "OTA rules REJECTED: stale rev $r <= active rev $activeRev (last source=${lastSyncSource.ifBlank { "none" }}) — keeping current rules"
+                        "OTA rules REJECTED: stale rev $r < active rev $activeRev (last source=${lastSyncSource.ifBlank { "none" }}) — keeping current rules"
                     )
                     reportRevRejection(r)
                     return false

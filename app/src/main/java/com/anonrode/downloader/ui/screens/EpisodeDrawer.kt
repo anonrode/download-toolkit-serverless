@@ -2,6 +2,7 @@ package com.anonrode.downloader.ui.screens
 
 import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
@@ -884,7 +885,7 @@ fun EpisodeDrawer(
                                                 text = if (synopsisExpanded) "Less ▴" else "More ▾",
                                                 fontSize = 12.sp,
                                                 fontWeight = FontWeight.SemiBold,
-                                                color = pal.accentViolet
+                                                color = pal.accent
                                             )
                                         }
                                     }

@@ -877,6 +877,11 @@ object InstagramPhotoMuxer {
         return try {
             val pb = ProcessBuilder(cmd)
             pb.environment()["TMPDIR"] = (workDir ?: File(".")).absolutePath
+            val nativeDir = cmd.firstOrNull()?.let { File(it).parentFile?.absolutePath }
+            if (!nativeDir.isNullOrBlank()) {
+                val existing = pb.environment()["LD_LIBRARY_PATH"]
+                pb.environment()["LD_LIBRARY_PATH"] = if (existing.isNullOrBlank()) nativeDir else "$nativeDir:$existing"
+            }
             pb.redirectErrorStream(true)
             p = pb.start()
             val reader = p.inputStream.bufferedReader()
