@@ -1,10 +1,7 @@
 package com.anonrode.downloader
 
 import android.graphics.Bitmap
-import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.test.ExperimentalTestApi
-import androidx.compose.ui.test.captureToImage
-import androidx.compose.ui.test.isRoot
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onAllNodesWithText
@@ -39,8 +36,10 @@ import java.io.FileOutputStream
  * Design rules:
  *  - every capture is best-effort and can NEVER fail the gate (a screenshot
  *    is evidence, not an assertion); the only assertion is that the app is up.
- *  - multiple composition roots exist while dialogs are open — each root is
- *    captured to its own file (`_rootN` suffix) so the dialog windows appear.
+ *  - captures go through the UiAutomation system screenshot (full display,
+ *    every window) — the Compose `captureToImage` path PixelCopy-fails on
+ *    the CI emulator's software GL, which is why the first three runs
+ *    shipped an EMPTY artifact. Failures now log to logcat (never silent).
  *  - @After resets EVERYTHING this test injects (payload is in-memory only;
  *    the prefs it touches are cleared) so later test classes in the same
  *    install see a clean app and the smoke gates stay deterministic.
@@ -76,22 +75,25 @@ class SurfaceScreenshotsTest {
     private fun capture(name: String) {
         try {
             composeRule.waitForIdle()
-            val rootCount = composeRule.onAllNodes(isRoot()).fetchSemanticsNodes().size
-            for (i in 0 until rootCount) {
-                try {
-                    val bmp = composeRule.onAllNodes(isRoot())[i]
-                        .captureToImage()
-                        .asAndroidBitmap()
-                    val file = if (i == 0) "$name.png" else "${name}_root$i.png"
-                    FileOutputStream(File(shotDir(), file)).use {
-                        bmp.compress(Bitmap.CompressFormat.PNG, 100, it)
-                    }
-                } catch (_: Throwable) {
-                    // one root failed to capture — keep the others
-                }
+            // Full-screen capture via UiAutomation, NOT captureToImage(): on
+            // the CI emulator (software GL) PixelCopy behind captureToImage
+            // fails per root with "Failed to find ColorBuffer", so this test
+            // shipped ZERO PNGs for three consecutive runs. The system
+            // screenshot path is reliable on emulators and captures EVERY
+            // window — exactly what the injected announcement / update card /
+            // house-ad receipts need (they render in separate dialog windows;
+            // the old per-root loop needed `_rootN` files for that).
+            val shot = InstrumentationRegistry.getInstrumentation()
+                .uiAutomation.takeScreenshot()
+                ?: throw IllegalStateException("uiAutomation.takeScreenshot returned null")
+            FileOutputStream(File(shotDir(), "$name.png")).use {
+                shot.compress(Bitmap.CompressFormat.PNG, 100, it)
             }
-        } catch (_: Throwable) {
-            // capture is evidence, never a gate
+        } catch (t: Throwable) {
+            // Capture is evidence, never a gate — but a SILENTLY empty
+            // artifact cost three CI runs of confusion, so failures now leave
+            // a logcat trail (the CI workflow dumps logcat every run).
+            android.util.Log.w("AnonrodeShots", "capture '$name' failed: $t")
         }
     }
 
