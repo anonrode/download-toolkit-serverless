@@ -152,6 +152,14 @@ jobs:
           # on this AVD/API combo) and is harmless on a green run.
           script: |
             gradle :app:connectedDebugAndroidTest --no-daemon || EXIT_CODE=$?
+            # Visual receipts: SurfaceScreenshotsTest writes PNGs into the app's
+            # external files dir; pull them while the emulator is still alive
+            # (the runner tears the device down at step end). Best-effort —
+            # never affects the gate's exit code (captured above).
+            mkdir -p "$GITHUB_WORKSPACE/.ci-artifacts/screenshots"
+            adb pull /sdcard/Android/data/com.anonrode.downloader.debug/files/screenshots \
+              "$GITHUB_WORKSPACE/.ci-artifacts/screenshots/" || true
+            ls -la "$GITHUB_WORKSPACE/.ci-artifacts/screenshots" || true
             echo "===== adb logcat (last 200 lines, tag-filtered) ====="
             adb logcat -d -t 200 '*:E' '*:W' 'TestRunner:*' 'AndroidXTracer:*' 'AnonApp:*' 2>&1 || true
             echo "===== end logcat ====="
@@ -216,6 +224,9 @@ jobs:
             done
             gradle :app:connectedDebugAndroidTest --no-daemon $ARGS \
               || EXIT_CODE=$?
+            mkdir -p "$GITHUB_WORKSPACE/.ci-artifacts/screenshots"
+            adb pull /sdcard/Android/data/com.anonrode.downloader.debug/files/screenshots \
+              "$GITHUB_WORKSPACE/.ci-artifacts/screenshots/" || true
             exit ${EXIT_CODE:-0}
 
       - name: Archive retry JUnit XML
@@ -282,6 +293,19 @@ jobs:
         with:
           name: flake-ledger
           path: flake-ledger.json
+
+      - name: Upload UI screenshots (visual receipts)
+        # Every push that reaches the emulator ships PNGs of the main surfaces
+        # (home, downloads, settings + injected announcement / update card /
+        # house-ad slot) as a downloadable artifact — visual verification of
+        # the UI without a device on hand.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Anonrode-UI-Screenshots
+          path: .ci-artifacts/screenshots/
+          if-no-files-found: warn
+          retention-days: 14
 
   release:
     # Gated on BOTH build (unit + Robolectric) AND emulator-test (instrumented

@@ -1422,6 +1422,14 @@ object DynamicRulesManager {
     internal fun verifySignature(payloadB64: String, sigB64: String): Boolean =
         SignatureChain.verifyLegacyMode(payloadB64, sigB64, signingRootPins())
 
+    /** TEST-ONLY payload injection for the instrumented UI screenshot run
+     *  (androidTest cannot reach the internal [parseRulesJson]). Hard-gated
+     *  to debug builds: a release build returns false and changes nothing. */
+    fun debugApplyPayloadForTests(jsonStr: String): Boolean {
+        if (!com.anonrode.downloader.BuildConfig.DEBUG) return false
+        return parseRulesJson(jsonStr)
+    }
+
     /** Returns false when the payload is malformed (or, for OTA-fetched
      *  payloads only, when its rev is not strictly newer than the active one);
      *  the previously active rules (bundled defaults on first run) stay in
