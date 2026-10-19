@@ -512,7 +512,14 @@ private fun SettingsThemeControl(
                         modifier = Modifier.size(18.dp)
                     )
                 }
-                Column {
+                // weight(1f): this wrapper is itself inside a weighted slot,
+                // so the chips row (measured first, intrinsic) starved it to
+                // ~1 character on narrow screens and the title wrapped one
+                // LETTER per line — caught by the CI screenshot receipts
+                // (320px emulator; the target phone is a similarly narrow
+                // ~290dp panel). The column now claims the leftover width and
+                // the text wraps by WORD at worst.
+                Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = "App Theme",
                         fontSize = Type.rowTitle.fontSize,
