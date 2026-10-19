@@ -1143,7 +1143,17 @@ object VidsrcResolver : BaseResolver {
 
     @Volatile private var legacyApiDeadUntilMs: Long = 0L
 
-    private fun legacyApiUsable(): Boolean = System.currentTimeMillis() >= legacyApiDeadUntilMs
+    /** In-session dead-flag AND the persisted health plane. The compiled
+     *  HostHealth seed for data.vidsrcme.ru (2026-10-18 audit §3.3) is what
+     *  actually kills the ~30-ConnectException cold-start wave: the in-memory
+     *  flag alone starts empty on every process. Payload knownDead entries
+     *  for the legacy host bite here too, and an OTA re-point of
+     *  legacyApiHost is judged by ITS own host. Callers keep the fail-open
+     *  semantic: "unusable" = skip WITHOUT a request, never a content
+     *  verdict. */
+    private fun legacyApiUsable(): Boolean =
+        System.currentTimeMillis() >= legacyApiDeadUntilMs &&
+            com.anonrode.downloader.pipeline.HostHealth.isUsable(otaLegacyApiHost())
 
     private fun markLegacyApiDead() {
         legacyApiDeadUntilMs = System.currentTimeMillis() + LEGACY_API_DEAD_TTL_MS

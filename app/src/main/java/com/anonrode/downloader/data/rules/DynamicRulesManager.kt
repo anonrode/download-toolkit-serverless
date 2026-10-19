@@ -55,6 +55,130 @@ data class ContentPolicy(
     val nollywoodTerms: List<String> = emptyList()
 )
 
+/**
+ * One OTA announcement (optional top-level "announcements" array): remote
+ * messaging rendered by the announcement host (dialog/sheet/banner).
+ * Absent section => no announcements (feature OFF — the in-app-defaults
+ * floor every section follows). Consumer: the announcement picker reads
+ * oncePer/minApp/expiry to decide what this install may show.
+ */
+data class Announcement(
+    val id: String,          // oncePer="id" store key; validator caps 64 chars
+    val title: String,       // <= 80 chars (validator cap)
+    val body: String,        // <= 300 chars (validator cap)
+    val mode: String,        // "dialog" | "sheet" | "banner"
+    val action: String,      // "none" | "url" | "update"
+    val actionLabel: String,
+    val actionUrl: String,   // http(s) when action="url"
+    val oncePer: String,     // "id" (default) | "rev"
+    val minApp: Int,         // VERSION_CODE floor; 0 = every build
+    val expiresAtMs: Long    // absolute epoch-ms hint; 0 = never expires
+)
+
+/** One APK hosting source from the "update" policy, walked in order (VPS
+ *  first — the fast unmetered pipe — GitHub fallback). Every attempt must
+ *  verify the SAME SHA-256 pin from the signed payload (Decision 4). */
+data class UpdateSource(
+    val kind: String,        // "vps" | "github" | "gitea"
+    val base: String         // http(s) directory/base URL
+)
+
+/**
+ * Force-obsolete gate block inside "update". House default is a soft,
+ * dismissible notice; "hard" is an explicit remote policy only. escapeHatch
+ * defaults TRUE (brick-safety rail, plan §4.5) — a hard gate must always be
+ * escapable by construction.
+ */
+data class UpdateForce(
+    val enabled: Boolean = false,
+    val minSupportedVersionCode: Int = 0,   // 0 = no floor (never gate on it)
+    val mode: String = "soft",              // "soft" | "hard"
+    val snoozeHours: Int = 24,              // 0..168 (validator cap)
+    val escapeHatch: Boolean = true
+)
+
+/**
+ * OTA update policy (optional top-level "update"): latest version identity,
+ * dual hosting sources + SHA-256 pins, message, optional force gate.
+ * Absent section => null (no update flow; pure pass-through).
+ */
+data class UpdatePolicy(
+    val latestVersionName: String,
+    val latestVersionCode: Int,
+    val sources: List<UpdateSource>,
+    val apkArm64: String,        // file name under each source base
+    val apkUniversal: String,
+    val sha256Arm64: String,     // 64 lowercase hex; "" until release-day pins
+    val sha256Universal: String,
+    val message: String,         // <= 300 chars (validator cap)
+    val force: UpdateForce?      // null = no force gate authored
+)
+
+/**
+ * OTA ads readiness (optional top-level "ads"). Nothing renders while
+ * [enabled] is false; [provider] selects the slot implementation ("house" =
+ * zero-SDK house texts; vendor adapters pre-wired but inert — plan §4.6).
+ * Credentials are runtime strings, so registration later is an OTA flip.
+ * Absent section => null (feature OFF).
+ */
+data class AdsConfig(
+    val enabled: Boolean,
+    val provider: String,          // "house"|"none"|"applovin"|"unity"|"admob"|"auto"
+    val placements: List<String>,  // known slot ids, e.g. "downloads_shelf"
+    val frequencyPerDay: Int,      // 0..20 (validator cap)
+    val houseTitle: String,
+    val houseBody: String,
+    val houseActionLabel: String,
+    val houseActionUrl: String,
+    val houseId: String,
+    val applovinSdkKey: String,    // vendor credential slots ("" = unset)
+    val unityGameId: String,
+    val admobAppId: String,
+    val admobBannerUnitId: String,
+    val admobNativeUnitId: String
+)
+
+/**
+ * OTA re-engagement config (optional top-level "engagement"): local
+ * notification after [inactiveDays] without an app open, deduped by
+ * [cooldownDays]; [welcomeBack] arms the in-app return card. Absent
+ * section => null (feature OFF).
+ */
+data class EngagementConfig(
+    val enabled: Boolean,
+    val inactiveDays: Int,     // 1..365 (validator cap)
+    val cooldownDays: Int,     // 1..365 (validator cap)
+    val title: String,
+    val body: String,
+    val welcomeBack: Boolean
+)
+
+/**
+ * Runtime signing-cert pin (optional top-level "tamper"): expected APK
+ * signing-cert SHA-256 (64 hex, case-insensitive). [reportOnly] is the
+ * default posture — a patched client can lie, so the value is VISIBILITY
+ * (tamper_detected telemetry), never a lock (plan §5). Absent section =>
+ * null (check disabled).
+ */
+data class TamperPolicy(
+    val expectedCertSha256: String,
+    val reportOnly: Boolean = true
+)
+
+/**
+ * FCM runtime config (optional top-level "fcm"): manual FirebaseOptions —
+ * deliberately NO google-services.json; all four strings ship OTA and any
+ * registrar built on this stays inert while [enabled] is false. Absent
+ * section => null.
+ */
+data class FcmConfig(
+    val enabled: Boolean,
+    val apiKey: String,
+    val appId: String,
+    val senderId: String,
+    val projectId: String
+)
+
 object DynamicRulesManager {
 
     // OTA rules are AES-128-CBC encrypted so the scraping logic is not
@@ -245,6 +369,18 @@ object DynamicRulesManager {
     // swap like every other snapshot; absent section = compiled defaults.
     @Volatile private var activeContentPolicy: ContentPolicy = ContentPolicy()
 
+    // v3.3.0 platform-surface sections (plan §4.1): announcements, update
+    // policy, ads readiness, engagement, tamper pin, FCM runtime config.
+    // Published with the atomic swap like every other snapshot; an absent
+    // section publishes OFF (null / empty) — no stale state can survive the
+    // payload that carried it (same in-app-defaults floor as flags).
+    @Volatile private var activeAnnouncements: List<Announcement> = emptyList()
+    @Volatile private var activeUpdatePolicy: UpdatePolicy? = null
+    @Volatile private var activeAdsConfig: AdsConfig? = null
+    @Volatile private var activeEngagementConfig: EngagementConfig? = null
+    @Volatile private var activeTamperPolicy: TamperPolicy? = null
+    @Volatile private var activeFcmConfig: FcmConfig? = null
+
     /** Resolved flag for one family id (see RulesFlags.FAMILY_IDS), or the
      *  safe default when the active payload carried no flag for it. */
     fun getFamilyFlag(family: String): FamilyFlag =
@@ -281,6 +417,166 @@ object DynamicRulesManager {
         else (0 until minOf(arr.length(), max)).mapNotNull {
             arr.optString(it).trim().lowercase().ifBlank { null }
         }
+
+    /** Lenient int read (authoring comfort like RulesFlags.parseMinApp): a
+     *  JSON number or a numeric string, anything else yields [default]. The
+     *  callers coerce the result into the section's validator range. */
+    private fun optIntLenient(obj: JSONObject, key: String, default: Int): Int {
+        if (!obj.has(key)) return default
+        return when (val v = obj.opt(key)) {
+            is Number -> v.toInt()
+            is String -> v.trim().toIntOrNull() ?: default
+            else -> default
+        }
+    }
+
+    /** Closed vocabulary for announcement fields — the publish-side validator
+     *  enforces the same sets; an unknown value here falls back to the safe
+     *  default instead of shipping an unrenderable message. */
+    private val ANNOUNCEMENT_MODES = setOf("dialog", "sheet", "banner")
+    private val ANNOUNCEMENT_ACTIONS = setOf("none", "url", "update")
+
+    /** Lenient parse of the optional top-level "announcements" array (bounded
+     *  16 like the validator). Blank/absent => emptyList (feature OFF).
+     *  Entries that are not objects, or carry no usable id (the oncePer
+     *  store key), are skipped — never fatal, matching every other section.
+     *  Unknown mode/action fall back to dialog/none; oncePer defaults to
+     *  "id" (dismiss once, never re-shown unless the id changes). */
+    private fun buildAnnouncements(obj: JSONObject): List<Announcement> {
+        val arr = obj.optJSONArray("announcements") ?: return emptyList()
+        val out = mutableListOf<Announcement>()
+        for (i in 0 until arr.length()) {
+            if (out.size >= 16) break
+            val a = arr.optJSONObject(i) ?: continue
+            val id = a.optString("id").trim()
+            if (id.isBlank()) continue
+            val mode = a.optString("mode").trim().lowercase()
+                .let { if (it in ANNOUNCEMENT_MODES) it else "dialog" }
+            val action = a.optString("action").trim().lowercase()
+                .let { if (it in ANNOUNCEMENT_ACTIONS) it else "none" }
+            val oncePer = if (a.optString("oncePer").trim().equals("rev", ignoreCase = true)) "rev" else "id"
+            out.add(
+                Announcement(
+                    id = id,
+                    title = a.optString("title").trim(),
+                    body = a.optString("body").trim(),
+                    mode = mode,
+                    action = action,
+                    actionLabel = a.optString("actionLabel").trim(),
+                    actionUrl = a.optString("actionUrl").trim(),
+                    oncePer = oncePer,
+                    minApp = optIntLenient(a, "minApp", 0).coerceAtLeast(0),
+                    expiresAtMs = a.optLong("expiresAtMs", 0L).coerceAtLeast(0L)
+                )
+            )
+        }
+        return out
+    }
+
+    /** Lenient parse of the optional top-level "update" object; null when
+     *  absent (feature OFF). Sources keep payload order (the consumer walks
+     *  it); SHA-256 pins are normalized to lowercase for the digest compare. */
+    private fun buildUpdatePolicy(obj: JSONObject): UpdatePolicy? {
+        val u = obj.optJSONObject("update") ?: return null
+        val sources = mutableListOf<UpdateSource>()
+        u.optJSONArray("sources")?.let { arr ->
+            for (i in 0 until minOf(arr.length(), 4)) {
+                val s = arr.optJSONObject(i) ?: continue
+                val kind = s.optString("kind").trim().lowercase()
+                val base = s.optString("base").trim()
+                if (kind.isBlank() || base.isBlank()) continue
+                sources.add(UpdateSource(kind, base))
+            }
+        }
+        val force = u.optJSONObject("force")?.let { f ->
+            UpdateForce(
+                enabled = f.optBoolean("enabled", false),
+                minSupportedVersionCode = optIntLenient(f, "minSupportedVersionCode", 0).coerceIn(0, 1_000_000),
+                mode = f.optString("mode").trim().lowercase().let { if (it == "hard") "hard" else "soft" },
+                snoozeHours = optIntLenient(f, "snoozeHours", 24).coerceIn(0, 168),
+                escapeHatch = f.optBoolean("escapeHatch", true)
+            )
+        }
+        return UpdatePolicy(
+            latestVersionName = u.optString("latestVersionName").trim(),
+            latestVersionCode = optIntLenient(u, "latestVersionCode", 0).coerceIn(0, 1_000_000),
+            sources = sources,
+            apkArm64 = u.optString("apkArm64").trim(),
+            apkUniversal = u.optString("apkUniversal").trim(),
+            sha256Arm64 = u.optString("sha256Arm64").trim().lowercase(),
+            sha256Universal = u.optString("sha256Universal").trim().lowercase(),
+            message = u.optString("message").trim(),
+            force = force
+        )
+    }
+
+    /** Lenient parse of the optional top-level "ads" object; null when absent
+     *  (feature OFF). House texts are nested under "house" (§4.1); vendor
+     *  credential fields sit flat and may be empty until registration day. */
+    private fun buildAdsConfig(obj: JSONObject): AdsConfig? {
+        val ads = obj.optJSONObject("ads") ?: return null
+        val placements = ads.optJSONArray("placements")?.let { arr ->
+            (0 until minOf(arr.length(), 8)).mapNotNull { i ->
+                arr.optString(i).trim().ifBlank { null }
+            }
+        } ?: emptyList()
+        val house = ads.optJSONObject("house")
+        return AdsConfig(
+            enabled = ads.optBoolean("enabled", false),
+            provider = ads.optString("provider", "none").trim().lowercase().ifBlank { "none" },
+            placements = placements,
+            frequencyPerDay = optIntLenient(ads, "frequencyPerDay", 0).coerceIn(0, 20),
+            houseTitle = house?.optString("title")?.trim() ?: "",
+            houseBody = house?.optString("body")?.trim() ?: "",
+            houseActionLabel = house?.optString("actionLabel")?.trim() ?: "",
+            houseActionUrl = house?.optString("actionUrl")?.trim() ?: "",
+            houseId = house?.optString("id")?.trim() ?: "",
+            applovinSdkKey = ads.optString("applovinSdkKey").trim(),
+            unityGameId = ads.optString("unityGameId").trim(),
+            admobAppId = ads.optString("admobAppId").trim(),
+            admobBannerUnitId = ads.optString("admobBannerUnitId").trim(),
+            admobNativeUnitId = ads.optString("admobNativeUnitId").trim()
+        )
+    }
+
+    /** Lenient parse of the optional top-level "engagement" object; null when
+     *  absent (feature OFF). Windows default to the §4.1 example (7/14) and
+     *  clamp into the validator range 1..365. */
+    private fun buildEngagementConfig(obj: JSONObject): EngagementConfig? {
+        val e = obj.optJSONObject("engagement") ?: return null
+        return EngagementConfig(
+            enabled = e.optBoolean("enabled", false),
+            inactiveDays = optIntLenient(e, "inactiveDays", 7).coerceIn(1, 365),
+            cooldownDays = optIntLenient(e, "cooldownDays", 14).coerceIn(1, 365),
+            title = e.optString("title").trim(),
+            body = e.optString("body").trim(),
+            welcomeBack = e.optBoolean("welcomeBack", true)
+        )
+    }
+
+    /** Lenient parse of the optional top-level "tamper" object; null when
+     *  absent (integrity check disabled). The pin is normalized to lowercase
+     *  hex — consumers compare against lowercase certificate digests. */
+    private fun buildTamperPolicy(obj: JSONObject): TamperPolicy? {
+        val t = obj.optJSONObject("tamper") ?: return null
+        return TamperPolicy(
+            expectedCertSha256 = t.optString("expectedCertSha256").trim().lowercase(),
+            reportOnly = t.optBoolean("reportOnly", true)
+        )
+    }
+
+    /** Lenient parse of the optional top-level "fcm" object; null when absent.
+     *  Manual FirebaseOptions only — no google-services.json anywhere. */
+    private fun buildFcmConfig(obj: JSONObject): FcmConfig? {
+        val f = obj.optJSONObject("fcm") ?: return null
+        return FcmConfig(
+            enabled = f.optBoolean("enabled", false),
+            apiKey = f.optString("apiKey").trim(),
+            appId = f.optString("appId").trim(),
+            senderId = f.optString("senderId").trim(),
+            projectId = f.optString("projectId").trim()
+        )
+    }
 
     // ---- P2-2: rev monotonicity + last-known-good ladder + sticky source ---
     // Application context for prefs persistence; captured in init() and
@@ -560,6 +856,33 @@ object DynamicRulesManager {
      *  fields. Never throws; an absent section returns compiled defaults. */
     fun getContentPolicy(): ContentPolicy =
         try { activeContentPolicy } catch (_: Exception) { ContentPolicy() }
+
+    /** Active OTA announcements in payload order. Never throws; an absent
+     *  section (or a family held back by its flag) yields an empty list. */
+    fun getAnnouncements(): List<Announcement> =
+        try { activeAnnouncements } catch (_: Exception) { emptyList() }
+
+    /** Active OTA update policy, or null when the payload carried none
+     *  (feature OFF — the update flow is inert). Never throws. */
+    fun getUpdatePolicy(): UpdatePolicy? =
+        try { activeUpdatePolicy } catch (_: Exception) { null }
+
+    /** Active OTA ads readiness config, or null when absent. Never throws. */
+    fun getAdsConfig(): AdsConfig? =
+        try { activeAdsConfig } catch (_: Exception) { null }
+
+    /** Active OTA re-engagement config, or null when absent. Never throws. */
+    fun getEngagementConfig(): EngagementConfig? =
+        try { activeEngagementConfig } catch (_: Exception) { null }
+
+    /** Active runtime-integrity cert pin, or null when absent (check
+     *  disabled). Never throws. */
+    fun getTamperPolicy(): TamperPolicy? =
+        try { activeTamperPolicy } catch (_: Exception) { null }
+
+    /** Active FCM runtime config, or null when absent. Never throws. */
+    fun getFcmConfig(): FcmConfig? =
+        try { activeFcmConfig } catch (_: Exception) { null }
 
     /** AES-128 key for RemoteLogger's encrypted report envelopes: the SAME
      *  hex key that obfuscates the OTA rules payload (RULES_KEY_HEX, mirror
@@ -1338,6 +1661,18 @@ object DynamicRulesManager {
             // ready). Lenient like every section; absent => compiled defaults.
             var contentPolicy = buildContentPolicy(obj)
 
+            // v3.3.0 platform-surface sections (plan §4.1): announcements,
+            // update, ads, engagement (flag-backed families, blanked below
+            // when their flag holds them back) + tamper and fcm (self-gating
+            // via their own enabled / presence flags). Lenient like every
+            // section; absent => OFF.
+            var announcements = buildAnnouncements(obj)
+            var updatePolicy = buildUpdatePolicy(obj)
+            var adsConfig = buildAdsConfig(obj)
+            var engagementConfig = buildEngagementConfig(obj)
+            val tamperPolicy = buildTamperPolicy(obj)
+            val fcmConfig = buildFcmConfig(obj)
+
             val ttl = obj.optLong("tokenTtlMinutes", 10L).coerceIn(1L, 240L)
 
             // Ordered search strategy chains: when a site's primary search
@@ -1462,6 +1797,13 @@ object DynamicRulesManager {
             familyGateBlank("lockerHosts") { lockerHosts.clear() }
             familyGateBlank("searchStrategies") { searchStrategies.clear() }
             familyGateBlank("contentPolicy") { contentPolicy = ContentPolicy() }
+            // v3.3.0 platform surfaces: a held-back family publishes OFF —
+            // exact same shape as an absent section, so every consumer's
+            // null/empty check doubles as the kill-switch path.
+            familyGateBlank("announcements") { announcements = emptyList() }
+            familyGateBlank("update") { updatePolicy = null }
+            familyGateBlank("ads") { adsConfig = null }
+            familyGateBlank("engagement") { engagementConfig = null }
 
             // P2-4 SHADOW MODE for the behavior family (Scientist rule, plan
             // slice 4): when the payload flags `pipelines` shadow, the section
@@ -1517,6 +1859,12 @@ object DynamicRulesManager {
             dynamicProviders = dynProviders
             activeFlags = familyFlags
             activeContentPolicy = contentPolicy
+            activeAnnouncements = announcements
+            activeUpdatePolicy = updatePolicy
+            activeAdsConfig = adsConfig
+            activeEngagementConfig = engagementConfig
+            activeTamperPolicy = tamperPolicy
+            activeFcmConfig = fcmConfig
             remoteLoggingUrl = remoteLogSink
             tokenTtlMinutes = ttl
             // P2-2: a payload that carries a rev and survived the gate becomes

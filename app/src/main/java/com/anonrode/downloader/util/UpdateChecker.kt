@@ -23,7 +23,7 @@ sealed class UpdateCheckResult {
  *
  *  1. https://api.github.com/repos/anonrode/download-toolkit-serverless/releases/latest
  *     (canonical; public repo, no token needed)
- *  2. http://68.155.146.145:8000/ota/latest.json — the same box that mirrors
+ *  2. http://68.155.146.145/ota/latest.json — the same box that mirrors
  *     the OTA rules payload (scripts/ota_mirror), serving
  *     {"version": "...", "assets": [...], "html_url": "..."} refreshed from
  *     the GitHub API. Raw-IP answer: needs no DNS, so it still works when
@@ -46,7 +46,11 @@ object UpdateChecker {
 
     private const val REPO = "anonrode/download-toolkit-serverless"
     private const val API_URL = "https://api.github.com/repos/$REPO/releases/latest"
-    private const val MIRROR_LATEST_URL = "http://68.155.146.145:8000/ota/latest.json"
+    // Port 80, not the retired :8000 — the box's static serve moved; live
+    // probes on 2026-10-18 (activity-log audit §4): :8000 times out, :80
+    // serves /ota/latest.json with 200. The old :8000 mirror could never
+    // succeed, so this source was silently dead before its fallback ran.
+    private const val MIRROR_LATEST_URL = "http://68.155.146.145/ota/latest.json"
     const val RELEASES_PAGE = "https://github.com/$REPO/releases"
 
     /** Stage summary of the last check ("" when the last check succeeded). */

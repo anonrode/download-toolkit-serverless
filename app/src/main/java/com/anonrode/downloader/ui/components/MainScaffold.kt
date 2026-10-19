@@ -303,14 +303,17 @@ private fun navBarItemColors(): NavigationBarItemColors {
 }
 
 /** Downloads-tab badge, isolated so the task-list observation recomposes
- *  only this icon. The derived flow emits only when the COUNT changes
- *  (distinctUntilChanged), so progress ticks that don't change the number
- *  of active tasks never touch composition at all. */
+ *  only this icon. Reads the shared four-state active predicate
+ *  (DownloadsSorter.activeTaskCount — same set as the Downloads chip/header,
+ *  audit F-9) instead of the legacy 3-state stats badgeCount. The derived
+ *  flow emits only when the COUNT changes (distinctUntilChanged), so
+ *  progress ticks that don't change the number of active tasks never touch
+ *  composition at all. */
 @Composable
 private fun DownloadsBadge(viewModel: MainViewModel) {
     val badgeCount by remember {
         viewModel.engine.tasks
-            .map { downloadsStats(it).badgeCount }
+            .map { DownloadsSorter.activeTaskCount(it) }
             .distinctUntilChanged()
     }.collectAsState(initial = 0)
 

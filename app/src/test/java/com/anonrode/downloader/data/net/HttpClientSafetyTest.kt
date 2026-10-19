@@ -202,7 +202,19 @@ class HttpClientSafetyTest {
 
     @Test
     fun terminal_directFileResponsesAccepted() {
-        assertEquals(500L, acceptsTerminalResponse(200, "500", null, "video/mp4"))
+        // Stub sizes below 1KB are REFUSED since the vidsrc-stub 1024 gate —
+        // the old 500-byte/9-byte acceptances here were stale (never caught
+        // because the fix commits shipped with [skip ci]; this file is the
+        // first place the harness runs).
+        assertNull(acceptsTerminalResponse(200, "500", null, "video/mp4"))
+        // Case-insensitive Content-Type, valid size:
+        assertEquals(2048L, acceptsTerminalResponse(200, "2048", null, "VIDEO/MP4"))
+        // HLS is the deliberate exception: a chunked/undersized m3u8 probe is
+        // accepted (playlists are legitimately tiny or size-less); the
+        // final-OUTPUT stub gate lives downstream (LinkResolver /
+        // ResultVerifier / YoutubeDlDownloader isFinal >= 1024).
+        assertEquals(500L, acceptsTerminalResponse(200, "500", null, "application/x-mpegurl"))
+        assertEquals(1L, acceptsTerminalResponse(200, null, null, "application/vnd.apple.mpegurl"))
         // 206 total comes from Content-Range, not Content-Length:
         assertEquals(
             159703784L,
@@ -210,8 +222,6 @@ class HttpClientSafetyTest {
         )
         // unknown-range total falls back to the (positive) probe CL:
         assertEquals(1L, acceptsTerminalResponse(206, "1", "bytes */1", "application/octet-stream"))
-        // case-insensitive Content-Type:
-        assertEquals(9L, acceptsTerminalResponse(200, "9", null, "VIDEO/MP4"))
     }
 
     @Test

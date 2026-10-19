@@ -1,7 +1,9 @@
 package com.anonrode.downloader
 
+import android.app.Activity
 import android.app.Application
 import android.content.Context
+import android.os.Bundle
 import android.util.Log
 import coil.ImageLoader
 import coil.ImageLoaderFactory
@@ -53,6 +55,14 @@ class AnonApp : Application(), ImageLoaderFactory {
         // append path); the first-open-of-day send runs further below, after
         // DynamicRulesManager provisions the sink origin.
         com.anonrode.downloader.util.LogUploader.install(this)
+        // Phase 2 (plan §4.2/Decision 5): first-foreground detection without
+        // a new dependency — an activity-start counter, plus the engagement
+        // clock stamp. onAppForegrounded() re-arms the inactivity alarm and,
+        // when the last rules sync is >6h old, forces the existing sync path
+        // so announcements/gates land promptly instead of waiting for the
+        // 24h floor.
+        registerActivityLifecycleCallbacks(foregroundTracker)
+        com.anonrode.downloader.update.EngagementScheduler.noteAppOpen(this)
         appScope.launch {
             try {
                 // Non-critical startup initializations: disk I/O, AES decryption,
@@ -63,6 +73,11 @@ class AnonApp : Application(), ImageLoaderFactory {
 
                 initYoutubeDlInternal(this@AnonApp)
                 maybeSyncRules()
+                // Phase 2 activation hooks: also run once here so a
+                // cache-restored payload (activation happened inside
+                // DynamicRulesManager.init) still evaluates on cold start;
+                // idempotent when a fresh sync just ran them.
+                afterRulesActivated(this@AnonApp)
                 if (ytdlpReady) maybeUpdateYoutubeDL()
                 // The "logs on the server" half (any connection, first open of
                 // the day + the 1 MB / crash-first triggers wired above; same
@@ -74,25 +89,66 @@ class AnonApp : Application(), ImageLoaderFactory {
         }
     }
 
-    private suspend fun maybeSyncRules() {
+    /** Auto-sync (24h floor); [force] = the resume-refresh path (>6h,
+     *  Decision 5) bypassing the floor. internal so the companion's
+     *  foreground hook can trigger it via the instance. */
+    internal suspend fun maybeSyncRules(force: Boolean = false) {
         try {
-            val prefs = getSharedPreferences("anon_serverless_prefs", Context.MODE_PRIVATE)
+            val prefs = getSharedPreferences(PREFS_SERVERLESS, Context.MODE_PRIVATE)
             val last = prefs.getLong(KEY_LAST_RULES_SYNC, 0L)
             val now = System.currentTimeMillis()
-            if (now - last < UPDATE_INTERVAL_MS) return
+            if (!force && now - last < UPDATE_INTERVAL_MS) return
+            lastSyncAttemptMs = now
             val (ok, ver) = com.anonrode.downloader.data.rules.DynamicRulesManager.syncFromGitHub(this)
             if (ok) {
                 prefs.edit().putLong(KEY_LAST_RULES_SYNC, now).apply()
                 Log.i("AnonApp", "Auto-synced scraper rules: $ver")
+                afterRulesActivated(this)
             }
         } catch (t: Throwable) {
             Log.w("AnonApp", "Auto-sync scraper rules failed, keeping cached/bundled rules", t)
         }
     }
 
+    /**
+     * Phase 2 post-activation hooks (plan §4.3). Every call is individually
+     * guarded and idempotent; the last two remain INERT until their payload
+     * sections exist (FcmRegistrar: `fcm`; IntegrityAttestor: hard-false
+     * const) — wiring them here now is what makes the later OTA flip real.
+     */
+    private fun afterRulesActivated(context: Context) {
+        try { com.anonrode.downloader.update.AnnouncementManager.refresh(context) } catch (_: Throwable) {}
+        try { com.anonrode.downloader.update.UpdateManager.evaluate(context) } catch (_: Throwable) {}
+        try { com.anonrode.downloader.update.EngagementScheduler.arm(context) } catch (_: Throwable) {}
+        try { com.anonrode.downloader.util.IntegrityCheck.evaluate(context) } catch (_: Throwable) {}
+        try { com.anonrode.downloader.update.FcmRegistrar.maybeRegister(context) } catch (_: Throwable) {}
+        try { com.anonrode.downloader.update.IntegrityAttestor.maybeAttest(context) } catch (_: Throwable) {}
+    }
+
+    /** Activity-start counter → session-first-foreground callback (see
+     *  onAppForegrounded in the companion). */
+    private val foregroundTracker = object : Application.ActivityLifecycleCallbacks {
+        private var startedCount = 0
+
+        override fun onActivityStarted(activity: Activity) {
+            if (startedCount == 0) onAppForegrounded()
+            startedCount++
+        }
+
+        override fun onActivityStopped(activity: Activity) {
+            if (startedCount > 0) startedCount--
+        }
+
+        override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {}
+        override fun onActivityResumed(activity: Activity) {}
+        override fun onActivityPaused(activity: Activity) {}
+        override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
+        override fun onActivityDestroyed(activity: Activity) {}
+    }
+
     private suspend fun maybeUpdateYoutubeDL() {
         try {
-            val prefs = getSharedPreferences("anon_serverless_prefs", Context.MODE_PRIVATE)
+            val prefs = getSharedPreferences(PREFS_SERVERLESS, Context.MODE_PRIVATE)
             val last = prefs.getLong(KEY_LAST_YTDLP_UPDATE, 0L)
             val now = System.currentTimeMillis()
             if (now - last < UPDATE_INTERVAL_MS) return
@@ -155,9 +211,54 @@ class AnonApp : Application(), ImageLoaderFactory {
         private val appScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
         private val initMutex = Mutex()
 
-        private const val KEY_LAST_RULES_SYNC = "last_rules_sync"
+        /** Written by AnonApp after each successful sync; UpdateManager reads
+         *  it (with the rules cache mtime) as its payload-staleness signal —
+         *  do not rename without updating update/UpdateManager.kt. */
+        internal const val KEY_LAST_RULES_SYNC = "last_rules_sync"
         private const val KEY_LAST_YTDLP_UPDATE = "last_ytdlp_update"
         private const val UPDATE_INTERVAL_MS = 24L * 60 * 60 * 1000
+
+        /** Prefs home of the sync/update bookkeeping (also read by
+         *  UpdateManager as its payload-staleness signal — do not rename
+         *  without updating update/UpdateManager.kt). */
+        internal const val PREFS_SERVERLESS = "anon_serverless_prefs"
+
+        /** Decision 5: resume-refresh fires when the last successful rules
+         *  sync is older than this, even though the auto floor is 24h. */
+        private const val RESUME_SYNC_INTERVAL_MS = 6L * 60 * 60 * 1000
+
+        /** Cold-start guard: the initial auto-sync and the first foreground
+         *  land nearly together — do not double-fire the sync path. */
+        private const val RESUME_SYNC_DEBOUNCE_MS = 10L * 60 * 1000
+
+        /** Last time a rules sync ATTEMPT started (any path), for the
+         *  foreground debounce above. */
+        @Volatile
+        private var lastSyncAttemptMs = 0L
+
+        /**
+         * First foreground of a session (Decision 5 + engagement clock).
+         * Stamps the last-open time / re-arms the inactivity alarm, and when
+         * the last successful rules sync is >6h old triggers the existing
+         * sync path with force=true. Cheap, guarded, never throws.
+         */
+        fun onAppForegrounded() {
+            if (!::instance.isInitialized) return
+            val app = instance
+            try {
+                com.anonrode.downloader.update.EngagementScheduler.noteAppOpen(app)
+            } catch (_: Throwable) {
+            }
+            try {
+                val now = System.currentTimeMillis()
+                if (now - lastSyncAttemptMs < RESUME_SYNC_DEBOUNCE_MS) return
+                val lastSync = app.getSharedPreferences(PREFS_SERVERLESS, Context.MODE_PRIVATE)
+                    .getLong(KEY_LAST_RULES_SYNC, 0L)
+                if (now - lastSync < RESUME_SYNC_INTERVAL_MS) return
+                appScope.launch { app.maybeSyncRules(force = true) }
+            } catch (_: Throwable) {
+            }
+        }
 
         @Volatile
         var ytdlpReady: Boolean = false

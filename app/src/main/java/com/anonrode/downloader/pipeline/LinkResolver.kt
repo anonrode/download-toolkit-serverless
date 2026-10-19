@@ -267,4 +267,20 @@ object LinkResolver {
      *  Non-null totalBytes = the URL really serves a file: LIVE proof. */
     fun probeTerminal(url: String, referer: String? = null, tag: String? = null): Long? =
         HttpClient.probeTerminal(url, referer = referer, tag = tag)?.totalBytes
+
+    /** Stub floor for HLS playlist probes (activity-log audit §3.4): the probe
+     *  accepts ANY 200 for an m3u8/mpegurl target, so a decoy
+     *  `master.m3u8 -> 200 Content-Length: 1` still classifies as a validated
+     *  terminal (HttpClient.kt:1303-1308 — the non-HLS branch carries the
+     *  1024-byte class gate, the HLS branch deliberately does not). Callers
+     *  here only see the probe's totalBytes, so they re-apply the same
+     *  1024-byte class before treating a sub-floor size on an HLS-shaped URL
+     *  as a playlist proof. */
+    const val HLS_STUB_MIN_BYTES = 1024L
+
+    fun isHlsStubTerminal(url: String, totalBytes: Long): Boolean {
+        if (totalBytes <= 0L || totalBytes >= HLS_STUB_MIN_BYTES) return false
+        val low = url.substringBefore('?').lowercase()
+        return low.contains("m3u8") || low.contains("mpegurl")
+    }
 }

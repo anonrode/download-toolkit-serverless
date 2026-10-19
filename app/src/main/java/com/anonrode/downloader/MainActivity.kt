@@ -42,8 +42,10 @@ import androidx.core.view.WindowCompat
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import com.anonrode.downloader.ui.components.AnnouncementHost
 import com.anonrode.downloader.ui.components.MainScaffold
 import com.anonrode.downloader.ui.components.MainTab
+import com.anonrode.downloader.ui.components.UpdateGate
 import com.anonrode.downloader.ui.screens.PlaylistPickerSheet
 import com.anonrode.downloader.ui.screens.SocialModal
 import com.anonrode.downloader.ui.screens.SplashContent
@@ -81,7 +83,9 @@ class MainActivity : ComponentActivity() {
         val coldTheme = coldPrefs.getString("pref_theme_mode", "dark") ?: "dark"
         applyEdgeToEdge(coldTheme)
 
-        handleShareIntent(intent)
+        // No share-intent handling here: MainActivity has no ACTION_SEND
+        // filter (QuickShareActivity owns the share surface), so the old
+        // defensive handleShareIntent call was unreachable and is removed.
 
         val prefs = getSharedPreferences("downloader_settings", android.content.Context.MODE_PRIVATE)
 
@@ -309,6 +313,14 @@ class MainActivity : ComponentActivity() {
                 // shield-blocked files included.
                 TorrentFilePickerHost()
 
+                // Platform-surface hosts (v3.3.0 phase 2): announcements and
+                // the update prompt/gate are ROOT overlays like the pickers
+                // above — they must render regardless of the active tab. The
+                // gate layer sits above the announcement layer when both are
+                // present (its dialog takes the modal slot).
+                AnnouncementHost()
+                UpdateGate()
+
                 if (showStorageRationale) {
                     AlertDialog(
                         onDismissRequest = { showStorageRationale = false },
@@ -391,11 +403,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    override fun onNewIntent(intent: Intent) {
-        super.onNewIntent(intent)
-        handleShareIntent(intent)
-    }
-
     /**
      * The player's Mini-button enters picture-in-picture; the SYSTEM owns
      * all further transitions (tap-to-expand, close-X), so the player can
@@ -412,23 +419,6 @@ class MainActivity : ComponentActivity() {
     ) {
         super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
         com.anonrode.downloader.ui.components.PlayerPipState.inPip = isInPictureInPictureMode
-    }
-
-    private fun handleShareIntent(intent: Intent?) {
-        if (intent?.action == Intent.ACTION_SEND && intent.type == "text/plain") {
-            val sharedText = intent.getStringExtra(Intent.EXTRA_TEXT) ?: return
-            // Share payloads arrive in two shapes: a bare URL, or prose that
-            // wraps a URL ("Check this out: https://…"). Pull the URL out if
-            // one is embedded; fall back to the raw text so the router can
-            // classify it (e.g. as a search query).
-            val url = com.anonrode.downloader.util.UrlExtractor.firstUrl(sharedText)
-                ?: sharedText.trim()
-            if (url.isNotBlank()) {
-                viewModel.handlePastedInput(url) { platform, u ->
-                    viewModel.activeSocialTarget.value = Pair(platform, u)
-                }
-            }
-        }
     }
 }
 

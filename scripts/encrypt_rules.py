@@ -156,10 +156,13 @@ MAX_RULES_ARRAY = 64
 
 # Phase-2 payload families — must equal the exact top-level keys
 # DynamicRulesManager.parseRulesJson consumes (docs/PHASE_2_PLAN.md P2-1).
+# v3.3.0 platform surfaces (plan §4.1) appended: announcements, update, ads,
+# engagement — kept byte-identical to RulesFlags.FAMILY_IDS in the app.
 FAMILY_IDS = [
     "domains", "mirrors", "sites", "resolvers", "directMediaExtensions",
     "hostPolicies", "urlTemplates", "knownDead", "lockerHosts",
     "searchStrategies", "pipelines", "dynamic_providers", "contentPolicy",
+    "announcements", "update", "ads", "engagement",
 ]
 FLAG_SUBKEYS = ("enabled", "percent", "minApp", "expiresMs", "shadow")
 REQUIRED_TOP_KEYS_VERSIONED = ("version",)
@@ -759,6 +762,305 @@ def verify_envelope(text: str, pub_b64: str = OTA_PUB_B64,
     raise SystemExit(last_pin_error)
 
 
+# --- v3.3.0 platform-surface sections (plan §4.1) --------------------------
+# Lockstep with DynamicRulesManager (buildAnnouncements / buildUpdatePolicy /
+# buildAdsConfig / buildEngagementConfig / buildTamperPolicy / buildFcmConfig):
+# the client parses leniently, this validator is the HARD gate. Closed
+# vocabulary: unknown fields inside a section are refused, like contentPolicy.
+ANNOUNCEMENTS_MAX = 16
+ANNOUNCEMENT_ID_MAX = 64
+ACTION_LABEL_MAX = 64
+TITLE_MAX = 80              # Decision 9: every user-visible title
+BODY_MAX = 300              # Decision 9: every user-visible body
+PLATFORM_URL_MAX = 512
+PLATFORM_VERSION_CODE_MAX = 1_000_000
+ANNOUNCEMENT_MODES = ("dialog", "sheet", "banner")
+ANNOUNCEMENT_ACTIONS = ("none", "url", "update")
+ANNOUNCEMENT_ONCE_PER = ("id", "rev")
+UPDATE_SOURCE_KINDS = ("vps", "github", "gitea")
+UPDATE_FORCE_MODES = ("soft", "hard")
+AD_PROVIDERS = ("house", "none", "applovin", "unity", "admob", "auto")
+# Known ad-slot ids (plan §4.3 anchors). A new slot lands with its UI change
+# AND this list — the same closed-vocabulary discipline as pipeline steps.
+AD_PLACEMENTS = ("downloads_shelf", "home_footer")
+HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
+# Certificate pins are conventionally either case; the client normalizes to
+# lowercase before comparing.
+CERT_HEX_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+# F-04 / Decision 13 (plan §2): `sites` fields the app parses but never reads
+# in main — reserved for a future reader. Nothing is removed (harmless data)
+# and no fake readers are added; the INFO note below exists so an OTA "fix"
+# through one of these fields can never look functional.
+RESERVED_SITE_FIELDS = ("searchType", "titleSelector", "linkSelector",
+                        "posterSelector", "seriesDescentSelectors")
+
+
+def _check_str_cap(val, where, problems, max_len, required=False):
+    """String-shape guard: type + length cap, non-emptiness when [required]."""
+    if val is None:
+        if required:
+            problems.append(f"{where}: required non-empty string <= {max_len} chars")
+        return
+    if not isinstance(val, str) or len(val) > max_len or (required and not val.strip()):
+        problems.append(
+            f"{where}: must be a {'non-empty ' if required else ''}string <= {max_len} chars")
+
+
+def _check_http_url(val, where, problems, required=False):
+    """http(s)-only URL guard (the remote_logging_url contract). An empty
+    string is allowed where the URL is unused (action="none"), never where a
+    click target is promised (required)."""
+    if val is None:
+        if required:
+            problems.append(f"{where}: required http(s) URL <= {PLATFORM_URL_MAX} chars")
+        return
+    if val == "" and not required:
+        return
+    if (not isinstance(val, str) or not val.startswith(("http://", "https://"))
+            or len(val) > PLATFORM_URL_MAX):
+        problems.append(f"{where}: must be an http(s) URL <= {PLATFORM_URL_MAX} chars")
+
+
+def _check_int_range(val, where, problems, lo, hi, required=False):
+    """Integer-range guard; JSON true is a typo, never 1. None = absent,
+    allowed unless [required]."""
+    if val is None:
+        if required:
+            problems.append(f"{where}: required int {lo}..{hi}")
+        return
+    if isinstance(val, bool) or not isinstance(val, int) or not lo <= val <= hi:
+        problems.append(f"{where}: must be an int {lo}..{hi}")
+
+
+def validate_platform_sections(obj) -> list:
+    """v3.3.0 platform-surface sections (docs/FINAL_BUILD_EXECUTION_PLAN.md
+    §4.1): announcements / update / ads / engagement / tamper / fcm. Same
+    discipline as contentPolicy: a typo'd field hard-fails HERE instead of
+    silently no-op'ing on every device."""
+    problems = []
+
+    ann = obj.get("announcements")
+    if ann is not None:
+        if not isinstance(ann, list) or len(ann) > ANNOUNCEMENTS_MAX:
+            problems.append(f"announcements: list <= {ANNOUNCEMENTS_MAX} entries")
+        else:
+            for i, a in enumerate(ann):
+                w = f"announcements[{i}]"
+                if not isinstance(a, dict):
+                    problems.append(f"{w}: must be an object")
+                    continue
+                for key in a:
+                    if key not in ("id", "title", "body", "mode", "action",
+                                   "actionLabel", "actionUrl", "oncePer",
+                                   "minApp", "expiresAtMs"):
+                        problems.append(f"{w}.{key}: unknown field")
+                _check_str_cap(a.get("id"), f"{w}.id", problems,
+                               ANNOUNCEMENT_ID_MAX, required=True)
+                _check_str_cap(a.get("title"), f"{w}.title", problems,
+                               TITLE_MAX, required=True)
+                _check_str_cap(a.get("body"), f"{w}.body", problems, BODY_MAX)
+                _check_str_cap(a.get("actionLabel"), f"{w}.actionLabel",
+                               problems, ACTION_LABEL_MAX)
+                if a.get("mode") is not None and a["mode"] not in ANNOUNCEMENT_MODES:
+                    problems.append(
+                        f"{w}.mode: one of {'|'.join(ANNOUNCEMENT_MODES)}")
+                if a.get("action") is not None and a["action"] not in ANNOUNCEMENT_ACTIONS:
+                    problems.append(
+                        f"{w}.action: one of {'|'.join(ANNOUNCEMENT_ACTIONS)}")
+                if a.get("oncePer") is not None and a["oncePer"] not in ANNOUNCEMENT_ONCE_PER:
+                    problems.append(
+                        f"{w}.oncePer: one of {'|'.join(ANNOUNCEMENT_ONCE_PER)}")
+                # A url action without a url is a dead button fleet-wide.
+                _check_http_url(a.get("actionUrl"), f"{w}.actionUrl", problems,
+                                required=(a.get("action") == "url"))
+                _check_int_range(a.get("minApp"), f"{w}.minApp", problems,
+                                 0, PLATFORM_VERSION_CODE_MAX)
+                _check_int_range(a.get("expiresAtMs"), f"{w}.expiresAtMs",
+                                 problems, 0, 2 ** 53)
+
+    upd = obj.get("update")
+    if upd is not None:
+        if not isinstance(upd, dict):
+            problems.append("update: must be an object")
+        else:
+            for key in upd:
+                if key not in ("latestVersionName", "latestVersionCode",
+                               "sources", "apkArm64", "apkUniversal",
+                               "sha256Arm64", "sha256Universal", "message",
+                               "force"):
+                    problems.append(f"update.{key}: unknown field")
+            _check_str_cap(upd.get("latestVersionName"),
+                           "update.latestVersionName", problems, 40, required=True)
+            _check_int_range(upd.get("latestVersionCode"),
+                             "update.latestVersionCode", problems, 0,
+                             PLATFORM_VERSION_CODE_MAX, required=True)
+            srcs = upd.get("sources")
+            if not isinstance(srcs, list) or not 1 <= len(srcs) <= 4:
+                problems.append("update.sources: list of 1..4 sources")
+            else:
+                for j, s in enumerate(srcs):
+                    w = f"update.sources[{j}]"
+                    if not isinstance(s, dict):
+                        problems.append(f"{w}: must be an object")
+                        continue
+                    for key in s:
+                        if key not in ("kind", "base"):
+                            problems.append(f"{w}.{key}: unknown field")
+                    if s.get("kind") not in UPDATE_SOURCE_KINDS:
+                        problems.append(
+                            f"{w}.kind: one of {'|'.join(UPDATE_SOURCE_KINDS)}")
+                    _check_http_url(s.get("base"), f"{w}.base", problems,
+                                    required=True)
+            # APK file names may be empty only until release-day; the SHA-256
+            # pins are explicitly allowed empty (release-day step, plan §6.5).
+            for fld in ("apkArm64", "apkUniversal"):
+                _check_str_cap(upd.get(fld), f"update.{fld}", problems, 120)
+            for fld in ("sha256Arm64", "sha256Universal"):
+                v = upd.get(fld)
+                if v is not None and v != "" and (
+                        not isinstance(v, str) or not HEX64_RE.match(v)):
+                    problems.append(f"update.{fld}: 64 lowercase hex chars or empty")
+            _check_str_cap(upd.get("message"), "update.message", problems, BODY_MAX)
+            force = upd.get("force")
+            if force is not None:
+                if not isinstance(force, dict):
+                    problems.append("update.force: must be an object")
+                else:
+                    for key in force:
+                        if key not in ("enabled", "minSupportedVersionCode",
+                                       "mode", "snoozeHours", "escapeHatch"):
+                            problems.append(f"update.force.{key}: unknown field")
+                    if "enabled" in force and not isinstance(force["enabled"], bool):
+                        problems.append("update.force.enabled: must be a bool")
+                    _check_int_range(force.get("minSupportedVersionCode"),
+                                     "update.force.minSupportedVersionCode",
+                                     problems, 0, PLATFORM_VERSION_CODE_MAX)
+                    if force.get("mode") is not None and force["mode"] not in UPDATE_FORCE_MODES:
+                        problems.append(
+                            f"update.force.mode: one of {'|'.join(UPDATE_FORCE_MODES)}")
+                    _check_int_range(force.get("snoozeHours"),
+                                     "update.force.snoozeHours", problems, 0, 168)
+                    if "escapeHatch" in force and not isinstance(force["escapeHatch"], bool):
+                        problems.append("update.force.escapeHatch: must be a bool")
+
+    ads = obj.get("ads")
+    if ads is not None:
+        if not isinstance(ads, dict):
+            problems.append("ads: must be an object")
+        else:
+            for key in ads:
+                if key not in ("enabled", "provider", "placements",
+                               "frequencyPerDay", "house", "applovinSdkKey",
+                               "unityGameId", "admobAppId", "admobBannerUnitId",
+                               "admobNativeUnitId"):
+                    problems.append(f"ads.{key}: unknown field")
+            if "enabled" in ads and not isinstance(ads["enabled"], bool):
+                problems.append("ads.enabled: must be a bool")
+            if ads.get("provider") is not None and ads["provider"] not in AD_PROVIDERS:
+                problems.append(f"ads.provider: one of {'|'.join(AD_PROVIDERS)}")
+            pl = ads.get("placements")
+            if pl is not None:
+                if (not isinstance(pl, list) or len(pl) > 8
+                        or any(p not in AD_PLACEMENTS for p in pl)):
+                    problems.append("ads.placements: list <= 8 of known slot "
+                                    f"ids ({', '.join(AD_PLACEMENTS)})")
+            _check_int_range(ads.get("frequencyPerDay"), "ads.frequencyPerDay",
+                             problems, 0, 20)
+            house = ads.get("house")
+            if house is not None:
+                if not isinstance(house, dict):
+                    problems.append("ads.house: must be an object")
+                else:
+                    for key in house:
+                        if key not in ("title", "body", "actionLabel",
+                                       "actionUrl", "id"):
+                            problems.append(f"ads.house.{key}: unknown field")
+                    _check_str_cap(house.get("title"), "ads.house.title",
+                                   problems, TITLE_MAX, required=True)
+                    _check_str_cap(house.get("body"), "ads.house.body",
+                                   problems, BODY_MAX)
+                    _check_str_cap(house.get("actionLabel"),
+                                   "ads.house.actionLabel", problems,
+                                   ACTION_LABEL_MAX)
+                    _check_str_cap(house.get("id"), "ads.house.id", problems,
+                                   ANNOUNCEMENT_ID_MAX)
+                    _check_http_url(house.get("actionUrl"),
+                                    "ads.house.actionUrl", problems)
+            # Vendor credential slots (plan §4.6): runtime strings only, empty
+            # until registration day — OTA-activatable without a rebuild.
+            for key in ("applovinSdkKey", "unityGameId", "admobAppId",
+                        "admobBannerUnitId", "admobNativeUnitId"):
+                _check_str_cap(ads.get(key), f"ads.{key}", problems, 256)
+
+    eng = obj.get("engagement")
+    if eng is not None:
+        if not isinstance(eng, dict):
+            problems.append("engagement: must be an object")
+        else:
+            for key in eng:
+                if key not in ("enabled", "inactiveDays", "cooldownDays",
+                               "title", "body", "welcomeBack"):
+                    problems.append(f"engagement.{key}: unknown field")
+            if "enabled" in eng and not isinstance(eng["enabled"], bool):
+                problems.append("engagement.enabled: must be a bool")
+            _check_int_range(eng.get("inactiveDays"), "engagement.inactiveDays",
+                             problems, 1, 365)
+            _check_int_range(eng.get("cooldownDays"), "engagement.cooldownDays",
+                             problems, 1, 365)
+            _check_str_cap(eng.get("title"), "engagement.title", problems,
+                           TITLE_MAX, required=True)
+            _check_str_cap(eng.get("body"), "engagement.body", problems, BODY_MAX)
+            if "welcomeBack" in eng and not isinstance(eng["welcomeBack"], bool):
+                problems.append("engagement.welcomeBack: must be a bool")
+
+    tam = obj.get("tamper")
+    if tam is not None:
+        if not isinstance(tam, dict):
+            problems.append("tamper: must be an object")
+        else:
+            for key in tam:
+                if key not in ("expectedCertSha256", "reportOnly"):
+                    problems.append(f"tamper.{key}: unknown field")
+            cert = tam.get("expectedCertSha256")
+            if cert is not None and cert != "" and (
+                    not isinstance(cert, str) or not CERT_HEX_RE.match(cert)):
+                problems.append("tamper.expectedCertSha256: empty or 64 hex chars")
+            if "reportOnly" in tam and not isinstance(tam["reportOnly"], bool):
+                problems.append("tamper.reportOnly: must be a bool")
+
+    fcm = obj.get("fcm")
+    if fcm is not None:
+        if not isinstance(fcm, dict):
+            problems.append("fcm: must be an object")
+        else:
+            for key in fcm:
+                if key not in ("enabled", "apiKey", "appId", "senderId", "projectId"):
+                    problems.append(f"fcm.{key}: unknown field")
+            if "enabled" in fcm and not isinstance(fcm["enabled"], bool):
+                problems.append("fcm.enabled: must be a bool")
+            for key in ("apiKey", "appId", "senderId", "projectId"):
+                _check_str_cap(fcm.get(key), f"fcm.{key}", problems, 256)
+
+    return problems
+
+
+def reserved_site_field_notes(plain: bytes) -> list:
+    """F-04 / Decision 13: INFO line naming the `sites` fields the app parses
+    but never reads in main. Keeps a future OTA "fix" through those fields
+    from ever looking functional. Empty list when the payload carries no
+    sites section; malformed plaintext yields none (validate_schema refuses
+    it separately)."""
+    try:
+        obj = json.loads(plain.decode("utf-8"))
+        sites = obj.get("sites")
+        if not isinstance(sites, dict) or not sites:
+            return []
+        return ["sites reserved fields (no readers in the app — F-04/Decision 13; "
+                "editing them changes nothing): " + ", ".join(RESERVED_SITE_FIELDS)]
+    except Exception:
+        return []
+
+
 def validate_schema(plain: bytes) -> list:
     """Returns a list of human-readable problems; empty list == valid."""
     problems = []
@@ -956,7 +1258,9 @@ def validate_schema(plain: bytes) -> list:
                        "hostPolicies", "searchStrategies", "urlTemplates",
                        "knownDead", "tokenTtlMinutes", "validation",
                        "minAppVersion", "pipelines", "remote_logging_url",
-                       "rev", "flags", "contentPolicy"):
+                       "rev", "flags", "contentPolicy",
+                       "announcements", "update", "ads", "engagement",
+                       "tamper", "fcm"):
             problems.append(f"unknown top-level field '{key}' (add it to the "
                             "allow-list in encrypt_rules.py AND DynamicRulesManager)")
 
@@ -1014,6 +1318,10 @@ def validate_schema(plain: bytes) -> list:
                 if key not in ("socketCaps", "suppressNollywood",
                                "nollywoodSites", "nollywoodOnlySites", "nollywoodTerms"):
                     problems.append(f"contentPolicy.{key}: unknown field")
+
+    # v3.3.0 platform surfaces (plan §4.1) — announcements / update / ads /
+    # engagement / tamper / fcm, strict like contentPolicy above.
+    problems.extend(validate_platform_sections(obj))
 
     problems.extend(validate_pipelines(obj))
     return problems
@@ -1190,6 +1498,11 @@ def main():
         for p in problems:
             print("  -", p)
         sys.exit(1)
+
+    # F-04 / Decision 13: reserved `sites` fields get an INFO line on every
+    # publish (and every --dry-run, which routes through this main()).
+    for note in reserved_site_field_notes(plain):
+        print(f"INFO: {note}")
 
     iv = _secrets.token_bytes(16)
     ct = encrypt_random_iv(plain, iv)

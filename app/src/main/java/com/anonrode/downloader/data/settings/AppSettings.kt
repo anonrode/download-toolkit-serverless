@@ -45,6 +45,21 @@ data class AppSettings(
         const val PREFS_NAME = "downloader_settings"
         const val PEERS_AUTO = -1
 
+        /** The ONE subtitle-language reader for the player while this
+         *  duplicated settings model is retired (F-08): identical pref key +
+         *  default as [load], so swapping a caller over is behavior-neutral
+         *  without materializing the whole data class. */
+        fun subtitleLanguage(context: Context): String =
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .getString("pref_subtitle_lang", "en") ?: "en"
+
+        /**
+         * @deprecated For removal (F-08, phase 2): this data class duplicates
+         * the engine's own settings field set (DownloadEngine
+         * loadPreferences/saveAllSettings is the live source of truth).
+         * Consumers migrate to targeted pref readers (see [subtitleLanguage])
+         * before the class is deleted; do not add new callers.
+         */
         fun load(context: Context): AppSettings {
             val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             return AppSettings(
@@ -74,6 +89,11 @@ data class AppSettings(
             )
         }
 
+        /**
+         * @deprecated For removal (F-08, phase 2): never had a production
+         * caller — the engine persists every setting itself. Kept only until
+         * the data class above is deleted; do not add new callers.
+         */
         fun save(context: Context, s: AppSettings) {
             context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
                 .putInt("pref_max_downloads", s.maxConcurrentDownloads.coerceIn(1, 6))

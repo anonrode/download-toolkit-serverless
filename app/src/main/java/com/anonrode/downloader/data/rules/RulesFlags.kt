@@ -88,7 +88,13 @@ object RulesFlags {
         "searchStrategies",
         "pipelines",
         "dynamic_providers",
-        "contentPolicy"
+        "contentPolicy",
+        // v3.3.0 platform surfaces (plan §4.1) — kept byte-identical to the
+        // publish-side list in scripts/encrypt_rules.py (FAMILY_IDS).
+        "announcements",
+        "update",
+        "ads",
+        "engagement"
     )
 
     /** Allowed per-family flag sub-keys; anything else voids that family's

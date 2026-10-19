@@ -439,8 +439,11 @@ private fun MediaPlayerModalImpl(
     // track switches it on. Once the user has driven the sheet in this
     // session (including "Off"), we never auto-touch again.
     var subtitleUserDecided by remember { mutableStateOf(false) }
+    // Direct pref read via AppSettings.subtitleLanguage(context) (F-08
+    // consolidation): the full AppSettings.load() snapshot was only ever
+    // consulted for this single field here — same pref key, same "en" default.
     val preferredSubLang = remember {
-        runCatching { com.anonrode.downloader.data.settings.AppSettings.load(context).subtitleLanguage }
+        runCatching { com.anonrode.downloader.data.settings.AppSettings.subtitleLanguage(context) }
             .getOrDefault("en")
     }
     var showAudioSheet by remember { mutableStateOf(false) }

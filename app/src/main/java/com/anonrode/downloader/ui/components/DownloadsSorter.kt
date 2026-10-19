@@ -246,21 +246,51 @@ object DownloadsSorter {
             .filter { it.value.isNotEmpty() }
             .map { (label, list) -> label to list.sortedByDescending { it.totalBytes } }
     }
+
+    /**
+     * The ONE "active" predicate shared by every live user-facing Downloads
+     * surface: a task the user still expects to be working — DOWNLOADING /
+     * RESOLVING / VALIDATING / QUEUED. Used by the Active filter chip (the
+     * predicate AND its count), the header meta line and the bottom-nav
+     * badge, so those surfaces can no longer disagree (audit F-9: the chip
+     * count used to include QUEUED while the header/badge excluded it).
+     *
+     * Deliberately NOT the same set as the two remaining distinct filters:
+     *  - [DownloadsStats].active — the narrower 3-state "transferring" set;
+     *    kept verbatim because DownloadsSorterTest pins its numbers.
+     *  - the DownloadService/updateProgress notification filter
+     *    (DOWNLOADING / RESOLVING only) — that one gates the ongoing
+     *    progress notification, which needs a task with byte progress to
+     *    report; QUEUED/VALIDATING have nothing to show there. Different
+     *    purpose, intentionally narrower — leave it alone.
+     */
+    fun isActiveTask(task: DownloadTask): Boolean =
+        task.status == TaskStatus.DOWNLOADING ||
+            task.status == TaskStatus.RESOLVING ||
+            task.status == TaskStatus.VALIDATING ||
+            task.status == TaskStatus.QUEUED
+
+    /** Count of [isActiveTask] tasks — header meta "N active" + nav badge. */
+    fun activeTaskCount(tasks: List<DownloadTask>): Int = tasks.count { isActiveTask(it) }
 }
 
-/** Counts surfaced in the Downloads stats strip and the bottom-nav badge.
+/** Counts surfaced in the Downloads stats strip.
  *  `active` is the "actually transferring" set: DOWNLOADING / RESOLVING /
  *  VALIDATING.  PAUSED is deliberately excluded — a paused task is parked,
  *  and counting it made the badge read "2 active" while only one download
  *  was moving (user-visible confusion).  Queued tasks are also excluded:
- *  a queued task hasn't claimed a download slot yet. */
+ *  a queued task hasn't claimed a download slot yet.
+ *  Kept verbatim for the pinned DownloadsSorterTest contract — the LIVE
+ *  header meta count and bottom-nav badge read the broader four-state
+ *  [DownloadsSorter.isActiveTask] instead (F-9 unification). */
 data class DownloadsStats(
     val files: Int,
     val done: Int,
     val active: Int,
     val failed: Int
 ) {
-    /** Tasks that should show a red badge on the Downloads bottom-nav icon. */
+    /** Legacy alias of [active]; kept for the pinned JVM tests — the
+     *  bottom-nav badge now reads [DownloadsSorter.activeTaskCount]. */
     val badgeCount: Int get() = active
 }
 

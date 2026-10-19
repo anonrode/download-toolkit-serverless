@@ -52,7 +52,24 @@ object NepuProvider : SiteProvider {
                     val poster = if (posterPath.isNotBlank() && posterPath != "null") "https://image.tmdb.org/t/p/w342$posterPath" else ""
 
                     if (tmdbId.isNotBlank() && title.isNotBlank()) {
-                        val fullUrl = "$mainUrl/watch/$mediaType/$tmdbId"
+                        // The OTA playbook's urlTemplates can change the
+                        // watch-URL shape fleet-wide (payload ships
+                        // "/watch/{media_type}/{id}"); the hardcoded shape is
+                        // the fallback, so a payload without a template behaves
+                        // byte-identically to before. {base} is supported for
+                        // absolute templates; unrenderable templates fall back.
+                        val tpl = DynamicRulesManager.getUrlTemplate(name)
+                        val fullUrl = if (tpl.isBlank()) {
+                            "$mainUrl/watch/$mediaType/$tmdbId"
+                        } else {
+                            val vars = mapOf("base" to mainUrl, "media_type" to mediaType, "id" to tmdbId)
+                            val rendered = RulesPipeline.renderTemplate(tpl, vars) { vars[it] }
+                            when {
+                                rendered.isNullOrBlank() -> "$mainUrl/watch/$mediaType/$tmdbId"
+                                rendered.startsWith("http://") || rendered.startsWith("https://") -> rendered
+                                else -> mainUrl.trimEnd('/') + "/" + rendered.trimStart('/')
+                            }
+                        }
                         results.add(
                             ShowCard(
                                 title = if (year.isNotBlank()) "$title ($year)" else title,

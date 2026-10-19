@@ -82,6 +82,15 @@ object YoutubeDlDownloader {
      *  sidecars written by the embed-subs pass). */
     private val SUBTITLE_ARTIFACT_EXTS = setOf("srt", "vtt", "ass", "ssa", "ttml", "json3", "srv3")
 
+    /** Terminal-stub floor for the FINAL accepted output (activity-log audit
+     *  §3.4 class): a yt-dlp/aria2c "artifact" under this size is a decoy or
+     *  error body, never media — the same 1024-byte class the terminal probe
+     *  applies to non-HLS responses (HttpClient.kt:1309-1310) and the
+     *  probe consumers re-apply for HLS (LinkResolver.isHlsStubTerminal).
+     *  Only the output gate uses this: HLS segment/fragment reads are
+     *  untouched (sub-KB segment reads are normal). */
+    private const val MIN_PRODUCED_BYTES = 1024L
+
     /**
      * Flat playlist metadata dump: `yt-dlp -J --flat-playlist` over the whole
      * list WITHOUT resolving any video page (one paginated metadata call),
@@ -631,7 +640,7 @@ object YoutubeDlDownloader {
             // successful completion. Without this, an attempt that exits 0
             // while a straggler range request died could hand the engine a
             // truncated file that the structure tier then blesses.
-            fun isFinal(f: File) = f.exists() && f.isFile && f.length() > 0L &&
+            fun isFinal(f: File) = f.exists() && f.isFile && f.length() >= MIN_PRODUCED_BYTES &&
                 !f.name.endsWith(".aria2") && !f.name.endsWith(".part") && !f.name.endsWith(".ytdl") &&
                 // Subtitle sidecars (write-subs/embed-subs output; embed
                 // normally deletes them, a half-finished pass may not) were
@@ -1258,7 +1267,7 @@ object YoutubeDlDownloader {
                 return null
             }
 
-            fun isFinal(f: File) = f.exists() && f.isFile && f.length() > 0L &&
+            fun isFinal(f: File) = f.exists() && f.isFile && f.length() >= MIN_PRODUCED_BYTES &&
                     !f.name.endsWith(".aria2") && !f.name.endsWith(".part") &&
                     !f.name.endsWith(".ytdl") && !f.name.endsWith(".torrent")
 

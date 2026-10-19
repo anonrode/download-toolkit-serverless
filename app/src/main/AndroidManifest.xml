@@ -10,6 +10,10 @@
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+    <!-- Self-update flow (phase 2): hand a SHA-256-verified APK to the system installer. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- Re-engagement (phase 2): re-arm the one-shot inactivity alarm after reboot. -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <application
         android:name=".AnonApp"
@@ -63,6 +67,39 @@
         <receiver
             android:name=".service.RetryReceiver"
             android:exported="false" />
+
+        <!-- Re-engagement (phase 2): re-arm the inactivity alarm after reboot.
+             BOOT_COMPLETED delivers to manifest receivers via an implicit
+             broadcast, so (unlike RetryReceiver's explicit PendingIntent)
+             this one MUST be exported="true" to receive it. -->
+        <receiver
+            android:name=".service.BootReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Re-engagement (phase 2): one-shot AlarmManager delivery. Self-
+             targeted explicit PendingIntent → exported="false". -->
+        <receiver
+            android:name=".update.EngagementAlarmReceiver"
+            android:exported="false" />
+
+        <!-- Self-update (phase 2): PackageInstaller session result hand-off
+             (launches the system confirmation when the session is pending). -->
+        <receiver
+            android:name=".update.PackageInstallerResultReceiver"
+            android:exported="false" />
+
+        <!-- Ads readiness (phase 2): AdMob reads its app id from manifest
+             meta-data. Google's official TEST app id — replace with the real
+             AdMob app id at registration (one-line change). Harmless while
+             the ads payload section is disabled. -->
+        <meta-data
+            android:name="com.google.android.gms.ads.APPLICATION_ID"
+            android:value="ca-app-pub-3940256099942544~3347511713" />
 
         <provider
             android:name="androidx.core.content.FileProvider"

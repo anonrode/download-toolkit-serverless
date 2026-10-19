@@ -800,6 +800,14 @@ object RulesPipeline {
                 DebugLog.resolve("$site pipeline resolve: probe rejected terminal ${probeUrl.take(140)} (hops=$hops)")
                 return null
             }
+            // HLS stub gate (activity-log audit §3.4): a `master.m3u8 -> 200
+            // Content-Length: 1` decoy passes the probe's HLS 200 branch —
+            // never accept a sub-1KB "size" on an HLS-shaped URL as the
+            // download terminal (mirrors the non-HLS 1024-byte class gate).
+            if (com.anonrode.downloader.pipeline.LinkResolver.isHlsStubTerminal(probeUrl, tp.totalBytes)) {
+                DebugLog.resolve("$site pipeline resolve: probe rejected HLS stub (${tp.totalBytes}B) ${probeUrl.take(140)}")
+                return null
+            }
             DebugLog.resolve("$site pipeline resolve: terminal validated (${tp.totalBytes}B, hops=$hops) ${probeUrl.take(140)}")
             return probeUrl
         }

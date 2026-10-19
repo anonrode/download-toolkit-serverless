@@ -388,3 +388,32 @@ Rollback: revert commit + republish previous payload rev (kill switches make cod
   nested unknown-field rejects; found & fixed a real false positive in the syntax-gate scanner (Kotlin
   string templates were misread) — gate is now template-aware. → **S1 advanced to PHASE 2** (Python
   reference sims for update/announcement/ads/engagement semantics + adversarial NN-6+ extension).
+- 2026-10-18 — **S3 PHASE 1 REVIEWED: PASS** — report `scratch/phase1_report_S3.md`. Verified from my shell:
+  manifest has zero `@string` refs (strings.xml deletion safe), no dangling refs after the resource/key
+  deletions (only tombstone comments), MainActivity free of the dead share path (onNewIntent removed),
+  `isActiveTask/activeTaskCount` in place with `downloadsStats` + all test pins untouched. Sockets control
+  placed in the Downloads drawer (flagged: 1-hunk move if "Connections" was meant). → **S3 advanced to
+  PHASE 2** (AnnouncementHost / UpdateGate / AdSlot / welcome-back / About diagnostics row).
+- 2026-10-18 — S2 first fixes landing (F-01 `setVerbose` present); S2 + S1-phase-2 + S4-phase-2 resumed after
+  the second API outage. S3's blocker recorded: `AppSettings.subtitleLanguage(Context)` must land via S2 or
+  CI compile breaks — **orchestrator must verify before the final push**.
+- 2026-10-18 late — **S2 PHASE 1 COMPLETE** (report `scratch/phase1_report_S2.md`): all 11 items landed incl.
+  the HLS stub gate (LinkResolver `HLS_STUB_MIN_BYTES=1024` + RulesPipeline/ResultVerifier/YoutubeDl
+  `isFinal >= MIN_PRODUCED_BYTES` + new HlsStubTerminalTest), vidsrcme compiled seed + `legacyApiUsable`,
+  F-01/02/03/06/07/08/09/12, UpdateChecker :80, QueueOrderTest. Two cross-scope blockers fixed by the
+  orchestrator: stale `HttpClientSafetyTest` assertions (500/9-byte accepts → refusals + HLS-exemption cases)
+  and the androidTest `RegexCompatCatalog` entries for the deleted TmdbPosterResolver.
+- 2026-10-18 late — **S4 PHASE 2 COMPLETE** (report `scratch/phase2_report_S4.md`): all five managers +
+  Ads.kt + publish_apk.py + BootReceiver + manifest + six pinned SDK deps + AnonApp hooks; self-verified
+  integration (file_paths already covers cacheDir, AdMob test-id confirmed, BOOT exported correct).
+  Orchestrator fixed the one documented mismatch: publish_apk now ALSO copies `latest.json` to
+  `ota_files/latest.json` (the exact `/ota/latest.json` URL the app's mirror check reads) + dry-run/verify
+  updated. `AppSettings.subtitleLanguage` landed → S3's call-site blocker CLEARED.
+- 2026-10-18 late — **PHASE 2 UI HOSTS completed by the orchestrator** (S3's agent retired after two deaths;
+  no double-writer risk): `AnnouncementHost.kt`, `UpdateGate.kt` (soft snooze + hard gate + 5×-long-press
+  24h escape hatch + `gate_shown`/`gate_bypass` telemetry), `AdSlot.kt` (house-only, per-day cap,
+  `ad_impression`), wired in MainActivity root + Downloads shelf + Home footer; `WelcomeBackCard` +
+  engagement pending-flag write in the scheduler; Settings "App signature" diagnostics row.
+- 2026-10-18 late — **verification sweep green**: syntax gate 188 files PASS; adversarial 100% (check 17
+  strengthened to the new `>= MIN_PRODUCED_BYTES` invariant); sims update 25/25, announcement 18/18,
+  ads 15/15, engagement 18/18, nollywood 18/18; `publish_apk.py` compiles. Checkpoint committed.

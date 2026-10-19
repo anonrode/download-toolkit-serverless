@@ -12,8 +12,16 @@ def check_file(path):
     col = 1
     in_line_comment = False
     in_block_comment = False
-    in_string = False
-    in_multiline_string = False
+
+    # Kotlin lexical contexts (v3.3.0 F-13: string templates are CODE).
+    # 'code' is the implicit top level; an opening quote pushes 'string' or
+    # 'raw'; "${" inside any string pushes 'expr' — inside a template
+    # expression the scanner is in code again, where nested string literals
+    # are legal ("a${f("b")}c"). A naive quote-to-quote scan miscounts the
+    # brackets there (false positive found when the gate widened to all
+    # files). Entries are (kind, depth); depth counts nested braces inside
+    # an 'expr' frame — the brace that returns it to 0 closes the template.
+    ctx_stack = []
 
     errors = []
     while i < n:
@@ -40,23 +48,95 @@ def check_file(path):
                 col += 1
             continue
 
-        if in_multiline_string:
-            if text[i:i+3] == '"""':
-                in_multiline_string = False
-                i += 3
-                col += 3
-            else:
-                i += 1
-                col += 1
-            continue
+        ctx = ctx_stack[-1][0] if ctx_stack else 'code'
 
-        if in_string:
+        if ctx == 'string':
             if c == '\\':
                 i += 2
                 col += 2
                 continue
+            if c == '$' and text[i+1:i+2] == '{':
+                ctx_stack.append(('expr', 1))
+                i += 2
+                col += 2
+                continue
             if c == '"':
-                in_string = False
+                ctx_stack.pop()
+            i += 1
+            col += 1
+            continue
+
+        if ctx == 'raw':
+            if text[i:i+3] == '"""':
+                ctx_stack.pop()
+                i += 3
+                col += 3
+                continue
+            if c == '$' and text[i+1:i+2] == '{':
+                ctx_stack.append(('expr', 1))
+                i += 2
+                col += 2
+                continue
+            i += 1
+            col += 1
+            continue
+
+        if ctx == 'expr':
+            if text[i:i+2] == '//':
+                in_line_comment = True
+                i += 2
+                col += 2
+                continue
+            if text[i:i+2] == '/*':
+                in_block_comment = True
+                i += 2
+                col += 2
+                continue
+            if text[i:i+3] == '"""':
+                ctx_stack.append(('raw', 0))
+                i += 3
+                col += 3
+                continue
+            if c == '"':
+                ctx_stack.append(('string', 0))
+                i += 1
+                col += 1
+                continue
+            if c == "'":
+                if i + 2 < n and text[i+2] == "'":
+                    i += 3
+                    col += 3
+                elif i + 3 < n and text[i+1] == '\\' and text[i+3] == "'":
+                    i += 4
+                    col += 4
+                else:
+                    i += 1
+                    col += 1
+                continue
+            if c == '{':
+                ctx_stack[-1] = ('expr', ctx_stack[-1][1] + 1)
+                i += 1
+                col += 1
+                continue
+            if c == '}':
+                depth = ctx_stack[-1][1] - 1
+                if depth == 0:
+                    ctx_stack.pop()
+                else:
+                    ctx_stack[-1] = ('expr', depth)
+                i += 1
+                col += 1
+                continue
+            if c in '([':
+                stack.append((c, line, col))
+            elif c in ')]':
+                if not stack:
+                    errors.append(f"Unmatched closing {c} at line {line}:{col}")
+                else:
+                    top, tline, tcol = stack.pop()
+                    expected = {'{': '}', '[': ']', '(': ')'}[top]
+                    if c != expected:
+                        errors.append(f"Mismatched bracket: expected {expected} for {top} from line {tline}:{tcol}, got {c} at line {line}:{col}")
             i += 1
             col += 1
             continue
@@ -73,12 +153,12 @@ def check_file(path):
             col += 2
             continue
         if text[i:i+3] == '"""':
-            in_multiline_string = True
+            ctx_stack.append(('raw', 0))
             i += 3
             col += 3
             continue
         if c == '"':
-            in_string = True
+            ctx_stack.append(('string', 0))
             i += 1
             col += 1
             continue
@@ -115,66 +195,23 @@ def check_file(path):
 
 if __name__ == "__main__":
     repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    target_files = [
-        "app/src/main/java/com/anonrode/downloader/data/models/Models.kt",
-        "app/src/main/java/com/anonrode/downloader/data/rules/DynamicRulesManager.kt",
-        "app/src/main/java/com/anonrode/downloader/data/rules/PipelineModels.kt",
-        "app/src/main/java/com/anonrode/downloader/engine/Aria2Control.kt",
-        "app/src/main/java/com/anonrode/downloader/engine/DownloadEngine.kt",
-        "app/src/main/java/com/anonrode/downloader/engine/HlsSizeEstimator.kt",
-        "app/src/main/java/com/anonrode/downloader/engine/ProgressParser.kt",
-        "app/src/main/java/com/anonrode/downloader/engine/TurboDownloader.kt",
-        "app/src/main/java/com/anonrode/downloader/engine/YoutubeDlDownloader.kt",
-        "app/src/main/java/com/anonrode/downloader/engine/StreamProgressMeter.kt",
-        "app/src/main/java/com/anonrode/downloader/engine/TaskRuntimeRegistry.kt",
-        "app/src/main/java/com/anonrode/downloader/engine/ProgressWatchdog.kt",
-        "app/src/main/java/com/anonrode/downloader/pipeline/UrlClassifier.kt",
-        "app/src/main/java/com/anonrode/downloader/pipeline/HostPolicyRegistry.kt",
-        "app/src/main/java/com/anonrode/downloader/pipeline/LinkResolver.kt",
-        "app/src/main/java/com/anonrode/downloader/providers/AsianCProvider.kt",
-        "app/src/main/java/com/anonrode/downloader/providers/AsianDramaFeed.kt",
-        "app/src/main/java/com/anonrode/downloader/providers/CategoryFeed.kt",
-        "app/src/main/java/com/anonrode/downloader/providers/RulesPipeline.kt",
-        "app/src/main/java/com/anonrode/downloader/providers/TrendingFeed.kt",
-        "app/src/main/java/com/anonrode/downloader/resolvers/Resolvers.kt",
-        "app/src/main/java/com/anonrode/downloader/util/ExplicitContentFilter.kt",
-        "app/src/main/java/com/anonrode/downloader/util/PostContentSanitizer.kt",
-        "app/src/main/java/com/anonrode/downloader/providers/NaijaPreyProvider.kt",
-        "app/src/main/java/com/anonrode/downloader/providers/NkiriProvider.kt",
-        "app/src/main/java/com/anonrode/downloader/providers/RocksProvider.kt",
-        "app/src/main/java/com/anonrode/downloader/providers/DramaRainProvider.kt",
-        "app/src/main/java/com/anonrode/downloader/providers/DramaKeyProvider.kt",
-        "app/src/main/java/com/anonrode/downloader/providers/AnimeOracle.kt",
-        "app/src/main/java/com/anonrode/downloader/providers/AnitakuProvider.kt",
-        "app/src/main/java/com/anonrode/downloader/viewmodel/MainViewModel.kt",
-        "app/src/main/java/com/anonrode/downloader/providers/NepuProvider.kt",
-        "app/src/main/java/com/anonrode/downloader/engine/InstagramPhotoMuxer.kt",
-        "app/src/main/java/com/anonrode/downloader/engine/DownloadRepository.kt",
-        "app/src/main/java/com/anonrode/downloader/pipeline/StreamValidator.kt",
-        "app/src/main/java/com/anonrode/downloader/AnonApp.kt",
-        "app/src/main/java/com/anonrode/downloader/ui/theme/Theme.kt",
-        "app/src/main/java/com/anonrode/downloader/ui/util/TitleFormatting.kt",
-        "app/src/main/java/com/anonrode/downloader/ui/screens/EpisodeDrawer.kt",
-        "app/src/main/java/com/anonrode/downloader/ui/screens/DownloadsScreen.kt",
-        "app/src/main/java/com/anonrode/downloader/ui/components/AsianDramaExplorer.kt",
-        "app/src/main/java/com/anonrode/downloader/ui/screens/HomeScreen.kt",
-        "app/src/main/java/com/anonrode/downloader/ui/components/MediaPlayerModal.kt",
-        "app/src/main/java/com/anonrode/downloader/ui/components/MediaPlayerPrefs.kt",
-        "app/src/main/java/com/anonrode/downloader/ui/components/QualityChipRow.kt",
-        "app/src/main/java/com/anonrode/downloader/ui/screens/SettingsSheet.kt",
-        "app/src/main/java/com/anonrode/downloader/ui/screens/SocialModal.kt",
-        "app/src/main/java/com/anonrode/downloader/ui/screens/QuickShareActivity.kt",
-        "app/src/main/java/com/anonrode/downloader/data/settings/AppSettings.kt",
-        "app/src/test/java/com/anonrode/downloader/pipeline/FullAppPipelineSimulationTest.kt"
-    ]
+    # v3.3.0 (F-13): no hand-maintained target list anymore — walk EVERY .kt
+    # file under app/src/main and app/src/test (sorted, deterministic). A new
+    # file is gated the moment it lands; the gate can never silently lag the
+    # tree the way a hardcoded list did.
+    target_files = []
+    for src_dir in ("app/src/main", "app/src/test"):
+        base = os.path.join(repo, *src_dir.split("/"))
+        for dirpath, _dirnames, filenames in os.walk(base):
+            for fn in filenames:
+                if fn.endswith(".kt"):
+                    rel = os.path.relpath(os.path.join(dirpath, fn), repo)
+                    target_files.append(rel.replace(os.sep, "/"))
+    target_files.sort()
 
     has_error = False
     for rel in target_files:
-        full = os.path.join(repo, rel)
-        if not os.path.exists(full):
-            print(f"MISSING: {rel}")
-            has_error = True
-            continue
+        full = os.path.join(repo, *rel.split("/"))
         errs = check_file(full)
         if errs:
             print(f"FAIL: {rel}")
@@ -184,6 +221,7 @@ if __name__ == "__main__":
         else:
             print(f"PASS: {rel}")
 
+    print(f"\nchecked {len(target_files)} Kotlin files under app/src/main + app/src/test")
     if has_error:
         sys.exit(1)
-    print("\nALL TARGET KOTLIN FILES VERIFIED CLEAN WITH ZERO SYNTAX/BRACE ERRORS!")
+    print("ALL TARGET KOTLIN FILES VERIFIED CLEAN WITH ZERO SYNTAX/BRACE ERRORS!")

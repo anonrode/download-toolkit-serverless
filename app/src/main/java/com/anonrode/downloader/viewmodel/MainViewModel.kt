@@ -1169,47 +1169,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
-    fun downloadEpisode(episode: EpisodeItem) {
-        val show = _uiState.value.activeShowForDrawer ?: return
-        com.anonrode.downloader.util.DebugLog.user("enqueue episode: ${show.title} - ${episode.title} url=${episode.url.take(100)}")
-        engine.enqueue(
-            showTitle = show.title,
-            episodeNum = episode.episodeNum,
-            episodeTitle = "${show.title} - ${episode.title}",
-            sourceUrl = episode.url,
-            mirrorUrls = episode.mirrorUrls,
-            isDirect = false,
-            backend = "aria2c",
-            parallelSockets = engine.parallelSocketsPerFile,
-            site = episode.site.ifBlank { show.site },
-            // Oracle instant-tap: if verification byte-proved THIS episode's
-            // direct URL seconds ago, the engine skips RESOLVING entirely
-            // (guarded inside enqueue; null/absent = today's exact path).
-            verifiedDirectUrl = com.anonrode.downloader.pipeline.ResultVerifier
-                .verifiedDirect(episode.url)
-        )
-    }
-
-    fun downloadAllEpisodes(episodes: List<EpisodeItem>) {
-        val show = _uiState.value.activeShowForDrawer ?: return
-        com.anonrode.downloader.util.DebugLog.user("enqueue batch: ${episodes.size} episodes of ${show.title}")
-        for (ep in episodes) {
-            engine.enqueue(
-                showTitle = show.title,
-                episodeNum = ep.episodeNum,
-                episodeTitle = "${show.title} - ${ep.title}",
-                sourceUrl = ep.url,
-                mirrorUrls = ep.mirrorUrls,
-                isDirect = false,
-                backend = "aria2c",
-                parallelSockets = engine.parallelSocketsPerFile,
-                site = ep.site.ifBlank { show.site },
-                verifiedDirectUrl = com.anonrode.downloader.pipeline.ResultVerifier
-                    .verifiedDirect(ep.url)
-            )
-        }
-    }
-
     fun saveSettings(
         maxConcurrent: Int,
         parallelSockets: Int,

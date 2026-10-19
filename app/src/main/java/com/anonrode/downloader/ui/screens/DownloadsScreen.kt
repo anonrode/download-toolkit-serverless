@@ -161,12 +161,14 @@ private const val FILTER_DONE = "done"
 private const val FILTER_FAILED = "failed"
 private val ALL_FILTERS = listOf(FILTER_ALL, FILTER_ACTIVE, FILTER_PAUSED, FILTER_DONE, FILTER_FAILED)
 
-/** §3.1 filter membership: Active buckets every unfinished in-flight state
- *  (including QUEUED — the user's mental model is "still working", the
- *  badge's stricter "transferring" bucket stays on the header line). */
+/** §3.1 filter membership: Active is the shared four-state predicate
+ *  [DownloadsSorter.isActiveTask] (DOWNLOADING / RESOLVING / VALIDATING /
+ *  QUEUED) — the SAME set the chip count, the header meta line and the nav
+ *  badge read, so the surfaces can no longer disagree (F-9). The engine's
+ *  progress-notification filter stays narrower on purpose (it needs a task
+ *  with byte progress to report); see the helper's doc. */
 private fun DownloadTask.matchesStatusFilter(filter: String): Boolean = when (filter) {
-    FILTER_ACTIVE -> status == TaskStatus.DOWNLOADING || status == TaskStatus.RESOLVING ||
-        status == TaskStatus.VALIDATING || status == TaskStatus.QUEUED
+    FILTER_ACTIVE -> DownloadsSorter.isActiveTask(this)
     FILTER_PAUSED -> status == TaskStatus.PAUSED
     FILTER_DONE -> status == TaskStatus.COMPLETED
     FILTER_FAILED -> status == TaskStatus.FAILED
@@ -285,12 +287,15 @@ fun DownloadsScreen(
             }
             val sorted = DownloadsSorter.sortDownloads(snapshot, sortMode)
             if (sortMode != DownloadsSorter.SORT_DATE) sorted else {
-                // v6 mock frame 1: the transferring set leads the date view in
-                // its own "ACTIVE" section (mock .sect ACTIVE), above the date
-                // buckets — the same active set the summary line counts
-                // (DOWNLOADING / RESOLVING / VALIDATING; QUEUED stays parked in
-                // its date bucket). Pure screen-level regrouping: the sorter
-                // and its tests are untouched.
+                // v6 mock frame 1: tasks that are byte-transferring lead the
+                // date view in their own "ACTIVE" section (mock .sect ACTIVE),
+                // above the date buckets. Deliberately the narrower 3-state
+                // set (DOWNLOADING / RESOLVING / VALIDATING; QUEUED stays
+                // parked in its date bucket) — a section that relocates rows,
+                // while the header/chip/badge COUNT the broader user-facing
+                // four-state set (DownloadsSorter.isActiveTask). Pure
+                // screen-level regrouping: the sorter and its tests are
+                // untouched.
                 val activeIds = snapshot.asSequence()
                     .filter {
                         it.status == TaskStatus.DOWNLOADING ||
@@ -335,15 +340,16 @@ fun DownloadsScreen(
 
     // Header meta counts (mock: "26.4 GB of 112 GB · 45 done · 0 active · 1
     // failed"). Counts are structural → remembered on the signature.
+    // "N active" reads the shared four-state predicate (F-9): the header, the
+    // chip count and the nav badge all report the same "still working" set;
+    // stats.active (3-state) is kept only as the pinned JVM-test contract.
     val stats = remember(structureSig) { downloadsStats(viewModel.engine.tasks.value) }
+    val activeCount = remember(structureSig) { DownloadsSorter.activeTaskCount(viewModel.engine.tasks.value) }
     val pausedCount = remember(structureSig) { tasks.count { it.status == TaskStatus.PAUSED } }
     val filterCounts = remember(structureSig) {
         mapOf(
             FILTER_ALL to tasks.size,
-            FILTER_ACTIVE to tasks.count {
-                it.status == TaskStatus.DOWNLOADING || it.status == TaskStatus.RESOLVING ||
-                    it.status == TaskStatus.VALIDATING || it.status == TaskStatus.QUEUED
-            },
+            FILTER_ACTIVE to DownloadsSorter.activeTaskCount(tasks),
             FILTER_PAUSED to pausedCount,
             FILTER_DONE to stats.done,
             FILTER_FAILED to stats.failed
@@ -401,7 +407,7 @@ fun DownloadsScreen(
             append(" · ")
         }
         withStyle(SpanStyle(color = LiveWord, fontWeight = FontWeight.Bold)) {
-            append("${stats.active} active")
+            append("$activeCount active")
         }
         append(" · ")
         withStyle(SpanStyle(color = DoneWord, fontWeight = FontWeight.Bold)) {
@@ -418,7 +424,12 @@ fun DownloadsScreen(
     // superseded by the mock's per-card RETRY circle — every failed row now
     // carries its own filled retry affordance.
     val hasPaused = tasks.any { it.status == TaskStatus.PAUSED }
-    val hasActive = tasks.any { it.status == TaskStatus.DOWNLOADING || it.status == TaskStatus.RESOLVING || it.status == TaskStatus.QUEUED }
+    // Same shared four-state predicate as the header/chip/badge: it is exactly
+    // the set DownloadEngine.pauseAll() pauses (DOWNLOADING / RESOLVING /
+    // VALIDATING / QUEUED), so the pill is visible whenever its action has
+    // something to do — the old hand-rolled trio left a validating-only queue
+    // without a Pause-all despite pauseAll() being able to pause it (F-9).
+    val hasActive = tasks.any { DownloadsSorter.isActiveTask(it) }
 
     Column(
         modifier = Modifier
@@ -696,6 +707,11 @@ fun DownloadsScreen(
                             color = TextMuted,
                             modifier = Modifier.padding(top = 4.dp, bottom = 16.dp)
                         )
+                    }
+                    // House-ad slot (v3.3.0 phase 2) — renders only when the
+                    // OTA payload enables a house ad for this placement.
+                    item(key = "ad-downloads-shelf") {
+                        com.anonrode.downloader.ui.components.AdSlot("downloads_shelf")
                     }
                 }
             }
@@ -1232,7 +1248,12 @@ private fun ActivityRow(
     onOpenActions: () -> Unit
 ) {
     val isPaused = task.status == TaskStatus.PAUSED
-    // "Active" = the transferring set (matches downloadsStats' bucketing).
+    // Card-level "active" = byte-transferring only (DOWNLOADING / RESOLVING):
+    // those rows own the live meter, the percent math and the Pause control;
+    // QUEUED / VALIDATING have their own copy and affordances below. The
+    // broader user-facing "still working" set (F-9 unified) lives in
+    // DownloadsSorter.isActiveTask and drives the header/chip/badge counts —
+    // do not widen this one, it would paint meters on non-transferring rows.
     val isActive = task.status == TaskStatus.DOWNLOADING || task.status == TaskStatus.RESOLVING
     val isFailed = task.status == TaskStatus.FAILED
     val isDone = task.status == TaskStatus.COMPLETED
@@ -1684,59 +1705,6 @@ internal fun formatBytesSpan(downloadedBytes: Long, totalBytes: Long): String =
         formatBytes(downloadedBytes)
     }
 
-/** §3.2 unified per-status detail for the card's status ROW (the single
- *  second row: [SOURCE] Word · detail). The legacy [statusDetailText] stays
- *  untouched for its JVM test; this is the card face's copy:
- *    Paused  → "· 368.0 KB · Tap to resume"   (the retry wording is banned)
- *    Active  → "· 42% · 140.2 MB / 330.0 MB · 2.0 MB/s"
- *    Failed  → "· <humanized reason>"         (one line; full error in ⋮)
- *    Done    → "· 323.3 MB"
- *  Size math runs through [formatBytesSpan], so "/ 0 B" is impossible. */
-internal fun cardStatusDetail(task: DownloadTask): String {
-    val totalKnown = task.totalBytes > 0
-    val pctText = if (totalKnown) {
-        (((task.downloadedBytes.toFloat() / task.totalBytes.toFloat()).coerceIn(0f, 1f)) * 100)
-            .toInt().coerceIn(0, 100).toString() + "%"
-    } else null
-
-    val transferring = task.status == TaskStatus.DOWNLOADING
-    val speedMb = task.speedBytesPerSec / (1024.0 * 1024.0)
-    val speedText = when {
-        !transferring -> null
-        speedMb >= 0.1 -> "%.1f MB/s".format(java.util.Locale.US, speedMb)
-        task.speedBytesPerSec >= 1024.0 -> "%.0f KB/s".format(java.util.Locale.US, task.speedBytesPerSec / 1024.0)
-        task.speedBytesPerSec > 0.0 -> "%.0f B/s".format(java.util.Locale.US, task.speedBytesPerSec)
-        else -> null
-    }
-    val etaText = if (transferring && task.etaSeconds > 0) formatEta(task.etaSeconds) else null
-
-    return when (task.status) {
-        TaskStatus.PAUSED -> when {
-            task.downloadedBytes > 0 || totalKnown -> "· ${formatBytesSpan(task.downloadedBytes, task.totalBytes)} · Tap to resume"
-            else -> "· Tap to resume"
-        }
-        TaskStatus.DOWNLOADING -> {
-            val parts = mutableListOf<String>()
-            if (totalKnown) parts.add(pctText!!)
-            parts.add(formatBytesSpan(task.downloadedBytes, task.totalBytes))
-            speedText?.let { parts.add(it) }
-            etaText?.let { parts.add(it) }
-            if (parts.size == 1 && parts[0].isBlank()) "" else "· " + parts.joinToString(" · ")
-        }
-        TaskStatus.RESOLVING -> if (task.downloadedBytes > 0) "· ${formatBytes(task.downloadedBytes)}" else ""
-        TaskStatus.VALIDATING -> "· checking file"
-        TaskStatus.QUEUED -> "· waiting to start"
-        TaskStatus.FAILED -> {
-            val reason = humanizeFailure(task.errorMessage ?: "").trim()
-            if (reason.isNotBlank() && reason != "Download failed") "· $reason" else "· download failed"
-        }
-        TaskStatus.COMPLETED -> {
-            val size = formatBytes(if (task.totalBytes > 0) task.totalBytes else task.downloadedBytes)
-            "· $size"
-        }
-    }
-}
-
 /** Grey detail after the status word (mock .stat .x), single line: percent,
  *  bytes, speed and ETA only where the record really knows them. Speed/ETA
  *  render while actually transferring only — paused rows never show a stale
@@ -1956,9 +1924,10 @@ private fun ShowFolderCard(
     onRequestActions: (DownloadTask) -> Unit
 ) {
     val completedCount = items.count { it.status == TaskStatus.COMPLETED }
-    val activeCount = items.count {
-        it.status == TaskStatus.DOWNLOADING || it.status == TaskStatus.RESOLVING || it.status == TaskStatus.VALIDATING
-    }
+    // Count with the same shared four-state predicate as the screen header /
+    // chip / badge (F-9) — a per-folder "active" number must not disagree
+    // with the global one for the same tasks.
+    val activeCount = items.count { DownloadsSorter.isActiveTask(it) }
     val totalBytes = items.sumOf { if (it.totalBytes > 0) it.totalBytes else it.downloadedBytes }
 
     Card(

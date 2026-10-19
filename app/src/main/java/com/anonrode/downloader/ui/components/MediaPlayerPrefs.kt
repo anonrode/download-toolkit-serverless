@@ -14,7 +14,6 @@ object MediaPlayerPrefs {
     private const val KEY_PLAYBACK_SPEED = "pref_playback_speed"
     private const val KEY_MEDIA_VOLUME = "pref_media_volume"
     private const val KEY_ALLOW_VOLUME_BOOST = "pref_allow_volume_boost"
-    private const val KEY_WINDOW_BRIGHTNESS = "pref_window_brightness"
     private const val KEY_SUBTITLE_TRACK = "pref_subtitle_track"
 
     fun getPlaybackSpeed(context: Context): Float =
@@ -47,18 +46,9 @@ object MediaPlayerPrefs {
             .apply()
     }
 
-    // -1f = follow system brightness (the default). 0f..1f = explicit override.
-    fun getWindowBrightness(context: Context): Float =
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getFloat(KEY_WINDOW_BRIGHTNESS, -1f)
-
-    fun setWindowBrightness(context: Context, brightness: Float) {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            // Persist exactly what the slider is set to; -1f is meaningful
-            // (means "follow system") and must be saved, not clamped.
-            .putFloat(KEY_WINDOW_BRIGHTNESS, brightness)
-            .apply()
-    }
+    // (Removed: getWindowBrightness/setWindowBrightness + the
+    // pref_window_brightness key — zero writers AND zero readers repo-wide,
+    // so the pair was fully dead; audit F-13.)
 
     fun getSubtitleTrack(context: Context): String? =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)

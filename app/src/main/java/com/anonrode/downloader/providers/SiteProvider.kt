@@ -7,7 +7,6 @@ import com.anonrode.downloader.data.models.ShowDetails
 interface SiteProvider {
     val name: String
     val mainUrl: String
-    val requiresSingleSocket: Boolean get() = false
     /** False for sites with no working search (dead/parked domains). */
     val searchEnabled: Boolean get() = true
 

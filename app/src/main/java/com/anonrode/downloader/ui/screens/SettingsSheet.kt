@@ -677,6 +677,107 @@ private fun SettingsHub(
         // (Trailing Spacer(Spacing.sm) removed — the content column's
         // spacedBy(12.dp) owns the beat between entries.)
     }
+
+    SettingsAboutSection(state = state)
+}
+
+/** About area — phase-1 SKELETON of the v3.3.0 update flow: a version row and
+ *  a manual check wired to the EXISTING [UpdateChecker] (the Updates drawer's
+ *  "App Updates" card remains the full-featured entry until the phase-2
+ *  UpdateManager replaces both with the in-app install flow + diagnostics
+ *  rows). Reuses [SettingsState.updateState] so both surfaces show one result. */
+@Composable
+private fun SettingsAboutSection(state: SettingsState) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+
+    // Same check/state mapping as SettingsUpdatesSection — never runs at
+    // startup, only when the row is tapped.
+    val runCheck: () -> Unit = {
+        state.updateState = UpdateUiState.Checking
+        scope.launch {
+            state.updateState = when (val r = UpdateChecker.check()) {
+                is UpdateCheckResult.Available -> UpdateUiState.Available(r.latestTag, r.releaseUrl)
+                is UpdateCheckResult.UpToDate -> UpdateUiState.UpToDate
+                UpdateCheckResult.Error -> UpdateUiState.Error
+            }
+        }
+    }
+
+    SettingsCategoryHeader(title = "About")
+    SettingsCard {
+        SettingsActionRow(
+            icon = Icons.Rounded.Info,
+            title = "Anonrode",
+            subtitle = "Version ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
+            action = { }
+        )
+
+        HorizontalDivider(color = BorderHairline, modifier = Modifier.padding(horizontal = Spacing.md))
+
+        val checkState = state.updateState
+        SettingsActionRow(
+            icon = Icons.Rounded.SystemUpdate,
+            title = "Check for updates",
+            subtitle = when (checkState) {
+                is UpdateUiState.Available -> "v${checkState.latestTag} is available — tap to open"
+                UpdateUiState.UpToDate -> "You're on the latest build"
+                UpdateUiState.Checking -> "Contacting GitHub…"
+                UpdateUiState.Error -> "Couldn't reach GitHub — tap to retry"
+                UpdateUiState.Idle -> "Compares this build against GitHub Releases"
+            },
+            action = {
+                when (checkState) {
+                    UpdateUiState.Checking -> Text("Checking…", color = TextMuted, fontSize = Type.caption.fontSize)
+                    is UpdateUiState.Available -> Text(
+                        text = "Open →",
+                        color = AccentPrimary,
+                        fontSize = Type.caption.fontSize,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(Radius.xs))
+                            .clickable { UpdateChecker.openInBrowser(context, checkState.url) }
+                            .minimumInteractiveComponentSize()
+                            .padding(horizontal = Spacing.sm, vertical = Spacing.md)
+                    )
+                    else -> Text(
+                        text = if (checkState is UpdateUiState.Error) "Retry" else "Check",
+                        color = if (checkState is UpdateUiState.Error) StatusWarning else AccentPrimary,
+                        fontSize = Type.caption.fontSize,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(Radius.xs))
+                            .clickable { runCheck() }
+                            .minimumInteractiveComponentSize()
+                            .padding(horizontal = Spacing.sm, vertical = Spacing.md)
+                    )
+                }
+            }
+        )
+
+        HorizontalDivider(color = BorderHairline, modifier = Modifier.padding(horizontal = Spacing.md))
+
+        // Repackage diagnostic (workstream C): this install's signing cert vs
+        // the optional OTA pin. Never blocks; a debug build legitimately
+        // mismatches a release pin and says so.
+        val verdict = remember { com.anonrode.downloader.util.IntegrityCheck.evaluate(context) }
+        val isDebugBuild = remember { com.anonrode.downloader.util.IntegrityCheck.isDebugBuild(context) }
+        SettingsActionRow(
+            icon = Icons.Rounded.VerifiedUser,
+            title = "App signature",
+            subtitle = when {
+                isDebugBuild -> "Debug build — pin comparison not applicable"
+                verdict == com.anonrode.downloader.util.IntegrityCheck.Verdict.OK ->
+                    "Verified — matches the signed release"
+                verdict == com.anonrode.downloader.util.IntegrityCheck.Verdict.MISMATCH ->
+                    "Does not match the release signature"
+                verdict == com.anonrode.downloader.util.IntegrityCheck.Verdict.NO_PIN ->
+                    "No signature pin published yet"
+                else -> "Couldn't read the app signature"
+            },
+            action = { }
+        )
+    }
 }
 
 /**
@@ -1051,6 +1152,46 @@ internal fun SettingsDownloadsSection(state: SettingsState) {
 
         HorizontalDivider(color = BorderHairline, modifier = Modifier.padding(horizontal = Spacing.md))
 
+        // Per-file parallel sockets — the control the 2026-10-14 re-group
+        // dropped (state/snapshot/persist plumbing survived, so the setting
+        // could only change out-of-band — audit F-5). Restored verbatim from
+        // the old Engine & Performance slider; writes through the same
+        // snapshot → persist() path as every neighboring row.
+        Column(modifier = Modifier.padding(Spacing.md)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Rounded.Hub, contentDescription = null, tint = AccentPrimary, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(Spacing.sm))
+                    Column {
+                        Text("Parallel Sockets (Turbo & Aria2c)", fontSize = Type.body.fontSize, fontWeight = FontWeight.SemiBold, color = TextPrimary)
+                        Text("High-speed segmented CDN connections (1–16)", fontSize = Type.caption.fontSize, color = TextMuted)
+                    }
+                }
+                Text("${state.sockets} conns", fontSize = Type.label.fontSize, fontWeight = FontWeight.Bold, color = AccentPrimary)
+            }
+            Slider(
+                value = state.sockets.toFloat(),
+                onValueChange = { state.sockets = it.toInt() },
+                onValueChangeFinished = { state.persist() },
+                valueRange = 1f..16f,
+                // 16 integer stops = 14 intermediate steps (the old 15 was
+                // off-by-one and let the thumb land on non-integer sockets).
+                steps = 14,
+                thumb = { SettingsSliderThumb() },
+                colors = SliderDefaults.colors(
+                    thumbColor = AccentPrimary,
+                    activeTrackColor = AccentPrimary,
+                    inactiveTrackColor = SurfaceElevated
+                )
+            )
+        }
+
+        HorizontalDivider(color = BorderHairline, modifier = Modifier.padding(horizontal = Spacing.md))
+
         Column(modifier = Modifier.padding(Spacing.md)) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -1204,9 +1345,11 @@ internal fun SettingsLogsSection(state: SettingsState) {
     SettingsDiagnosticsSection(state = state)
 }
 
-// Engine & Performance section retired 2026-10-14: its sliders moved to the
-// Downloads drawer (parallel / sockets / storage guard), its Wi-Fi gates moved
-// to the Connections drawer (see SettingsConnectionsSection).
+// Engine & Performance section retired 2026-10-14: its sliders live in the
+// Downloads drawer (parallel downloads / per-file sockets / storage guard) —
+// per-file sockets only actually re-landed there 2026-10-18 (the re-group
+// shipped without it, leaving the state plumbing unreachable; audit F-5). Its
+// Wi-Fi gates moved to the Connections drawer (see SettingsConnectionsSection).
 
 // Media & Quality section retired 2026-10-14: quality chips, subtitle
 // download and language moved to the Playback drawer (SettingsPlaybackSection).

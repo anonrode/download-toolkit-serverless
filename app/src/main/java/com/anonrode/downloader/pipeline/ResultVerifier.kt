@@ -326,14 +326,17 @@ object ResultVerifier {
     private suspend fun probeWithRetry(direct: String, referer: String): ProbeOutcome {
         val first = try { chain.probe(direct, referer) } catch (e: Exception) { null }
             ?: return ProbeOutcome.NotProven("net")
-        first.totalBytes?.let { return ProbeOutcome.Live(it) }
+        // HLS stub gate (activity-log audit §3.4): a 1-byte m3u8 answer is a
+        // decoy, never "LIVE" proof — LinkResolver mirrors the 1024-byte
+        // class the same probe applies to non-HLS 200s.
+        first.totalBytes?.let { if (!LinkResolver.isHlsStubTerminal(direct, it)) return ProbeOutcome.Live(it) }
         if (first.code != 404 && first.code != 410) {
             return ProbeOutcome.NotProven("http-${first.code}${if (first.contentType.contains("html")) " html" else ""}")
         }
         delay(deadConfirmDelayMs)
         val second = try { chain.probe(direct, referer) } catch (e: Exception) { null }
             ?: return ProbeOutcome.NotProven("retry-net")
-        second.totalBytes?.let { return ProbeOutcome.Live(it) }
+        second.totalBytes?.let { if (!LinkResolver.isHlsStubTerminal(direct, it)) return ProbeOutcome.Live(it) }
         return if (second.code == 404 || second.code == 410) ProbeOutcome.DeadConfirmed
         else ProbeOutcome.NotProven("retry-${second.code}")
     }

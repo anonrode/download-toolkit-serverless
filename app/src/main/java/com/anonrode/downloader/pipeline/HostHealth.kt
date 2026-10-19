@@ -89,6 +89,23 @@ object HostHealth {
         return EXEMPT_HOST_SUFFIXES.any { h == it || h.endsWith(".$it") }
     }
 
+    /** Compiled dead seeds: hosts confirmed dead from the field (dated
+     *  evidence) and skipped WITHOUT burning a request. Distinct from the
+     *  OTA knownDead list: the cold-start data.vidsrcme.ru wave
+     *  (2026-10-18 activity-log audit §3.3 — ~30 ConnectExceptions per cold
+     *  start on every fleet device, 213 failures logged) cannot wait for a
+     *  payload rev, so the evidence ships in the APK. A seed stays for the
+     *  life of this build by design — the host is TCP-refused fleet-wide and
+     *  from desktop networks; removal takes a build. */
+    private val COMPILED_DEAD_SEEDS = listOf(
+        "data.vidsrcme.ru" // 2026-10-18 — dead since 10-17; host probes must never fire
+    )
+
+    private fun isCompiledDeadSeed(host: String): Boolean {
+        val h = host.lowercase().removePrefix("www.")
+        return COMPILED_DEAD_SEEDS.any { h == it || h.endsWith(".$it") }
+    }
+
     /** Exponential backoff window after consecutive failures:
      *  30s, 1m, 2m — capped at 2m.
      *
@@ -265,6 +282,7 @@ object HostHealth {
     fun isUsable(urlOrHost: String): Boolean {
         val h = hostOf(urlOrHost)
         if (isExemptHost(h)) return true
+        if (isCompiledDeadSeed(h)) return false
         if (DynamicRulesManager.isKnownDead(urlOrHost)) return false
         val r = records[h] ?: return true
         val sinceLastFail = System.currentTimeMillis() - r.lastFailMs

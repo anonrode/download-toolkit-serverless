@@ -233,6 +233,11 @@ class DownloadEngine(
                         val msg = "Download server stayed unreachable for 30+ minutes — gave up. Tap retry once the site is back."
                         repository.update(t.id) { it.copy(status = TaskStatus.FAILED, errorMessage = msg, speedBytesPerSec = 0.0) }
                         com.anonrode.downloader.util.DebugLog.user("park give-up task=${t.id}")
+                        // Terminal FAILED rows drop their registry entry too
+                        // (same leak class the COMPLETED path already cleans).
+                        // Guarded so an entry a live job still owns (a retry
+                        // racing this tick) is never clobbered.
+                        if (runtimeRegistry.get(t.id)?.activeJob?.isActive != true) runtimeRegistry.forget(t.id)
                         try {
                             com.anonrode.downloader.service.DownloadService.notifyFailed(
                                 context, t.id, t.episodeTitle, msg
@@ -291,6 +296,11 @@ class DownloadEngine(
         filterExplicitContent = prefs.getBoolean("pref_filter_explicit_content", true)
         // Retention applies at startup, not just when the setting changes.
         com.anonrode.downloader.util.DebugLog.configureRetention(logRetentionDays)
+        // debugLogging drives DebugLog's TRACE gate — without this call
+        // setVerbose had no production caller and trace() (4 call sites,
+        // incl. ShadowRunner lifecycle) could never emit. Default OFF; only
+        // the user's pref turns it on.
+        com.anonrode.downloader.util.DebugLog.setVerbose(debugLogging)
     }
 
     fun setShowPosters(show: Boolean) {
@@ -358,6 +368,8 @@ class DownloadEngine(
         this.subtitleLanguage = subLang.trim().ifBlank { "en" }
         this.filterExplicitContent = filterExplicit
         com.anonrode.downloader.util.DebugLog.configureRetention(this.logRetentionDays)
+        // Verbose gate applies live on save, exactly like retention above.
+        com.anonrode.downloader.util.DebugLog.setVerbose(this.debugLogging)
 
         // Turning a Wi-Fi gate OFF must release the tasks it parked: the network
         // observer only unparks on an actual Wi-Fi reconnect, so without this the
@@ -644,8 +656,12 @@ class DownloadEngine(
             processQueue()
             return
         }
-        // Keep the FIRST tasks in list order (the ones the user queued first);
-        // demote the rest back to the queue head order.
+        // Keep the FIRST tasks in list order — and list order is NEWEST-FIRST
+        // (DownloadRepository.addFirst prepends), so this keeps the MOST
+        // RECENTLY enqueued/active tasks and demotes the OLDEST back to QUEUED.
+        // processQueue then picks the newest QUEUED again (firstOrNull below),
+        // so the queue is LIFO by design: the tap the user made most recently
+        // starts next, matching the newest-first Downloads list on screen.
         actives.drop(maxConcurrentDownloads).forEach { t ->
             com.anonrode.downloader.util.DebugLog.user(
                 "concurrency limit now $maxConcurrentDownloads — demoting task=${t.id} (${t.episodeTitle.take(40)}) back to queue"
@@ -1142,6 +1158,11 @@ class DownloadEngine(
         com.anonrode.downloader.util.DebugLog.resolve(
             "task=${task.id} failover: no other provider could serve \"$query\""
         )
+        // Strongest no-source evidence the app can gather: every eligible
+        // provider was searched and none carried the title. Recorded ONCE per
+        // attempt-cycle here — after the candidate loop, never inside it —
+        // and the ledger TTLs it (48h) + clears on rules activation.
+        com.anonrode.downloader.pipeline.NoSourceLedger.recordUnresolved(query)
         return false
     }
 
@@ -2183,13 +2204,24 @@ class DownloadEngine(
                 runtimeRegistry.getActiveJob(taskId)?.cancel()
                 return
             }
+            var failedTerminal = false
             if (!parkInsteadOfFail(t, stallMsg, forcePark = isRateLimitedError(stallMsg))) {
                 repository.update(taskId) {
                     it.copy(status = TaskStatus.FAILED, errorMessage = stallMsg)
                 }
                 com.anonrode.downloader.service.DownloadService.notifyFailed(context, taskId, t.episodeTitle, stallMsg)
+                failedTerminal = true
             }
-            runtimeRegistry.getActiveJob(taskId)?.cancel()
+            val dyingJob = runtimeRegistry.getActiveJob(taskId)
+            dyingJob?.cancel()
+            // Watchdog-exhausted FAILED is terminal: drop the registry entry
+            // (same rule as the COMPLETED path). Runs AFTER the cancel so the
+            // dying job stays reachable, and never drops an entry a newer job
+            // (a retry racing this kill) has taken over.
+            if (failedTerminal) {
+                val reg = runtimeRegistry.get(taskId)
+                if (reg == null || reg.activeJob == null || reg.activeJob === dyingJob) runtimeRegistry.forget(taskId)
+            }
         } else {
             // Preserve park counters across stall kills: markForManualRetry's
             // resetParkingAndFailoverState would wipe parkCycleCount/firstParkedAtMs
@@ -2241,7 +2273,11 @@ class DownloadEngine(
         if (!lockAlreadyHeld && !runtimeRegistry.tryAcquireStartLock(initialTask.id)) return
         val live = repository.find(initialTask.id)
         if (live == null || live.status !in setOf(TaskStatus.QUEUED, TaskStatus.RESOLVING, TaskStatus.DOWNLOADING)) {
-            runtimeRegistry.releaseStartLock(initialTask.id)
+            // No job will ever attach to this entry, so forget it instead of
+            // leaving a dead key behind (release-only left one per guarded
+            // start). The start lock is exclusively ours here; a later retry
+            // re-creates the entry via getOrCreate.
+            runtimeRegistry.forget(initialTask.id)
             return
         }
         com.anonrode.downloader.util.DebugLog.write("start task=${initialTask.id} url=${initialTask.directUrl.take(80)} backend=${initialTask.backend}")
@@ -2317,6 +2353,18 @@ class DownloadEngine(
                             val reasonSuffix = if (!hostReason.isNullOrBlank()) " ($hostReason)" else ""
                             com.anonrode.downloader.util.DebugLog.error("task=${task.id} could not crack stream link (host=$host)$reasonSuffix for ${streamUrl.take(120)}")
                             if (attemptCrossProviderFailover(task)) return@launch
+                            // No source found: a resolver chain that came back
+                            // with zero candidates AND failover that exhausted
+                            // every other provider. Record the title for the
+                            // no-source ledger — once here, outside every
+                            // per-candidate loop. Gated on host usability so a
+                            // task merely parking out a cooldown (not a
+                            // terminal verdict) is never recorded.
+                            if (com.anonrode.downloader.pipeline.HostHealth.isUsable(streamUrl)) {
+                                com.anonrode.downloader.pipeline.NoSourceLedger.recordUnresolved(
+                                    task.showTitle.ifBlank { task.episodeTitle }
+                                )
+                            }
                             if (!com.anonrode.downloader.pipeline.HostHealth.isUsable(streamUrl)) {
                                 val mins = maxOf(1L, com.anonrode.downloader.pipeline.HostHealth.remainingBackoffMs(streamUrl) / 60_000L)
                                 com.anonrode.downloader.util.DebugLog.resolve("task=${task.id} host $host in backoff — parking for ~${mins}m")
@@ -3115,6 +3163,13 @@ class DownloadEngine(
                         repository.update(task.id) { it.copy(status = TaskStatus.FAILED, errorMessage = errReason) }
                         com.anonrode.downloader.util.DebugLog.write("failed task=${task.id} reason=$errReason")
                         com.anonrode.downloader.service.DownloadService.notifyFailed(context, task.id, task.episodeTitle, errReason)
+                        // Terminal FAILED: drop the registry entry exactly like
+                        // the COMPLETED path (guarded so a newer job's entry is
+                        // never clobbered).
+                        val reg = runtimeRegistry.get(task.id)
+                        if (reg == null || reg.activeJob === coroutineContext[Job]) {
+                            runtimeRegistry.forget(task.id)
+                        }
                     }
                 }
             } catch (e: CancellationException) {
@@ -3172,6 +3227,12 @@ class DownloadEngine(
                     if (!parkInsteadOfFail(live, errMsg, forcePark = isRateLimitedError(errMsg))) {
                         repository.update(task.id) { it.copy(status = TaskStatus.FAILED, errorMessage = errMsg) }
                         com.anonrode.downloader.service.DownloadService.notifyFailed(context, task.id, task.episodeTitle, errMsg)
+                        // Terminal FAILED cleanup, same rule + guard as the
+                        // produced-file FAILED path above.
+                        val reg = runtimeRegistry.get(task.id)
+                        if (reg == null || reg.activeJob === coroutineContext[Job]) {
+                            runtimeRegistry.forget(task.id)
+                        }
                     }
                 } else {
                     // Cancelled (pause/cancel/network park): native-process teardown can surface

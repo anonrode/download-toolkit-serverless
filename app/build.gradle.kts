@@ -63,8 +63,13 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
-            isShrinkResources = false
+            // Phase 1 hardening (workstream C): R8 + resource shrinking ON for
+            // release only. There is no local compiler in this cycle — the
+            // rules in proguard-rules.pro are audited per-dependency and the
+            // first CI run is the real check (see scratch/phase1_report_S4.md
+            // §Uncertainties).
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -148,6 +153,22 @@ dependencies {
     implementation("androidx.media3:media3-common:$media3")
     implementation("androidx.media3:media3-session:$media3")
     implementation("androidx.media3:media3-datasource:$media3")
+
+    // ── Future-capability pre-wiring (plan §4.6 / Decision 16) ──────────────
+    // Every SDK below ships DISABLED: nothing initializes unless the OTA
+    // payload's "ads"/"fcm" sections enable it (ads/Ads.kt, update/
+    // FcmRegistrar.kt, update/IntegrityAttestor.kt gate at runtime).
+    // OTA can ship config/credentials, never code — so the code compiles in
+    // now and activation later is a payload edit wherever the vendor accepts
+    // runtime credentials. Pinned to the newest lines that still target
+    // compileSdk 34 (same constraint as media3 above; newer majors of
+    // play-services-ads/firebase require compileSdk 35).
+    implementation("com.applovin:applovin-sdk:12.6.1")                 // MAX, sdkKey = payload field
+    implementation("com.unity3d.ads:unity-ads:4.12.2")                 // gameId = payload field
+    implementation("com.google.android.gms:play-services-ads:23.6.0")  // AdMob, unit ids = payload fields
+    implementation("com.google.android.ump:user-messaging-platform:3.1.0") // UMP consent (EEA), inert
+    implementation("com.google.firebase:firebase-messaging:24.1.0")   // manual FirebaseOptions — NO google-services.json
+    implementation("com.google.android.play:integrity:1.4.0")         // standard integrity tokens, hard-gated off (update/IntegrityAttestor.kt)
 
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")

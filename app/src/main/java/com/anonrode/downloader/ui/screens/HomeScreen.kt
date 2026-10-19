@@ -560,6 +560,7 @@ fun HomeScreen(
                 Column(
                     modifier = Modifier.weight(1f).verticalScroll(rememberScrollState())
                 ) {
+                    WelcomeBackCard()
                     TrendingSection(
                         items = uiState.trending,
                         isLoading = uiState.isTrendingLoading,
@@ -583,6 +584,10 @@ fun HomeScreen(
                         onOpen = { category -> viewModel.openCategory(category) },
                         onMore = { viewModel.openCatalog() }
                     )
+                    Spacer(modifier = Modifier.height(Spacing.lg))
+                    // House-ad slot (v3.3.0 phase 2) — renders only when the
+                    // OTA payload enables a house ad for this placement.
+                    com.anonrode.downloader.ui.components.AdSlot("home_footer")
                 }
             } else {
                 LazyColumn(
@@ -874,6 +879,71 @@ private fun TrendingSection(
                 //  helper line under Trending Now is deleted outright.)
             }
         }
+    }
+}
+
+/**
+ * Welcome-back card (v3.3.0 phase 2): rendered once when the user returns
+ * after a payload-defined absence — the scheduler stamps the pending pref on
+ * that exact transition. Copy comes verbatim from the signed payload;
+ * dismissal clears the flag. Renders nothing while the section is absent,
+ * disabled or welcomeBack is off.
+ */
+@Composable
+private fun WelcomeBackCard() {
+    val context = LocalContext.current
+    val cfg = remember {
+        com.anonrode.downloader.data.rules.DynamicRulesManager.getEngagementConfig()
+    }
+    val prefs = remember {
+        context.getSharedPreferences("downloader_settings", android.content.Context.MODE_PRIVATE)
+    }
+    var visible by remember {
+        mutableStateOf(
+            cfg?.enabled == true && cfg.welcomeBack &&
+                prefs.getBoolean("engagement_welcome_back_pending", false)
+        )
+    }
+    if (!visible || cfg == null) return
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = Spacing.sm)
+            .clip(RoundedCornerShape(Radius.lg))
+            .background(SurfaceCard)
+            .border(1.dp, BorderHairline, RoundedCornerShape(Radius.lg))
+            .padding(Spacing.md),
+        verticalAlignment = Alignment.Top
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            if (cfg.title.isNotBlank()) {
+                Text(
+                    text = cfg.title,
+                    color = TextPrimary,
+                    fontSize = Type.rowTitle.fontSize,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+            if (cfg.body.isNotBlank()) {
+                Text(
+                    text = cfg.body,
+                    color = TextSecondary,
+                    fontSize = Type.caption.fontSize
+                )
+            }
+        }
+        Text(
+            text = "✕",
+            color = TextMuted,
+            fontSize = Type.caption.fontSize,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier
+                .padding(start = Spacing.sm)
+                .clickable {
+                    prefs.edit().putBoolean("engagement_welcome_back_pending", false).apply()
+                    visible = false
+                }
+        )
     }
 }
 
