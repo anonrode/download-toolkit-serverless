@@ -13,7 +13,10 @@
 #    ("keep serializers for all serializable classes retained after
 #    shrinking"); the one gap is NAMED companion objects — audited
 #    Models.kt + FeedCache.kt: none exist in this app.
-#  - media3 1.4.1 modules ship proguard-rules.txt (consumer rules).
+#  - media3 1.4.1 ships consumer rules as proguard.txt (media3-common,
+#    media3-exoplayer, media3-ui, media3-datasource; media3-session and
+#    media3-exoplayer-hls ship none). media3 1.5+ raises minCompileSdk to
+#    35 (byte-verified) — part of why this line stays on 1.4.1.
 #  - Coil 2.7.0 ships NO consumer rules (coil-base build script declares no
 #    consumerProguardFiles; no META-INF/proguard in the module) — see below.
 #  - No app code loads classes by name: zero Class.forName / ClassLoader /
@@ -109,19 +112,29 @@
 # Per-SDK R8 treatment, audited against vendor documentation; every one of
 # these artifacts declares consumer rules or a documented no-configuration
 # requirement, so no blanket keeps are added for them:
-#  - play-services-ads 23.x / user-messaging-platform 3.x (Google): ship
-#    consumer ProGuard rules (standard for all Play services / AdMob incl.
-#    mediation). No app-side rules needed.
-#  - firebase-messaging 24.x (Google/Firebase): ships consumer rules; the
-#    manual-FirebaseOptions path adds no reflection of app classes.
-#  - play-integrity 1.x (Google): ships consumer rules for its task API.
+#  - play-services-ads 23.x (Google): the Play services AARs ship consumer
+#    ProGuard rules (mediation-adapter keeps; byte-verified in
+#    play-services-ads-lite 23.6.0). No app-side rules needed.
+#  - user-messaging-platform 3.1.0: ships NO consumer rules (byte-verified;
+#    the inert path calls the SDK directly, nothing reflective). UMP 4.x
+#    adds a proguard.txt — re-check if ever upgraded.
+#  - firebase-messaging 24.1.0: the messaging AAR itself ships NO consumer
+#    rules (byte-verified); the consumer rules on this classpath come from
+#    its transitive artifacts firebase-common / firebase-components /
+#    firebase-encoders-json (each ships proguard.txt). The manual-
+#    FirebaseOptions path adds no reflection of app classes.
+#  - play-integrity 1.4.0: ships NO consumer rules (byte-verified; its
+#    core-common 2.0.4 dependency ships none either) — the task API is
+#    called directly, nothing reflective on the inert path.
 #  - applovin-sdk 12.x: the SDK bundles its own ProGuard configuration
 #    (AppLovin docs: no additional rules required).
-#  - unity-ads 4.x: docs claim bundled rules, but this could NOT be
-#    byte-verified in this cycle (no artifact access; Maven unreachable) —
-#    the one conservative keep below covers the native-bridge surface, cost
-#    is small (one small AAR), and it is REMOVABLE after the first green CI
-#    run shows unity-ads plugin classes resolve without it.
+#  - unity-ads 4.12.2: byte-verified — the AAR ships proguard.txt consumer
+#    rules that already keep com.unity3d.ads.** and com.unity3d.services.**;
+#    the one conservative keep below is retained as belt-and-braces (cost is
+#    small, one small AAR) and is REMOVABLE after the first green CI run.
+#    Unity docs caveat: SDK 4.20.0+ ships its full R8 rule set; for < 4.20.0
+#    with AGP 9 + minify they require app-side WorkManager keep rules —
+#    NOT applicable to this build (AGP 8.5.2); re-check on any AGP bump.
 # CI-watch: if R8 reports missing classes from any vendor package, add the
 # narrowest possible dontwarn/keep for exactly that class (never `**`).
 -keep class com.unity3d.ads.** { *; }

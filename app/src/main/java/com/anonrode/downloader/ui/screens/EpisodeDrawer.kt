@@ -226,12 +226,25 @@ fun EpisodeDrawer(
     var pendingForceAll by rememberSaveable { mutableStateOf(false) }
 
     val allTasks by viewModel.engine.tasks.collectAsState()
-    // Task-title join shared by both URL sets below.
-    val showTasks = remember(allTasks, show.title) {
-        val cleanTitle = show.title.trim().lowercase()
+    // Task join shared by both URL sets below.
+    // AUDIT FIX (2026-10-19, cross-doc audit BUG 4 / wiring F-10): every
+    // enqueue path stamps task.showTitle with
+    // NameSanitizer.cleanShowFolder(show.title) — which strips "[site]",
+    // "(year)" and "| Download …" and replaces ":" — so comparing against the
+    // RAW title left "✓ Downloaded" and "Remaining (N)" broken for any title
+    // the sanitizer changes (e.g. "Teetotaler (2023) - Nollywood Comedy").
+    // Match the stamped series URL first (the strongest key), then BOTH title
+    // normalizations, then the legacy contains-fallback.
+    val showTasks = remember(allTasks, show.title, show.url) {
+        val rawLower = show.title.trim().lowercase()
+        val folderLower = com.anonrode.downloader.util.NameSanitizer
+            .cleanShowFolder(show.title).trim().lowercase()
         allTasks.filter { task ->
-            task.showTitle.trim().lowercase() == cleanTitle ||
-            (cleanTitle.isNotBlank() && task.showTitle.contains(show.title, ignoreCase = true))
+            val t = task.showTitle.trim().lowercase()
+            (task.seriesUrl.isNotBlank() && task.seriesUrl.equals(show.url, ignoreCase = true)) ||
+                t == rawLower ||
+                (folderLower.isNotBlank() && t == folderLower) ||
+                (rawLower.isNotBlank() && task.showTitle.contains(show.title, ignoreCase = true))
         }
     }
     // COMPLETED only: the green "✓ Downloaded" pill (and the 0.78 dim) must
@@ -348,7 +361,18 @@ fun EpisodeDrawer(
         viewModel.viewModelScope.launch(Dispatchers.Default) {
             try {
                 val cleanFolder = com.anonrode.downloader.util.NameSanitizer.cleanShowFolder(show.title)
-                toEnqueue.forEach { ep ->
+                // AUDIT FIX (2026-10-19, cross-doc audit BUG 7): enqueue in
+                // REVERSE order with queue processing deferred to the final
+                // call. repository.addFirst prepends, so the LAST enqueued
+                // task lands at index 0: ascending enqueue put E8 at the top
+                // of the queue list, and once the initial wave saturated the
+                // concurrency slots every later slot-free picked
+                // firstOrNull{QUEUED} = E8, E7, … — the tail of any batch
+                // larger than the concurrency limit downloaded IN REVERSE.
+                // Reversed + a single final trigger: E1 sits at index 0 and
+                // starts first; engine semantics and QueueOrderTest untouched.
+                toEnqueue.asReversed().forEachIndexed { i, ep ->
+                    val isFinalEnqueue = i == toEnqueue.lastIndex
                     viewModel.engine.enqueue(
                         showTitle = cleanFolder,
                         episodeNum = ep.episodeNum,
@@ -366,7 +390,8 @@ fun EpisodeDrawer(
                         verifiedDirectUrl = com.anonrode.downloader.pipeline.ResultVerifier.verifiedDirect(ep.url),
                         seriesUrl = show.url,
                         seriesTotal = episodes.size,
-                        posterUrl = show.posterUrl
+                        posterUrl = show.posterUrl,
+                        triggerQueueProcessing = isFinalEnqueue
                     )
                 }
                 withContext(Dispatchers.Main) { onDismiss() }

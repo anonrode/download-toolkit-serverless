@@ -1549,10 +1549,21 @@ object YoutubeDlDownloader {
         return null
     }
 
-    /** CDN families and stream hosts that require an explicit referer —
-     *  rewritten-master runs keep the original referer for hotlink protection. */
+    /** Referers from the CDN families that REQUIRE an explicit referer —
+     *  rewritten-master runs keep exactly these (the anitaku CDNs 403 every
+     *  request that does not carry https://megaplay.buzz/, live-verified
+     *  2026-08-22, gogoanime family likewise hotlink-protected); every OTHER
+     *  referer is STRIPPED for the token-locked vidsrc-family CDNs, which
+     *  403 anything that carries one.
+     *
+     *  AUDIT FIX (2026-10-19, cross-doc audit BUG 2): this used to return
+     *  `low.startsWith("http")` — TRUE for every real URL — which silently
+     *  disabled the strip: every rewritten-master run kept its referer and
+     *  the vidsrc-family path sent exactly the header those CDNs reject. */
     private fun requiresExplicitReferer(referer: String): Boolean {
-        val low = referer.lowercase().trimEnd('/')
-        return low.startsWith("http://") || low.startsWith("https://")
+        val low = referer.lowercase()
+        return low.contains("megaplay.buzz") || low.contains("watching.onl") ||
+            low.contains("anivideo.sbs") || low.contains("anitaku") ||
+            low.contains("gogoanime") || low.contains("2anime.xyz")
     }
 }

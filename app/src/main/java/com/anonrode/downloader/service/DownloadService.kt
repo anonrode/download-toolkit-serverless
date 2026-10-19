@@ -139,6 +139,7 @@ class DownloadService : Service() {
     private fun buildOngoingNotification(title: String, progress: Int, activeCount: Int): Notification {
         val appIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
+            putExtra(EXTRA_OPEN_TAB, "downloads")
         }
         val pendingIntent = PendingIntent.getActivity(
             this,
@@ -180,6 +181,9 @@ class DownloadService : Service() {
         const val EXTRA_TITLE = "extra_title"
         const val EXTRA_PROGRESS = "extra_progress"
         const val EXTRA_COUNT = "extra_count"
+        /** Deep-link extra (cross-doc audit BUG 6 / wiring F-11): tapping a
+         *  download notification opens the Downloads tab. */
+        const val EXTRA_OPEN_TAB = "extra_open_tab"
 
         /** The currently running service instance, if any. Used by [stop] to
          *  avoid the background-startService crash on Android 8+. */
@@ -207,6 +211,7 @@ class DownloadService : Service() {
             try {
                 val appIntent = Intent(context, MainActivity::class.java).apply {
                     flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
+                    putExtra(EXTRA_OPEN_TAB, "downloads")
                 }
                 val pendingIntent = PendingIntent.getActivity(
                     context,
@@ -242,6 +247,7 @@ class DownloadService : Service() {
             try {
                 val appIntent = Intent(context, MainActivity::class.java).apply {
                     flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
+                    putExtra(EXTRA_OPEN_TAB, "downloads")
                 }
                 val contentIntent = PendingIntent.getActivity(
                     context,

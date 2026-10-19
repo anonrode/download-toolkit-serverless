@@ -359,7 +359,10 @@ downloading → verified → install_started (and install success in the install
 ## f. Registration rollout (how each vendor flips from "compiled-in" to "live")
 
 Everything below is either a payload edit (OTA) or a documented one-line code change. Every SDK is
-currently INERT: nothing initializes unless its payload section is enabled.
+currently INERT: nothing initializes unless its payload section is enabled. Honest footnote: the ad /
+FCM SDKs ship merge-time init PROVIDERS (e.g. Firebase's) that run on cold start and are
+failure-tolerant — while unconfigured they only emit a benign "no default options" line; nothing
+touches the network until a section below enables it.
 
 | Service | Fill in the payload | Code / manifest change | Rebuild? |
 |---|---|---|---|

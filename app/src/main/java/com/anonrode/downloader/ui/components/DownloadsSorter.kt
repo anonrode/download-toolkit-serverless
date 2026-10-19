@@ -66,7 +66,13 @@ object DownloadsSorter {
      * they complete.
      */
     fun isShelfItem(task: DownloadTask): Boolean =
-        task.status == TaskStatus.COMPLETED && task.showTitle == "Direct Downloads"
+        task.status == TaskStatus.COMPLETED &&
+            (task.showTitle == "Direct Downloads" ||
+                // AUDIT FIX (2026-10-19, cross-doc audit BUG 5 / wiring F-12):
+                // social downloads are stamped "Social/<platform>" by the VM,
+                // SocialModal and QuickShare — they ARE social & media items
+                // and previously never reached the shelf at all.
+                task.showTitle.startsWith("Social/", ignoreCase = true))
 
     /**
      * Splits the engine snapshot into (shelf tiles, activity rows) per

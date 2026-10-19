@@ -1816,6 +1816,24 @@ private fun humanizeFailure(raw: String): String {
 //  thumb is now the §4.1 gradient well with a video icon, and the source is
 //  named by the inline [SOCIAL]/[NKIRI]-style site badge instead.) ───────────
 
+/** Shelf-tile badge (AUDIT FIX 2026-10-19, cross-doc audit BUG 5): the tile
+ *  used to paint a hardcoded "𝕏" (the old X/Twitter mock) on EVERY shelf
+ *  item — Instagram reels and plain MP4s included. Derive the badge from the
+ *  task's own stamps: the "Social/<platform>" title, the site field, or the
+ *  source URL. */
+private fun shelfBadge(task: DownloadTask): String {
+    val hay = (task.showTitle + " " + task.site + " " + task.sourceUrl).lowercase()
+    return when {
+        hay.contains("instagram") -> "IG"
+        hay.contains("youtube") || hay.contains("youtu.be") -> "YT"
+        hay.contains("tiktok") -> "TT"
+        hay.contains("facebook") || hay.contains("fb.watch") -> "FB"
+        hay.contains("twitter") || hay.contains("x.com") -> "𝕏"
+        hay.contains("vimeo") -> "VM"
+        else -> "CLIP"
+    }
+}
+
 /** Offline-shelf tile (mock .tile): 166×94 deep well, hairline, centered
  *  platform glyph + 34dp glass play (black-50%, white-14% outline, white ▶),
  *  title 11sp/700 + mono "MP4 · 720p · 326.7 KB" beneath. Tap = play;
@@ -1852,10 +1870,9 @@ private fun SocialShelfTile(
                 },
             contentAlignment = Alignment.Center
         ) {
-            // Muted platform glyph — a plain text glyph per spec ("a plain
-            // TEXT glyph is fine").
+            // Platform badge (audit fix): per-task, not the old hardcoded "𝕏".
             Text(
-                text = "𝕏",
+                text = shelfBadge(task),
                 fontSize = 20.sp,
                 fontWeight = FontWeight.Black,
                 color = TextMuted

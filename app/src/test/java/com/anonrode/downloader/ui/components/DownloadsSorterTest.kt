@@ -411,4 +411,34 @@ class DownloadsSorterTest {
         assertEquals(listOf(x.filePath),
             DownloadsSorter.playQueueFor(listOf(x), "bogus_mode", x))
     }
+
+    // -- shelf rule (cross-doc audit BUG 5 fix) --------------------------------
+
+    @Test
+    fun shelfRule_coversCompletedDirectAndSocial_only() {
+        assertTrue(
+            DownloadsSorter.isShelfItem(
+                task("sh1", showTitle = "Direct Downloads", status = TaskStatus.COMPLETED)
+            )
+        )
+        // Social downloads are stamped "Social/<platform>" by every enqueue
+        // path — they belong on the Social & Media shelf.
+        assertTrue(
+            DownloadsSorter.isShelfItem(
+                task("sh2", showTitle = "Social/instagram", status = TaskStatus.COMPLETED)
+            )
+        )
+        // In-flight social items stay rows until complete.
+        assertTrue(
+            !DownloadsSorter.isShelfItem(
+                task("sh3", showTitle = "Social/youtube", status = TaskStatus.DOWNLOADING)
+            )
+        )
+        // Series episodes never shelf.
+        assertTrue(
+            !DownloadsSorter.isShelfItem(
+                task("sh4", showTitle = "Breaking Bad", status = TaskStatus.COMPLETED)
+            )
+        )
+    }
 }

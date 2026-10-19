@@ -126,7 +126,7 @@ One final build that ships, together:
 "update": {
   "latestVersionName": "3.3.0", "latestVersionCode": 331,
   "sources": [
-    { "kind": "vps",    "base": "http://68.155.146.145/apk/" },
+    { "kind": "vps",    "base": "http://68.155.146.145/ota/apk/" },
     { "kind": "github", "base": "https://github.com/anonrode/download-toolkit-serverless/releases/download/v3.3.0/" }
   ],
   "apkArm64": "AnonDownloader-3.3.0-arm64-v8a.apk",

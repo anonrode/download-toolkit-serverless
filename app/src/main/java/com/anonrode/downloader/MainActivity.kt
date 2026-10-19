@@ -64,7 +64,29 @@ import com.anonrode.downloader.viewmodel.MainViewModel
 
 class MainActivity : ComponentActivity() {
 
+    companion object {
+        /** Notification deep-link extra (cross-doc audit BUG 6 / wiring F-11):
+         *  tapping a download notification must land on the Downloads tab. */
+        const val EXTRA_OPEN_TAB = "extra_open_tab"
+    }
+
     private val viewModel: MainViewModel by viewModels()
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        val tab = intent.getStringExtra(EXTRA_OPEN_TAB)
+        if (!tab.isNullOrBlank()) {
+            // Persist + recreate: the tab machinery reads pref_last_tab during
+            // creation, so recreation is the deterministic way to land on the
+            // requested tab from a warm activity (no new nav plumbing, no new
+            // state to keep in sync).
+            getSharedPreferences("downloader_settings", android.content.Context.MODE_PRIVATE)
+                .edit().putString("pref_last_tab", tab).apply()
+            intent.removeExtra(EXTRA_OPEN_TAB)
+            recreate()
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         try {
@@ -79,6 +101,15 @@ class MainActivity : ComponentActivity() {
         // first composition. Theme switches later re-run enableEdgeToEdge
         // through syncSystemBars — that is the only call that repaints the bar
         // FILL (see its doc); here it just seeds the first frame.
+        // Notification deep-link (cross-doc audit BUG 6/F-11): a tap that
+        // starts the app cold must land on the requested tab too — persist it
+        // before the initialTab read below picks it up.
+        intent?.getStringExtra(EXTRA_OPEN_TAB)?.takeIf { it.isNotBlank() }?.let { tab ->
+            getSharedPreferences("downloader_settings", android.content.Context.MODE_PRIVATE)
+                .edit().putString("pref_last_tab", tab).apply()
+            intent.removeExtra(EXTRA_OPEN_TAB)
+        }
+
         val coldPrefs = getSharedPreferences("downloader_settings", android.content.Context.MODE_PRIVATE)
         val coldTheme = coldPrefs.getString("pref_theme_mode", "dark") ?: "dark"
         applyEdgeToEdge(coldTheme)

@@ -20,12 +20,17 @@ import com.google.firebase.messaging.FirebaseMessaging
  * (id-only telemetry + journal) — the token itself never leaves the device
  * through our logging paths (it would be useless to us and sensitive
  * anyway). Registration is re-entrant: a payload revision with new
- * credentials deletes the previous named app and re-initializes.
+ * credentials deletes the previous FirebaseApp and re-initializes.
+ *
+ * App scope: firebase-messaging exposes only the no-arg
+ * FirebaseMessaging.getInstance() publicly (the FirebaseApp overload is
+ * package-private in the 24.1.0 artifact — verified), so the registrar owns
+ * the DEFAULT FirebaseApp. Without google-services.json nothing else
+ * initializes it.
+ *
  * Never throws.
  */
 object FcmRegistrar {
-
-    private const val APP_NAME = "ota-fcm"
 
     @Volatile
     private var registeredAppId: String = ""
@@ -41,8 +46,8 @@ object FcmRegistrar {
         if (!cfg.enabled) return
         if (cfg.apiKey.isBlank() || cfg.appId.isBlank() || cfg.projectId.isBlank()) return
         try {
-            val app = ensureApp(context, cfg) ?: return
-            FirebaseMessaging.getInstance(app).token.addOnCompleteListener { task ->
+            ensureApp(context, cfg) ?: return
+            FirebaseMessaging.getInstance().token.addOnCompleteListener { task ->
                 if (task.isSuccessful) {
                     report("token_ok")
                 } else {
@@ -54,11 +59,11 @@ object FcmRegistrar {
         }
     }
 
-    /** Named-app lifecycle: reuse when the payload's appId is unchanged,
+    /** Default-app lifecycle: reuse when the payload's appId is unchanged,
      *  otherwise delete + re-init so a credential rotation takes effect. */
     private fun ensureApp(context: Context, cfg: FcmConfig): FirebaseApp? {
         val existing = try {
-            FirebaseApp.getInstance(APP_NAME)
+            FirebaseApp.getInstance()
         } catch (_: IllegalStateException) {
             null
         }
@@ -77,7 +82,7 @@ object FcmRegistrar {
             .setGcmSenderId(cfg.senderId)
             .build()
         val app = try {
-            FirebaseApp.initializeApp(context.applicationContext, options, APP_NAME)
+            FirebaseApp.initializeApp(context.applicationContext, options)
         } catch (t: Throwable) {
             DebugLog.error("FcmRegistrar: initializeApp failed (${t.javaClass.simpleName})")
             null

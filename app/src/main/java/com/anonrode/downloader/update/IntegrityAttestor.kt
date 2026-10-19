@@ -6,7 +6,7 @@ import com.anonrode.downloader.util.DebugLog
 import com.anonrode.downloader.util.RemoteLogger
 import com.google.android.play.core.integrity.IntegrityManagerFactory
 import com.google.android.play.core.integrity.StandardIntegrityManager
-import com.google.android.play.core.integrity.StandardIntegrityTokenRequest
+import com.google.android.play.core.integrity.StandardIntegrityManager.StandardIntegrityTokenRequest
 
 /**
  * Play Integrity attestor (plan §4.6, "PRE-WIRED, honestly caveated").
