@@ -162,9 +162,11 @@ dependencies {
     // FcmRegistrar.kt, update/IntegrityAttestor.kt gate at runtime).
     // OTA can ship config/credentials, never code — so the code compiles in
     // now and activation later is a payload edit wherever the vendor accepts
-    // runtime credentials. Pinned to the newest lines that still target
-    // compileSdk 34 (same constraint as media3 above; newer majors of
-    // play-services-ads/firebase require compileSdk 35).
+    // runtime credentials. Pins were verified against LIVE registries +
+    // artifacts (scratch/qa_report_V1.md): all exist and none blocks
+    // compileSdk 34 (QA-V1 byte-checked the AAR metadata; upgrade locks —
+    // Kotlin-2.1 floors, removed overloads, media3 1.5+ needing compileSdk
+    // 35 — are recorded there for the next bump, not asserted here).
     implementation("com.applovin:applovin-sdk:12.6.1")                 // MAX, sdkKey = payload field
     implementation("com.unity3d.ads:unity-ads:4.12.2")                 // gameId = payload field
     implementation("com.google.android.gms:play-services-ads:23.6.0")  // AdMob, unit ids = payload fields

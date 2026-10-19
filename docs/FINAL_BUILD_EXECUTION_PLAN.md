@@ -444,3 +444,23 @@ Rollback: revert commit + republish previous payload rev (kill switches make cod
   views not rendered in v3.3.0), snoozeHours 0→24h note, PackageInstaller fallback = synchronous-failure
   scope, rev shown-key format `announcement_shown_rev_<rev>_<id>`. Checklist checkpoint `1ba0b55`
   (191 files gate-green). Next: V1 gates → FINAL FINAL STAGE (push/watch/fix/tag/verify).
+- 2026-10-19 — **QA-V1 COMPLETE (`scratch/qa_report_V1.md`, live-URL evidence)** — verified all six dep
+  pins exist + compileSdk-34 OK (upgrade locks recorded), byte-verified every vendor API call in the
+  pinned AARs, confirmed manifest/meta-data/test-id and that every ops-doc command runs as written.
+  **Caught two real compile errors before CI**: IntegrityAttestor imported a nonexistent top-level
+  `StandardIntegrityTokenRequest` (now the nested `StandardIntegrityManager.…`) and FcmRegistrar called
+  the package-private `FirebaseMessaging.getInstance(FirebaseApp)` (now the default-app flow) — both
+  fixed; proguard consumer-rule claims corrected from its byte checks; the build.gradle "requires
+  compileSdk 35" comment it disproved was rewritten. All included in `1eb5981`.
+- 2026-10-19 — **Cross-document external audit adjudicated** (`scratch/qa_report_crossaudit.md`):
+  6 of 8 claims confirmed and fixed (incl. the P1 `requiresExplicitReferer` regression, batch-enqueue
+  reverse order, sanitized-title mismatches, shelf/𝕏, notification deep-link, stale plan path); 2
+  verified no-op; the "remove the 6 pre-wired SDKs" recommendation **declined with reasons** (owner's
+  explicit OTA-registration mandate, Decision 16; costs already documented — reversion is 6 lines).
+- 2026-10-19 — Motion/polish investigation complete (`scratch/motion_polish_report.md`,
+  Desktop `MOTION_POLISH_REPORT.md`): tab switching already crossfades (report corrects the earlier
+  "no transitions" assessment); the real gaps are 5 surfaces + reduce-motion leaks + press-scale
+  coverage, with Tier A drop-in snippets — scheduled for the NEXT cycle (investigation-only per owner).
+- 2026-10-19 — **FINAL FINAL STAGE begins: push → watch CI → fix → tag v3.3.0 → watch release →
+  verify.** All local gates green: syntax 191 files, adversarial 100%, sims 94/94, payload dry-run
+  PASS, CI feature suites + screenshot receipts wired.
