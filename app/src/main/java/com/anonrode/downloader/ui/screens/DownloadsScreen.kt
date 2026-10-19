@@ -1506,44 +1506,70 @@ private fun ActivityRow(
 
             // §3.2 flush bottom progress bar — 0dp of extra vertical height,
             // aligned to the card Box's BottomCenter; hidden on Done/Failed.
-            // The fade rides the wrapper (AnimatedVisibility's content scope
-            // is not a BoxScope, so the align lives here) and the bar is a
-            // 3dp overlay — no layout shift from the appear/disappear.
-            AnimatedVisibility(
+            // Rendered through a BoxScope helper: a bare AnimatedVisibility
+            // call at this spot resolves against the enclosing ColumnScope
+            // implicit receiver and Kotlin refuses the implicit use.
+            ActivityProgressOverlay(
                 visible = barVisible,
-                modifier = Modifier.align(Alignment.BottomCenter),
-                enter = fadeIn(tween(Motion.DurationFast)),
-                exit = fadeOut(tween(Motion.DurationNavExit))
-            ) {
-                if (barIndeterminate) {
-                    LinearProgressIndicator(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(3.dp)
-                            .semantics {
-                                progressBarRangeInfo = ProgressBarRangeInfo.Indeterminate
-                                contentDescription = "Download in progress"
-                            },
-                        color = if (isPaused) chroma.paused else chroma.live,
-                        trackColor = SurfaceElevated,
-                        strokeCap = StrokeCap.Square
-                    )
-                } else {
-                    LinearProgressIndicator(
-                        progress = { barFraction },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(3.dp)
-                            .semantics {
-                                progressBarRangeInfo = ProgressBarRangeInfo(barFraction, 0f..1f)
-                                contentDescription = "Download progress"
-                            },
-                        color = if (isPaused) chroma.paused else chroma.live,
-                        trackColor = SurfaceElevated,
-                        strokeCap = StrokeCap.Square
-                    )
-                }
-            }
+                indeterminate = barIndeterminate,
+                fraction = barFraction,
+                paused = isPaused,
+                chroma = chroma
+            )
+        }
+    }
+}
+
+/** Flush bottom progress bar for an ActivityRow card.
+ *
+ *  Deliberately a BoxScope receiver: a bare `AnimatedVisibility` call inside
+ *  the card's Box gets resolved against the enclosing ColumnScope implicit
+ *  receiver and fails to compile ("cannot be called in this context with an
+ *  implicit receiver"). Scoped to BoxScope here, the plain overlay overload
+ *  is the only candidate. Pure fades (no expand/shrink) on the nav tokens —
+ *  the 3dp bar is an overlay, so appear/disappear costs 0dp of layout. */
+@Composable
+private fun BoxScope.ActivityProgressOverlay(
+    visible: Boolean,
+    indeterminate: Boolean,
+    fraction: Float,
+    paused: Boolean,
+    chroma: DownloadsChroma
+) {
+    AnimatedVisibility(
+        visible = visible,
+        modifier = Modifier.align(Alignment.BottomCenter),
+        enter = fadeIn(tween(Motion.DurationFast)),
+        exit = fadeOut(tween(Motion.DurationNavExit))
+    ) {
+        val barColor = if (paused) chroma.paused else chroma.live
+        if (indeterminate) {
+            LinearProgressIndicator(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(3.dp)
+                    .semantics {
+                        progressBarRangeInfo = ProgressBarRangeInfo.Indeterminate
+                        contentDescription = "Download in progress"
+                    },
+                color = barColor,
+                trackColor = SurfaceElevated,
+                strokeCap = StrokeCap.Square
+            )
+        } else {
+            LinearProgressIndicator(
+                progress = { fraction },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(3.dp)
+                    .semantics {
+                        progressBarRangeInfo = ProgressBarRangeInfo(fraction, 0f..1f)
+                        contentDescription = "Download progress"
+                    },
+                color = barColor,
+                trackColor = SurfaceElevated,
+                strokeCap = StrokeCap.Square
+            )
         }
     }
 }
