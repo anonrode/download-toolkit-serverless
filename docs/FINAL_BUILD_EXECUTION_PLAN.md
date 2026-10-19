@@ -375,3 +375,16 @@ Rollback: revert commit + republish previous payload rev (kill switches make cod
   contracts sent in the handoff.
 - 2026-10-18 — S1 getter contracts confirmed landed (:862-884 + getActiveRev :600); S1/S2/S3 still
   in phase 1 — review gates pending their reports.
+- 2026-10-18 17:30-19:30 — **network incident**: the subagent API endpoint (api.river.ai) began timing out;
+  S1, S2 (twice) and S4-phase-2 runs died on connect timeouts (infra, not work). Handling: assessed each
+  agent's landed state from the tree; resumed S1 (it finished), re-dispatched S2 + S4 with state-aware
+  instructions; S3 confirmed alive (message reached its active turn). S2 verified to have landed ZERO edits
+  before dying — resumed with a write-first priority order. S4 phase-2 verified to have landed nothing —
+  re-dispatched with the full assignment.
+- 2026-10-18 — **S1 PHASE 1 REVIEWED: PASS** — report `scratch/phase1_report_S1.md`; my independent re-run:
+  gate 177/177 PASS, default + example dry-runs PASS with the reserved-fields INFO line, real payload/.enc
+  md5s unchanged; contracts frozen (`getAnnouncements/getUpdatePolicy/getAdsConfig/getEngagementConfig/
+  getTamperPolicy/getFcmConfig`, exact data-class field names); validator strict across all six sections +
+  nested unknown-field rejects; found & fixed a real false positive in the syntax-gate scanner (Kotlin
+  string templates were misread) — gate is now template-aware. → **S1 advanced to PHASE 2** (Python
+  reference sims for update/announcement/ads/engagement semantics + adversarial NN-6+ extension).
