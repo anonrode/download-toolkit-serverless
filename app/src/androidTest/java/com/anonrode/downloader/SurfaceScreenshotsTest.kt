@@ -58,17 +58,26 @@ class SurfaceScreenshotsTest {
     private val ctx get() = InstrumentationRegistry.getInstrumentation().targetContext
 
     private fun shotDir(): File =
-        File(ctx.getExternalFilesDir(null), "screenshots").apply { mkdirs() }
+        // INTERNAL app storage, deliberately: on the CI emulator
+        // getExternalFilesDir(null) returns null (external storage not
+        // mounted at test time), so the old external path silently
+        // materialized NOTHING — three runs of empty artifacts, and the adb
+        // pull failed with "No such file or directory". Internal storage is
+        // always writable; the CI pull step reads it back via `run-as`
+        // (debug build, debuggable=true).
+        File(ctx.filesDir, "screenshots").apply { mkdirs() }
 
     @Before
     fun ensureShotDir() {
-        // Create the directory up front: the CI pull step tolerates a missing
-        // dir, but when captureToImage fails on a particular emulator the
-        // directory's mere existence keeps the failure mode visible in the
-        // logs instead of an opaque "No such file or directory".
+        // Create the directory up front so a mixed setup failure is visible
+        // (mkdirs() returning false) instead of an opaque missing dir on the
+        // device at pull time.
         try {
-            shotDir().mkdirs()
-        } catch (_: Throwable) {
+            if (!shotDir().mkdirs() && !shotDir().isDirectory) {
+                android.util.Log.w("AnonrodeShots", "shot dir could not be created: ${shotDir()}")
+            }
+        } catch (t: Throwable) {
+            android.util.Log.w("AnonrodeShots", "shot dir setup failed: $t")
         }
     }
 

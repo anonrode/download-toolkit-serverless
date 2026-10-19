@@ -156,8 +156,13 @@ jobs:
           script: |
             mkdir -p "$RUNNER_TEMP/gate"
             gradle :app:connectedDebugAndroidTest --no-daemon || touch "$RUNNER_TEMP/gate/first-run-failed"
+            # Screenshots live in the app's INTERNAL files dir (the external
+            # dir does not exist on this emulator — getExternalFilesDir()
+            # returns null there), so they are read back through `run-as`
+            # (debug build) as a tar stream. Best-effort, single-line steps.
             mkdir -p "$GITHUB_WORKSPACE/.ci-artifacts/screenshots"
-            adb pull /sdcard/Android/data/com.anonrode.downloader.debug/files/screenshots "$GITHUB_WORKSPACE/.ci-artifacts/screenshots/" || true
+            adb exec-out run-as com.anonrode.downloader.debug tar -C files -cf - screenshots > "$GITHUB_WORKSPACE/.ci-artifacts/screenshots.tar" || true
+            tar -xf "$GITHUB_WORKSPACE/.ci-artifacts/screenshots.tar" -C "$GITHUB_WORKSPACE/.ci-artifacts/" || true
             ls -la "$GITHUB_WORKSPACE/.ci-artifacts/screenshots" || true
             echo "===== adb logcat (last 200 lines, tag-filtered) ====="
             adb logcat -d -t 200 '*:E' '*:W' 'TestRunner:*' 'AndroidXTracer:*' 'AnonApp:*' 2>&1 || true
@@ -226,7 +231,8 @@ jobs:
             mkdir -p "$RUNNER_TEMP/gate"
             gradle :app:connectedDebugAndroidTest --no-daemon $ARGS || touch "$RUNNER_TEMP/gate/retry-failed"
             mkdir -p "$GITHUB_WORKSPACE/.ci-artifacts/screenshots"
-            adb pull /sdcard/Android/data/com.anonrode.downloader.debug/files/screenshots "$GITHUB_WORKSPACE/.ci-artifacts/screenshots/" || true
+            adb exec-out run-as com.anonrode.downloader.debug tar -C files -cf - screenshots > "$GITHUB_WORKSPACE/.ci-artifacts/screenshots.tar" || true
+            tar -xf "$GITHUB_WORKSPACE/.ci-artifacts/screenshots.tar" -C "$GITHUB_WORKSPACE/.ci-artifacts/" || true
             test ! -f "$RUNNER_TEMP/gate/retry-failed"
 
       - name: Archive retry JUnit XML

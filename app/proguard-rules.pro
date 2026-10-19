@@ -108,6 +108,25 @@
 # org.json is the platform implementation shipped in android.jar (never
 # shrunk/renamed). No rules required.
 
+# ── R8 full-mode missing-class relaxations (CI run 39243465048) ────────────
+# R8 fails the release build outright when these referenced-but-absent
+# classes are seen. Every one is a guarded/optional reference inside an SDK
+# we ship but never trigger on Android:
+#  - LoudnessCodecController(±listener): API 35 classes referenced by
+#    play-services-ads internals; compileSdk is 34 and the SDK guards the
+#    call by SDK_INT at runtime.
+#  - java.beans.*: Jackson's Java7SupportImpl (only instantiated when the
+#    java.beans package exists — it never does on Android).
+#  - org.tukaani.xz.*: commons-compress sevenz/xz coders for archive formats
+#    this app never opens (xz is not a shipped dependency).
+#  - org.w3c.dom.bootstrap.DOMImplementationRegistry: Jackson's
+#    DOMSerializer (the DOM bootstrap is absent on Android).
+-dontwarn android.media.LoudnessCodecController
+-dontwarn android.media.LoudnessCodecController$OnLoudnessCodecUpdateListener
+-dontwarn java.beans.**
+-dontwarn org.tukaani.xz.**
+-dontwarn org.w3c.dom.bootstrap.DOMImplementationRegistry
+
 # ── Phase-2 pre-wired future SDKs (all inert at runtime) ───────────────────
 # Per-SDK R8 treatment, audited against vendor documentation; every one of
 # these artifacts declares consumer rules or a documented no-configuration
