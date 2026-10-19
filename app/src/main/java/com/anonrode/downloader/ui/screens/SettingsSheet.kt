@@ -359,7 +359,12 @@ fun SettingsScreen(
                 IconButton(onClick = { if (currentDrawer != null) openDrawerName = null else onBack() }) {
                     Icon(
                         imageVector = Icons.Default.ArrowBack,
-                        contentDescription = if (currentDrawer != null) "Back to Settings" else "Back to Search",
+                        // "Close Settings", not "Back to Search": that string
+                        // belongs to the Downloads tab's own back arrow, and
+                        // duplicate labels collide for TalkBack and for the
+                        // instrumented finders (hidden tabs still appear in
+                        // the unmerged semantics tree).
+                        contentDescription = if (currentDrawer != null) "Back to Settings" else "Close Settings",
                         tint = TextPrimary,
                         modifier = Modifier.size(20.dp)
                     )
