@@ -1,5 +1,7 @@
 package com.anonrode.downloader.ui.components
 
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -9,17 +11,20 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.anonrode.downloader.ui.theme.*
 import com.anonrode.downloader.ui.util.pressScale
+import com.anonrode.downloader.ui.util.tick
 
 /**
  * The one selection language for option bars on sheets: a hairline bar of
@@ -61,16 +66,33 @@ fun SegmentCell(
     cellHeight: Dp = 42.dp
 ) {
     val src = remember { MutableInteractionSource() }
+    // Selection tick (Haptics verb): every cell tap acknowledges.
+    val view = LocalView.current
+    // Content Swap: the selection fill glides and the ink follows it, so the
+    // label never flashes dark ink on an unfilled cell mid-swap.
+    val fill by animateColorAsState(
+        targetValue = if (selected) AccentPrimary else Color.Transparent,
+        animationSpec = tween(Motion.DurationFast),
+        label = "segmentFill"
+    )
+    val ink by animateColorAsState(
+        targetValue = if (selected) BackgroundDark else TextSecondary,
+        animationSpec = tween(Motion.DurationFast),
+        label = "segmentInk"
+    )
     Row(
         modifier = modifier
             .height(cellHeight)
-            .pressScale(src, 0.97f)
+            .pressScale(src, Motion.PressScaleLarge)
             .clip(RoundedCornerShape(Radius.sm))
-            .background(if (selected) AccentPrimary else Color.Transparent)
+            .background(fill)
             .clickable(
                 interactionSource = src,
                 indication = null,
-                onClick = onClick
+                onClick = {
+                    view.tick()
+                    onClick()
+                }
             ),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.Center
@@ -79,7 +101,7 @@ fun SegmentCell(
             Icon(
                 imageVector = icon,
                 contentDescription = null,
-                tint = if (selected) BackgroundDark else TextSecondary,
+                tint = ink,
                 modifier = Modifier.size(15.dp)
             )
             Spacer(modifier = Modifier.width(Spacing.xs))
@@ -88,7 +110,7 @@ fun SegmentCell(
             text = label,
             fontSize = Type.caption.fontSize,
             fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
-            color = if (selected) BackgroundDark else TextSecondary
+            color = ink
         )
     }
 }

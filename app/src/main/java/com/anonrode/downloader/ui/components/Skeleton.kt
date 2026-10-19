@@ -92,6 +92,26 @@ fun rememberShimmerX(reduceMotion: Boolean): Float {
     return x
 }
 
+/** One infinite 0..1 sweep for arbitrary periods (progress tracks, dots).
+ *  Same contract as [rememberShimmerX]: no transition is created at all when
+ *  the user disabled system animations — the old freeze-the-draw approach
+ *  (EpisodeDrawer scrape track) still re-scheduled a frame forever. */
+@Composable
+fun rememberInfiniteSweep(periodMs: Int, label: String): Float {
+    if (rememberReduceMotion()) return 0f
+    val t = rememberInfiniteTransition(label = label)
+    val x by t.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(periodMs, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "$label-value"
+    )
+    return x
+}
+
 /** A skeleton rectangle with the sweep highlight. Purely decorative:
  *  cleared from the semantics tree so TalkBack never announces it. */
 @Composable

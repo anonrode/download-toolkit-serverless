@@ -5,7 +5,6 @@ package com.anonrode.downloader.ui.screens
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.*
-import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
@@ -275,8 +274,6 @@ internal enum class SettingsDrawer(val label: String, val sub: String) {
     LOGS("Privacy & Logs", "Content filter · logging · diagnostics")
 }
 
-private val SettingsEasing = CubicBezierEasing(0.2f, 0f, 0f, 1f)
-
 @Composable
 fun SettingsScreen(
     viewModel: MainViewModel,
@@ -384,17 +381,17 @@ fun SettingsScreen(
                     // Nav speed contract (ui-proposal-downloads-v6-drawer.html):
                     // the 500ms slide+fade read as slow motion before the page
                     // appeared. Entrance caps at DurationFast (200ms), exit at
-                    // DurationNavExit (120ms) — same SettingsEasing curve, one
-                    // third of the wait; the destination's first frame paints
-                    // immediately and the animation only decorates it.
+                    // DurationNavExit (120ms) — the shared Motion.StandardEasing
+                    // curve, one third of the wait; the destination's first
+                    // frame paints immediately and the animation only decorates.
                     (slideInHorizontally(
-                        animationSpec = tween(Motion.DurationFast, easing = SettingsEasing)
+                        animationSpec = tween(Motion.DurationFast, easing = Motion.StandardEasing)
                     ) { full -> if (forward) full else -full / 3 } +
-                        fadeIn(tween(Motion.DurationFast, easing = SettingsEasing))) togetherWith
+                        fadeIn(tween(Motion.DurationFast, easing = Motion.StandardEasing))) togetherWith
                         (slideOutHorizontally(
-                            animationSpec = tween(Motion.DurationNavExit, easing = SettingsEasing)
+                            animationSpec = tween(Motion.DurationNavExit, easing = Motion.StandardEasing)
                         ) { full -> if (forward) -full / 3 else full } +
-                            fadeOut(tween(Motion.DurationNavExit, easing = SettingsEasing)))
+                            fadeOut(tween(Motion.DurationNavExit, easing = Motion.StandardEasing)))
                 },
                 label = "settingsDrawer"
             ) { drawer ->

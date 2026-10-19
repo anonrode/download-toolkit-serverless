@@ -1,5 +1,12 @@
 package com.anonrode.downloader.ui.components
 
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -44,10 +51,49 @@ import com.anonrode.downloader.ui.theme.*
  */
 @Composable
 fun AnnouncementHost() {
-    val context = LocalContext.current
     val active by AnnouncementManager.current.collectAsState()
-    val ann = active ?: return
 
+    // Dialog mode is a window of its own (M3 AlertDialog animates itself):
+    // routing it through AnimatedContent would keep a ghost dialog window
+    // alive through the exit transition, so it keeps the plain path.
+    val dialogAnn = active?.takeIf { it.mode.equals("dialog", ignoreCase = true) }
+    if (dialogAnn != null) {
+        AnnouncementDialog(dialogAnn)
+        return
+    }
+
+    // Banner/sheet are in-window overlays and ride one Content Swap — fade +
+    // directional slide (banner from the top, sheet from the bottom) on the
+    // nav tokens; the outgoing card animates away instead of popping.
+    AnimatedContent(
+        targetState = active,
+        transitionSpec = {
+            val targetMode = targetState?.mode?.lowercase()
+            val initialMode = initialState?.mode?.lowercase()
+            if (targetState != null) {
+                (fadeIn(tween(Motion.DurationFast)) +
+                    slideInVertically(tween(Motion.DurationFast)) { h ->
+                        if (targetMode == "sheet") h / 3 else -h / 3
+                    }) togetherWith
+                    fadeOut(tween(Motion.DurationNavExit))
+            } else {
+                fadeIn(tween(Motion.DurationNavExit)) togetherWith
+                    (fadeOut(tween(Motion.DurationNavExit)) +
+                        slideOutVertically(tween(Motion.DurationNavExit)) { h ->
+                            if (initialMode == "sheet") h / 3 else -h / 3
+                        })
+            }
+        },
+        label = "announcementHost"
+    ) { ann ->
+        if (ann != null) AnnouncementOverlay(ann)
+    }
+}
+
+/** Banner + sheet renders (in-window overlays). */
+@Composable
+private fun AnnouncementOverlay(ann: AnnouncementManager.Active) {
+    val context = LocalContext.current
     val dismiss: () -> Unit = { AnnouncementManager.dismiss(context, ann.id) }
     val act: () -> Unit = {
         when (ann.action.lowercase()) {
@@ -183,35 +229,58 @@ fun AnnouncementHost() {
             }
         }
 
-        else -> {
-            AlertDialog(
-                onDismissRequest = { dismiss() },
-                containerColor = SurfaceCard,
-                titleContentColor = TextPrimary,
-                textContentColor = TextSecondary,
-                title = {
-                    if (ann.title.isNotBlank()) {
-                        Text(ann.title, fontWeight = FontWeight.SemiBold, fontSize = Type.itemTitle.fontSize)
-                    }
-                },
-                text = {
-                    if (ann.body.isNotBlank()) {
-                        Text(ann.body, fontSize = Type.body.fontSize)
-                    }
-                },
-                confirmButton = {
-                    if (hasAction) {
-                        TextButton(onClick = act) {
-                            Text(ann.actionLabel, color = AccentPrimary, fontWeight = FontWeight.Bold)
-                        }
-                    }
-                },
-                dismissButton = {
-                    TextButton(onClick = dismiss) {
-                        Text(if (hasAction) "Later" else "Dismiss", color = TextSecondary)
-                    }
-                }
-            )
+    }
+}
+
+/** The dialog-mode announcement: M3 AlertDialog in its own window, kept out
+ *  of the host's in-window transition on purpose so no ghost window lingers
+ *  through the exit. */
+@Composable
+private fun AnnouncementDialog(ann: AnnouncementManager.Active) {
+    val context = LocalContext.current
+    val dismiss: () -> Unit = { AnnouncementManager.dismiss(context, ann.id) }
+    val act: () -> Unit = {
+        when (ann.action.lowercase()) {
+            "url" -> {
+                if (ann.actionUrl.isNotBlank()) UpdateChecker.openInBrowser(context, ann.actionUrl)
+                dismiss()
+            }
+            "update" -> {
+                dismiss()
+                // Promotes the state so UpdateGate renders the prompt/gate.
+                UpdateManager.evaluate(context)
+            }
+            else -> dismiss()
         }
     }
+    val hasAction = ann.action != "none" && ann.actionLabel.isNotBlank()
+
+    AlertDialog(
+        onDismissRequest = { dismiss() },
+        containerColor = SurfaceCard,
+        titleContentColor = TextPrimary,
+        textContentColor = TextSecondary,
+        title = {
+            if (ann.title.isNotBlank()) {
+                Text(ann.title, fontWeight = FontWeight.SemiBold, fontSize = Type.itemTitle.fontSize)
+            }
+        },
+        text = {
+            if (ann.body.isNotBlank()) {
+                Text(ann.body, fontSize = Type.body.fontSize)
+            }
+        },
+        confirmButton = {
+            if (hasAction) {
+                TextButton(onClick = act) {
+                    Text(ann.actionLabel, color = AccentPrimary, fontWeight = FontWeight.Bold)
+                }
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = dismiss) {
+                Text(if (hasAction) "Later" else "Dismiss", color = TextSecondary)
+            }
+        }
+    )
 }

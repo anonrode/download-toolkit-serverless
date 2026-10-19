@@ -1,7 +1,12 @@
 package com.anonrode.downloader.ui.theme
 
+import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.animation.core.FiniteAnimationSpec
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
@@ -37,6 +42,18 @@ object Motion {
      *  of the old 500ms wait, same easing curve. */
     const val DurationNavExit = 120
 
+    /** The app's one curve: press-scale and settings nav both ride it.
+     *  (Was duplicated as PressScale's inline bezier and SettingsSheet's
+     *  private SettingsEasing; byte-identical, and M3's standard/emphasized
+     *  cubic-bezier verbatim.) */
+    val StandardEasing = CubicBezierEasing(0.2f, 0f, 0f, 1f)
+
+    /** Press personality: the scale tween under the finger, and the two named
+     *  scale factors — 0.96 lone button/card · 0.97 wide shared surfaces. */
+    const val DurationPress = 140
+    const val PressScaleDefault = 0.96f
+    const val PressScaleLarge = 0.97f
+
     // M3 "standard" spring parameters (copied from material3's
     // StandardMotionTokens — MotionScheme itself only exists from
     // material3 1.5.0-alpha, so the numbers live here as constants).
@@ -51,6 +68,21 @@ object Motion {
 
     /** Skeleton shimmer sweep period (one full traverse). */
     const val DurationSkeleton = 1200
+
+    /** Feedback-pulse periods (the "still working" indicators). LivePulse is
+     *  the FULL cycle — the live dot animates the half (÷2) with Reverse. */
+    const val DurationLivePulse = 1600
+    const val DurationIndeterminate = 1100
+    const val DurationScrapeSweep = 1500
+
+    /** Shared list-item motion — the one Modifier.animateItem spec triple
+     *  (was copy-pasted inline at every Home list; Downloads rode none).
+     *  ItemPlacement is IntOffset-typed on purpose: animateItem's
+     *  placementSpec parameter is FiniteAnimationSpec<IntOffset> and the
+     *  generic is invariant, so a Float-typed spec would not compile. */
+    val ItemFadeIn: FiniteAnimationSpec<Float> = spring(EffectsDamping, EffectsStiffnessDefault)
+    val ItemPlacement: FiniteAnimationSpec<IntOffset> = spring(SpatialDamping, SpatialStiffnessDefault)
+    val ItemFadeOut: FiniteAnimationSpec<Float> = tween(DurationFast)
 }
 
 /**

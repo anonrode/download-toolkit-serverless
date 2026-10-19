@@ -3,14 +3,22 @@ package com.anonrode.downloader.ui.screens
 import android.content.ClipboardManager
 import android.content.Context
 import androidx.activity.compose.BackHandler
-import androidx.compose.animation.core.spring
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -60,6 +68,7 @@ import com.anonrode.downloader.ui.components.SearchListSkeleton
 import com.anonrode.downloader.ui.components.TrendingRowSkeleton
 import com.anonrode.downloader.ui.theme.*
 import com.anonrode.downloader.ui.util.TitleFormatting
+import com.anonrode.downloader.ui.util.pressScale
 import com.anonrode.downloader.util.UrlExtractor
 import com.anonrode.downloader.viewmodel.MainViewModel
 
@@ -362,45 +371,58 @@ fun HomeScreen(
                 }
             }
 
-            // Smart Clipboard Banner
+            // Smart Clipboard Banner — Content Swap: AnimatedContent keeps the
+            // outgoing banner composed so it can animate away; the plain `if`
+            // popped it. Same nav tokens as every other swap.
             val snippetText = clipboardSnippet
-            if (!snippetText.isNullOrBlank() && uiState.query.isBlank()) {
-                Spacer(modifier = Modifier.height(Spacing.sm))
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(Radius.md))
-                        .background(SurfaceElevated)
-                        .border(1.dp, BorderHairline, RoundedCornerShape(Radius.md))
-                        .clickable {
-                            clipboardSnippet = null
-                            viewModel.handlePastedInput(snippetText) { platform, url ->
-                                onOpenSocial(platform, url)
-                            }
-                        }
-                        .heightIn(min = 48.dp) // 16dp icon + 8+8dp padding alone was a ~36dp target
-                        .padding(horizontal = Spacing.md, vertical = Spacing.sm),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
+            AnimatedContent(
+                targetState = snippetText.takeIf { !it.isNullOrBlank() && uiState.query.isBlank() },
+                transitionSpec = {
+                    (fadeIn(tween(Motion.DurationFast)) +
+                        expandVertically(tween(Motion.DurationFast))) togetherWith
+                        (fadeOut(tween(Motion.DurationNavExit)) +
+                            shrinkVertically(tween(Motion.DurationNavExit)))
+                },
+                label = "pasteBanner"
+            ) { shown ->
+                if (shown != null) {
+                    Spacer(modifier = Modifier.height(Spacing.sm))
                     Row(
-                        modifier = Modifier.weight(1f),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(Radius.md))
+                            .background(SurfaceElevated)
+                            .border(1.dp, BorderHairline, RoundedCornerShape(Radius.md))
+                            .clickable {
+                                clipboardSnippet = null
+                                viewModel.handlePastedInput(shown) { platform, url ->
+                                    onOpenSocial(platform, url)
+                                }
+                            }
+                            .heightIn(min = 48.dp) // 16dp icon + 8+8dp padding alone was a ~36dp target
+                            .padding(horizontal = Spacing.md, vertical = Spacing.sm),
+                        horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(Icons.Rounded.ContentPaste, contentDescription = null, tint = AccentPrimary, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(Spacing.sm))
-                        Text(
-                            text = run {
-                                val head = if (snippetText.length > 35) snippetText.take(35) + "..." else snippetText
-                                "Paste link: $head"
-                            },
-                            color = TextPrimary,
-                            fontSize = Type.label.fontSize,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
+                        Row(
+                            modifier = Modifier.weight(1f),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(Icons.Rounded.ContentPaste, contentDescription = null, tint = AccentPrimary, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(Spacing.sm))
+                            Text(
+                                text = run {
+                                    val head = if (shown.length > 35) shown.take(35) + "..." else shown
+                                    "Paste link: $head"
+                                },
+                                color = TextPrimary,
+                                fontSize = Type.label.fontSize,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        Text("Download", color = AccentPrimary, fontSize = Type.label.fontSize, fontWeight = FontWeight.Bold)
                     }
-                    Text("Download", color = AccentPrimary, fontSize = Type.label.fontSize, fontWeight = FontWeight.Bold)
                 }
             }
 
@@ -609,13 +631,9 @@ fun HomeScreen(
                             // untouched — animateItem state is per key, so
                             // partial updates never re-animate anything.
                             modifier = Modifier.animateItem(
-                                fadeInSpec = spring(
-                                    Motion.EffectsDamping, Motion.EffectsStiffnessDefault
-                                ),
-                                placementSpec = spring(
-                                    Motion.SpatialDamping, Motion.SpatialStiffnessDefault
-                                ),
-                                fadeOutSpec = tween(Motion.DurationFast)
+                                fadeInSpec = Motion.ItemFadeIn,
+                                placementSpec = Motion.ItemPlacement,
+                                fadeOutSpec = Motion.ItemFadeOut
                             )
                         )
                     }
@@ -629,7 +647,7 @@ fun HomeScreen(
         // Composed BEFORE the drawer block so tapping a card stacks the
         // EpisodeDrawer on top. The catalog hides while a genre page is open
         // and reappears on its back gesture (grid → catalog → home).
-        uiState.activeCategory?.let { category ->
+        OverlaySurface(target = uiState.activeCategory) { category ->
             CategoryPage(
                 category = category,
                 cards = uiState.categoryCards,
@@ -644,7 +662,7 @@ fun HomeScreen(
                 onOpen = { viewModel.openEpisodeDrawer(it) }
             )
         }
-        uiState.activeDramaRegion?.let { region ->
+        OverlaySurface(target = uiState.activeDramaRegion) { region ->
             com.anonrode.downloader.ui.components.AsianDramaExplorer(
                 region = region,
                 era = uiState.activeDramaEra,
@@ -665,7 +683,11 @@ fun HomeScreen(
                 onOpen = { viewModel.openEpisodeDrawer(it) }
             )
         }
-        if (uiState.catalogOpen && uiState.activeCategory == null && uiState.activeDramaRegion == null) {
+        OverlaySurface(
+            target = uiState.catalogOpen.takeIf {
+                uiState.activeCategory == null && uiState.activeDramaRegion == null
+            }
+        ) {
             CatalogPage(
                 catalogRows = uiState.catalogRows,
                 showPosters = viewModel.engine.showPostersInResults,
@@ -726,6 +748,30 @@ private fun BoxScope.PosterScrim() {
                 )
             )
     )
+}
+
+/** Surface Enter/Exit for full-page overlays (category page, Asian-drama hub,
+ *  catalog): AnimatedContent keeps the OUTGOING page composed, so its exit
+ *  animation draws real content — a plain `?.let` can only pop. 200ms in /
+ *  120ms out, the app's nav speed contract. */
+@Composable
+private fun <T : Any> OverlaySurface(target: T?, content: @Composable (T) -> Unit) {
+    AnimatedContent(
+        targetState = target,
+        transitionSpec = {
+            if (targetState != null) {
+                (fadeIn(tween(Motion.DurationFast)) +
+                    scaleIn(tween(Motion.DurationFast), initialScale = 0.985f)) togetherWith
+                    fadeOut(tween(Motion.DurationNavExit))
+            } else {
+                fadeIn(tween(Motion.DurationNavExit)) togetherWith
+                    (fadeOut(tween(Motion.DurationNavExit)) +
+                        scaleOut(tween(Motion.DurationNavExit), targetScale = 0.985f))
+            }
+        },
+        modifier = Modifier.fillMaxSize(),
+        label = "overlaySurface"
+    ) { state -> if (state != null) content(state) }
 }
 
 @Composable
@@ -848,13 +894,9 @@ private fun TrendingSection(
                             // New cards fade in as sites answer; nothing
                             // already on screen re-animates (per-key state).
                             modifier = Modifier.animateItem(
-                                fadeInSpec = spring(
-                                    Motion.EffectsDamping, Motion.EffectsStiffnessDefault
-                                ),
-                                placementSpec = spring(
-                                    Motion.SpatialDamping, Motion.SpatialStiffnessDefault
-                                ),
-                                fadeOutSpec = tween(Motion.DurationFast)
+                                fadeInSpec = Motion.ItemFadeIn,
+                                placementSpec = Motion.ItemPlacement,
+                                fadeOutSpec = Motion.ItemFadeOut
                             )
                         )
                     }
@@ -963,10 +1005,12 @@ private fun TrendingCard(
     val subtitleLine = remember(seasonPart, yearPart) {
         listOfNotNull(yearPart.ifBlank { null }, seasonPart).joinToString(" · ")
     }
+    val pressSrc = remember { MutableInteractionSource() }
     Column(
         modifier = modifier
+            .pressScale(pressSrc)
             .width(124.dp)
-            .clickable { onClick() }
+            .clickable(interactionSource = pressSrc, indication = null) { onClick() }
     ) {
         Box(
             modifier = Modifier
@@ -1469,13 +1513,9 @@ private fun CategoryPage(
                         // The grid streams in per-site partials — cards fade
                         // in as they arrive, painted ones never move.
                         modifier = Modifier.animateItem(
-                            fadeInSpec = spring(
-                                Motion.EffectsDamping, Motion.EffectsStiffnessDefault
-                            ),
-                            placementSpec = spring(
-                                Motion.SpatialDamping, Motion.SpatialStiffnessDefault
-                            ),
-                            fadeOutSpec = tween(Motion.DurationFast)
+                            fadeInSpec = Motion.ItemFadeIn,
+                            placementSpec = Motion.ItemPlacement,
+                            fadeOutSpec = Motion.ItemFadeOut
                         )
                     )
                 }
@@ -1683,13 +1723,9 @@ private fun CatalogPage(
                                     // Rows fill as their genre loads — cards
                                     // glide in rather than snapping.
                                     modifier = Modifier.animateItem(
-                                        fadeInSpec = spring(
-                                            Motion.EffectsDamping, Motion.EffectsStiffnessDefault
-                                        ),
-                                        placementSpec = spring(
-                                            Motion.SpatialDamping, Motion.SpatialStiffnessDefault
-                                        ),
-                                        fadeOutSpec = tween(Motion.DurationFast)
+                                        fadeInSpec = Motion.ItemFadeIn,
+                                        placementSpec = Motion.ItemPlacement,
+                                        fadeOutSpec = Motion.ItemFadeOut
                                     )
                                 )
                             }
@@ -1713,13 +1749,15 @@ fun ShowCardItem(
     /** Caller-owned modifier (list item animation rides here). */
     modifier: Modifier = Modifier
 ) {
+    val pressSrc = remember { MutableInteractionSource() }
     Row(
         modifier = modifier
+            .pressScale(pressSrc)
             .fillMaxWidth()
             .clip(RoundedCornerShape(Radius.lg))
             .background(SurfaceCard)
             .border(1.dp, BorderHairline, RoundedCornerShape(Radius.lg))
-            .clickable { onClick() }
+            .clickable(interactionSource = pressSrc, indication = null) { onClick() }
             .padding(Spacing.md),
         horizontalArrangement = Arrangement.spacedBy(Spacing.md)
     ) {

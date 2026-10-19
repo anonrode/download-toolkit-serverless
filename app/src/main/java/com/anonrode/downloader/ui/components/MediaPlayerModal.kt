@@ -10,7 +10,6 @@ import android.content.pm.ActivityInfo
 import android.media.audiofx.LoudnessEnhancer
 import android.net.Uri
 import android.graphics.Typeface
-import android.view.HapticFeedbackConstants
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.FrameLayout
@@ -22,6 +21,7 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
@@ -135,7 +135,9 @@ import androidx.media3.ui.CaptionStyleCompat
 import androidx.media3.ui.PlayerView
 import androidx.media3.ui.SubtitleView
 import com.anonrode.downloader.R
+import com.anonrode.downloader.ui.theme.Motion
 import com.anonrode.downloader.ui.theme.Spacing
+import com.anonrode.downloader.ui.util.tick
 import kotlinx.coroutines.delay
 import java.io.File
 import java.util.UUID
@@ -1037,7 +1039,7 @@ private fun MediaPlayerModalImpl(
                                     overdragDistance += -dragAmount
                                     if (overdragDistance >= detentThresholdPx) {
                                         boostDetentBroken = true
-                                        view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                                        view.tick()
                                         currentVolumePercent = 101
                                         exoPlayer.volume = 1.0f
                                         loudnessEnhancer.setBoostPercent(101, allowVolumeBoost)
@@ -1061,7 +1063,7 @@ private fun MediaPlayerModalImpl(
                                 if (candidate <= 100f) {
                                     boostDetentBroken = false
                                     overdragDistance = 0f
-                                    view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                                    view.tick()
                                     currentVolumePercent = 100
                                     exoPlayer.volume = 1.0f
                                     loudnessEnhancer.setBoostPercent(100, allowVolumeBoost)
@@ -1164,11 +1166,12 @@ private fun MediaPlayerModalImpl(
                 )
             }
 
-            // Volume & Boost HUD Pill
+            // Volume & Boost HUD Pill — fade on the app's nav tokens, not the
+            // stock spring defaults every other surface here has moved off.
             AnimatedVisibility(
                 visible = showVolumeHud && !inPip,
-                enter = fadeIn(),
-                exit = fadeOut(),
+                enter = fadeIn(animationSpec = tween(Motion.DurationFast)),
+                exit = fadeOut(animationSpec = tween(Motion.DurationNavExit)),
                 modifier = Modifier
                     .align(Alignment.TopCenter)
                     .padding(top = 64.dp)
@@ -1469,7 +1472,7 @@ private fun MediaPlayerModalImpl(
                                     }
                                     showVolumeHud = true
                                     volumeHudTick++
-                                    view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                                    view.tick()
                                 },
                                 leading = Icons.Filled.GraphicEq
                             )
@@ -1500,7 +1503,7 @@ private fun MediaPlayerModalImpl(
                     }
                     showVolumeHud = true
                     volumeHudTick++
-                    view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                    view.tick()
                 },
                 onPickTrack = { label ->
                     currentAudioLabel = label

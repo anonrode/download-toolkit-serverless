@@ -22,10 +22,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.sp
 import com.anonrode.downloader.security.TorrentSecurityShield
 import com.anonrode.downloader.ui.theme.*
+import com.anonrode.downloader.ui.util.confirmHaptic
+import com.anonrode.downloader.ui.util.tick
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -119,6 +122,8 @@ fun TorrentFilePickerDialog(
     val blockedFiles = request.files.filter { !it.isSafe }
     var selectedList by rememberSaveable { mutableStateOf(safeFiles.map { it.index }) }
     val selected = selectedList.toSet()
+    // Commit thump (Haptics verb) on the picker's one confirm action.
+    val hapticView = LocalView.current
 
     AlertDialog(
         onDismissRequest = { onDismiss(TorrentFilePicker.TorrentPickResult.Cancelled) },
@@ -142,6 +147,7 @@ fun TorrentFilePickerDialog(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clickable {
+                                    hapticView.tick()
                                     selectedList = if (checked) selectedList - file.index
                                     else selectedList + file.index
                                 }
@@ -149,6 +155,7 @@ fun TorrentFilePickerDialog(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Checkbox(checked = checked, onCheckedChange = {
+                                hapticView.tick()
                                 selectedList = if (it) selectedList + file.index else selectedList - file.index
                             })
                             Column(modifier = Modifier.weight(1f)) {
@@ -208,6 +215,7 @@ fun TorrentFilePickerDialog(
                 TextButton(
                     enabled = selected.isNotEmpty(),
                     onClick = {
+                        hapticView.confirmHaptic()
                         onDismiss(TorrentFilePicker.TorrentPickResult.Selected(selected.toList()))
                     }
                 ) {

@@ -1,6 +1,7 @@
 package com.anonrode.downloader.ui.screens
 
 import androidx.compose.animation.*
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -20,6 +21,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -29,6 +31,7 @@ import com.anonrode.downloader.ui.components.PosterFallbackWell
 import com.anonrode.downloader.ui.components.SegmentBar
 import com.anonrode.downloader.ui.components.SegmentCell
 import com.anonrode.downloader.ui.theme.*
+import com.anonrode.downloader.ui.util.confirmHaptic
 import com.anonrode.downloader.ui.util.pressScale
 import com.anonrode.downloader.viewmodel.MainViewModel
 
@@ -181,10 +184,14 @@ fun SocialModal(
             }
 
             // ---- Quality (video only) ----
+            // Same options-reveal spec as QuickShare's identical row — ONE
+            // spec for the pattern, not one per sheet (was stock defaults).
             AnimatedVisibility(
                 visible = !audioOnly,
-                enter = fadeIn() + expandVertically(),
-                exit = fadeOut() + shrinkVertically()
+                enter = fadeIn(animationSpec = tween(Motion.DurationNormal)) +
+                        expandVertically(animationSpec = tween(Motion.DurationNormal)),
+                exit = fadeOut(animationSpec = tween(Motion.DurationNormal)) +
+                        shrinkVertically(animationSpec = tween(Motion.DurationNormal))
             ) {
                 Column {
                     Spacer(modifier = Modifier.height(Spacing.sm))
@@ -238,10 +245,14 @@ fun SocialModal(
 
             // ---- The one action ----
             val dlSrc = remember { MutableInteractionSource() }
+            // Commit thump (Haptics verb): queueing is the sheet's one
+            // commitment moment, matching the drawer's batch confirm.
+            val hapticView = LocalView.current
             Button(
                 onClick = {
                     if (enqueued) return@Button
                     enqueued = true
+                    hapticView.confirmHaptic()
                     // Sync BOTH directions, persisting through the engine
                     // (which writes the pref). The old one-way `if
                     // (alwaysInstant)` meant a checked-then-unchecked box

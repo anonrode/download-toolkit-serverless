@@ -3,6 +3,7 @@ package com.anonrode.downloader.ui.screens
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -17,6 +18,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -26,6 +28,9 @@ import com.anonrode.downloader.pipeline.PlaylistPicker
 import com.anonrode.downloader.ui.components.EpisodeListSkeleton
 import com.anonrode.downloader.ui.components.QualityChipRow
 import com.anonrode.downloader.ui.theme.*
+import com.anonrode.downloader.ui.util.confirmHaptic
+import com.anonrode.downloader.ui.util.pressScale
+import com.anonrode.downloader.ui.util.tick
 import com.anonrode.downloader.viewmodel.MainViewModel
 
 /**
@@ -50,6 +55,9 @@ fun PlaylistPickerSheet(viewModel: MainViewModel, onDismiss: () -> Unit) {
     val state by viewModel.playlistState.collectAsState()
     val tasks by viewModel.engine.tasks.collectAsState()
     val meta = state.meta
+    // Haptics verb handle: tick = selection, confirm = commit (shared by the
+    // row toggles and the confirm button below).
+    val hapticView = LocalView.current
 
     var query by remember { mutableStateOf("") }
     var rangeSpec by remember { mutableStateOf("") }
@@ -300,11 +308,16 @@ fun PlaylistPickerSheet(viewModel: MainViewModel, onDismiss: () -> Unit) {
                 items(filtered, key = { it }) { idx ->
                     val entry = meta.entries[idx - 1]
                     val isDownloaded = entry.videoId in downloaded
+                    // Selection tick + press personality — same verb language
+                    // as the drawer's episode rows.
+                    val rowSrc = remember { MutableInteractionSource() }
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
+                            .pressScale(rowSrc)
                             .clip(RoundedCornerShape(Radius.md))
-                            .clickable {
+                            .clickable(interactionSource = rowSrc, indication = null) {
+                                hapticView.tick()
                                 if (selected.contains(idx)) selected.remove(idx) else selected.add(idx)
                             }
                             .padding(vertical = Spacing.xs, horizontal = Spacing.xxs),
@@ -385,9 +398,11 @@ fun PlaylistPickerSheet(viewModel: MainViewModel, onDismiss: () -> Unit) {
 
             // ---- confirm ----
             Spacer(Modifier.height(Spacing.sm))
+            val dlSrc = remember { MutableInteractionSource() }
             Button(
                 onClick = {
                     if (effective.isEmpty()) return@Button
+                    hapticView.confirmHaptic()
                     viewModel.confirmPlaylist(
                         indices = effective.sorted(),
                         audioOnly = audioOnly,
@@ -396,7 +411,8 @@ fun PlaylistPickerSheet(viewModel: MainViewModel, onDismiss: () -> Unit) {
                     onDismiss()
                 },
                 enabled = effective.isNotEmpty(),
-                modifier = Modifier.fillMaxWidth().height(48.dp),
+                interactionSource = dlSrc,
+                modifier = Modifier.fillMaxWidth().height(48.dp).pressScale(dlSrc),
                 shape = RoundedCornerShape(Radius.md),
                 colors = ButtonDefaults.buttonColors(containerColor = AccentPrimary, contentColor = BackgroundDark)
             ) {

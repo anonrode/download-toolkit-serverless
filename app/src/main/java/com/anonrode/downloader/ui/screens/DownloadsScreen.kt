@@ -2,6 +2,9 @@ package com.anonrode.downloader.ui.screens
 
 import android.content.Context
 import android.content.Intent
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -9,6 +12,11 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -66,6 +74,7 @@ import com.anonrode.downloader.data.models.TaskStatus
 import com.anonrode.downloader.ui.components.DownloadsSorter
 import com.anonrode.downloader.ui.components.PosterImageOrFallback
 import com.anonrode.downloader.ui.components.downloadsStats
+import com.anonrode.downloader.ui.components.rememberReduceMotion
 import com.anonrode.downloader.ui.theme.*
 import com.anonrode.downloader.ui.util.TitleFormatting
 import com.anonrode.downloader.ui.util.rejectHaptic
@@ -674,7 +683,14 @@ fun DownloadsScreen(
                                 onPause = { viewModel.engine.pause(task.id) },
                                 onRetry = { viewModel.engine.retry(task.id) },
                                 onCancel = { viewModel.engine.cancel(task.id) },
-                                onOpenActions = { pendingActionsTask = task }
+                                onOpenActions = { pendingActionsTask = task },
+                                // List Item Enter/Move (same shared spec as
+                                // every Home list — was the only list without).
+                                modifier = Modifier.animateItem(
+                                    fadeInSpec = Motion.ItemFadeIn,
+                                    placementSpec = Motion.ItemPlacement,
+                                    fadeOutSpec = Motion.ItemFadeOut
+                                )
                             )
                         }
                     }
@@ -693,7 +709,12 @@ fun DownloadsScreen(
                                 SocialShelfTile(
                                     task = item,
                                     onPlay = { onPlayTask(item) },
-                                    onOpenActions = { pendingActionsTask = item }
+                                    onOpenActions = { pendingActionsTask = item },
+                                    modifier = Modifier.animateItem(
+                                        fadeInSpec = Motion.ItemFadeIn,
+                                        placementSpec = Motion.ItemPlacement,
+                                        fadeOutSpec = Motion.ItemFadeOut
+                                    )
                                 )
                             }
                         }
@@ -1245,7 +1266,9 @@ private fun ActivityRow(
     // Kept for call-site parity: row-level cancel moved into the ⋮ actions
     // dialog ("Cancel this download?"), matching the mock's two-control cards.
     onCancel: () -> Unit,
-    onOpenActions: () -> Unit
+    onOpenActions: () -> Unit,
+    /** Caller-owned modifier (list placement animation rides here). */
+    modifier: Modifier = Modifier
 ) {
     val isPaused = task.status == TaskStatus.PAUSED
     // Card-level "active" = byte-transferring only (DOWNLOADING / RESOLVING):
@@ -1301,7 +1324,7 @@ private fun ActivityRow(
     } else 0f
     val barFraction by animateFloatAsState(
         targetValue = barTarget,
-        animationSpec = tween(durationMillis = 350),
+        animationSpec = tween(Motion.DurationNormal),
         label = "rowProgress"
     )
     val barVisible = (isActive || isPaused) && !isDone && !isFailed
@@ -1311,7 +1334,7 @@ private fun ActivityRow(
         shape = RoundedCornerShape(12.dp),
         colors = CardDefaults.cardColors(containerColor = SurfaceCard),
         border = BorderStroke(1.dp, BorderHairline),
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .clickable(
                 // PAUSED joined the clickable set (2026-10): tapping a paused
@@ -1390,23 +1413,39 @@ private fun ActivityRow(
                         if (sourceBadge.isNotBlank()) {
                             SiteTagChip(site = sourceBadge, kind = style.kind, chroma = chroma)
                         }
+                        // State Morph: the ink glides and the word crossfades
+                        // when QUEUED → DOWNLOADING → DONE lands (was a hard swap).
+                        val statusInk by animateColorAsState(
+                            targetValue = style.accent,
+                            animationSpec = tween(Motion.DurationFast),
+                            label = "rowStatusInk"
+                        )
                         if (style.kind == DownloadStateKind.LIVE) {
-                            StatusDot(color = style.accent, pulse = true)
+                            StatusDot(color = statusInk, pulse = true)
                         } else {
                             Text(
                                 text = style.glyph,
                                 fontSize = 10.sp,
                                 fontWeight = FontWeight.ExtraBold,
-                                color = style.accent
+                                color = statusInk
                             )
                         }
-                        Text(
-                            text = style.word,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = style.accent,
-                            maxLines = 1
-                        )
+                        AnimatedContent(
+                            targetState = style.word,
+                            transitionSpec = {
+                                fadeIn(tween(Motion.DurationFast)) togetherWith
+                                    fadeOut(tween(Motion.DurationNavExit))
+                            },
+                            label = "rowStatusWord"
+                        ) { word ->
+                            Text(
+                                text = word,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = statusInk,
+                                maxLines = 1
+                            )
+                        }
                     }
                     Spacer(modifier = Modifier.height(3.dp))
                     // Line 3: Progress metrics or full multi-line error (zero truncation)
@@ -1467,11 +1506,18 @@ private fun ActivityRow(
 
             // §3.2 flush bottom progress bar — 0dp of extra vertical height,
             // aligned to the card Box's BottomCenter; hidden on Done/Failed.
-            if (barVisible) {
+            // The fade rides the wrapper (AnimatedVisibility's content scope
+            // is not a BoxScope, so the align lives here) and the bar is a
+            // 3dp overlay — no layout shift from the appear/disappear.
+            AnimatedVisibility(
+                visible = barVisible,
+                modifier = Modifier.align(Alignment.BottomCenter),
+                enter = fadeIn(tween(Motion.DurationFast)),
+                exit = fadeOut(tween(Motion.DurationNavExit))
+            ) {
                 if (barIndeterminate) {
                     LinearProgressIndicator(
                         modifier = Modifier
-                            .align(Alignment.BottomCenter)
                             .fillMaxWidth()
                             .height(3.dp)
                             .semantics {
@@ -1486,7 +1532,6 @@ private fun ActivityRow(
                     LinearProgressIndicator(
                         progress = { barFraction },
                         modifier = Modifier
-                            .align(Alignment.BottomCenter)
                             .fillMaxWidth()
                             .height(3.dp)
                             .semantics {
@@ -1556,12 +1601,15 @@ private fun RetryCircleButton(onClick: () -> Unit, accent: Color = FailRust) {
  *  25% alpha (mock @keyframes pulse, 1.6s). */
 @Composable
 private fun StatusDot(color: Color, pulse: Boolean = false) {
-    val background = if (pulse) {
+    // Reduce-motion: a pulse is pure decoration, so the dot renders static
+    // (full alpha) and the transition is never created.
+    val reduceMotion = rememberReduceMotion()
+    val background = if (pulse && !reduceMotion) {
         val alpha by rememberInfiniteTransition(label = "liveDot").animateFloat(
             initialValue = 1f,
             targetValue = 0.25f,
             animationSpec = infiniteRepeatable(
-                tween(durationMillis = 800, easing = LinearEasing),
+                tween(durationMillis = Motion.DurationLivePulse / 2, easing = LinearEasing),
                 RepeatMode.Reverse
             ),
             label = "liveDotAlpha"
@@ -1842,9 +1890,11 @@ private fun shelfBadge(task: DownloadTask): String {
 private fun SocialShelfTile(
     task: DownloadTask,
     onPlay: () -> Unit,
-    onOpenActions: () -> Unit
+    onOpenActions: () -> Unit,
+    /** Caller-owned modifier (list placement animation rides here). */
+    modifier: Modifier = Modifier
 ) {
-    Column(modifier = Modifier.width(166.dp)) {
+    Column(modifier = modifier.width(166.dp)) {
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -2054,23 +2104,31 @@ private fun ShowFolderCard(
                 }
             }
 
-            if (isExpanded) {
-                Divider(color = BorderHairline, thickness = 1.dp)
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = Spacing.sm, vertical = Spacing.xs),
-                    verticalArrangement = Arrangement.spacedBy(Spacing.xs)
-                ) {
-                    items.forEach { task ->
-                        ActivityRow(
-                            task = task,
-                            onPlay = { onPlayTask(task) },
-                            onPause = { onPauseTask(task.id) },
-                            onRetry = { onRetryTask(task.id) },
-                            onCancel = { onCancelTask(task.id) },
-                            onOpenActions = { onRequestActions(task) }
-                        )
+            AnimatedVisibility(
+                visible = isExpanded,
+                enter = fadeIn(tween(Motion.DurationFast)) +
+                    expandVertically(tween(Motion.DurationFast)),
+                exit = fadeOut(tween(Motion.DurationNavExit)) +
+                    shrinkVertically(tween(Motion.DurationNavExit))
+            ) {
+                Column {
+                    Divider(color = BorderHairline, thickness = 1.dp)
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = Spacing.sm, vertical = Spacing.xs),
+                        verticalArrangement = Arrangement.spacedBy(Spacing.xs)
+                    ) {
+                        items.forEach { task ->
+                            ActivityRow(
+                                task = task,
+                                onPlay = { onPlayTask(task) },
+                                onPause = { onPauseTask(task.id) },
+                                onRetry = { onRetryTask(task.id) },
+                                onCancel = { onCancelTask(task.id) },
+                                onOpenActions = { onRequestActions(task) }
+                            )
+                        }
                     }
                 }
             }

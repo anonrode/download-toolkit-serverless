@@ -4,15 +4,13 @@ import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
@@ -41,7 +39,6 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
@@ -90,6 +87,7 @@ import com.anonrode.downloader.data.models.ShowCard
 import com.anonrode.downloader.data.models.TaskStatus
 import com.anonrode.downloader.ui.components.PosterFallbackWell
 import com.anonrode.downloader.ui.components.SkeletonBox
+import com.anonrode.downloader.ui.components.rememberInfiniteSweep
 import com.anonrode.downloader.ui.components.rememberReduceMotion
 import com.anonrode.downloader.ui.components.rememberShimmerX
 import com.anonrode.downloader.ui.theme.AnonTheme
@@ -951,7 +949,12 @@ fun EpisodeDrawer(
                                         modifier = Modifier
                                             .fillMaxWidth()
                                             .padding(horizontal = gutter, vertical = 6.dp)
-                                            .animateContentSize()
+                                            // Content Reveal: the synopsis grows on the
+                                            // app's spatial spring instead of the stock
+                                            // default spec.
+                                            .animateContentSize(
+                                                spring(Motion.SpatialDamping, Motion.SpatialStiffnessDefault)
+                                            )
                                             .clickable { synopsisExpanded = !synopsisExpanded }
                                     ) {
                                         Text(
@@ -1073,8 +1076,15 @@ fun EpisodeDrawer(
                                         }
                                     }
 
-                                    // Range input
-                                    AnimatedVisibility(visible = showRangeInput && episodes.size > 6) {
+                                    // Range input — Content Reveal on the shared tokens
+                                    // (was AnimatedVisibility on stock defaults).
+                                    AnimatedVisibility(
+                                        visible = showRangeInput && episodes.size > 6,
+                                        enter = fadeIn(tween(Motion.DurationFast)) +
+                                            expandVertically(tween(Motion.DurationFast)),
+                                        exit = fadeOut(tween(Motion.DurationNavExit)) +
+                                            shrinkVertically(tween(Motion.DurationNavExit))
+                                    ) {
                                         OutlinedTextField(
                                             value = rangeText,
                                             onValueChange = {
@@ -1436,10 +1446,17 @@ fun EpisodeRow(
                 modifier = Modifier.width(28.dp)
             )
 
+            // Content Swap: the downloaded dim glides (read in the DRAW phase)
+            // and the pill fades in — was an instant 0.78 snap + hard pill.
+            val rowDim by animateFloatAsState(
+                targetValue = if (isDownloaded) 0.78f else 1f,
+                animationSpec = tween(Motion.DurationFast),
+                label = "episodeRowDim"
+            )
             Column(
                 modifier = Modifier
                     .weight(1f)
-                    .alpha(if (isDownloaded) 0.78f else 1f),
+                    .graphicsLayer { alpha = rowDim },
                 verticalArrangement = Arrangement.Center
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1452,21 +1469,27 @@ fun EpisodeRow(
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f, fill = false)
                     )
-                    if (isDownloaded) {
-                        Spacer(modifier = Modifier.width(6.dp))
-                        // §2.6 emerald state pill: ✓ Downloaded / already queued —
-                        // a scannable tick in a 130-row list, colour+word+glyph.
-                        Text(
-                            text = "✓ Downloaded",
-                            fontSize = 9.sp,
-                            fontWeight = FontWeight.ExtraBold,
-                            letterSpacing = 0.4.sp,
-                            color = pal.emeraldText,
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(Radius.pill))
-                                .background(pal.emeraldTint)
-                                .padding(horizontal = 6.dp, vertical = 2.dp)
-                        )
+                    AnimatedVisibility(
+                        visible = isDownloaded,
+                        enter = fadeIn(tween(Motion.DurationFast)),
+                        exit = fadeOut(tween(Motion.DurationNavExit))
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Spacer(modifier = Modifier.width(6.dp))
+                            // §2.6 emerald state pill: ✓ Downloaded / already queued —
+                            // a scannable tick in a 130-row list, colour+word+glyph.
+                            Text(
+                                text = "✓ Downloaded",
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                letterSpacing = 0.4.sp,
+                                color = pal.emeraldText,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(Radius.pill))
+                                    .background(pal.emeraldTint)
+                                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                            )
+                        }
                     }
                 }
                 // Subtitle: quality · codec · size — parts derive in order
@@ -1524,9 +1547,13 @@ fun EpisodeRow(
             // deliberate flows go through selection + the docked CTA.)
 
             // Checkbox indicator with high contrast in both Light and Dark mode
+            // (press-scale rides the 22dp control only — never the row, whose
+            // grouped segment paint would flash through the seams).
+            val checkSrc = remember { MutableInteractionSource() }
             Box(
                 modifier = Modifier
                     .size(22.dp)
+                    .pressScale(checkSrc)
                     .clip(RoundedCornerShape(7.dp))
                     .then(
                         if (isSelected) {
@@ -1541,6 +1568,8 @@ fun EpisodeRow(
                     // semantics for TalkBack.
                     .toggleable(
                         value = isSelected,
+                        interactionSource = checkSrc,
+                        indication = null,
                         role = Role.Checkbox,
                         onValueChange = { onToggle() }
                     ),
@@ -1557,7 +1586,15 @@ fun EpisodeRow(
             }
         }
 
-        AnimatedVisibility(visible = expanded) {
+        // Episode details panel — Content Reveal on the shared tokens
+        // (was AnimatedVisibility on stock defaults).
+        AnimatedVisibility(
+            visible = expanded,
+            enter = fadeIn(tween(Motion.DurationFast)) +
+                expandVertically(tween(Motion.DurationFast)),
+            exit = fadeOut(tween(Motion.DurationNavExit)) +
+                shrinkVertically(tween(Motion.DurationNavExit))
+        ) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1631,15 +1668,9 @@ private fun DrawerLoadingState(stageText: String) {
     val reduceMotion = rememberReduceMotion()
     val skeletonX = rememberShimmerX(reduceMotion)
     val pal = sheetPalette(AnonTheme.colors.isDark)
-    val sweepState = rememberInfiniteTransition(label = "scrapeProgress").animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 1500, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "scrapeSweep"
-    )
+    // Reduce-motion: no transition is created at all (the old code only froze
+    // the draw, so the tick kept running forever = pure battery).
+    val sweepState = rememberInfiniteSweep(Motion.DurationScrapeSweep, "scrapeProgress")
     Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
         Spacer(modifier = Modifier.height(6.dp))
         Row(
@@ -1675,7 +1706,7 @@ private fun DrawerLoadingState(stageText: String) {
                     val w = size.width
                     if (w <= 0f) return@drawBehind
                     val segW = w * 0.34f
-                    val x = if (reduceMotion) 0f else sweepState.value * (w - segW)
+                    val x = sweepState * (w - segW)
                     drawRoundRect(
                         color = pal.accent,
                         topLeft = Offset(x, 0f),

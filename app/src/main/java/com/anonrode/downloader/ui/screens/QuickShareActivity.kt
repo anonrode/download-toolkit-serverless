@@ -38,6 +38,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -50,6 +51,7 @@ import com.anonrode.downloader.data.router.UrlRouter
 import com.anonrode.downloader.ui.components.SegmentBar
 import com.anonrode.downloader.ui.components.SegmentCell
 import com.anonrode.downloader.ui.theme.*
+import com.anonrode.downloader.ui.util.confirmHaptic
 import com.anonrode.downloader.ui.util.pressScale
 
 class QuickShareActivity : ComponentActivity() {
@@ -655,6 +657,8 @@ fun QuickShareCard(
 
             // ---- The one action (tap outside or ✕ dismisses) ----
             val dlSrc = remember { MutableInteractionSource() }
+            // Commit thump (Haptics verb) — fired only when a task queued.
+            val hapticView = LocalView.current
             Button(
                 onClick = {
                     if (enqueued) return@Button
@@ -664,7 +668,11 @@ fun QuickShareCard(
                     // armed when a task was actually queued, so the user
                     // can retry after granting permission.
                     val queued = onDownload(selectedQuality, audioOnly, alwaysInstant, engineOverride)
-                    if (!queued) enqueued = false
+                    if (!queued) {
+                        enqueued = false
+                    } else {
+                        hapticView.confirmHaptic()
+                    }
                 },
                 enabled = !enqueued,
                 interactionSource = dlSrc,
