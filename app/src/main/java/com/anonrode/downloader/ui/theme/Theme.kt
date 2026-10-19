@@ -197,6 +197,8 @@ fun AnonDownloaderTheme(
     val isDark = when (themeMode.lowercase()) {
         "light" -> false
         "system" -> isSystemDark
+        // Legacy/defensive alias: "auto" resolves exactly like "system".
+        "auto" -> isSystemDark
         else -> true
     }
 

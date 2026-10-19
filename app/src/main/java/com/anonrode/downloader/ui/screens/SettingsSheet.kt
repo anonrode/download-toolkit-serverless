@@ -1156,8 +1156,8 @@ internal fun SettingsDownloadsSection(state: SettingsState) {
                 value = state.maxConcurrent.toFloat(),
                 onValueChange = { state.maxConcurrent = it.toInt() },
                 onValueChangeFinished = { state.persist() },
-                valueRange = 1f..5f,
-                steps = 3,
+                valueRange = 1f..6f,
+                steps = 4,
                 thumb = { SettingsSliderThumb() },
                 colors = SliderDefaults.colors(
                     thumbColor = AccentPrimary,

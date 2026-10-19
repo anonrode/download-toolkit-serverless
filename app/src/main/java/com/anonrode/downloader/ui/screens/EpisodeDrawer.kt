@@ -421,13 +421,16 @@ fun EpisodeDrawer(
         // light sheet at the FULL detent. The app window's own flag re-applies
         // untouched the moment the dialog dismisses.
         val dialogWindow = (LocalView.current.parent as? DialogWindowProvider)?.window
+        // Read the sheet's dark state HERE: AnonTheme.colors is a @Composable
+        // getter, so it cannot be read from the non-composable SideEffect below.
+        val sheetIsDark = AnonTheme.colors.isDark
         SideEffect {
             dialogWindow?.let { w ->
                 // WindowCompat (core, not the ktx extension) — the plain
                 // `window.isAppearanceLightStatusBars` property needs a newer
                 // core-ktx than the dependency graph carries.
                 WindowCompat.getInsetsController(w, w.decorView)
-                    .isAppearanceLightStatusBars = !AnonTheme.colors.isDark
+                    .isAppearanceLightStatusBars = !sheetIsDark
             }
         }
         BoxWithConstraints(modifier = Modifier.fillMaxSize()) {

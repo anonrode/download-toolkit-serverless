@@ -1,6 +1,7 @@
 package com.anonrode.downloader.ads
 
 import android.content.Context
+import com.anonrode.downloader.data.rules.AdsConfig
 import com.anonrode.downloader.data.rules.DynamicRulesManager
 import com.anonrode.downloader.util.DebugLog
 import com.applovin.sdk.AppLovinSdk
@@ -30,7 +31,7 @@ import com.unity3d.ads.UnityAds
  * only journals init decisions. Never throws.
  */
 interface AdBridge {
-    fun init(context: Context, cfg: DynamicRulesManager.AdsConfig)
+    fun init(context: Context, cfg: AdsConfig)
     fun isReady(): Boolean
 }
 
@@ -39,7 +40,7 @@ interface AdBridge {
 object HouseAds : AdBridge {
     @Volatile private var ready = false
 
-    override fun init(context: Context, cfg: DynamicRulesManager.AdsConfig) {
+    override fun init(context: Context, cfg: AdsConfig) {
         ready = cfg.houseTitle.isNotBlank() || cfg.houseBody.isNotBlank()
     }
 
@@ -51,7 +52,7 @@ object HouseAds : AdBridge {
 object AppLovinBridge : AdBridge {
     @Volatile private var ready = false
 
-    override fun init(context: Context, cfg: DynamicRulesManager.AdsConfig) {
+    override fun init(context: Context, cfg: AdsConfig) {
         if (cfg.applovinSdkKey.isBlank()) return // no credential → stay inert
         try {
             val settings = AppLovinSdkSettings(context)
@@ -70,7 +71,7 @@ object AppLovinBridge : AdBridge {
 object UnityBridge : AdBridge {
     @Volatile private var ready = false
 
-    override fun init(context: Context, cfg: DynamicRulesManager.AdsConfig) {
+    override fun init(context: Context, cfg: AdsConfig) {
         if (cfg.unityGameId.isBlank()) return
         try {
             UnityAds.initialize(context, cfg.unityGameId, false, object : IUnityAdsInitializationListener {
@@ -96,7 +97,7 @@ object UnityBridge : AdBridge {
 object AdMobBridge : AdBridge {
     @Volatile private var ready = false
 
-    override fun init(context: Context, cfg: DynamicRulesManager.AdsConfig) {
+    override fun init(context: Context, cfg: AdsConfig) {
         try {
             MobileAds.initialize(context) {
                 ready = true

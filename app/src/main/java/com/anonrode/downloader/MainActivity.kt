@@ -149,6 +149,8 @@ class MainActivity : ComponentActivity() {
             val isDark = when (themeMode.lowercase()) {
                 "light" -> false
                 "system" -> isSystemInDarkTheme()
+                // Legacy/defensive alias: "auto" resolves exactly like "system".
+                "auto" -> isSystemInDarkTheme()
                 else -> true
             }
 
@@ -466,6 +468,9 @@ class MainActivity : ComponentActivity() {
 private fun MainActivity.resolveIsDark(themeMode: String): Boolean = when (themeMode.lowercase()) {
     "light" -> false
     "system" -> (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
+        Configuration.UI_MODE_NIGHT_YES
+    // Legacy/defensive alias: "auto" resolves exactly like "system".
+    "auto" -> (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
         Configuration.UI_MODE_NIGHT_YES
     else -> true
 }

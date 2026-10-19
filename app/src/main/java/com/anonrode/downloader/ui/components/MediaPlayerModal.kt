@@ -369,13 +369,27 @@ private fun MediaPlayerModalImpl(
                     .show(WindowInsetsCompat.Type.systemBars())
             }
             val theme = prefs?.getString("pref_theme_mode", "dark") ?: "dark"
-            val restoreStyle = if (theme.equals("light", ignoreCase = true)) {
+            // Resolve the EFFECTIVE dark state for the restore: the old
+            // light-vs-else check restored dark system bars for "system"/"auto"
+            // even when the device is in light mode. Read live here (plain
+            // context read, not a composable accessor) so the restore matches
+            // whatever the device is in at dismiss time.
+            val t = theme.lowercase()
+            val systemDark = (context.resources.configuration.uiMode and
+                android.content.res.Configuration.UI_MODE_NIGHT_MASK) ==
+                android.content.res.Configuration.UI_MODE_NIGHT_YES
+            val effectiveDark = when (t) {
+                "light" -> false
+                "system", "auto" -> systemDark
+                else -> true
+            }
+            val restoreStyle = if (effectiveDark) {
+                SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
+            } else {
                 SystemBarStyle.light(
                     android.graphics.Color.TRANSPARENT,
                     android.graphics.Color.TRANSPARENT
                 )
-            } else {
-                SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
             }
             componentActivity?.enableEdgeToEdge(
                 statusBarStyle = restoreStyle,

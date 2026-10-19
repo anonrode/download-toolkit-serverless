@@ -1298,10 +1298,13 @@ class DownloadEngine(
         if (words.isEmpty()) return false
         if (!words.all { normCard.contains(it) }) return false
 
-        // Year check inside titleMatches if both present
+        // Year check inside titleMatches if both present — ±1 tolerance,
+        // same rationale as the Layer-2 comment above: streaming sites label
+        // the SAME show off-by-one, so a strict equality here defeated the
+        // documented tolerance before it was ever reached.
         val qYear = extractYear(query)
         val cYear = extractYear(candidate)
-        if (qYear != null && cYear != null && qYear != cYear) return false
+        if (qYear != null && cYear != null && kotlin.math.abs(qYear - cYear) > 1) return false
 
         // Sequel / Part check if both present
         val partRegex = Regex("""\b(?:part|chapter|pt)[\s._-]?(\d+|[ivx]+)\b""")
@@ -1954,6 +1957,23 @@ class DownloadEngine(
                     if (variant == null) continue
                     val vFile = rewriteHlsMaster(variant, vUrl, "hls-$taskId-v$idx.m3u8", cacheDir)
                     if (vFile != null) created.add(vFile)
+                    if (vFile != null && masterFile == null) {
+                        // rewriteHlsMaster returns null when nothing needed
+                        // rewriting (fully absolute playlist). Materialize it
+                        // as a local master anyway so the variant repoint below
+                        // still runs and preflight returns a usable local
+                        // master — otherwise the variant files created just
+                        // above are orphaned and the engine falls back to the
+                        // remote master.
+                        masterFile = try {
+                            val f = File(cacheDir, "hls-$taskId.m3u8")
+                            f.writeText(playlist)
+                            f
+                        } catch (_: Exception) {
+                            null
+                        }
+                        if (masterFile != null) created.add(masterFile)
+                    }
                     if (vFile != null && masterFile != null) {
                         // Repoint this variant's URI in the local master at the
                         // local variant file (same directory → relative name).

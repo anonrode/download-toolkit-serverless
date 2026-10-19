@@ -43,6 +43,21 @@ object NollywoodFilter {
             RegexOption.IGNORE_CASE
         )
 
+    // One-entry cache: the regex used to be recompiled per card on feed
+    // surfaces. The volatile pair can race benignly — a lost race just
+    // recomputes the same Regex from the same key, so no lock is needed.
+    @Volatile private var cachedTermKey: List<String>? = null
+    @Volatile private var cachedTermRegex: Regex? = null
+
+    private fun termRegexCached(terms: List<String>): Regex {
+        val key = terms.ifEmpty { DEFAULT_TERMS }
+        cachedTermKey?.let { if (it == key) return cachedTermRegex!! }
+        val re = termRegex(key)
+        cachedTermKey = key
+        cachedTermRegex = re
+        return re
+    }
+
     private fun matchesTerm(text: String?, re: Regex): Boolean =
         !text.isNullOrEmpty() && re.containsMatchIn(text)
 
@@ -56,7 +71,7 @@ object NollywoodFilter {
     fun isNollywoodTitle(title: String): Boolean {
         val policy = DynamicRulesManager.getContentPolicy()
         if (!policy.suppressNollywood) return false
-        return matchesTerm(title, termRegex(policy.nollywoodTerms.ifEmpty { DEFAULT_TERMS }))
+        return matchesTerm(title, termRegexCached(policy.nollywoodTerms))
     }
 
     fun isNollywood(card: ShowCard): Boolean {
@@ -67,7 +82,7 @@ object NollywoodFilter {
         // R3: brand-level kill list (default empty).
         if (policy.nollywoodOnlySites.any { it.equals(site, ignoreCase = true) }) return true
 
-        val re = termRegex(policy.nollywoodTerms.ifEmpty { DEFAULT_TERMS })
+        val re = termRegexCached(policy.nollywoodTerms)
 
         // R1: the title says it — any site.
         if (matchesTerm(card.title, re)) return true

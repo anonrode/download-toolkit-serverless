@@ -1532,6 +1532,10 @@ object YoutubeDlDownloader {
         if (clean.isBlank()) return true
         val lower = clean.lowercase()
         if (lower == "video.mp4" || lower == "download.mp4" || lower == "video" || lower == "download") return true
+        // Generic export titles ("Shared media.mp4", "Direct video.mp4") from
+        // OS share sheets — same unnamed treatment as the names above.
+        val stem = lower.substringBeforeLast('.', lower)
+        if (stem in setOf("shared media", "direct media", "shared video", "direct video")) return true
         if (clean.startsWith("Social_", ignoreCase = true)) return true
         val genericPlatformRegex = Regex(
             """^(Instagram|YouTube|Twitter|Facebook|TikTok|Pinterest|Reddit|X|Social|Web)[\s_]*(Video)?[-\d\s]*(\.[A-Za-z0-9]+)?$""",
