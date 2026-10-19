@@ -425,3 +425,22 @@ Rollback: revert commit + republish previous payload rev (kill switches make cod
   exported="true" with the BOOT_COMPLETED rationale; AdMob test-id confirmed). CI-watch prep: `gh` is
   unauthenticated → poll the public Actions API with curl; fix-loop identifies failing steps via the
   jobs endpoint and patches statically.
+- 2026-10-18 late — **CI feature suites added** (orchestrator): `UpdateFlowTest` (state machine + all
+  brick rails incl. fails-closed), `AnnouncementFlowTest` (pick/дismiss/no-replay/rev semantics),
+  `EngagementIntegrityAdsTest` (welcome-back stamp, integrity off-states, ads inertness) — Robolectric,
+  executed by the GitHub build job. Baseline green: gate 191 files, adversarial 100%, 9 sims pass,
+  payload dry-run PASS, scripts compile.
+- 2026-10-18/19 — **QA FAN-OUT (3 agents)**:
+  - **QA-V2 (Python parity) COMPLETE** — 3 Kotlin-mirror suites (63/35/62 checks) + pref-key audit
+    (no orphans); findings F1 gate-not-satisfiable, F5 dead checkForUpdate, F6 ads budget scope KDoc,
+    F9 blank-copy cooldown burn + lost-update counter — ALL CLOSED in `1ba0b55`.
+  - **QA-V3 (flow/kill-switch sweep) COMPLETE** — all four families' kill switches verified WIRED;
+    3×P1 (announcement consumed by cold-start double activation; force.mode ignored → soft deployed as
+    hard; welcome-back unreachable due to pre-init call ordering) + P2s F4-F9 — ALL CLOSED in `1ba0b55`
+    (+ doc patches below).
+  - **QA-V1 (config/deps vs online docs)** — still running; its findings gate the final push.
+- 2026-10-18 late — `docs/PLATFORM_OPERATIONS.md` corrected against code (QA-V3 §5): escape-hatch
+  wording (silent 24h hide, no "Continue anyway" dialog), AppLovin/Unity = OTA SDK-init only (vendor
+  views not rendered in v3.3.0), snoozeHours 0→24h note, PackageInstaller fallback = synchronous-failure
+  scope, rev shown-key format `announcement_shown_rev_<rev>_<id>`. Checklist checkpoint `1ba0b55`
+  (191 files gate-green). Next: V1 gates → FINAL FINAL STAGE (push/watch/fix/tag/verify).

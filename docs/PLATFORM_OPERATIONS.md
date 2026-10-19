@@ -217,7 +217,7 @@ after the idle window also arms the in-app welcome-back card (same copy). Kill w
 | `apkArm64` / `apkUniversal` file names | ≤120 chars |
 | `sha256Arm64` / `sha256Universal` | 64 lowercase hex, or `""` until release day |
 | `force.minSupportedVersionCode` / version codes | 0–1,000,000 |
-| `force.snoozeHours` | 0–168 |
+| `force.snoozeHours` | 0–168 (`0` is treated as the 24h default) |
 | `ads.frequencyPerDay` | 0–20 |
 | `ads.placements` | ⊆ {`downloads_shelf`, `home_footer`} |
 | vendor credentials (`applovinSdkKey`, `unityGameId`, `admob*`, `fcm.*`) | ≤256 chars each |
@@ -284,9 +284,9 @@ Non-negotiable rails (enforced in code, listed so you can trust them):
 
 1. A HARD gate never renders when the payload is older than **14 days**, when policy evaluation
    failed, or when `minSupportedVersionCode` is 0. Stale policy degrades to "no gate".
-2. **Escape hatch**: on the hard gate, **long-press the "Update required" title 5 times** → a 24-hour
-   bypass appears ("Continue anyway"). Each bypass emits a `gate_bypass` telemetry record, so
-   bypasses are visible, never silent.
+2. **Escape hatch**: on the hard gate, **long-press the "Update required" title 5 times** → the gate
+   hides for 24 hours (a silent bypass — no extra dialog, by design). Each bypass emits a
+   `gate_bypass` telemetry record, so bypasses are visible, never silent.
 3. The gate blocks UI ONLY — downloads already in the engine keep running.
 4. Every surface is percent-rollable (§c) — you can stage a gate for 5% and watch before the fleet.
 5. The soft card's "Later" honors `force.snoozeHours` (default 24h) — no nagging loops.
@@ -363,8 +363,8 @@ currently INERT: nothing initializes unless its payload section is enabled.
 
 | Service | Fill in the payload | Code / manifest change | Rebuild? |
 |---|---|---|---|
-| **AppLovin (MAX)** | `ads.provider:"applovin"`, `ads.applovinSdkKey` (Dashboard → Account → Keys) | none | **No — fully OTA** |
-| **Unity Ads** | `ads.provider:"unity"`, `ads.unityGameId` (Unity Dashboard game id) | none | **No — fully OTA** |
+| **AppLovin (MAX)** | `ads.provider:"applovin"`, `ads.applovinSdkKey` (Dashboard → Account → Keys) | none | **OTA for SDK initialization** — the bridge initializes from the payload credential on activation; vendor ad VIEWS are not rendered in v3.3.0 (house is the only visible slot until a follow-up release) |
+| **Unity Ads** | `ads.provider:"unity"`, `ads.unityGameId` (Unity Dashboard game id) | none | **OTA for SDK initialization** (same view caveat as AppLovin) |
 | **AdMob** | `ads.provider:"admob"`, `ads.admobAppId`, `ads.admobBannerUnitId`, `ads.admobNativeUnitId` | **ONE manifest line**: in `AndroidManifest.xml` replace the `com.google.android.gms.ads.APPLICATION_ID` meta-data value (currently Google's test id `ca-app-pub-3940256099942544~3347511713`) with your real app id | **Yes — one line + rebuild** (the only AdMob field the SDK reads from the manifest) |
 | **Firebase / FCM** | `fcm.enabled:true`, `fcm.apiKey`, `fcm.appId`, `fcm.senderId`, `fcm.projectId` (Firebase console → project settings; manual options — deliberately NO `google-services.json`) | none client-side. Server side: send via FCM HTTP v1 with a service account | **No — fully OTA** |
 | **Play Integrity** | none yet (the payload flag does not exist in v3.3.0) | `update/IntegrityAttestor.kt`: flip `ENABLED = true`, set `CLOUD_PROJECT_NUMBER`, stand up the server verify endpoint; Google Cloud project + Play Console link required | **Yes** (consts) — and honestly caveated: verdict strength on sideloaded apps is weak; enable only if wanted |
@@ -412,11 +412,11 @@ a repackaged build (visibility only — decide the response, e.g. a payload gate
 
 | Symptom | Check (in order) | Fix |
 |---|---|---|
-| Announcement doesn't show anywhere | Section present in the LIVE payload? `flags.announcements` enabled? `minApp` ≤ device build? `expiresAtMs` passed? Already shown? (`announcement_shown_<id>` / `_rev_<rev>` pref on the device) | New id (or `oncePer:"rev"` + new rev) for retries; check the sync happened (24h floor / 6h resume / manual sync button) |
+| Announcement doesn't show anywhere | Section present in the LIVE payload? `flags.announcements` enabled? `minApp` ≤ device build? `expiresAtMs` passed? Already shown? (`announcement_shown_<id>` for oncePer=id, `announcement_shown_rev_<rev>_<id>` for oncePer=rev — the rev key carries BOTH, so different ids in one rev don't suppress each other) | New id (or `oncePer:"rev"` + new rev) for retries; check the sync happened (24h floor / 6h resume / manual sync button) |
 | Gate never appears (hard) | Payload really fresh? (last successful sync or rules-cache mtime < 14 days) `force.enabled` true? `minSupportedVersionCode` > device VERSION_CODE and non-zero? | The rails intentionally fail closed — verify with a device log (`UpdateManager.evaluate`) that the policy parsed; then re-check the payload fields |
 | Gate won't dismiss | It's `mode:"hard"` by design | Use the escape hatch (long-press title 5×, 24h bypass) and then FIX THE PAYLOAD (`force.enabled:false` or raise the floor → new rev). Check `gate_bypass` telemetry to see how many users did the same |
 | Update download fails on device | Source order + SHA: does the VPS serve the file (`curl -sI http://68.155.146.145/ota/apk/<file>` from on the box)? Does the GitHub asset exist? Do `latest.json` sha256s equal the payload pins? File names typo'd? | Re-run `publish_apk.py --sync-box` (it verifies hashes on the box); re-copy pins from the fresh `latest.json`; publish a corrected rev |
-| Install never starts | REQUEST_INSTALL_PACKAGES present (it is); user hasn't allowed "install from this source" yet | The installer prompt asks once; if PackageInstaller errors, the ACTION_VIEW fallback opens the same prompt |
+| Install never starts | REQUEST_INSTALL_PACKAGES present (it is); user hasn't allowed "install from this source" yet | The installer prompt asks once; the ACTION_VIEW fallback covers a SYNCHRONOUS session failure — an async installer error surfaces in the system installer UI and can be retried from the gate |
 | Ads never show | `ads.enabled` true? `provider` correct? credential filled (applovin/unity/admob)? `placements` names match the slot ids? Daily cap already reached (`ad_impressions_<day>_<houseId>`)? | Fix the field, bump rev; for AdMob also check the manifest app id was replaced at registration (§f) |
 | Engagement notification never arrives | `engagement.enabled` true? POST_NOTIFICATIONS permission granted on Android 13+? device battery-optimization killing alarms (inexact alarms are deferred in Doze — this is expected, not a bug)? inside `cooldownDays` of a previous send? | Verify `inactiveDays` window actually elapsed since last open; use `engagement_sent` telemetry as ground truth for "was it posted" |
 | Everything is stale after publishing | Rev not bumped? Signed `fleet-pin verified` at publish time? Device within 24h floor and no >6h resume yet? | Bump rev and republish; manual sync on a test device to check within minutes |
