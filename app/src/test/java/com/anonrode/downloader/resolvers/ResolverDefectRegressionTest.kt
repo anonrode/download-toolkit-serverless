@@ -85,8 +85,13 @@ class ResolverDefectRegressionTest {
             }
         }
         // The watchdog must re-read state from the repository per tick — that is
-        // what makes its `t` live rather than stale:
-        assertTrue(source.contains("val t = repository.find(task.id) ?: break"))
+        // what makes its variable live rather than stale.
+        // TRIAGE (A) TEST DRIFT: the re-read is now `val live =
+        // repository.find(task.id) ?: task` (renamed t → live; the null branch
+        // falls back to the captured task instead of breaking — the same
+        // per-tick freshness contract, and the dead `?: break` form no longer
+        // exists in the engine).
+        assertTrue(source.contains("val live = repository.find(task.id) ?: task"))
     }
 
     @Test fun concurrencyDefaultsAndBoundsStayBounded() {
@@ -96,12 +101,13 @@ class ResolverDefectRegressionTest {
         assertTrue(settings.contains("""pref_max_downloads", 4).coerceIn(1, 6"""))
         assertTrue(settings.contains("""pref_parallel_sockets", 16).coerceIn(1, 16"""))
         assertTrue(engine.contains("var maxConcurrentDownloads: Int = 4"))
-        // TRIAGE (A) TEST DRIFT: processQueue now builds a UNION guard
-        // (status counts ∪ live activeJobs ∪ startingTaskIds) instead of the old
-        // `jobActive + startingActive` sum; the union is the stronger bound.
-        // Restated invariant: starting-but-not-yet-running launches are still
-        // counted into THE concurrency choke-point.
-        assertTrue(engine.contains("addAll(startingTaskIds)"))
+        // TRIAGE (A) TEST DRIFT: processQueue's UNION guard is now built from
+        // status counts ∪ runtimeRegistry.activeRunningTaskIds(), and that
+        // registry accessor returns entries that are isStarting OR have an
+        // active job (TaskRuntimeRegistry: activeJob?.isActive == true ||
+        // isStarting.get()) — the starting-but-not-yet-registered window is
+        // still counted into THE concurrency choke-point.
+        assertTrue(engine.contains("addAll(runtimeRegistry.activeRunningTaskIds())"))
         assertTrue(engine.contains("if (activeCount >= maxConcurrentDownloads) return"))
     }
 
