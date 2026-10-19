@@ -340,7 +340,10 @@ fun HomeScreen(
                             ) {
                                 Icon(
                                     imageVector = Icons.Rounded.ArrowForward,
-                                    contentDescription = "Search",
+                                    // Distinct from the bottom-nav "Search" tab:
+                                    // sharing one label made both TalkBack and the
+                                    // instrumented tests ambiguous.
+                                    contentDescription = "Submit search",
                                     tint = BackgroundDark,
                                     modifier = Modifier.size(18.dp)
                                 )

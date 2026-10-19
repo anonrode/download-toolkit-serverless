@@ -39,8 +39,19 @@ class MainSmokeTest {
                 "Search series, anime, movies, torrents..."
             ).fetchSemanticsNodes().isNotEmpty()
         }
+        // The splash paints as the TOPMOST child of the same composition —
+        // HomeScreen is already composed (and its placeholder already in the
+        // tree) while the splash is still fading. That made the placeholder
+        // poll return with TWO "ANONRODE" texts in the tree and the plain
+        // assertIsDisplayed below fail ("expected at most 1 node, found 2").
+        // Wait until only the home header remains; this also guarantees taps
+        // below land on the real UI, not the splash overlay.
+        composeRule.waitUntil(timeoutMillis = 30_000) {
+            composeRule.onAllNodesWithText("ANONRODE").fetchSemanticsNodes().size == 1
+        }
         // Storage rationale AlertDialog (API 30+) covers HomeScreen with a
-        // scrim. Dismiss it before any click/assertion. The button only
+        // scrim. Dismiss it before any click/assertion (checked after the
+        // splash is gone so the tap lands on the dialog). The button only
         // exists on Android 11+; on older API the query is empty and the
         // call is a no-op.
         if (composeRule.onAllNodesWithText("Not now")
@@ -60,9 +71,15 @@ class MainSmokeTest {
     @Test
     fun downloadsScreen_opensAndNavigatesBack() {
         waitForMainScreen()
-        composeRule.onNodeWithContentDescription("Downloads").performClick()
+        // The nav item's icon description is merged into the item's semantics
+        // node, so the merged tree exposes no node whose own
+        // ContentDescription == "Downloads" — look in the unmerged tree
+        // (the CI failure message recommends exactly this).
+        composeRule.onNodeWithContentDescription("Downloads", useUnmergedTree = true)
+            .performClick()
         composeRule.onNodeWithText("DOWNLOADS & MEDIA").assertIsDisplayed()
-        composeRule.onNodeWithContentDescription("Back").performClick()
+        composeRule.onNodeWithContentDescription("Back", useUnmergedTree = true)
+            .performClick()
         composeRule.onNodeWithText("ANONRODE").assertIsDisplayed()
     }
 }

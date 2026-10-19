@@ -2,6 +2,7 @@ package com.anonrode.downloader
 
 import android.content.Context
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.isFocused
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onAllNodesWithText
@@ -89,14 +90,25 @@ class EmulatorGatingSmokeTest {
                 "Search series, anime, movies, torrents..."
             ).fetchSemanticsNodes().isNotEmpty()
         }
+        // The splash paints as the TOPMOST child of the same composition —
+        // HomeScreen (and this placeholder) are already in the tree while
+        // the splash still covers the window. Wait for the splash's
+        // "ANONRODE" to leave (one node left = the home header) so every
+        // later tap lands on the real UI and the single-ANONRODE assertion
+        // in the cold-start test is deterministic.
+        composeRule.waitUntil(timeoutMillis = 30_000) {
+            composeRule.onAllNodesWithText("ANONRODE").fetchSemanticsNodes().size == 1
+        }
         // Storage rationale dialog covers HomeScreen on API 30+ when the
         // app does not hold MANAGE_EXTERNAL_STORAGE (always true for the
         // instrumented test). The dialog is an AlertDialog on top of the
         // composition, so HomeScreen nodes stay in the tree but the dialog
         // scrim makes `assertIsDisplayed` fail. Dismiss it with "Not now"
         // before any assertion or click so the test sees an unobscured
-        // HomeScreen. The dialog only appears on Android 11+ (R+); on
-        // older API the node simply won't exist and the call is a no-op.
+        // HomeScreen (checked AFTER the splash is gone so the tap lands on
+        // the dialog, not the splash overlay). The dialog only appears on
+        // Android 11+ (R+); on older API the node simply won't exist and the
+        // call is a no-op.
         if (composeRule.onAllNodesWithText("Not now")
                 .fetchSemanticsNodes().isNotEmpty()) {
             composeRule.onNodeWithText("Not now").performClick()
@@ -150,7 +162,8 @@ class EmulatorGatingSmokeTest {
         composeRule.onNodeWithText("Search series, anime, movies, torrents...")
             .assertIsDisplayed()
         // Navigate to Downloads. The icon has contentDescription="Downloads".
-        composeRule.onNodeWithContentDescription("Downloads").performClick()
+        composeRule.onNodeWithContentDescription("Downloads", useUnmergedTree = true)
+            .performClick()
         composeRule.waitUntil(timeoutMillis = 15_000) {
             composeRule.onAllNodesWithText("DOWNLOADS & MEDIA")
                 .fetchSemanticsNodes().isNotEmpty()
@@ -172,23 +185,36 @@ class EmulatorGatingSmokeTest {
         // search bar's text first to ensure focus, then type via
         // performTextInput on the displayed placeholder area's text node.
         val query = "test-query-x9q"
+        // Focus the field the way a user does: tap the visible search-bar
+        // text — the transparent BasicTextField sits in the SAME box and
+        // takes focus from that tap. (The old direct performTextInput on
+        // the placeholder node assumed that node WAS the field; it is a
+        // sibling Text with no focus action — the exact cause of the CI
+        // failure "Failed to assert the following: (RequestFocus is
+        // defined)".)
         composeRule.onNodeWithText("Search series, anime, movies, torrents...")
-            .performTextInput(query)
-        // The query is in the state; the submit arrow appears only when the
-        // query is non-blank, so its visibility proves state propagation.
+            .performClick()
+        composeRule.waitUntil(timeoutMillis = 5_000) {
+            composeRule.onAllNodes(isFocused()).fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNode(isFocused()).performTextInput(query)
+        // The submit arrow appears only when the query is non-blank, so its
+        // visibility proves state propagation. Its description is distinct
+        // from the bottom-nav "Search" tab ("Submit search").
         composeRule.waitUntil(timeoutMillis = 10_000) {
-            composeRule.onAllNodesWithContentDescription("Search")
+            composeRule.onAllNodesWithContentDescription("Submit search", useUnmergedTree = true)
                 .fetchSemanticsNodes().isNotEmpty()
         }
-        composeRule.onNodeWithContentDescription("Search").performClick()
-        // Either results render OR the "no results"/"connection error" state
-        // renders — both are valid outcomes without a live site. The
-        // assertion is that one of the three states surfaces within 30s, i.e.
-        // the search pipeline ran end-to-end.
+        composeRule.onNodeWithContentDescription("Submit search", useUnmergedTree = true)
+            .performClick()
+        // Either results render OR the loading/error/no-matches state renders —
+        // all are valid outcomes without a live site. The assertion is that
+        // one of the three states surfaces within 30s, i.e. the search
+        // pipeline ran end-to-end.
         composeRule.waitUntil(timeoutMillis = 30_000) {
-            composeRule.onAllNodesWithText("Streaming search across all providers...")
+            composeRule.onAllNodesWithText("Searching all sources…")
                 .fetchSemanticsNodes().isNotEmpty() ||
-                composeRule.onAllNodesWithText("No results found for", substring = true)
+                composeRule.onAllNodesWithText("No matches for", substring = true)
                     .fetchSemanticsNodes().isNotEmpty() ||
                 composeRule.onAllNodesWithText("Check your connection and try again", substring = true)
                     .fetchSemanticsNodes().isNotEmpty()
@@ -202,7 +228,8 @@ class EmulatorGatingSmokeTest {
         waitForHome()
         val task = injectTask(episodeTitle = "Persisted Task Episode")
         // Open downloads screen and wait for the card title.
-        composeRule.onNodeWithContentDescription("Downloads").performClick()
+        composeRule.onNodeWithContentDescription("Downloads", useUnmergedTree = true)
+            .performClick()
         waitForDownloadsHeader()
         composeRule.waitUntil(timeoutMillis = 10_000) {
             composeRule.onAllNodesWithText("Persisted Task Episode")
@@ -233,7 +260,8 @@ class EmulatorGatingSmokeTest {
         )
         // Give the engine a moment to settle so a stale initial render
         // doesn't bleed into the speed read.
-        composeRule.onNodeWithContentDescription("Downloads").performClick()
+        composeRule.onNodeWithContentDescription("Downloads", useUnmergedTree = true)
+            .performClick()
         waitForDownloadsHeader()
         // The engine's init block runs once on construction and parks any
         // DOWNLOADING task it sees to PAUSED. By the time the Downloads
@@ -258,7 +286,8 @@ class EmulatorGatingSmokeTest {
         // and the card is the only active one in the list, so a single match
         // is the right one.
         val tClickNanos = System.nanoTime()
-        composeRule.onNodeWithContentDescription("Pause").performClick()
+        composeRule.onNodeWithContentDescription("Pause", useUnmergedTree = true)
+            .performClick()
         // After click, within 1.5s the status line must have flipped
         // "Downloading · …" → "Paused · …". The 1.5s number is the user's hard
         // requirement: pause must look instant. v5/v6 rows carry no stale speed
@@ -301,7 +330,8 @@ class EmulatorGatingSmokeTest {
         // First-launch check: after the splash + init settle, the card must
         // show PAUSED, never DOWNLOADING. (Init parks DOWNLOADING -> PAUSED
         // before we even see the UI.)
-        composeRule.onNodeWithContentDescription("Downloads").performClick()
+        composeRule.onNodeWithContentDescription("Downloads", useUnmergedTree = true)
+            .performClick()
         waitForDownloadsHeader()
         composeRule.waitUntil(timeoutMillis = 10_000) {
             composeRule.onAllNodesWithText("ForceStop Test")
@@ -314,7 +344,8 @@ class EmulatorGatingSmokeTest {
         // Belt: a DOWNLOADING affordance (Pause button) must not be present.
         assertEquals(
             0,
-            composeRule.onAllNodesWithContentDescription("Pause").fetchSemanticsNodes().size
+            composeRule.onAllNodesWithContentDescription("Pause", useUnmergedTree = true)
+                .fetchSemanticsNodes().size
         )
         // The repo task should be PAUSED too (init's v3.0.4 fix).
         val all = repo.snapshot()
@@ -336,7 +367,8 @@ class EmulatorGatingSmokeTest {
             total = 30L * MB,
             episodeTitle = "Cancel Test Episode"
         )
-        composeRule.onNodeWithContentDescription("Downloads").performClick()
+        composeRule.onNodeWithContentDescription("Downloads", useUnmergedTree = true)
+            .performClick()
         waitForDownloadsHeader()
         composeRule.waitUntil(timeoutMillis = 10_000) {
             composeRule.onAllNodesWithText("Cancel Test Episode")
@@ -345,7 +377,8 @@ class EmulatorGatingSmokeTest {
         // v6 paused cards carry ▶ (Resume) + the ⋮ kebab (mock two-control
         // layout); cancel moved into the actions dialog the kebab opens
         // ("Cancel this download?" → Remove — same engine cancel, one gate).
-        composeRule.onNodeWithContentDescription("More actions").performClick()
+        composeRule.onNodeWithContentDescription("More actions", useUnmergedTree = true)
+            .performClick()
         composeRule.onNodeWithText("Remove").performClick()
         // Repository must drop it within the UI tick.
         composeRule.waitUntil(timeoutMillis = 5_000) {

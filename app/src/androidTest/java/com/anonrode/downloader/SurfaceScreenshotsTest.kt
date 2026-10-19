@@ -82,12 +82,19 @@ class SurfaceScreenshotsTest {
     }
 
     /** Same idiom as MainSmokeTest: wait for the post-splash Home search bar,
-     *  then dismiss the storage-rationale dialog if this API shows it. */
+     *  then the splash overlay itself, then dismiss the storage-rationale
+     *  dialog if this API shows it. Waiting the splash fully out also keeps
+     *  it out of capture 01 — captures happen right after this call. */
     private fun waitForMainScreen() {
         composeRule.waitUntil(timeoutMillis = 30_000) {
             composeRule.onAllNodesWithText(
                 "Search series, anime, movies, torrents..."
             ).fetchSemanticsNodes().isNotEmpty()
+        }
+        // Splash paints above the already-composed HomeScreen; one
+        // "ANONRODE" node left = the home header, splash gone.
+        composeRule.waitUntil(timeoutMillis = 30_000) {
+            composeRule.onAllNodesWithText("ANONRODE").fetchSemanticsNodes().size == 1
         }
         if (composeRule.onAllNodesWithText("Not now")
                 .fetchSemanticsNodes().isNotEmpty()) {
@@ -154,15 +161,15 @@ class SurfaceScreenshotsTest {
         composeRule.waitForIdle()
         capture("01_home_top")
 
-        composeRule.onNodeWithContentDescription("Downloads").performClick()
+        composeRule.onNodeWithContentDescription("Downloads", useUnmergedTree = true).performClick()
         composeRule.waitForIdle()
         capture("02_downloads")
 
-        composeRule.onNodeWithContentDescription("Settings").performClick()
+        composeRule.onNodeWithContentDescription("Settings", useUnmergedTree = true).performClick()
         composeRule.waitForIdle()
         capture("03_settings")
 
-        composeRule.onNodeWithContentDescription("Search").performClick()
+        composeRule.onNodeWithContentDescription("Search", useUnmergedTree = true).performClick()
         composeRule.waitForIdle()
 
         // ── Inject the platform surfaces and capture what they render ──
@@ -191,9 +198,9 @@ class SurfaceScreenshotsTest {
 
         // House-ad slot on the Home footer (best-effort: the landing column
         // only re-reads the config on recomposition — nudge it with a tab hop).
-        composeRule.onNodeWithContentDescription("Downloads").performClick()
+        composeRule.onNodeWithContentDescription("Downloads", useUnmergedTree = true).performClick()
         composeRule.waitForIdle()
-        composeRule.onNodeWithContentDescription("Search").performClick()
+        composeRule.onNodeWithContentDescription("Search", useUnmergedTree = true).performClick()
         composeRule.waitForIdle()
         if (composeRule.onAllNodesWithText("Injected house-ad slot.")
                 .fetchSemanticsNodes().isNotEmpty()) {
