@@ -34,6 +34,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -206,6 +207,14 @@ private fun TabPage(active: Boolean, content: @Composable () -> Unit) {
             .fillMaxSize()
             .zIndex(if (active) 1f else 0f)
             .graphicsLayer { this.alpha = alpha }
+            // An inactive tab is invisible (alpha 0) but stays composed —
+            // without clearing its semantics, a screen reader (and the
+            // instrumented tests) would still see EVERY node of every hidden
+            // tab, and e.g. the Settings tab's own back arrow ("Back to
+            // Search") collided with the Downloads tab's identical finder.
+            // Clearing while hidden keeps the semantics tree honest; the
+            // pages still never tear down (state/scroll positions survive).
+            .then(if (active) Modifier else Modifier.clearAndSetSemantics {})
             .pointerInput(active) {
                 if (active) detectTapGestures(onTap = {})
             }

@@ -468,7 +468,11 @@ fun DownloadsScreen(
             ) {
                 Icon(
                     imageVector = Icons.Default.ArrowBack,
-                    contentDescription = "Back",
+                    // Distinct from every other back affordance ("Back" on
+                    // home's overlay pages): this one returns to the Search
+                    // tab, and the distinct label keeps TalkBack and the
+                    // instrumented finders unambiguous.
+                    contentDescription = "Back to Search",
                     tint = TextSecondary,
                     modifier = Modifier.size(16.dp)
                 )

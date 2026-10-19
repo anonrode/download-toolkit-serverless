@@ -50,6 +50,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import coil.compose.AsyncImage
 import coil.imageLoader
@@ -302,6 +303,11 @@ fun HomeScreen(
                             ),
                             modifier = Modifier
                                 .fillMaxWidth()
+                                // Deterministic test handle: instrumented smoke
+                                // tests type through this node instead of the
+                                // placeholder Text sibling (which has no focus
+                                // action and made performTextInput fail).
+                                .testTag("home_search_field")
                                 .onFocusChanged { isSearchFocused = it.isFocused }
                         )
                     }
@@ -687,8 +693,14 @@ fun HomeScreen(
             )
         }
         OverlaySurface(
-            target = uiState.catalogOpen.takeIf {
-                uiState.activeCategory == null && uiState.activeDramaRegion == null
+            // `Unit.takeIf {...}` — NOT `catalogOpen.takeIf {...}`: a Boolean
+            // target of `false` is still NON-NULL, so OverlaySurface composed
+            // the entire catalog page whenever the other two overlays were
+            // closed — it painted over Home and its own Back arrow surfaced
+            // in every screen's semantics tree (caught by the emulator smoke
+            // suite before this build ever shipped).
+            target = Unit.takeIf {
+                uiState.catalogOpen && uiState.activeCategory == null && uiState.activeDramaRegion == null
             }
         ) {
             CatalogPage(

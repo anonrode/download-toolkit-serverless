@@ -66,6 +66,19 @@ class DownloadRepository {
         }
     }
 
+    /** Debug-only: re-apply the restore-time parking mapping to the current
+     *  in-memory list — the exact `parkForRestore` transformation
+     *  [initPersistence] applies to persisted rows when the app boots.
+     *  Instrumented tests use it to exercise the v3.0.4 "a reopen never
+     *  auto-resumes mid-flight work" contract without an actual process
+     *  restart (initPersistence itself is one-shot per process). No-op in
+     *  release builds. */
+    fun debugSimulateRestoreForTests() {
+        if (!com.anonrode.downloader.BuildConfig.DEBUG) return
+        _tasks.value = _tasks.value.map { parkForRestore(it) }
+        persist()
+    }
+
     private val persistMutex = kotlinx.coroutines.sync.Mutex()
 
     fun persist() {

@@ -78,7 +78,11 @@ class MainSmokeTest {
         composeRule.onNodeWithContentDescription("Downloads", useUnmergedTree = true)
             .performClick()
         composeRule.onNodeWithText("DOWNLOADS & MEDIA").assertIsDisplayed()
-        composeRule.onNodeWithContentDescription("Back", useUnmergedTree = true)
+        // The Downloads header's back arrow returns to the Search tab; its
+        // distinct label ("Back to Search") keeps it unambiguous next to the
+        // home overlays' own "Back" icons. Unmerged tree: the description is
+        // merged into the icon-button node's semantics otherwise.
+        composeRule.onNodeWithContentDescription("Back to Search", useUnmergedTree = true)
             .performClick()
         composeRule.onNodeWithText("ANONRODE").assertIsDisplayed()
     }

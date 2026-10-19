@@ -2,11 +2,12 @@ package com.anonrode.downloader
 
 import android.content.Context
 import androidx.compose.ui.test.assertIsDisplayed
-import androidx.compose.ui.test.isFocused
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onFirst
 import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
@@ -185,19 +186,14 @@ class EmulatorGatingSmokeTest {
         // search bar's text first to ensure focus, then type via
         // performTextInput on the displayed placeholder area's text node.
         val query = "test-query-x9q"
-        // Focus the field the way a user does: tap the visible search-bar
-        // text — the transparent BasicTextField sits in the SAME box and
-        // takes focus from that tap. (The old direct performTextInput on
-        // the placeholder node assumed that node WAS the field; it is a
-        // sibling Text with no focus action — the exact cause of the CI
-        // failure "Failed to assert the following: (RequestFocus is
-        // defined)".)
-        composeRule.onNodeWithText("Search series, anime, movies, torrents...")
-            .performClick()
-        composeRule.waitUntil(timeoutMillis = 5_000) {
-            composeRule.onAllNodes(isFocused()).fetchSemanticsNodes().isNotEmpty()
-        }
-        composeRule.onNode(isFocused()).performTextInput(query)
+        // Type straight into the field via its testTag. The placeholder Text
+        // is a SIBLING node with no focus action — the old
+        // placeholder-targeted performTextInput failed with "Failed to
+        // assert the following: (RequestFocus is defined)", and the
+        // tap-to-focus stand-in then timed out waiting for focus. The tagged
+        // BasicTextField node carries its own RequestFocus action, so
+        // performTextInput focuses and types in one step.
+        composeRule.onNodeWithTag("home_search_field").performTextInput(query)
         // The submit arrow appears only when the query is non-blank, so its
         // visibility proves state propagation. Its description is distinct
         // from the bottom-nav "Search" tab ("Submit search").
@@ -242,7 +238,9 @@ class EmulatorGatingSmokeTest {
         composeRule.waitUntil(timeoutMillis = 5_000) {
             composeRule.onAllNodesWithText("Paused").fetchSemanticsNodes().isNotEmpty()
         }
-        composeRule.onNodeWithText("Paused").assertIsDisplayed()
+        // "Paused" also names a status FILTER CHIP on this screen, so the
+        // contains-matcher finds two nodes; the row's own word is among them.
+        composeRule.onAllNodesWithText("Paused").onFirst().assertIsDisplayed()
         assertNotNull(repo.find(task.id))
     }
 
@@ -327,9 +325,14 @@ class EmulatorGatingSmokeTest {
             speed = 2.0 * MB,
             episodeTitle = "ForceStop Test"
         )
-        // First-launch check: after the splash + init settle, the card must
-        // show PAUSED, never DOWNLOADING. (Init parks DOWNLOADING -> PAUSED
-        // before we even see the UI.)
+        // Simulate the NEXT APP START: the persistence restore maps every
+        // mid-flight row through parkForRestore — the exact mapping
+        // initPersistence applies when AnonApp boots (the engine's own init
+        // already ran before this test and is one-shot per process, so this
+        // debug hook drives the same shipped transformation).
+        repo.debugSimulateRestoreForTests()
+        // First-launch check: after the splash + restore settle, the card
+        // must show PAUSED, never DOWNLOADING.
         composeRule.onNodeWithContentDescription("Downloads", useUnmergedTree = true)
             .performClick()
         waitForDownloadsHeader()
