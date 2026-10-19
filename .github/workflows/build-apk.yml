@@ -143,27 +143,26 @@ jobs:
           target: google_apis
           force-avd-creation: false
           disable-linux-hw-accel: false
-          # `|| true` keeps the step exit code the same as `gradle`'s so
-          # the workflow's `failure()` checks still fire on a real test
-          # failure. The trailing `adb logcat` dump is best-effort — it
-          # runs whether the tests passed or failed so the workflow log
-          # always has a tail of the device's recent logs available
-          # while debugging. Logcat output is bounded (a few hundred KB
-          # on this AVD/API combo) and is harmless on a green run.
+          # Gate design (2026-10-19, run-7 incident): the emulator-runner
+          # executes the script line-by-line, so neither a backslash
+          # continuation nor an `EXIT_CODE` shell variable reliably survives.
+          # Run 7 had ALL 12 TESTS GREEN (BUILD SUCCESSFUL) yet the step
+          # failed because the screenshots `adb pull` (its `|| true` split
+          # off with the line continuation) errored on a missing directory.
+          # Robust pattern: gradle's verdict lands in a MARKER FILE (files
+          # survive any subshell), every best-effort command stays on ONE
+          # line with `|| true`, and the LAST line re-asserts gradle's verdict
+          # as the step's exit code.
           script: |
-            gradle :app:connectedDebugAndroidTest --no-daemon || EXIT_CODE=$?
-            # Visual receipts: SurfaceScreenshotsTest writes PNGs into the app's
-            # external files dir; pull them while the emulator is still alive
-            # (the runner tears the device down at step end). Best-effort —
-            # never affects the gate's exit code (captured above).
+            mkdir -p "$RUNNER_TEMP/gate"
+            gradle :app:connectedDebugAndroidTest --no-daemon || touch "$RUNNER_TEMP/gate/first-run-failed"
             mkdir -p "$GITHUB_WORKSPACE/.ci-artifacts/screenshots"
-            adb pull /sdcard/Android/data/com.anonrode.downloader.debug/files/screenshots \
-              "$GITHUB_WORKSPACE/.ci-artifacts/screenshots/" || true
+            adb pull /sdcard/Android/data/com.anonrode.downloader.debug/files/screenshots "$GITHUB_WORKSPACE/.ci-artifacts/screenshots/" || true
             ls -la "$GITHUB_WORKSPACE/.ci-artifacts/screenshots" || true
             echo "===== adb logcat (last 200 lines, tag-filtered) ====="
             adb logcat -d -t 200 '*:E' '*:W' 'TestRunner:*' 'AndroidXTracer:*' 'AnonApp:*' 2>&1 || true
             echo "===== end logcat ====="
-            exit ${EXIT_CODE:-0}
+            test ! -f "$RUNNER_TEMP/gate/first-run-failed"
 
       - name: Archive first-run JUnit XML
         # Persist the first-run XML outside the emulator runner's tmpfs so
@@ -222,12 +221,13 @@ jobs:
             for c in $CLASSES; do
               ARGS="$ARGS -Pandroid.testInstrumentationRunnerArguments.class=$c"
             done
-            gradle :app:connectedDebugAndroidTest --no-daemon $ARGS \
-              || EXIT_CODE=$?
+            # Same marker-file pattern as the first pass (see the comment
+            # there): no backslash continuations, no EXIT_CODE variable.
+            mkdir -p "$RUNNER_TEMP/gate"
+            gradle :app:connectedDebugAndroidTest --no-daemon $ARGS || touch "$RUNNER_TEMP/gate/retry-failed"
             mkdir -p "$GITHUB_WORKSPACE/.ci-artifacts/screenshots"
-            adb pull /sdcard/Android/data/com.anonrode.downloader.debug/files/screenshots \
-              "$GITHUB_WORKSPACE/.ci-artifacts/screenshots/" || true
-            exit ${EXIT_CODE:-0}
+            adb pull /sdcard/Android/data/com.anonrode.downloader.debug/files/screenshots "$GITHUB_WORKSPACE/.ci-artifacts/screenshots/" || true
+            test ! -f "$RUNNER_TEMP/gate/retry-failed"
 
       - name: Archive retry JUnit XML
         if: always()

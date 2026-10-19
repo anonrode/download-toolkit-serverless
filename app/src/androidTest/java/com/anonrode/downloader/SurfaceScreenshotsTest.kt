@@ -19,6 +19,7 @@ import com.anonrode.downloader.data.rules.DynamicRulesManager
 import com.anonrode.downloader.update.AnnouncementManager
 import com.anonrode.downloader.update.UpdateManager
 import org.junit.After
+import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -59,6 +60,18 @@ class SurfaceScreenshotsTest {
 
     private fun shotDir(): File =
         File(ctx.getExternalFilesDir(null), "screenshots").apply { mkdirs() }
+
+    @Before
+    fun ensureShotDir() {
+        // Create the directory up front: the CI pull step tolerates a missing
+        // dir, but when captureToImage fails on a particular emulator the
+        // directory's mere existence keeps the failure mode visible in the
+        // logs instead of an opaque "No such file or directory".
+        try {
+            shotDir().mkdirs()
+        } catch (_: Throwable) {
+        }
+    }
 
     private fun capture(name: String) {
         try {
