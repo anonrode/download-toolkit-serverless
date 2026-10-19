@@ -6,6 +6,7 @@ import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.isRoot
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
@@ -86,10 +87,24 @@ class SurfaceScreenshotsTest {
      *  dialog if this API shows it. Waiting the splash fully out also keeps
      *  it out of capture 01 — captures happen right after this call. */
     private fun waitForMainScreen() {
+        // The app cold-starts on the LAST-USED tab (pref_last_tab): poll until
+        // the Search tab is up (tapping it as needed) so capture 01 is always
+        // Home. Hidden tabs no longer expose semantics.
         composeRule.waitUntil(timeoutMillis = 30_000) {
-            composeRule.onAllNodesWithText(
-                "Search series, anime, movies, torrents..."
-            ).fetchSemanticsNodes().isNotEmpty()
+            val homeUp = composeRule.onAllNodesWithText("Search series, anime, movies, torrents...")
+                .fetchSemanticsNodes().isNotEmpty()
+            if (!homeUp) {
+                val dismiss = composeRule.onAllNodesWithText("Not now")
+                if (dismiss.fetchSemanticsNodes().isNotEmpty()) {
+                    try { dismiss[0].performClick() } catch (_: Throwable) {}
+                } else {
+                    val navSearch = composeRule.onAllNodesWithContentDescription("Search", useUnmergedTree = true)
+                    if (navSearch.fetchSemanticsNodes().isNotEmpty()) {
+                        try { navSearch[0].performClick() } catch (_: Throwable) {}
+                    }
+                }
+            }
+            homeUp
         }
         // Splash paints above the already-composed HomeScreen; one
         // "ANONRODE" node left = the home header, splash gone.

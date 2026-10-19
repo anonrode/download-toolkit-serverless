@@ -86,10 +86,27 @@ class EmulatorGatingSmokeTest {
     // search bar is the canonical "the home tab is up" affordance, and it
     // is also what the cold-start test asserts immediately after this call.
     private fun waitForHome() {
+        // The app cold-starts on the LAST-USED tab (pref_last_tab — written
+        // on every tab switch, restored by MainActivity) and hidden tabs no
+        // longer expose semantics, so poll: clear whichever overlay is in
+        // the way (storage rationale "Not now"), tap the Search tab (the
+        // splash still covering the nav makes that tap a harmless no-op),
+        // and keep going until Home's placeholder answers.
         composeRule.waitUntil(timeoutMillis = 30_000) {
-            composeRule.onAllNodesWithText(
-                "Search series, anime, movies, torrents..."
-            ).fetchSemanticsNodes().isNotEmpty()
+            val homeUp = composeRule.onAllNodesWithText("Search series, anime, movies, torrents...")
+                .fetchSemanticsNodes().isNotEmpty()
+            if (!homeUp) {
+                val dismiss = composeRule.onAllNodesWithText("Not now")
+                if (dismiss.fetchSemanticsNodes().isNotEmpty()) {
+                    try { dismiss[0].performClick() } catch (_: Throwable) {}
+                } else {
+                    val navSearch = composeRule.onAllNodesWithContentDescription("Search", useUnmergedTree = true)
+                    if (navSearch.fetchSemanticsNodes().isNotEmpty()) {
+                        try { navSearch[0].performClick() } catch (_: Throwable) {}
+                    }
+                }
+            }
+            homeUp
         }
         // The splash paints as the TOPMOST child of the same composition —
         // HomeScreen (and this placeholder) are already in the tree while

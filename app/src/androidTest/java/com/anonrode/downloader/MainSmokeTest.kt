@@ -2,6 +2,7 @@ package com.anonrode.downloader
 
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
@@ -34,10 +35,25 @@ class MainSmokeTest {
     // placeholder instead — that text only exists in the post-splash
     // HomeScreen. This is the same fix applied to EmulatorGatingSmokeTest.
     private fun waitForMainScreen() {
+        // The app cold-starts on the LAST-USED tab (pref_last_tab) and hidden
+        // tabs no longer expose semantics, so poll: dismiss the storage
+        // dialog if it is up, tap the Search tab (a no-op while the splash
+        // still covers the nav), and keep going until Home answers.
         composeRule.waitUntil(timeoutMillis = 30_000) {
-            composeRule.onAllNodesWithText(
-                "Search series, anime, movies, torrents..."
-            ).fetchSemanticsNodes().isNotEmpty()
+            val homeUp = composeRule.onAllNodesWithText("Search series, anime, movies, torrents...")
+                .fetchSemanticsNodes().isNotEmpty()
+            if (!homeUp) {
+                val dismiss = composeRule.onAllNodesWithText("Not now")
+                if (dismiss.fetchSemanticsNodes().isNotEmpty()) {
+                    try { dismiss[0].performClick() } catch (_: Throwable) {}
+                } else {
+                    val navSearch = composeRule.onAllNodesWithContentDescription("Search", useUnmergedTree = true)
+                    if (navSearch.fetchSemanticsNodes().isNotEmpty()) {
+                        try { navSearch[0].performClick() } catch (_: Throwable) {}
+                    }
+                }
+            }
+            homeUp
         }
         // The splash paints as the TOPMOST child of the same composition —
         // HomeScreen is already composed (and its placeholder already in the
