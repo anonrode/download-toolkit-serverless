@@ -30,15 +30,20 @@ import java.time.LocalDate
  * this slot renders nothing for those providers, which keeps the ad plane
  * zero-risk until a network is actually chosen.
  *
- * Frequency: at most `frequencyPerDay` impressions per calendar day per
- * placement, counted with key `ad_impressions_<yyyyMMdd>_<houseId>`; the
- * impression is recorded once per composition entry via LaunchedEffect.
- * Telemetry is id-only (`ad_impression`).
+ * Frequency: at most `frequencyPerDay` impressions per calendar day for the
+ * configured house ad, shared across placements (the key is
+ * `ad_impressions_<yyyyMMdd>_<houseId>` — one daily budget, whichever slots
+ * render it); the impression is recorded once per composition entry via
+ * LaunchedEffect, re-reading the stored count at increment time so two slots
+ * composing in the same frame cannot lose an update. Telemetry is id-only
+ * (`ad_impression`).
  */
 @Composable
 fun AdSlot(placement: String, modifier: Modifier = Modifier) {
     val context = LocalContext.current
-    val cfg = remember { DynamicRulesManager.getAdsConfig() } ?: return
+    // F8 (QA-V3): plain read each composition — a payload that lands after
+    // the first frame (cold start) must be visible without a restart.
+    val cfg = DynamicRulesManager.getAdsConfig() ?: return
     if (!cfg.enabled || cfg.provider != "house" || placement !in cfg.placements || cfg.frequencyPerDay <= 0) {
         return
     }
@@ -55,7 +60,9 @@ fun AdSlot(placement: String, modifier: Modifier = Modifier) {
 
     LaunchedEffect(key) {
         try {
-            prefs.edit().putInt(key, shownToday + 1).apply()
+            // Re-read at increment time: two slots composing in the same frame
+            // would otherwise both write the same captured value (lost update).
+            prefs.edit().putInt(key, prefs.getInt(key, 0) + 1).apply()
         } catch (_: Exception) {
         }
         try {

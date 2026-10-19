@@ -52,7 +52,9 @@ fun UpdateGate() {
     val prefs = remember {
         context.getSharedPreferences("downloader_settings", Context.MODE_PRIVATE)
     }
-    val policy = remember { DynamicRulesManager.getUpdatePolicy() }
+    // F8 (QA-V3): plain reads each composition — a payload that lands after
+    // the first frame (cold start) must be visible without a restart.
+    val policy = DynamicRulesManager.getUpdatePolicy()
 
     var snoozeUntil by remember { mutableStateOf(prefs.getLong("update_snooze_until_ms", 0L)) }
     var bypassUntil by remember { mutableStateOf(prefs.getLong("update_gate_bypass_ms", 0L)) }
@@ -84,16 +86,23 @@ fun UpdateGate() {
     }
 
     val now = System.currentTimeMillis()
+    val isForced = state == UpdateManager.State.FORCED
+    // QA-V3 F2: force.mode selects PRESENTATION — "hard" is the locked
+    // dialog, "soft" (the default) is the dismissible card. Before this
+    // fix, every force config rendered the locked dialog while the ops doc
+    // promised "soft = dismissible".
+    val hardGate = isForced && (policy?.force?.mode?.lowercase() ?: "soft") == "hard"
     val visible = when (state) {
         // The escape hatch suppresses the HARD gate for 24h, then it returns
-        // (a nudge, never a brick).
-        UpdateManager.State.FORCED -> now >= bypassUntil
+        // (a nudge, never a brick). A SOFT force behaves like AVAILABLE
+        // (snooze-able) per the payload's force.mode semantics.
+        UpdateManager.State.FORCED ->
+            if (hardGate) now >= bypassUntil else now >= snoozeUntil
         UpdateManager.State.AVAILABLE -> now >= snoozeUntil
         else -> false
     }
     if (!visible) return
 
-    val isForced = state == UpdateManager.State.FORCED
     val body = message.ifBlank {
         if (isForced) "This version is no longer supported. Please update to continue."
         else "A new version is available."
@@ -140,7 +149,7 @@ fun UpdateGate() {
         prefs.edit().putLong("update_snooze_until_ms", snoozeUntil).apply()
     }
 
-    if (isForced) {
+    if (hardGate) {
         AlertDialog(
             onDismissRequest = { /* hard gate: outside/back dismiss disabled */ },
             properties = DialogProperties(
@@ -210,7 +219,7 @@ fun UpdateGate() {
                     .padding(Spacing.md)
             ) {
                 Text(
-                    text = "Update available",
+                    text = if (isForced) "Update required" else "Update available",
                     color = TextPrimary,
                     fontWeight = FontWeight.Bold,
                     fontSize = Type.rowTitle.fontSize

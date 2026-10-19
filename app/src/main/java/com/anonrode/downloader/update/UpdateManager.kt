@@ -75,8 +75,10 @@ object UpdateManager {
      * Sync, cheap (volatile rules + prefs only). Computes [state]/[message]
      * from the active update policy; safe to call on any thread, never
      * throws. FORCED requires the force block enabled, a non-zero
-     * minSupportedVersionCode, this build below the floor, and a payload
-     * whose age is known and < 14 days (§4.5 rail 1 + rail "minSupported 0").
+     * minSupportedVersionCode, this build below the floor, a payload whose
+     * age is known and < 14 days (§4.5 rail 1 + rail "minSupported 0"), AND a
+     * strictly newer build actually published (QA-V2 F1: a gate must always
+     * be satisfiable — never demand an update that does not exist).
      */
     fun evaluate(context: Context) {
         try {
@@ -89,11 +91,12 @@ object UpdateManager {
             val vc = BuildConfig.VERSION_CODE
             val force = policy.force
             val forceFloor = force?.minSupportedVersionCode ?: 0
+            val available = policy.latestVersionCode > vc
             val forced = force?.enabled == true &&
                 forceFloor > 0 &&
                 vc < forceFloor &&
+                available &&
                 payloadAgeMs(context) < STALE_RAIL_MS
-            val available = policy.latestVersionCode > vc
             val newState = when {
                 forced -> State.FORCED
                 available -> State.AVAILABLE
@@ -358,28 +361,11 @@ object UpdateManager {
         false
     }
 
-    // ---- manual check (absorbs util/UpdateChecker) --------------------------
-
-    /**
-     * Manual "Check for updates" for Settings. Reuses the existing
-     * GitHub-API → VPS-mirror → cached-answer chain in
-     * [UpdateChecker.check] (its `:8000` mirror was repointed to `:80` by the
-     * phase-1 unification) and refreshes [state] from the payload policy.
-     * Returns a user-facing summary string.
-     */
-    suspend fun checkForUpdate(context: Context): String {
-        evaluate(context)
-        return try {
-            when (val r = UpdateChecker.check()) {
-                is UpdateCheckResult.Available -> "Update available: ${r.latestTag}"
-                is UpdateCheckResult.UpToDate -> "Up to date (${r.latestTag})"
-                UpdateCheckResult.Error ->
-                    UpdateChecker.lastCheckDetail.ifBlank { "Could not reach the update servers" }
-            }
-        } catch (t: Throwable) {
-            "Update check failed (${t.javaClass.simpleName})"
-        }
-    }
+    // NOTE (QA-V2 F5): the earlier string-returning `checkForUpdate` wrapper
+    // was removed as dead code — Settings runs the structured
+    // util/UpdateChecker.check() chain itself and then calls [evaluate] so a
+    // manual check also refreshes the prompt/gate state. This object stays
+    // the single source for [state]/[message].
 
     // ---- telemetry ----------------------------------------------------------
 

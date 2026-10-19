@@ -982,6 +982,11 @@ class DownloadEngine(
                         val msg = "Download server stayed unreachable for 30+ minutes — gave up. Tap retry once the site is back."
                         repository.update(t.id) { it.copy(status = TaskStatus.FAILED, errorMessage = msg, speedBytesPerSec = 0.0) }
                         com.anonrode.downloader.util.DebugLog.user("park give-up task=${t.id}")
+                        // Terminal FAILED rows drop their registry entry too
+                        // (same leak class the COMPLETED path already cleans).
+                        // Guarded so an entry a live job still owns (a retry
+                        // racing this tick) is never clobbered.
+                        if (runtimeRegistry.get(t.id)?.activeJob?.isActive != true) runtimeRegistry.forget(t.id)
                         try {
                             com.anonrode.downloader.service.DownloadService.notifyFailed(
                                 context, t.id, t.episodeTitle, msg
@@ -1040,6 +1045,11 @@ class DownloadEngine(
         filterExplicitContent = prefs.getBoolean("pref_filter_explicit_content", true)
         // Retention applies at startup, not just when the setting changes.
         com.anonrode.downloader.util.DebugLog.configureRetention(logRetentionDays)
+        // debugLogging drives DebugLog's TRACE gate — without this call
+        // setVerbose had no production caller and trace() (4 call sites,
+        // incl. ShadowRunner lifecycle) could never emit. Default OFF; only
+        // the user's pref turns it on.
+        com.anonrode.downloader.util.DebugLog.setVerbose(debugLogging)
     }
 
     fun setShowPosters(show: Boolean) {
@@ -1107,6 +1117,8 @@ class DownloadEngine(
         this.subtitleLanguage = subLang.trim().ifBlank { "en" }
         this.filterExplicitContent = filterExplicit
         com.anonrode.downloader.util.DebugLog.configureRetention(this.logRetentionDays)
+        // Verbose gate applies live on save, exactly like retention above.
+        com.anonrode.downloader.util.DebugLog.setVerbose(this.debugLogging)
 
         // Turning a Wi-Fi gate OFF must release the tasks it parked: the network
         // observer only unparks on an actual Wi-Fi reconnect, so without this the
@@ -1393,8 +1405,12 @@ class DownloadEngine(
             processQueue()
             return
         }
-        // Keep the FIRST tasks in list order (the ones the user queued first);
-        // demote the rest back to the queue head order.
+        // Keep the FIRST tasks in list order — and list order is NEWEST-FIRST
+        // (DownloadRepository.addFirst prepends), so this keeps the MOST
+        // RECENTLY enqueued/active tasks and demotes the OLDEST back to QUEUED.
+        // processQueue then picks the newest QUEUED again (firstOrNull below),
+        // so the queue is LIFO by design: the tap the user made most recently
+        // starts next, matching the newest-first Downloads list on screen.
         actives.drop(maxConcurrentDownloads).forEach { t ->
             com.anonrode.downloader.util.DebugLog.user(
                 "concurrency limit now $maxConcurrentDownloads — demoting task=${t.id} (${t.episodeTitle.take(40)}) back to queue"
@@ -1891,6 +1907,11 @@ class DownloadEngine(
         com.anonrode.downloader.util.DebugLog.resolve(
             "task=${task.id} failover: no other provider could serve \"$query\""
         )
+        // Strongest no-source evidence the app can gather: every eligible
+        // provider was searched and none carried the title. Recorded ONCE per
+        // attempt-cycle here — after the candidate loop, never inside it —
+        // and the ledger TTLs it (48h) + clears on rules activation.
+        com.anonrode.downloader.pipeline.NoSourceLedger.recordUnresolved(query)
         return false
     }
 
@@ -2932,13 +2953,24 @@ class DownloadEngine(
                 runtimeRegistry.getActiveJob(taskId)?.cancel()
                 return
             }
+            var failedTerminal = false
             if (!parkInsteadOfFail(t, stallMsg, forcePark = isRateLimitedError(stallMsg))) {
                 repository.update(taskId) {
                     it.copy(status = TaskStatus.FAILED, errorMessage = stallMsg)
                 }
                 com.anonrode.downloader.service.DownloadService.notifyFailed(context, taskId, t.episodeTitle, stallMsg)
+                failedTerminal = true
             }
-            runtimeRegistry.getActiveJob(taskId)?.cancel()
+            val dyingJob = runtimeRegistry.getActiveJob(taskId)
+            dyingJob?.cancel()
+            // Watchdog-exhausted FAILED is terminal: drop the registry entry
+            // (same rule as the COMPLETED path). Runs AFTER the cancel so the
+            // dying job stays reachable, and never drops an entry a newer job
+            // (a retry racing this kill) has taken over.
+            if (failedTerminal) {
+                val reg = runtimeRegistry.get(taskId)
+                if (reg == null || reg.activeJob == null || reg.activeJob === dyingJob) runtimeRegistry.forget(taskId)
+            }
         } else {
             // Preserve park counters across stall kills: markForManualRetry's
             // resetParkingAndFailoverState would wipe parkCycleCount/firstParkedAtMs
@@ -2990,7 +3022,11 @@ class DownloadEngine(
         if (!lockAlreadyHeld && !runtimeRegistry.tryAcquireStartLock(initialTask.id)) return
         val live = repository.find(initialTask.id)
         if (live == null || live.status !in setOf(TaskStatus.QUEUED, TaskStatus.RESOLVING, TaskStatus.DOWNLOADING)) {
-            runtimeRegistry.releaseStartLock(initialTask.id)
+            // No job will ever attach to this entry, so forget it instead of
+            // leaving a dead key behind (release-only left one per guarded
+            // start). The start lock is exclusively ours here; a later retry
+            // re-creates the entry via getOrCreate.
+            runtimeRegistry.forget(initialTask.id)
             return
         }
         com.anonrode.downloader.util.DebugLog.write("start task=${initialTask.id} url=${initialTask.directUrl.take(80)} backend=${initialTask.backend}")
@@ -3066,6 +3102,18 @@ class DownloadEngine(
                             val reasonSuffix = if (!hostReason.isNullOrBlank()) " ($hostReason)" else ""
                             com.anonrode.downloader.util.DebugLog.error("task=${task.id} could not crack stream link (host=$host)$reasonSuffix for ${streamUrl.take(120)}")
                             if (attemptCrossProviderFailover(task)) return@launch
+                            // No source found: a resolver chain that came back
+                            // with zero candidates AND failover that exhausted
+                            // every other provider. Record the title for the
+                            // no-source ledger — once here, outside every
+                            // per-candidate loop. Gated on host usability so a
+                            // task merely parking out a cooldown (not a
+                            // terminal verdict) is never recorded.
+                            if (com.anonrode.downloader.pipeline.HostHealth.isUsable(streamUrl)) {
+                                com.anonrode.downloader.pipeline.NoSourceLedger.recordUnresolved(
+                                    task.showTitle.ifBlank { task.episodeTitle }
+                                )
+                            }
                             if (!com.anonrode.downloader.pipeline.HostHealth.isUsable(streamUrl)) {
                                 val mins = maxOf(1L, com.anonrode.downloader.pipeline.HostHealth.remainingBackoffMs(streamUrl) / 60_000L)
                                 com.anonrode.downloader.util.DebugLog.resolve("task=${task.id} host $host in backoff — parking for ~${mins}m")
@@ -3864,6 +3912,13 @@ class DownloadEngine(
                         repository.update(task.id) { it.copy(status = TaskStatus.FAILED, errorMessage = errReason) }
                         com.anonrode.downloader.util.DebugLog.write("failed task=${task.id} reason=$errReason")
                         com.anonrode.downloader.service.DownloadService.notifyFailed(context, task.id, task.episodeTitle, errReason)
+                        // Terminal FAILED: drop the registry entry exactly like
+                        // the COMPLETED path (guarded so a newer job's entry is
+                        // never clobbered).
+                        val reg = runtimeRegistry.get(task.id)
+                        if (reg == null || reg.activeJob === coroutineContext[Job]) {
+                            runtimeRegistry.forget(task.id)
+                        }
                     }
                 }
             } catch (e: CancellationException) {
@@ -3921,6 +3976,12 @@ class DownloadEngine(
                     if (!parkInsteadOfFail(live, errMsg, forcePark = isRateLimitedError(errMsg))) {
                         repository.update(task.id) { it.copy(status = TaskStatus.FAILED, errorMessage = errMsg) }
                         com.anonrode.downloader.service.DownloadService.notifyFailed(context, task.id, task.episodeTitle, errMsg)
+                        // Terminal FAILED cleanup, same rule + guard as the
+                        // produced-file FAILED path above.
+                        val reg = runtimeRegistry.get(task.id)
+                        if (reg == null || reg.activeJob === coroutineContext[Job]) {
+                            runtimeRegistry.forget(task.id)
+                        }
                     }
                 } else {
                     // Cancelled (pause/cancel/network park): native-process teardown can surface
@@ -5419,6 +5480,15 @@ object YoutubeDlDownloader {
      *  sidecars written by the embed-subs pass). */
     private val SUBTITLE_ARTIFACT_EXTS = setOf("srt", "vtt", "ass", "ssa", "ttml", "json3", "srv3")
 
+    /** Terminal-stub floor for the FINAL accepted output (activity-log audit
+     *  §3.4 class): a yt-dlp/aria2c "artifact" under this size is a decoy or
+     *  error body, never media — the same 1024-byte class the terminal probe
+     *  applies to non-HLS responses (HttpClient.kt:1309-1310) and the
+     *  probe consumers re-apply for HLS (LinkResolver.isHlsStubTerminal).
+     *  Only the output gate uses this: HLS segment/fragment reads are
+     *  untouched (sub-KB segment reads are normal). */
+    private const val MIN_PRODUCED_BYTES = 1024L
+
     /**
      * Flat playlist metadata dump: `yt-dlp -J --flat-playlist` over the whole
      * list WITHOUT resolving any video page (one paginated metadata call),
@@ -5968,7 +6038,7 @@ object YoutubeDlDownloader {
             // successful completion. Without this, an attempt that exits 0
             // while a straggler range request died could hand the engine a
             // truncated file that the structure tier then blesses.
-            fun isFinal(f: File) = f.exists() && f.isFile && f.length() > 0L &&
+            fun isFinal(f: File) = f.exists() && f.isFile && f.length() >= MIN_PRODUCED_BYTES &&
                 !f.name.endsWith(".aria2") && !f.name.endsWith(".part") && !f.name.endsWith(".ytdl") &&
                 // Subtitle sidecars (write-subs/embed-subs output; embed
                 // normally deletes them, a half-finished pass may not) were
@@ -6595,7 +6665,7 @@ object YoutubeDlDownloader {
                 return null
             }
 
-            fun isFinal(f: File) = f.exists() && f.isFile && f.length() > 0L &&
+            fun isFinal(f: File) = f.exists() && f.isFile && f.length() >= MIN_PRODUCED_BYTES &&
                     !f.name.endsWith(".aria2") && !f.name.endsWith(".part") &&
                     !f.name.endsWith(".ytdl") && !f.name.endsWith(".torrent")
 
@@ -7752,3 +7822,97 @@ nw/ctl pages).
 - `nollywoodSites` — if a site ever shows collateral, scope R2 to a site list (R2 scopes only when the list is non-empty).
 - `nollywoodOnlySites` — brand-level kill switch (kept empty; too blunt for multi-catalogue sites).
 - `suppressNollywood` — master switch; false/absent restores everything on the next sync.
+
+
+---
+
+## Section 16: v3.3.0 Platform Surfaces — Announcements, Update Flow, Force Gate, Engagement, Ads (2026-10-18)
+
+Same cycle as Section 15. The signed OTA payload gains six sections; the app gains the matching
+runtime; every surface is OFF when its section is absent (pure pass-through), percent-rollable via
+the `flags` families, and kill-switchable by republishing the previous payload rev.
+
+**Payload sections (parsed by `data/rules/DynamicRulesManager.kt`; validated in lockstep by
+`scripts/encrypt_rules.py`):**
+
+| Section | Getter | Shape |
+|---|---|---|
+| `announcements` | `getAnnouncements()` | array of `{id,title,body,mode(dialog|sheet|banner),action(none|url|update),actionLabel,actionUrl,oncePer(id|rev),minApp,expiresAtMs}` |
+| `update` | `getUpdatePolicy()` | `{latestVersionName,latestVersionCode,sources[{kind,base}],apkArm64,apkUniversal,sha256Arm64,sha256Universal,message,force{enabled,minSupportedVersionCode,mode,snoozeHours,escapeHatch}}` |
+| `ads` | `getAdsConfig()` | `{enabled,provider(house|none|applovin|unity|admob|auto),placements[],frequencyPerDay,house{title,body,actionLabel,actionUrl,id},vendor credentials}` |
+| `engagement` | `getEngagementConfig()` | `{enabled,inactiveDays,cooldownDays,title,body,welcomeBack}` |
+| `tamper` | `getTamperPolicy()` | `{expectedCertSha256,reportOnly}` |
+| `fcm` | `getFcmConfig()` | `{enabled,apiKey,appId,senderId,projectId}` |
+
+Flags families added in lockstep (`RulesFlags.FAMILY_IDS` == `encrypt_rules.py`): `announcements`,
+`update`, `ads`, `engagement` — the same kill/percent/shadow ladder as every existing family.
+
+**Runtime modules (new):**
+
+| File | Role |
+|---|---|
+| `update/UpdateManager.kt` | State machine (UNKNOWN/UP_TO_DATE/AVAILABLE/FORCED) with the brick rails (staleness >14d, failure, floor==0 never FORCED); source-walk download (VPS → GitHub per payload order) with a SHA-256 pin verified on EVERY attempt (blank pin fails closed); PackageInstaller session install with ACTION_VIEW/FileProvider fallback; `update_flow` stage telemetry |
+| `update/AnnouncementManager.kt` | First-eligible pick (minApp/expiry/oncePer id|rev), shown-marker persisted at pick time, id-only telemetry |
+| `update/EngagementScheduler.kt` (+ `service/BootReceiver.kt`) | One-shot AlarmManager (boot re-arm), LOW channel, cooldown dedupe, payload copy verbatim, welcome-back pending flag for the in-app card |
+| `update/FcmRegistrar.kt` | Manual `FirebaseOptions` (no google-services.json — OTA-portable credentials), hard no-op while disabled |
+| `update/IntegrityAttestor.kt` | Play-Integrity client, hard-gated off (payload flag pending); class-only logs |
+| `ads/Ads.kt` | `AdBridge` interface + House/AppLovin/Unity/AdMob bridges — all inert unless enabled+provider+credential; AdMob meta-data = Google TEST app id with the registration comment |
+| `ui/components/AnnouncementHost.kt` | Root host rendering the three modes + action dispatch |
+| `ui/components/UpdateGate.kt` | Soft card (snooze) + hard dialog (no back/outside dismiss; Update-now → download→verify→install; release-page fallback; 5×-long-press 24h escape hatch with `gate_bypass` telemetry); blocks UI only |
+| `ui/components/AdSlot.kt` | House-only renderer with per-day frequency cap + `ad_impression` telemetry |
+| `util/IntegrityCheck.kt` | Signing-cert SHA-256 (API 26-27 legacy fallback + API 28+ signing-info union) vs the OTA pin; Verdict{NONE,OK,MISMATCH,UNKNOWN}; never blocks; one id-only report per session |
+| `scripts/publish_apk.py` | APK + `latest.json` mirror to the VPS (`ota_files/apk/` + root `ota_files/latest.json` = the exact `/ota/latest.json` URL the app reads), dry-run default, on-box sha256 verification |
+
+**Integration points:** `AnonApp.kt` (post-activation hooks for all managers + cold start + >6h
+resume-refresh via activity-start counter), `MainActivity.kt` root (AnnouncementHost + UpdateGate),
+`DownloadsScreen.kt` (`AdSlot("downloads_shelf")` under the shelf), `HomeScreen.kt`
+(`WelcomeBackCard` + `AdSlot("home_footer")`), `SettingsSheet.kt` About (version + Check-for-updates
++ App-signature diagnostics), `AndroidManifest.xml` (REQUEST_INSTALL_PACKAGES, RECEIVE_BOOT_COMPLETED
++ BootReceiver, AdMob test-id meta-data).
+
+**Verification:** Python reference sims (written BEFORE/ALONGSIDE the Kotlin): update policy 25/25
+(rails + source walk + pin), announcements 18/18, ads frequency 15/15, engagement math 18/18; Kotlin
+tests `PlatformSectionsParseTest` (8), `RulesFlagsTest` (3) via CI; validator dry-runs PASS on both
+the shipped and example payloads; syntax gate covers all files.
+
+---
+
+## Section 17: v3.3.0 Hardening & Cleanup Batch (2026-10-18)
+
+**Anti-decompile / anti-mod (honest layering):**
+- R8 + resource shrinking ON for release only (`app/build.gradle.kts`), `-repackageclasses 'anon'` +
+  `-allowaccessmodification`; `proguard-rules.pro` rewritten against the actual dependency set with
+  per-rule justification (OkHttp/coroutines/media3 consumer rules verified; Coil ships NONE — kept
+  wholesale deliberately; youtubedl-android kept wholesale; kotlinx.serialization 1.7.2 bundled rules).
+- IP shield: site URLs/selectors live in the ENCRYPTED OTA payload, not the APK; rules are ECDSA-signed
+  and rev-monotonic.
+- `IntegrityCheck` reports repackaged installs (telemetry + Settings row) — a patched app can lie;
+  the value is visibility. Play Integrity rejected (GMS/Play assumptions) — documented.
+- CI signing guard already refuses debug-signed releases. Debug/release coexist via `.debug` suffix.
+
+**Audit-fix closures in this batch:** F-01 debug-logging wired (setVerbose from settings),
+F-02 NoSourceLedger records, F-03 urlTemplates consumed by Nepu, F-04 reserved-field INFO note,
+F-05 flags plane armed at publish, F-06 dead file deleted, F-07 retired interface member removed,
+F-08 AppSettings consolidation (helper + deprecation; call site swapped), F-09 registry forget on
+every terminal FAILED path, F-12 queue-order truth (comment fixed, behavior pinned by
+QueueOrderTest), F-13 gate covers ALL 188 Kotlin files. Log-audit still-reachables: UpdateChecker
+port-80, vidsrcme compiled seed + `legacyApiUsable` gate, HLS stub terminal floor
+(`HLS_STUB_MIN_BYTES=1024` at LinkResolver/RulesPipeline/ResultVerifier + `isFinal >=
+MIN_PRODUCED_BYTES` in YoutubeDlDownloader; `HlsStubTerminalTest` added). Wiring P2s: dead share
+handler / ViewModel methods / `cardStatusDetail` deleted, one "active" predicate unified across UI
+surfaces (service filter deliberately distinct), parallel-sockets control added, dead resources
+removed with zero-ref proofs, `AppSettings` player call swapped.
+
+**Tests added this cycle:** `PlatformSectionsParseTest`, `RulesFlagsTest`, `QueueOrderTest`,
+`HlsStubTerminalTest` (CI-executed); sims as listed in Section 16; `adversarial_qa_audit.py` extended
+(NN-6+: families lockstep, getters, validator keys, gate coverage) with the isFinal check STRENGTHENED
+to the new `>= MIN_PRODUCED_BYTES` invariant (the stale `> 0L` string match was the batch's one red
+gate and was corrected with the reason recorded).
+
+**CI-watch list (first release run):** vendor SDK call signatures (AppLovin settings ctor, Unity
+listener, integrity builders); dependency versions pinned to the last compileSdk-34-compatible lines
+(a metadata bump forces compileSdk 35 + AGP review); R8 runtime behavior on device (Coil kept
+wholesale to remove discovery risk); `-dontwarn kotlin.reflect.**` speculation; Unity keep rule
+removable after a green run.
+
+---

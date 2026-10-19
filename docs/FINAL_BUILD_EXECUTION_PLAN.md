@@ -417,3 +417,11 @@ Rollback: revert commit + republish previous payload rev (kill switches make cod
 - 2026-10-18 late — **verification sweep green**: syntax gate 188 files PASS; adversarial 100% (check 17
   strengthened to the new `>= MIN_PRODUCED_BYTES` invariant); sims update 25/25, announcement 18/18,
   ads 15/15, engagement 18/18, nollywood 18/18; `publish_apk.py` compiles. Checkpoint committed.
+- 2026-10-18 late — **PHASE 3 underway**: S4 agent dispatched for version bump (331/3.3.0) +
+  `docs/PLATFORM_OPERATIONS.md` + `CHANGELOG.md` + `README.md`. Orchestrator: audit doc rebuilt with
+  **Sections 16 (platform surfaces) + 17 (hardening/cleanup)** — 444 KB, Desktop refreshed; pre-push
+  integration sweep clean (zero dangling refs to deleted symbols anywhere incl. androidTest; HLS gate
+  single-sourced at `LinkResolver.HLS_STUB_MIN_BYTES` used by RulesPipeline/ResultVerifier; BootReceiver
+  exported="true" with the BOOT_COMPLETED rationale; AdMob test-id confirmed). CI-watch prep: `gh` is
+  unauthenticated → poll the public Actions API with curl; fix-loop identifies failing steps via the
+  jobs endpoint and patches statically.

@@ -58,6 +58,15 @@ object AnnouncementManager {
                 current.value = null
                 return
             }
+            if (current.value != null) {
+                // QA-V3 F1: a LIVE announcement owns the slot. The cold start
+                // runs afterRulesActivated twice (cache-restore + fresh sync);
+                // because the shown-marker persists at PICK time, the second
+                // call used to see the marker, advance to the next entry (or
+                // clear the flow) and the picked message never rendered.
+                // Re-evaluation waits until the live one is dismissed.
+                return
+            }
             val rev = DynamicRulesManager.getActiveRev()
             val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             val now = System.currentTimeMillis()
@@ -112,9 +121,11 @@ object AnnouncementManager {
     }
 
     /** oncePer scope → persistent shown-marker key (exact names frozen by
-     *  the phase-2 contract; "rev" keys carry the active payload rev). */
+     *  the phase-2 contract; "rev" keys carry the active payload rev — AND
+     *  the id (QA-V3 F9): without the id, one rev-scoped announcement shown
+     *  suppressed every other rev-scoped entry for the whole rev). */
     private fun shownKey(oncePer: String, id: String, rev: Long): String =
-        if (oncePer.equals("rev", ignoreCase = true)) "announcement_shown_rev_$rev"
+        if (oncePer.equals("rev", ignoreCase = true)) "announcement_shown_rev_${rev}_$id"
         else "announcement_shown_$id"
 
     private fun report(type: String, id: String) {

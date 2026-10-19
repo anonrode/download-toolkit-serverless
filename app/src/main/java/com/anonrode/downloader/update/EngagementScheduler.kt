@@ -11,7 +11,9 @@ import androidx.core.app.NotificationCompat
 import com.anonrode.downloader.MainActivity
 import com.anonrode.downloader.R
 import com.anonrode.downloader.data.rules.DynamicRulesManager
+import com.anonrode.downloader.data.rules.EngagementConfig
 import com.anonrode.downloader.util.DebugLog
+import com.anonrode.downloader.util.RemoteLogger
 
 /**
  * Re-engagement scheduler (workstream B, phase 2; plan §4.1 `engagement`
@@ -38,6 +40,7 @@ object EngagementScheduler {
     private const val PREF_LAST_OPEN = "engagement_last_open_ms"
     private const val PREF_LAST_SENT = "engagement_last_sent_ms"
     private const val PREF_WELCOME_BACK = "engagement_welcome_back_pending"
+    private const val PREF_ARM_PENDING = "engagement_arm_pending"
     private const val DAY_MS = 24L * 60 * 60 * 1000
     private const val ARM_REQUEST_CODE = 77031
     private const val NOTIFICATION_ID = 8810
@@ -50,12 +53,20 @@ object EngagementScheduler {
             val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             val now = System.currentTimeMillis()
             val lastOpen = prefs.getLong(PREF_LAST_OPEN, 0L)
+            val cfg = DynamicRulesManager.getEngagementConfig()
+            if (cfg == null) {
+                // QA-V3 F3: the cold-start call runs BEFORE the async rules
+                // init, so the payload is not loaded yet — and stamping
+                // last-open now would destroy the very absence this method
+                // measures. Leave the clock for the post-activation call
+                // (AnonApp.afterRulesActivated -> noteAppOpen).
+                return
+            }
             // Welcome-back pending (phase-2 UI contract): a user returning
             // after a >= inactiveDays absence gets the in-app card once — the
             // in-app twin of the notification, same payload copy. The Home
             // card clears the flag on dismiss (HomeScreen.WelcomeBackCard).
-            val cfg = DynamicRulesManager.getEngagementConfig()
-            if (cfg != null && cfg.enabled && cfg.welcomeBack && lastOpen > 0L &&
+            if (cfg.enabled && cfg.welcomeBack && lastOpen > 0L &&
                 now - lastOpen >= cfg.inactiveDays * DAY_MS
             ) {
                 prefs.edit().putBoolean(PREF_WELCOME_BACK, true).apply()
@@ -88,13 +99,28 @@ object EngagementScheduler {
             triggerAt = maxOf(triggerAt, now + 60_000L) // due-but-dropped → prompt, not instant-loop
             val alarm = context.getSystemService(AlarmManager::class.java) ?: return
             alarm.set(AlarmManager.RTC, triggerAt, alarmPendingIntent(context))
+            // QA-V3 F6: a boot-time arm attempt that found no payload leaves
+            // this flag set; the first arm with a loaded payload clears it.
+            prefs.edit().putBoolean(PREF_ARM_PENDING, false).apply()
         } catch (t: Throwable) {
             DebugLog.engine("EngagementScheduler.arm failed: ${t.javaClass.simpleName}")
         }
     }
 
-    /** Reboot re-arm hook (alarms die at reboot). */
+    /** Reboot re-arm hook (alarms die at reboot). Best-effort with an honest
+     *  bound (QA-V3 F6): BOOT_COMPLETED can arrive before the async rules
+     *  init finishes, so when the payload is not loaded yet this flags a
+     *  pending arm that the next post-activation hook clears — i.e. after a
+     *  reboot the alarm re-arms at the next app start, not mid-boot. */
     fun onBoot(context: Context) {
+        if (DynamicRulesManager.getEngagementConfig() == null) {
+            try {
+                context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                    .edit().putBoolean(PREF_ARM_PENDING, true).apply()
+            } catch (_: Exception) {
+            }
+            return
+        }
         arm(context)
     }
 
@@ -115,11 +141,46 @@ object EngagementScheduler {
                 arm(context) // inside cooldown — next due is cooldown-end
                 return
             }
-            postNotification(context, cfg.title, cfg.body)
-            prefs.edit().putLong(PREF_LAST_SENT, now).apply()
+            if (cfg.title.isBlank() && cfg.body.isBlank()) {
+                // Misconfigured payload copy: nothing to say. Do NOT stamp the
+                // cooldown (a fixed payload must not wait a full cooldown) and
+                // do NOT fall through to the 60 s re-arm floor (that would
+                // spin a blank-copy alarm every minute) — defer to the
+                // cooldown horizon; the next app-open re-arms normally.
+                DebugLog.engine("EngagementScheduler: blank copy — deferring to cooldown horizon")
+                val alarmManager = context.getSystemService(AlarmManager::class.java)
+                alarmManager?.set(
+                    AlarmManager.RTC,
+                    now + cfg.cooldownDays * DAY_MS,
+                    alarmPendingIntent(context)
+                )
+                return
+            }
+            val posted = postNotification(context, cfg.title, cfg.body)
+            if (posted) {
+                prefs.edit().putLong(PREF_LAST_SENT, now).apply()
+                reportSent(cfg)
+            }
             arm(context) // next notification no earlier than cooldown-end
         } catch (t: Throwable) {
             DebugLog.engine("EngagementScheduler.onAlarm failed: ${t.javaClass.simpleName}")
+        }
+    }
+
+    /** One id-only `engagement_sent` record per posted notification (plan
+     *  §10); cooldownDays already rate-limits, so no session cap needed. */
+    private fun reportSent(cfg: EngagementConfig) {
+        try {
+            RemoteLogger.report(
+                type = "engagement_sent",
+                message = "engagement notification posted after ${cfg.inactiveDays}d of inactivity",
+                context = mapOf(
+                    "inactive_days" to cfg.inactiveDays,
+                    "cooldown_days" to cfg.cooldownDays,
+                    "welcome_back" to cfg.welcomeBack
+                )
+            )
+        } catch (_: Exception) {
         }
     }
 
@@ -136,8 +197,10 @@ object EngagementScheduler {
         manager.createNotificationChannel(channel)
     }
 
-    private fun postNotification(context: Context, title: String, body: String) {
-        if (title.isBlank() && body.isBlank()) return
+    /** Posts the payload's copy; true when it was handed to the
+     *  NotificationManager (false only for fully blank copy). */
+    private fun postNotification(context: Context, title: String, body: String): Boolean {
+        if (title.isBlank() && body.isBlank()) return false
         val appIntent = Intent(context, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_NEW_TASK
         }
@@ -155,8 +218,9 @@ object EngagementScheduler {
             .setContentIntent(contentIntent)
             .setAutoCancel(true)
             .build()
-        val manager = context.getSystemService(NotificationManager::class.java) ?: return
+        val manager = context.getSystemService(NotificationManager::class.java) ?: return false
         manager.notify(NOTIFICATION_ID, notification)
+        return true
     }
 
     private fun alarmPendingIntent(context: Context): PendingIntent {

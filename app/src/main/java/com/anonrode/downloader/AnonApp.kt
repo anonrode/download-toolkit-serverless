@@ -89,13 +89,25 @@ class AnonApp : Application(), ImageLoaderFactory {
         }
     }
 
+    /** Single-flight guard (QA-V3 F4): the cold-start auto sync and the
+     *  first-foreground forced sync used to be able to overlap and
+     *  double-fire the 4-source chain + hooks. */
+    @Volatile private var syncInFlight = false
+
     /** Auto-sync (24h floor); [force] = the resume-refresh path (>6h,
      *  Decision 5) bypassing the floor. internal so the companion's
      *  foreground hook can trigger it via the instance. */
     internal suspend fun maybeSyncRules(force: Boolean = false) {
+        if (syncInFlight) return
+        syncInFlight = true
         try {
             val prefs = getSharedPreferences(PREFS_SERVERLESS, Context.MODE_PRIVATE)
-            val last = prefs.getLong(KEY_LAST_RULES_SYNC, 0L)
+            // Floor considers BOTH the last success and the last attempt, so a
+            // failed attempt still spaces out retries (QA-V3 F4).
+            val last = maxOf(
+                prefs.getLong(KEY_LAST_RULES_SYNC, 0L),
+                lastSyncAttemptMs
+            )
             val now = System.currentTimeMillis()
             if (!force && now - last < UPDATE_INTERVAL_MS) return
             lastSyncAttemptMs = now
@@ -107,6 +119,8 @@ class AnonApp : Application(), ImageLoaderFactory {
             }
         } catch (t: Throwable) {
             Log.w("AnonApp", "Auto-sync scraper rules failed, keeping cached/bundled rules", t)
+        } finally {
+            syncInFlight = false
         }
     }
 
@@ -120,10 +134,23 @@ class AnonApp : Application(), ImageLoaderFactory {
         try { com.anonrode.downloader.update.AnnouncementManager.refresh(context) } catch (_: Throwable) {}
         try { com.anonrode.downloader.update.UpdateManager.evaluate(context) } catch (_: Throwable) {}
         try { com.anonrode.downloader.update.EngagementScheduler.arm(context) } catch (_: Throwable) {}
+        // QA-V3 F3: the cold-start noteAppOpen runs pre-init (cfg null -> it
+        // bails without stamping); THIS is the payload-aware call that stamps
+        // the return and evaluates the welcome-back window.
+        try { com.anonrode.downloader.update.EngagementScheduler.noteAppOpen(context) } catch (_: Throwable) {}
         try { com.anonrode.downloader.util.IntegrityCheck.evaluate(context) } catch (_: Throwable) {}
         try { com.anonrode.downloader.update.FcmRegistrar.maybeRegister(context) } catch (_: Throwable) {}
         try { com.anonrode.downloader.update.IntegrityAttestor.maybeAttest(context) } catch (_: Throwable) {}
+        // QA-V3 F7: initialize the configured vendor ad bridge on activation
+        // (inert while ads are disabled; SDK init + credentials = the OTA
+        // activation half — vendor ad VIEWS remain a follow-up).
+        try { com.anonrode.downloader.ads.Ads.activeBridge(context) } catch (_: Throwable) {}
     }
+
+    /** Manual-sync path (Settings "Sync Now", QA-V3 F5): run the same
+     *  post-activation hooks the auto-sync runs, so a manually pulled payload
+     *  renders/arms immediately instead of waiting for the next restart. */
+    fun runPostActivationHooks() = afterRulesActivated(this)
 
     /** Activity-start counter → session-first-foreground callback (see
      *  onAppForegrounded in the companion). */

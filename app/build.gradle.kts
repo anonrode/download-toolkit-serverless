@@ -13,8 +13,10 @@ android {
         applicationId = "com.anonrode.downloader"
         minSdk = 26
         targetSdk = 34
-        versionCode = 330
-        versionName = "3.2.11"
+        // v3.3.0 — platform surfaces (announcements / update flow + gate /
+        // engagement / ads readiness) + hardening (R8) + audit-fix batch.
+        versionCode = 331
+        versionName = "3.3.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {

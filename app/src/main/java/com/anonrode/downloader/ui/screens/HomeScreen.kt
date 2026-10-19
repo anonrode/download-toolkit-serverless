@@ -892,18 +892,15 @@ private fun TrendingSection(
 @Composable
 private fun WelcomeBackCard() {
     val context = LocalContext.current
-    val cfg = remember {
-        com.anonrode.downloader.data.rules.DynamicRulesManager.getEngagementConfig()
-    }
+    // F8 (QA-V3): plain reads each composition — a payload that lands after
+    // the first frame (cold start) must appear without a process restart.
+    val cfg = com.anonrode.downloader.data.rules.DynamicRulesManager.getEngagementConfig()
     val prefs = remember {
         context.getSharedPreferences("downloader_settings", android.content.Context.MODE_PRIVATE)
     }
-    var visible by remember {
-        mutableStateOf(
-            cfg?.enabled == true && cfg.welcomeBack &&
-                prefs.getBoolean("engagement_welcome_back_pending", false)
-        )
-    }
+    var dismissed by remember { mutableStateOf(false) }
+    val visible = !dismissed && cfg != null && cfg.enabled && cfg.welcomeBack &&
+        prefs.getBoolean("engagement_welcome_back_pending", false)
     if (!visible || cfg == null) return
     Row(
         modifier = Modifier
@@ -941,7 +938,7 @@ private fun WelcomeBackCard() {
                 .padding(start = Spacing.sm)
                 .clickable {
                     prefs.edit().putBoolean("engagement_welcome_back_pending", false).apply()
-                    visible = false
+                    dismissed = true
                 }
         )
     }

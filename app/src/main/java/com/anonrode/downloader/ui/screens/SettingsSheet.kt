@@ -989,6 +989,23 @@ internal fun SettingsSelfHealingSection(
                                 val (ok, ver) = DynamicRulesManager.syncFromGitHub(context)
                                 state.isSyncingRules = false
                                 if (ok) {
+                                    // QA-V3 F5: a manual sync must behave like the
+                                    // auto path — refresh the sync clock, then run
+                                    // the post-activation hooks so announcements/
+                                    // gates/engagement picked up by this payload
+                                    // render immediately (docs promise this button
+                                    // doubles as the render check).
+                                    context.getSharedPreferences(
+                                        com.anonrode.downloader.AnonApp.PREFS_SERVERLESS,
+                                        android.content.Context.MODE_PRIVATE
+                                    ).edit()
+                                        .putLong(
+                                            com.anonrode.downloader.AnonApp.KEY_LAST_RULES_SYNC,
+                                            System.currentTimeMillis()
+                                        )
+                                        .apply()
+                                    (context.applicationContext as? com.anonrode.downloader.AnonApp)
+                                        ?.runPostActivationHooks()
                                     Toast.makeText(context, "Synced fresh logic: $ver", Toast.LENGTH_SHORT).show()
                                 } else {
                                     Toast.makeText(context, "Sync error: $ver", Toast.LENGTH_SHORT).show()
