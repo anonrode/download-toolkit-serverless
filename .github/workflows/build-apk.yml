@@ -155,11 +155,14 @@ jobs:
           # as the step's exit code.
           script: |
             mkdir -p "$RUNNER_TEMP/gate"
-            gradle :app:connectedDebugAndroidTest --no-daemon || touch "$RUNNER_TEMP/gate/first-run-failed"
-            # Screenshots live in the app's INTERNAL files dir (the external
-            # dir does not exist on this emulator — getExternalFilesDir()
-            # returns null there), so they are read back through `run-as`
-            # (debug build) as a tar stream. Best-effort, single-line steps.
+            # leaveApksInstalledAfterRun: AGP UNINSTALLS the app when the
+            # connected test task ends, taking the app's data dir with it —
+            # which is why every pull attempt before this flag found nothing
+            # ("No such file or directory", empty artifacts). With the app
+            # still installed, `run-as` can read the screenshots back.
+            gradle :app:connectedDebugAndroidTest --no-daemon -Pandroid.injected.androidTest.leaveApksInstalledAfterRun=true || touch "$RUNNER_TEMP/gate/first-run-failed"
+            # Screenshots live in the app's files dir; read them back through
+            # `run-as` (debug build) as a tar stream. Best-effort, single-line.
             mkdir -p "$GITHUB_WORKSPACE/.ci-artifacts/screenshots"
             adb exec-out run-as com.anonrode.downloader.debug tar -C files -cf - screenshots > "$GITHUB_WORKSPACE/.ci-artifacts/screenshots.tar" || true
             tar -xf "$GITHUB_WORKSPACE/.ci-artifacts/screenshots.tar" -C "$GITHUB_WORKSPACE/.ci-artifacts/" || true
@@ -229,7 +232,7 @@ jobs:
             # Same marker-file pattern as the first pass (see the comment
             # there): no backslash continuations, no EXIT_CODE variable.
             mkdir -p "$RUNNER_TEMP/gate"
-            gradle :app:connectedDebugAndroidTest --no-daemon $ARGS || touch "$RUNNER_TEMP/gate/retry-failed"
+            gradle :app:connectedDebugAndroidTest --no-daemon -Pandroid.injected.androidTest.leaveApksInstalledAfterRun=true $ARGS || touch "$RUNNER_TEMP/gate/retry-failed"
             mkdir -p "$GITHUB_WORKSPACE/.ci-artifacts/screenshots"
             adb exec-out run-as com.anonrode.downloader.debug tar -C files -cf - screenshots > "$GITHUB_WORKSPACE/.ci-artifacts/screenshots.tar" || true
             tar -xf "$GITHUB_WORKSPACE/.ci-artifacts/screenshots.tar" -C "$GITHUB_WORKSPACE/.ci-artifacts/" || true
