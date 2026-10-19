@@ -364,3 +364,14 @@ Rollback: revert commit + republish previous payload rev (kill switches make cod
   active-definition unification, parallel-sockets control, About/Check-for-updates skeleton, player
   sub-language swap), S4 hardening (R8 on + keep-rules, IntegrityCheck.kt, REQUEST_INSTALL_PACKAGES).
   Next: my review gate per §10 as each agent reports; then PHASE 2.
+- 2026-10-18 — **S4 PHASE 1 REVIEWED: PASS** — gradle (R8+shrink, release-only) and manifest
+  (REQUEST_INSTALL_PACKAGES only) diffs exactly scoped; `proguard-rules.pro` rewritten per real deps
+  with per-rule justification (caught that Coil 2.7 ships NO consumer rules — brief corrected);
+  `IntegrityCheck.kt` verified against the real `RemoteLogger.report(type,message,context,…)` signature
+  and S1's landed `TamperPolicy`/`getTamperPolicy()`; minSdk=26 legacy-signature fallback present;
+  never blocks; id-only telemetry. Syntax gate: **177 files, ALL CLEAN**. → **S4 advanced to PHASE 2**
+  (UpdateManager / AnnouncementManager / EngagementScheduler / FcmRegistrar / IntegrityAttestor /
+  AdBridge set / SDK deps / `scripts/publish_apk.py` / AnonApp hooks), with the frozen consumer
+  contracts sent in the handoff.
+- 2026-10-18 — S1 getter contracts confirmed landed (:862-884 + getActiveRev :600); S1/S2/S3 still
+  in phase 1 — review gates pending their reports.
