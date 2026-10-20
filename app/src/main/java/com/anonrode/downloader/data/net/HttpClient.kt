@@ -143,6 +143,98 @@ object HttpClient {
     /** In-memory cache for DoH-resolved IP addresses to avoid redundant HTTPS lookups */
     private val dohCache = java.util.concurrent.ConcurrentHashMap<String, List<java.net.InetAddress>>()
 
+    // ---- HTTP 451 edge-route failover (2026-10-19) ------------------------
+    // nepu.gd's Cloudflare zone serves a legal-block page from one anycast A
+    // record (104.21.16.49) while another record serves normal 200s. OkHttp
+    // treats 451 as an HTTP answer, so it never tries the second address.
+    // One bounded retry after rotating the per-host address order fixes that
+    // without pinning an IP or weakening TLS. The bad-route mark is a hint,
+    // not a block: when every address is marked bad the full list is used.
+    private const val BAD_ROUTE_TTL_MS = 10 * 60_000L
+    private const val MAX_BAD_ROUTE_HOSTS = 64
+    private const val MAX_OFFERED_ROUTES = 16
+    private val badRoutes = java.util.concurrent.ConcurrentHashMap<
+        String, java.util.concurrent.ConcurrentHashMap<String, Long>>()
+    private val routeRotation = java.util.concurrent.ConcurrentHashMap<
+        String, java.util.concurrent.atomic.AtomicInteger>()
+    private val offeredRoutes = object : ThreadLocal<java.util.ArrayDeque<Pair<String, String>>>() {
+        override fun initialValue() = java.util.ArrayDeque<Pair<String, String>>()
+    }
+
+    private fun rememberOfferedRoute(host: String, ip: String) {
+        val q = offeredRoutes.get()
+        while (q.size >= MAX_OFFERED_ROUTES) q.removeLast()
+        q.addFirst(host to ip)
+    }
+
+    private fun takeOfferedRoute(host: String): String? {
+        val q = offeredRoutes.get()
+        val it = q.iterator()
+        while (it.hasNext()) {
+            val entry = it.next()
+            if (entry.first == host) {
+                it.remove()
+                return entry.second
+            }
+        }
+        return null
+    }
+
+    /** Rotate the resolved address order and drop entries inside their TTL. */
+    private fun rotateRoutes(host: String, addresses: List<java.net.InetAddress>): List<java.net.InetAddress> {
+        if (addresses.isEmpty()) return addresses
+        if (addresses.size == 1) {
+            rememberOfferedRoute(host, addresses[0].hostAddress)
+            return addresses
+        }
+        val now = System.currentTimeMillis()
+        val bad = badRoutes[host]
+        if (bad != null) {
+            bad.entries.removeIf { it.value <= now }
+            if (bad.isEmpty()) badRoutes.remove(host, bad)
+        }
+        val filtered = addresses.filter { addr ->
+            val until = badRoutes[host]?.get(addr.hostAddress) ?: 0L
+            until <= now
+        }
+        // Fail open rather than blackholing the host if every route is marked.
+        val usable = if (filtered.isEmpty()) addresses else filtered
+        val start = (routeRotation[host]?.get() ?: 0) % usable.size
+        val rotated = if (start == 0) usable else usable.drop(start) + usable.take(start)
+        rememberOfferedRoute(host, rotated.first().hostAddress)
+        return rotated
+    }
+
+    /** Log the 451 reason and mark the route this call actually used. */
+    private fun noteHttp451(url: String, res: Response) {
+        val reason = try {
+            res.peekBody(256).string().replace(Regex("\\s+"), " ").take(140)
+        } catch (_: Exception) {
+            ""
+        }
+        com.anonrode.downloader.util.DebugLog.net(
+            "HTTP 451 edge/legal block for ${url.take(140)} " +
+                "(cf-ray=${res.header("CF-RAY") ?: "-"}, server=${res.header("Server") ?: "-"})" +
+                if (reason.isNotBlank()) " body=$reason" else ""
+        )
+        val host = parsedHost(url) ?: return
+        val ip = takeOfferedRoute(host)
+        if (ip != null) {
+            if (badRoutes.size >= MAX_BAD_ROUTE_HOSTS && !badRoutes.containsKey(host)) {
+                val now = System.currentTimeMillis()
+                badRoutes.entries.removeIf { e -> e.value.values.all { it <= now } }
+                if (badRoutes.size >= MAX_BAD_ROUTE_HOSTS) badRoutes.clear()
+            }
+            badRoutes.computeIfAbsent(host) { java.util.concurrent.ConcurrentHashMap() }[ip] =
+                System.currentTimeMillis() + BAD_ROUTE_TTL_MS
+        }
+        // Force the retry's DNS lookup to start at the next address even when
+        // the used route could not be identified (pooled connection).
+        routeRotation.computeIfAbsent(host) {
+            java.util.concurrent.atomic.AtomicInteger()
+        }.incrementAndGet()
+    }
+
     private val bootstrapDohClient by lazy {
         OkHttpClient.Builder()
             .dns(object : okhttp3.Dns {
@@ -284,7 +376,7 @@ object HttpClient {
                     "$hostname resolves only to private/link-local addresses — refused (SSRF guard)"
                 )
             }
-            return safe
+            return rotateRoutes(hostname, safe)
         }
     }
 
@@ -549,14 +641,23 @@ object HttpClient {
         }
         headers.forEach { (k, v) -> reqBuilder.header(k, v) }
 
-        val call = client.newCall(reqBuilder.build())
-        inFlightCalls.add(call)
-        if (tag != null) {
-            taggedCalls.computeIfAbsent(tag) { java.util.concurrent.CopyOnWriteArrayList() }.add(call)
+        fun register(c: okhttp3.Call) {
+            inFlightCalls.add(c)
+            if (tag != null) {
+                taggedCalls.computeIfAbsent(tag) { java.util.concurrent.CopyOnWriteArrayList() }.add(c)
+            }
         }
+        fun unregister(c: okhttp3.Call) {
+            inFlightCalls.remove(c)
+            if (tag != null) taggedCalls[tag]?.remove(c)
+        }
+
+        var call = client.newCall(reqBuilder.build())
+        register(call)
+        var attempt = 0
         val started = System.currentTimeMillis()
         return try {
-            val res = try {
+            var res = try {
                 call.execute()
             } catch (e: Exception) {
                 if (call.isCanceled()) {
@@ -567,6 +668,28 @@ object HttpClient {
             com.anonrode.downloader.util.DebugLog.net(
                 "GET ${safeUrl(url)} -> ${res.code} in ${System.currentTimeMillis() - started}ms"
             )
+            if (res.code == 451 && attempt == 0) {
+                // ONE same-request retry: a legal-block page served by one
+                // anycast edge must not mask the healthy sibling address.
+                noteHttp451(url, res)
+                res.close()
+                try { client.connectionPool.evictAll() } catch (_: Exception) {}
+                unregister(call)
+                attempt++
+                call = client.newCall(reqBuilder.build())
+                register(call)
+                res = try {
+                    call.execute()
+                } catch (e: Exception) {
+                    if (call.isCanceled()) {
+                        throw kotlinx.coroutines.CancellationException("HTTP call canceled").apply { initCause(e) }
+                    }
+                    throw e
+                }
+                com.anonrode.downloader.util.DebugLog.net(
+                    "GET ${safeUrl(url)} retry-after-451 -> ${res.code} in ${System.currentTimeMillis() - started}ms"
+                )
+            }
             consume(res)
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
             throw cancelled
@@ -576,10 +699,7 @@ object HttpClient {
             )
             throw e
         } finally {
-            inFlightCalls.remove(call)
-            if (tag != null) {
-                taggedCalls[tag]?.remove(call)
-            }
+            unregister(call)
         }
     }
 
@@ -1002,20 +1122,45 @@ object HttpClient {
                     .build()
             } else client
 
-            val call = effectiveClient.newCall(reqBuilder.build())
-            inFlightCalls.add(call)
-            if (tag != null) {
-                taggedCalls.computeIfAbsent(tag) { java.util.concurrent.CopyOnWriteArrayList() }.add(call)
+            fun register(c: okhttp3.Call) {
+                inFlightCalls.add(c)
+                if (tag != null) {
+                    taggedCalls.computeIfAbsent(tag) { java.util.concurrent.CopyOnWriteArrayList() }.add(c)
+                }
             }
+            fun unregister(c: okhttp3.Call) {
+                inFlightCalls.remove(c)
+                if (tag != null) taggedCalls[tag]?.remove(c)
+            }
+            var call = effectiveClient.newCall(reqBuilder.build())
+            register(call)
+            var attempt = 0
             val started = System.currentTimeMillis()
             try {
-                val response = try {
+                var response = try {
                     call.execute()
                 } catch (e: java.io.IOException) {
                     if (call.isCanceled()) {
                         throw kotlinx.coroutines.CancellationException("HTTP call canceled").apply { initCause(e) }
                     }
                     throw e
+                }
+                if (response.code == 451 && attempt == 0) {
+                    noteHttp451(url, response)
+                    response.close()
+                    try { effectiveClient.connectionPool.evictAll() } catch (_: Exception) {}
+                    unregister(call)
+                    attempt++
+                    call = effectiveClient.newCall(reqBuilder.build())
+                    register(call)
+                    response = try {
+                        call.execute()
+                    } catch (e: java.io.IOException) {
+                        if (call.isCanceled()) {
+                            throw kotlinx.coroutines.CancellationException("HTTP call canceled").apply { initCause(e) }
+                        }
+                        throw e
+                    }
                 }
                 response.use { res ->
                     com.anonrode.downloader.util.DebugLog.net(
@@ -1033,8 +1178,7 @@ object HttpClient {
                     )
                 }
             } finally {
-                inFlightCalls.remove(call)
-                if (tag != null) taggedCalls[tag]?.remove(call)
+                unregister(call)
             }
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
@@ -1166,28 +1310,48 @@ object HttpClient {
                 .header("Range", "bytes=0-1024")
             if (!referer.isNullOrBlank()) reqBuilder.header("Referer", referer)
             val client = if (permissive) terminalProbeClientPermissive else terminalProbeClient
-            val call = client.newCall(reqBuilder.build())
-            call.timeout().timeout(timeoutMs, TimeUnit.MILLISECONDS)
-            inFlightCalls.add(call)
-            if (tag != null) {
-                taggedCalls.computeIfAbsent(tag) { java.util.concurrent.CopyOnWriteArrayList() }.add(call)
+            fun register(c: okhttp3.Call) {
+                c.timeout().timeout(timeoutMs, TimeUnit.MILLISECONDS)
+                inFlightCalls.add(c)
+                if (tag != null) {
+                    taggedCalls.computeIfAbsent(tag) { java.util.concurrent.CopyOnWriteArrayList() }.add(c)
+                }
             }
+            fun unregister(c: okhttp3.Call) {
+                inFlightCalls.remove(c)
+                if (tag != null) taggedCalls[tag]?.remove(c)
+            }
+            var call = client.newCall(reqBuilder.build())
+            register(call)
+            var attempt = 0
             try {
-                call.execute().use { res ->
-                    val ct = res.header("Content-Type")?.lowercase() ?: ""
-                    val total = acceptsTerminalResponse(
-                        res.code, res.header("Content-Length"), res.header("Content-Range"), res.header("Content-Type"), url
-                    )
-                    val tp = TerminalProbe(res.code, res.header("Location"), ct, total)
-                    com.anonrode.downloader.util.DebugLog.net(
-                        "TERMINAL ${safeUrl(url)} -> ${res.code}" +
-                            (if (total != null) " size=$total" else " (not a terminal)")
-                    )
-                    return tp
+                while (true) {
+                    val res = call.execute()
+                    if (res.code == 451 && attempt == 0) {
+                        noteHttp451(url, res)
+                        res.close()
+                        try { client.connectionPool.evictAll() } catch (_: Exception) {}
+                        unregister(call)
+                        attempt++
+                        call = client.newCall(reqBuilder.build())
+                        register(call)
+                        continue
+                    }
+                    res.use { r ->
+                        val ct = r.header("Content-Type")?.lowercase() ?: ""
+                        val total = acceptsTerminalResponse(
+                            r.code, r.header("Content-Length"), r.header("Content-Range"), r.header("Content-Type"), url
+                        )
+                        val tp = TerminalProbe(r.code, r.header("Location"), ct, total)
+                        com.anonrode.downloader.util.DebugLog.net(
+                            "TERMINAL ${safeUrl(url)} -> ${r.code}" +
+                                (if (total != null) " size=$total" else " (not a terminal)")
+                        )
+                        return tp
+                    }
                 }
             } finally {
-                inFlightCalls.remove(call)
-                if (tag != null) taggedCalls[tag]?.remove(call)
+                unregister(call)
             }
         } catch (e: Exception) {
             if (!permissive && isTlsChainFailure(e)) {

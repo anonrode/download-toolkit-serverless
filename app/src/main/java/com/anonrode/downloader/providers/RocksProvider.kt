@@ -17,10 +17,49 @@ object RocksProvider : SiteProvider {
     override val mainUrl: String get() = DynamicRulesManager.getBaseUrl(name)
 
     override suspend fun search(query: String): List<ShowCard> {
-        DynamicRulesManager.getPipeline(name)?.search?.let { pl ->
-            val results = RulesPipeline.runSearch(name, pl, query)
-            if (results.isNotEmpty()) return results
+        val pipelineResults = DynamicRulesManager.getPipeline(name)?.search?.let { pl ->
+            RulesPipeline.runSearch(name, pl, query)
+        } ?: emptyList()
+
+        // The HTML search endpoint answers with five UNRELATED cards for some
+        // queries (verified live: "The Promised Neverland") and used to win
+        // merely because it was the first source. Only trust pipeline output
+        // when at least one card matches the query tokens; otherwise run the
+        // compiled RSS search and merge, so a non-empty wrong result can never
+        // mask the verified post.
+        if (pipelineResults.isNotEmpty() && hasRelevantResult(query, pipelineResults)) {
+            return pipelineResults
         }
+        val rssResults = searchCompiledRss(query)
+        if (rssResults.isEmpty()) return pipelineResults
+        if (pipelineResults.isEmpty()) return rssResults
+        return mergeResults(query, rssResults, pipelineResults)
+    }
+
+    /** True when at least one card reaches the RelevanceScorer acceptance floor. */
+    internal fun hasRelevantResult(query: String, cards: List<ShowCard>): Boolean =
+        cards.any { RelevanceScorer.score(query, it.title) >= 0.50 }
+
+    /** URL/title dedupe; [primary] (the compiled RSS result) stays ahead of
+     *  unrelated pipeline noise, then relevance orders the merged list. */
+    internal fun mergeResults(query: String, primary: List<ShowCard>, extra: List<ShowCard>): List<ShowCard> {
+        val out = mutableListOf<ShowCard>()
+        val seenUrls = mutableSetOf<String>()
+        val seenTitles = mutableSetOf<String>()
+        fun normalizedUrl(url: String) = url.trim().substringBefore('#')
+        fun normalizedTitle(title: String) = title.lowercase().filter { it.isLetterOrDigit() }
+        for (card in primary + extra) {
+            val u = normalizedUrl(card.url)
+            val t = normalizedTitle(card.title)
+            if (u.isNotBlank() && !seenUrls.add(u)) continue
+            if (t.isNotBlank() && !seenTitles.add(t)) continue
+            out.add(card)
+        }
+        return out.sortedByDescending { RelevanceScorer.score(query, it.title) }
+    }
+
+    /** The original compiled RSS path, kept as the correctness fallback. */
+    private suspend fun searchCompiledRss(query: String): List<ShowCard> {
         val results = mutableListOf<ShowCard>()
         val noLinks = mutableListOf<ShowCard>()
         try {
@@ -187,7 +226,8 @@ object RocksProvider : SiteProvider {
                     }
                     val lowerHref = href.lowercase()
 
-                    if (href.isBlank() || href in seen || href.contains("error?e=", ignoreCase = true) || href.contains("errore=", ignoreCase = true)) continue
+                    if (href.isBlank() || href in seen || DynamicRulesManager.isKnownDead(href) ||
+                        href.contains("error?e=", ignoreCase = true) || href.contains("errore=", ignoreCase = true)) continue
                     if (PostContentSanitizer.isSameSitePostPermalink(href, "my9jarocks.bz") || PostContentSanitizer.isSiblingPostAnchorText(elem.text())) continue
                     val isLocker = lowerHref.contains("loadedfiles") ||
                             lowerHref.contains("downloadwella") ||
@@ -352,7 +392,7 @@ object RocksProvider : SiteProvider {
                     val href = a.attr("abs:href").ifBlank {
                         HttpClient.safeResolveUri(showUrl, rawHref)
                     }
-                    if (href.isNotBlank() && href !in seen) {
+                    if (href.isNotBlank() && href !in seen && !DynamicRulesManager.isKnownDead(href)) {
                         seen.add(href)
                         val text = a.text().trim()
                         // The old fallback copied the anchor text verbatim —

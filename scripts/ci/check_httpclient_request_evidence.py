@@ -21,17 +21,28 @@ class SourceContracts(unittest.TestCase):
 
     def test_get_consumption_inside_registered_scope(self):
         get = section('private fun <T> executeGet(', ' * In-flight resolver/probe calls.')
-        self.assertLess(get.index('inFlightCalls.add(call)'), get.index('consume(res)'))
+        # executeGet registers through the local register(call) helper (which
+        # adds to inFlightCalls) and unregisters in finally — including the
+        # one-shot 451 retry's re-registration. Keep the contract on the helper.
+        self.assertLess(get.index('register(call)'), get.index('consume(res)'))
         self.assertLess(get.index('consume(res)'), get.index('finally {'))
-        self.assertLess(get.index('finally {'), get.index('inFlightCalls.remove(call)'))
+        # unregister(call) is also DEFINED as a helper before the try; assert
+        # it is called inside the finally block rather than comparing raw
+        # string offsets (the helper definition comes first by design).
+        _finally = get.index('finally {')
+        self.assertIn('unregister(call)', get[_finally:_finally + 200])
         text = section('internal fun getTextWithClient(', ' * POST with a form-urlencoded body')
         self.assertIn('executeGet(url, referer, headers, tag, false, client) { res ->', text)
         self.assertIn('res.use { r ->', text)
         self.assertNotIn('get(url, referer, headers, tag, permissive).use', text)
 
     def test_failure_callbacks_and_cancellation_order(self):
+        # postJsonWithClient now sits between postFormWithClient and the
+        # reachability probe; give it its own section so the "exactly one
+        # failure callback per request function" contract stays meaningful.
         for start, end in [('internal fun getTextWithClient(', ' * POST with a form-urlencoded body'),
-                           ('internal fun postFormWithClient(', ' * Reachability probe:')]:
+                           ('internal fun postFormWithClient(', 'internal fun postJsonWithClient('),
+                           ('internal fun postJsonWithClient(', ' * Reachability probe:')]:
             text = section(start, end)
             self.assertEqual(1, text.count('onFailure?.onFailure(url, e)'))
             self.assertLess(text.index('catch (e: kotlinx.coroutines.CancellationException)'),

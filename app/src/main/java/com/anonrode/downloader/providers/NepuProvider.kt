@@ -149,6 +149,16 @@ object NepuProvider : SiteProvider {
         val isTv = mediaType == "tv" && season != null && episode != null
         val tvPath = if (isTv) "tv/$tmdbId/$season/$episode" else "movie/$tmdbId"
 
+        // A dead mirror must never enter a candidate list: the user cannot
+        // create a task from it, and the resolver sweep does not spend a pass
+        // proving it dead again. knownDead is the OTA-owned verdict.
+        fun addMirror(candidate: String) {
+            val clean = candidate.trim()
+            if (clean.isBlank() || clean == primaryUrl || mirrors.contains(clean)) return
+            if (DynamicRulesManager.isKnownDead(clean)) return
+            mirrors.add(clean)
+        }
+
         // 5 live proven clusters (raced first ahead of legacy endpoints)
         val liveClusters = listOf(
             if (isTv) "https://net79.cc/api/embed-tmdb/$tmdbId?type=tv&se=$season&ep=$episode" else "https://net79.cc/api/embed-tmdb/$tmdbId?type=movie",
@@ -157,19 +167,10 @@ object NepuProvider : SiteProvider {
             "https://nsrplay.space/embed/$tvPath",
             "https://streamvaultsrc.click/embed/$tvPath"
         )
-        liveClusters.forEach { sUrl ->
-            if (sUrl != primaryUrl && !mirrors.contains(sUrl)) {
-                mirrors.add(sUrl)
-            }
-        }
+        liveClusters.forEach { addMirror(it) }
 
         // Dynamic server mappings extracted from site HTML
-        srvMap.values.forEach { url ->
-            val clean = url.trim()
-            if (clean.isNotBlank() && clean != primaryUrl && !mirrors.contains(clean)) {
-                mirrors.add(clean)
-            }
-        }
+        srvMap.values.forEach { addMirror(it) }
 
         val legacySynthetic = listOf(
             "https://vidsrc.mov/embed/$tvPath",
@@ -187,11 +188,7 @@ object NepuProvider : SiteProvider {
             if (isTv) "https://superflixapi.co/serie/$tmdbId/$season/$episode" else "https://superflixapi.co/filme/$tmdbId",
             "https://peachify.top/embed/$tvPath"
         )
-        legacySynthetic.forEach { sUrl ->
-            if (sUrl != primaryUrl && !mirrors.contains(sUrl)) {
-                mirrors.add(sUrl)
-            }
-        }
+        legacySynthetic.forEach { addMirror(it) }
         return mirrors
     }
 

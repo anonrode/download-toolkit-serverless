@@ -114,7 +114,15 @@ object RulesPipeline {
             val items = runStep(site, "search", step, vars, tag = "search") { outcome ->
                 if (step.items != null) extractSearchCards(site, step, outcome, vars) else emptyList()
             }
-            if (step.items != null) cards = items
+            // Ordered search strategies: the FIRST step that yields cards wins;
+            // an empty strategy falls through to the next one. Before this,
+            // every item-bearing step overwrote `cards`, so a fallback could
+            // silently erase a successful primary (and a primary that answered
+            // with junk card-shaped HTML made the good later source invisible).
+            if (step.items != null && items.isNotEmpty()) {
+                cards = items
+                break
+            }
         }
         if (cards.isNotEmpty()) {
             DebugLog.resolve("$site pipeline search: ${cards.size} cards for \"$effectiveQuery\"")
@@ -201,6 +209,58 @@ object RulesPipeline {
         if (customPatterns.any { it.isNotBlank() && low.contains(it.lowercase()) }) return true
         return DEAD_FILE_MARKERS.any { low.contains(it) }
     }
+
+    /**
+     * Pipeline stages fetch JSON/HTML/RSS pages. A media/container body means
+     * the endpoint returned the file itself or a misrouted CDN object (the
+     * nsrplay class: MP4 bytes reaching a bind regex and producing a
+     * percent-encoded "%00%00%00 ftypisom" URL). Reject such bodies before any
+     * bind runs; this is a content verdict, never a transport retry.
+     */
+    internal fun looksBinaryBody(body: String, headers: Map<String, String>): Boolean {
+        if (body.isBlank()) return false
+        val ct = headers.entries
+            .firstOrNull { it.key.equals("Content-Type", ignoreCase = true) }
+            ?.value?.lowercase().orEmpty()
+        if (ct.startsWith("video/") || ct.startsWith("audio/") || ct.startsWith("image/") ||
+            ct.contains("application/octet-stream")
+        ) return true
+        val head = body.take(256)
+        if (head.isEmpty()) return false
+        if (head.any { it == '\u0000' }) return true
+        if (head.startsWith("%PDF") || head.startsWith("MZ") || head.startsWith("GIF8")) return true
+        if (head.startsWith("PK\u0003\u0004")) return true
+        // UTF-8 decode of binary magic: PNG 0x89, JPEG 0xFF D8 FF, EBML 0x1A.
+        if (head.startsWith("\uFFFDPNG") || head.startsWith("\uFFFD\uFFFD\uFFFD")) return true
+        val first32 = head.take(32)
+        if (first32.startsWith("\u001A") || first32.contains("ftypisom") ||
+            first32.contains("ftypmp4") || first32.contains("ftyp")
+        ) return true
+        val controls = head.count { c -> c.code in 0..8 || c.code in 14..31 }
+        return controls > 4
+    }
+
+    /**
+     * Terminal candidates must be a plain https URL: no cleartext, no literal
+     * control characters, and no percent-encoded control bytes (%00-%1F,
+     * %7F). The nsrplay failure built a URL from binary body bytes
+     * ("...%00%00%00%20ftypisom") and the http variant died on Android's
+     * cleartext policy.
+     */
+    internal fun isSafeTerminalCandidate(candidate: String): Boolean {
+        if (candidate.isBlank()) return false
+        if (!candidate.startsWith("https://", ignoreCase = true)) return false
+        if (DynamicRulesManager.isKnownDead(candidate)) return false
+        if (candidate.any { it.code < 0x20 || it.code == 0x7F }) return false
+        return !Regex("""%(?:0[0-9A-Fa-f]|1[0-9A-Fa-f]|7[Ff])""").containsMatchIn(candidate)
+    }
+
+    /** HLS decoy check that also honors the response Content-Type: a vidsrc
+     *  `_stream?id=` URL has no "m3u8" in its text, so the URL-only gate alone
+     *  missed a 200 + 1-byte mpegurl answer. */
+    internal fun isHlsTerminalStub(url: String, totalBytes: Long, contentType: String): Boolean =
+        com.anonrode.downloader.pipeline.LinkResolver.isHlsStubTerminal(url, totalBytes) ||
+            (contentType.contains("mpegurl", ignoreCase = true) && totalBytes < 8L)
 
     /** Runs one step's source list according to its mode, returning the
      *  extracted items of the winning source(s). */
@@ -383,6 +443,14 @@ object RulesPipeline {
 
         if (body == null) {
             DebugLog.error("$site pipeline $stage: no body from ${source.method} $url")
+            return null
+        }
+
+        if (looksBinaryBody(body, responseHeaders)) {
+            DebugLog.error(
+                "$site pipeline $stage: binary body from ${source.method} $url " +
+                    "(ct=${responseHeaders.entries.firstOrNull { it.key.equals("Content-Type", true) }?.value?.take(40) ?: "?"}) — refusing"
+            )
             return null
         }
 
@@ -764,6 +832,10 @@ object RulesPipeline {
                 candidate = stripQueryParam(candidate, param)
             }
         }
+        if (!isSafeTerminalCandidate(candidate)) {
+            DebugLog.resolve("$site pipeline resolve: unsafe terminal candidate refused (${candidate.take(140)})")
+            return null
+        }
         // Gate on parsedHost — HttpUrl's own view of the host, identical to
         // what the fetch will connect to. safeHost's string-split lets
         // userinfo/backslash forgeries through (see HttpClient.parsedHost).
@@ -804,8 +876,11 @@ object RulesPipeline {
             // Content-Length: 1` decoy passes the probe's HLS 200 branch —
             // never accept a sub-1KB "size" on an HLS-shaped URL as the
             // download terminal (mirrors the non-HLS 1024-byte class gate).
-            if (com.anonrode.downloader.pipeline.LinkResolver.isHlsStubTerminal(probeUrl, tp.totalBytes)) {
-                DebugLog.resolve("$site pipeline resolve: probe rejected HLS stub (${tp.totalBytes}B) ${probeUrl.take(140)}")
+            // The content type matters too: vidsrc.buzz `_stream?id=` answers
+            // 200 + 1 byte with an mpegurl type but has no m3u8 in its URL.
+            val hlsStub = isHlsTerminalStub(probeUrl, tp.totalBytes, tp.contentType)
+            if (hlsStub) {
+                DebugLog.resolve("$site pipeline resolve: probe rejected HLS stub (${tp.totalBytes}B, ct=${tp.contentType.take(40)}) ${probeUrl.take(140)}")
                 return null
             }
             DebugLog.resolve("$site pipeline resolve: terminal validated (${tp.totalBytes}B, hops=$hops) ${probeUrl.take(140)}")
@@ -1545,7 +1620,14 @@ object RulesPipeline {
         // selector finds. Same-document fallback: zero extra network.
         if (metaSynopsis.isNullOrBlank()) metaSynopsis = fallbackSynopsis(doc)
 
-        return PipelineEpisodes(metaTitle, metaPoster, metaSynopsis, episodes)
+        // A knownDead host must never reach a task/list: drop dead primary
+        // links and dead mirrors here, before the drawer renders them. This is
+        // the OTA-side counterpart to the compiled providers' filters.
+        val usableEpisodes = episodes.mapNotNull { ep ->
+            if (DynamicRulesManager.isKnownDead(ep.url)) return@mapNotNull null
+            ep.copy(mirrorUrls = ep.mirrorUrls.filterNot { DynamicRulesManager.isKnownDead(it) })
+        }
+        return PipelineEpisodes(metaTitle, metaPoster, metaSynopsis, usableEpisodes)
     }
 
     /**

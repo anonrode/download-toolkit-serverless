@@ -240,6 +240,13 @@ object ResolverRegistry {
         memoTaskId: String?
     ): String? = withContext(Dispatchers.IO) {
         currentCoroutineContext().ensureActive()
+        // knownDead is unconditional (also under bypassHealth): a defunct host
+        // must fail in microseconds with an honest reason, not burn a resolver
+        // pass. The reason is recorded for the engine's existing error path.
+        knownDeadReason(url)?.let { reason ->
+            noteKnownDead(url, reason)
+            return@withContext null
+        }
         // Chain lineage (see ResolveLineage): merges this call's arguments
         // with the ambient chain state. A nested leg that reset depth or
         // visited (NaijaVaultGatewayResolver's default-argument registry
@@ -261,10 +268,21 @@ object ResolverRegistry {
         val cacheKey = com.anonrode.downloader.pipeline.ResolveCache.keyFor(url, quality)
         if (lineage.depth == 0) {
             com.anonrode.downloader.pipeline.ResolveCache.get(cacheKey)?.let { cached ->
-                com.anonrode.downloader.pipeline.PipelineJournal.hop(
-                    site = "", stage = "cache", url = url, ok = true, ms = 0
-                )
-                return@withContext cached
+                // A resolved URL that a stub gate has since proven garbage must
+                // never be served from cache: the engine's replay/resume path
+                // calls resolve with allowCacheHit=true, which is exactly how a
+                // 1-byte vidsrc _stream URL was replayed task after task.
+                if (com.anonrode.downloader.pipeline.ResolveCache.isPoisoned(cached)) {
+                    com.anonrode.downloader.pipeline.ResolveCache.invalidate(cacheKey)
+                    com.anonrode.downloader.util.DebugLog.resolve(
+                        "resolve cache: dropped poisoned URL ${cached.take(120)} — re-resolving fresh"
+                    )
+                } else {
+                    com.anonrode.downloader.pipeline.PipelineJournal.hop(
+                        site = "", stage = "cache", url = url, ok = true, ms = 0
+                    )
+                    return@withContext cached
+                }
             }
             // Manual retry taps grant ONE bypass of the health gate: the user
             // explicitly asked for a fresh attempt at a cooling-down host, and
@@ -333,6 +351,18 @@ object ResolverRegistry {
         val candidates = urls.asSequence()
             .filter { it.isNotBlank() }
             .distinct()
+            // OTA knownDead is a CONTENT/ownership verdict, not a transient
+            // health backoff: bypassHealth may lift stale cooldowns, but never
+            // re-attempts a host the playbook has declared dead (zippyshare,
+            // data.vidsrcme.ru, nepu.to/tv, ...). Record the reason so the
+            // engine's resolver-chain-EMPTY error can quote it.
+            .filter { url ->
+                val reason = knownDeadReason(url)
+                if (reason != null) {
+                    noteKnownDead(url, reason)
+                    false
+                } else true
+            }
             .let { seq -> if (bypassHealth) seq else seq.filter { com.anonrode.downloader.pipeline.HostHealth.isUsable(it) } }
             .toList()
         // Provider-issued mirror fan-outs (nepu resolveEpisode — share-31 log,
@@ -361,6 +391,27 @@ object ResolverRegistry {
             }
         }
         return boundedFirstSuccess(candidates, maxConcurrency) { resolve(it, quality, bypassHealth = bypassHealth) }
+    }
+
+    /** User-facing reason for an OTA knownDead host, or null when live. */
+    internal fun knownDeadReason(url: String): String? {
+        if (!DynamicRulesManager.isKnownDead(url)) return null
+        val low = url.lowercase()
+        return if (low.contains("zippyshare")) {
+            "Zippyshare shut down in 2023 — this link cannot be downloaded"
+        } else {
+            "This host is marked dead in the download rules — no resolver will be attempted"
+        }
+    }
+
+    /** Record the knownDead reason where the engine already reads host reasons
+     *  (DownloadEngine's resolver-chain-EMPTY path appends HostHealth.lastReason). */
+    private fun noteKnownDead(url: String, reason: String) {
+        com.anonrode.downloader.pipeline.HostHealth.recordFail(url, reason = reason)
+        com.anonrode.downloader.pipeline.PipelineJournal.hop(
+            site = "", stage = "known-dead", url = url, ok = false, ms = 0, detail = reason
+        )
+        com.anonrode.downloader.util.DebugLog.resolve("knownDead fast-fail: ${url.take(100)} — $reason")
     }
 
     private suspend fun resolveInternal(
@@ -1292,6 +1343,7 @@ object VidsrcResolver : BaseResolver {
         // returning a minted url, verify its first media unit is actually
         // media; a confirmed ad server is skipped for the next of the 3.
         var adClassifiedServers = 0
+        var stubClassifiedServers = 0
         for (i in 0 until minOf(3, servers.length())) {
             val sv = servers.optJSONObject(i) ?: continue
             val ref = sv.optString("ref").takeIf { it.isNotBlank() } ?: continue
@@ -1329,12 +1381,29 @@ object VidsrcResolver : BaseResolver {
                             )
                             continue
                         }
+                        MintHeadVerdict.STUB -> {
+                            // A 1-byte/empty mpegurl answer is the vidsrc
+                            // _stream decoy. Poison it so the engine's replay
+                            // path cannot reuse it, then try the next server.
+                            stubClassifiedServers++
+                            com.anonrode.downloader.pipeline.ResolveCache.poison(absolute)
+                            com.anonrode.downloader.util.DebugLog.resolve(
+                                "Vidsrc: minted server #$i is a stub (1-byte/non-playlist) — poisoned and skipping for tmdb=$tmdb"
+                            )
+                            continue
+                        }
                         // MEDIA confirmed, or UNKNOWN (probe transport miss):
                         // both keep today's return-the-mint behavior.
                         else -> return absolute
                     }
                 }
             }
+        }
+        if (stubClassifiedServers > 0) {
+            // Stub-only line-up: content-class but deliberately NOT memoized
+            // (the mint rotates between passes, exactly like the ad list).
+            lastFailure = "Vidsrc: stub-only server list (${stubClassifiedServers}x 1-byte/non-playlist) for tmdb=$tmdb"
+            return null
         }
         if (adClassifiedServers > 0) {
             // Every minted server we could classify served an ad payload: an
@@ -1352,7 +1421,7 @@ object VidsrcResolver : BaseResolver {
     // Minted-server head verification (ad-first mint skip, 2026-10-16).
     // ------------------------------------------------------------------
 
-    private enum class MintHeadVerdict { MEDIA, AD, MANIFEST, UNKNOWN }
+    internal enum class MintHeadVerdict { MEDIA, AD, MANIFEST, STUB, UNKNOWN }
 
     /** Derived clients keep the shared pool/DNS/cookies/SSRF floor but bound
      *  the WHOLE call: playlist fetch ≤ 2s, segment head ≤ 1.5s. HttpClient.probe
@@ -1384,7 +1453,12 @@ object VidsrcResolver : BaseResolver {
             if (withRange) builder.header("Range", "bytes=0-512")
             if (referer.isNotBlank()) builder.header("Referer", referer)
             HttpClient.executeCancellable(client, builder.build()) { res ->
-                val bytes = try { res.peekBody(maxPeek.toLong()).bytes() } catch (_: Exception) { ByteArray(0) }
+                // A sub-1KB announcement means a stub candidate: never pull a
+                // multi-MB body just to classify a 1-byte decoy. 512B is
+                // enough for "#EXTM3U" plus the first segment URI.
+                val announced = res.body?.contentLength() ?: -1L
+                val peekCap = if (announced in 0L..1023L) minOf(maxPeek.toLong(), 512L) else maxPeek.toLong()
+                val bytes = try { res.peekBody(peekCap).bytes() } catch (_: Exception) { ByteArray(0) }
                 Triple(res.code, res.header("Content-Type")?.lowercase() ?: "", bytes)
             }
         } catch (cancelled: CancellationException) {
@@ -1406,7 +1480,8 @@ object VidsrcResolver : BaseResolver {
      * promoted to AD: skipping real servers on a probe hiccup trades proven
      * streams for a guess.
      */
-    private fun headPayloadVerdict(contentType: String, bytes: ByteArray): MintHeadVerdict {
+    internal fun headPayloadVerdict(contentType: String, bytes: ByteArray): MintHeadVerdict {
+        val ct = contentType.lowercase()
         if (bytes.size >= 4 &&
             bytes[0] == 0x89.toByte() && bytes[1] == 0x50.toByte() &&
             bytes[2] == 0x4E.toByte() && bytes[3] == 0x47.toByte()
@@ -1420,11 +1495,20 @@ object VidsrcResolver : BaseResolver {
             bytes[4] == 0x66.toByte() && bytes[5] == 0x74.toByte() &&
             bytes[6] == 0x79.toByte() && bytes[7] == 0x70.toByte()
         ) return MintHeadVerdict.MEDIA // MP4 'ftyp' at offset 4
-        if (contentType.startsWith("image/")) return MintHeadVerdict.AD
-        if (contentType.contains("mpegurl") || contentType.contains("mp2t")) return MintHeadVerdict.MANIFEST
-        val text = String(bytes, Charsets.UTF_8)
+        if (bytes.isEmpty()) return MintHeadVerdict.STUB
+        if (ct.contains("mpegurl")) {
+            // A real playlist ALWAYS starts with the #EXTM3U tag. A 1-byte
+            // "1" answer under an mpegurl Content-Type is the vidsrc.buzz
+            // _stream decoy, not a manifest.
+            val text = String(bytes, Charsets.UTF_8).trimStart()
+            return if (text.startsWith("#EXTM3U")) MintHeadVerdict.MANIFEST else MintHeadVerdict.STUB
+        }
+        if (ct.startsWith("image/")) return MintHeadVerdict.AD
+        if (ct.contains("mp2t")) return MintHeadVerdict.MANIFEST
+        val text = String(bytes, Charsets.UTF_8).trimStart()
         if (text.startsWith("#EXT")) return MintHeadVerdict.MANIFEST
-        if (contentType.contains("dash") || text.startsWith("<?xml") || text.startsWith("<MPD")) return MintHeadVerdict.MANIFEST
+        if (bytes.size < 4) return MintHeadVerdict.STUB // cannot be a media container
+        if (ct.contains("dash") || text.startsWith("<?xml") || text.startsWith("<MPD")) return MintHeadVerdict.MANIFEST
         return MintHeadVerdict.UNKNOWN
     }
 
@@ -1436,23 +1520,37 @@ object VidsrcResolver : BaseResolver {
      * m3u8 is the segment URI; an in-manifest nested playlist (first line is
      * itself another m3u8, live-verified on vidsrc.buzz VOD) counts as
      * media-ish, per "m3u8/HTML-less binary beginning" evidence. */
-    private fun classifyMintedStream(streamUrl: String, referer: String): MintHeadVerdict {
+    internal fun classifyMintedStream(streamUrl: String, referer: String): MintHeadVerdict {
+        // megaplays.se/api/playlist.php is a working proxy (yt-dlp consumes
+        // its playlist directly). Never apply the HLS stub heuristics there.
+        if (streamUrl.contains("megaplays.se/api/playlist.php", ignoreCase = true)) {
+            return MintHeadVerdict.MANIFEST
+        }
         val head = rangedHeadGet(streamUrl, referer, mintPlaylistClient, 64 * 1024, withRange = false)
             ?: return MintHeadVerdict.UNKNOWN
         if (head.first !in 200..299) return MintHeadVerdict.UNKNOWN
         val verdict = headPayloadVerdict(head.second, head.third)
+        if (verdict == MintHeadVerdict.STUB) return MintHeadVerdict.STUB
         if (verdict != MintHeadVerdict.MANIFEST) return verdict
         val text = String(head.third, Charsets.UTF_8)
+        if (!text.trimStart().startsWith("#EXTM3U")) return MintHeadVerdict.STUB
         val firstLine = text.lineSequence()
             .map { it.trim() }
             .firstOrNull { it.isNotEmpty() && !it.startsWith("#") }
-            ?: return MintHeadVerdict.UNKNOWN
+            ?: return MintHeadVerdict.STUB
+        // "1" is not a segment URI; a real first media line carries a scheme,
+        // a slash, a dot, or a query.
+        val looksSegmented = firstLine.startsWith("http", ignoreCase = true) ||
+            firstLine.startsWith("/") || firstLine.contains('/') ||
+            firstLine.contains('.') || firstLine.contains('?')
+        if (!looksSegmented) return MintHeadVerdict.STUB
         val segmentUrl = if (firstLine.startsWith("http", ignoreCase = true)) firstLine
         else HttpClient.safeResolveUri(streamUrl, firstLine)
         val seg = rangedHeadGet(segmentUrl, streamUrl, mintSegmentClient, 513, withRange = true)
             ?: return MintHeadVerdict.UNKNOWN
         if (seg.first !in 200..299) return MintHeadVerdict.UNKNOWN
         val segVerdict = headPayloadVerdict(seg.second, seg.third)
+        if (segVerdict == MintHeadVerdict.STUB) return MintHeadVerdict.STUB
         // A nested playlist at the segment slot is the same media-ish
         // beginning class the direct case already accepts.
         return if (segVerdict == MintHeadVerdict.MANIFEST) MintHeadVerdict.MEDIA else segVerdict
@@ -2173,7 +2271,16 @@ object NpDownloaderGatewayResolver : BaseResolver {
     override suspend fun resolve(url: String, quality: String, depth: Int): String? {
         lastFailure = null
         try {
-            val html = HttpClient.getText(url, referer = url) ?: run {
+            // A gateway page is a directory hop, not media: cap the whole hop
+            // at 8s so a dead chain hands the slot to the next mirror instead
+            // of eating the registry's 12s attempt budget (live: 16s dead-end).
+            val deadlineMs = System.currentTimeMillis() + 10_000L
+            val boundedClient = HttpClient.shared.newBuilder()
+                .callTimeout(8, TimeUnit.SECONDS)
+                .build()
+            val html = HttpClient.getTextWithClient(
+                boundedClient, url, referer = url, tag = "np-downloader"
+            ) ?: run {
                 lastFailure = "NpDownloader: empty HTTP response for $url"
                 return null
             }
@@ -2182,6 +2289,10 @@ object NpDownloaderGatewayResolver : BaseResolver {
             if (sdmAnchor != null) {
                 val href = sdmAnchor.attr("abs:href").takeIf { it.isNotBlank() }
                 if (href != null && href != url) {
+                    if (System.currentTimeMillis() > deadlineMs) {
+                        lastFailure = "NpDownloader: gateway budget exhausted before target hop"
+                        return null
+                    }
                     return if (depth < ResolverRegistry.RESOLVE_DEPTH_LIMIT) {
                         ResolverRegistry.resolve(href, quality, depth + 1)
                             ?: if (isDirectMediaUrl(href) || LinkResolver.isProvablyDirectFile(href)) href else null
@@ -2191,6 +2302,10 @@ object NpDownloaderGatewayResolver : BaseResolver {
             val anyLocker = soup.select("a[href]").map { it.attr("abs:href") }
                 .firstOrNull { LinkResolver.isKnownLockerHost(it) && it != url }
             if (!anyLocker.isNullOrBlank()) {
+                if (System.currentTimeMillis() > deadlineMs) {
+                    lastFailure = "NpDownloader: gateway budget exhausted before mirror hop"
+                    return null
+                }
                 return if (depth < ResolverRegistry.RESOLVE_DEPTH_LIMIT) {
                     ResolverRegistry.resolve(anyLocker, quality, depth + 1)
                         ?: if (isDirectMediaUrl(anyLocker) || LinkResolver.isProvablyDirectFile(anyLocker)) anyLocker else null
@@ -2559,6 +2674,11 @@ object LoadedfilesResolver : BaseResolver {
 
     private suspend fun resolveAttempt(url: String, onFailure: (ResolverOutcome.Failure?) -> Unit): String? {
         try {
+            // Internal deadline below the registry's 12s unproven-host budget:
+            // a chain that keeps minting fresh tokens but never reaches media
+            // must yield the slot to the next mirror instead of consuming the
+            // whole pass (live: "token chain exhausted" at 11s).
+            val deadlineMs = System.currentTimeMillis() + 10_000L
             // The token chain needs the shared client's longer read timeout (a
             // slow wait page must not abort the hop), but the host-candidate
             // probe is pure liveness: a dead host should fail in 6s instead of
@@ -2583,6 +2703,7 @@ object LoadedfilesResolver : BaseResolver {
             // 9jarocks path died for hours (live-verified 2026-08-21).
             val hosts = candidateHosts(url)
             var currUrl: String? = null
+            var fastTimedOut = false
             for (host in hosts) {
                 val candidate = HttpClient.safeUrl(rewriteHost(url, host))
                 val effective = try {
@@ -2591,6 +2712,9 @@ object LoadedfilesResolver : BaseResolver {
                     throw cancelled
                 } catch (e: Exception) {
                     currentCoroutineContext().ensureActive()
+                    if (e is java.net.SocketTimeoutException ||
+                        (e.message ?: "").contains("timeout", ignoreCase = true)
+                    ) fastTimedOut = true
                     onFailure(resolverFailure(e))
                     android.util.Log.w("AnonDownload", "Loadedfiles fast-probe failed for $host: ${e.message}")
                     null
@@ -2601,12 +2725,18 @@ object LoadedfilesResolver : BaseResolver {
                     break
                 }
             }
-            // Every candidate failed the fast probe — a merely SLOW host may
-            // still answer past 5s, so give the same candidates one slower pass
-            // before declaring the domain dead (a truly dead host now costs
-            // 5s x N candidates + 10s x N, not 15s x N).
+            // Every candidate failed the fast probe. A slow host can still
+            // answer after 6-8s, but a transport-dead one (ConnectException /
+            // UnknownHost) will not get better in the slow pass: skip it and
+            // fail over immediately.
+            if (currUrl == null && !fastTimedOut) {
+                onFailure(ResolverOutcome.Failure("Loadedfiles: all candidate hosts transport-dead (${hosts.joinToString()})"))
+                android.util.Log.w("AnonDownload", "Loadedfiles: all fast probes transport-dead")
+                return null
+            }
             if (currUrl == null) {
                 for (host in hosts) {
+                    if (System.currentTimeMillis() > deadlineMs) break
                     val candidate = HttpClient.safeUrl(rewriteHost(url, host))
                     val effective = try {
                         probeEffectiveUrl(slowProbeClient, candidate)
@@ -2636,8 +2766,20 @@ object LoadedfilesResolver : BaseResolver {
             val cookieMap = mutableMapOf<String, String>()
             var ptHops = 0
             var lastFetchedUrl: String? = null
+            val seenChain = mutableSetOf<String>()
+            var chainAborted = false
             for (step in 1..10) {
                 currentCoroutineContext().ensureActive()
+                if (System.currentTimeMillis() > deadlineMs) {
+                    onFailure(ResolverOutcome.Failure("Loadedfiles token chain deadline (10s) on $currUrl"))
+                    chainAborted = true
+                    break
+                }
+                if (!seenChain.add(currUrl!!.substringBefore('#'))) {
+                    onFailure(ResolverOutcome.Failure("Loadedfiles token chain loop on $currUrl"))
+                    chainAborted = true
+                    break
+                }
                 val pageBeforeStep = currUrl
                 val referer = when {
                     lastFetchedUrl != null -> lastFetchedUrl
@@ -2810,7 +2952,7 @@ object LoadedfilesResolver : BaseResolver {
                     break
                 }
             }
-            if (currUrl != null && !currUrl.contains("/token/download/") && !currUrl.contains("gfrdaseazzs.com")) {
+            if (!chainAborted && currUrl != null && !currUrl.contains("/token/download/") && !currUrl.contains("gfrdaseazzs.com")) {
                 onFailure(ResolverOutcome.Failure("Loadedfiles token chain exhausted on $currUrl"))
             }
             // The token chain failed on the reachable-first host (it answered
