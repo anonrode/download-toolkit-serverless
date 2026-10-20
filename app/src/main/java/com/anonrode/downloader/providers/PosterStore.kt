@@ -76,6 +76,9 @@ object PosterStore {
     private val loadedLock = Any()
     private val writeMutex = Mutex()
     private val writeSignal = Channel<Unit>(Channel.CONFLATED)
+    /** Invalidates queued writers across init/reset (test isolation and the
+     *  real init path); a stale writer must never overwrite the new file. */
+    private val generation = java.util.concurrent.atomic.AtomicLong(0L)
 
     @Volatile
     private var file: File? = null
@@ -100,8 +103,9 @@ object PosterStore {
 
     /** Testable file overload (no Android Context needed). */
     fun init(file: File) {
+        generation.incrementAndGet()
         this.file = file
-        snapshot = read(file)
+        synchronized(lock) { snapshot = read(file) }
         synchronized(loadedLock) {
             loadedUrls.clear()
             // Card entries are written only by markLoaded(), so they are
@@ -134,13 +138,17 @@ object PosterStore {
     }
 
     private fun writeNow() {
+        val gen = generation.get()
         val f = file ?: return
         val snap = synchronized(lock) { snapshot }
+        if (gen != generation.get()) return
         try {
             val parent = f.parentFile ?: return
             if (!parent.exists()) parent.mkdirs()
             val tmp = File(parent, "${f.name}.tmp")
             tmp.writeText(json.encodeToString(PosterSnapshot.serializer(), snap))
+            // A reset/init may have landed while the file was being written.
+            if (gen != generation.get()) return
             if (!tmp.renameTo(f)) {
                 f.delete()
                 tmp.renameTo(f)
@@ -331,6 +339,7 @@ object PosterStore {
     // ── Test hooks ─────────────────────────────────────────────────────────
 
     internal fun resetForTest() {
+        generation.incrementAndGet()
         synchronized(lock) { snapshot = PosterSnapshot() }
         synchronized(loadedLock) { loadedUrls.clear() }
     }

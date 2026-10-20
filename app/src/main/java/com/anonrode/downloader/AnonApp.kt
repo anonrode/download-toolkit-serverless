@@ -256,6 +256,11 @@ class AnonApp : Application(), ImageLoaderFactory {
     internal fun buildImageHttpClient(): okhttp3.OkHttpClient =
         PosterImages.configure(
             HttpClient.shared.newBuilder()
+                // Coil's networkCachePolicy(DISABLED) maps to OkHttp's
+                // only-if-cached, which is a no-op without a Cache. This cache
+                // makes the offline/cache-only underlay truly network-free on
+                // a disk miss instead of waiting out the call timeout.
+                .cache(okhttp3.Cache(File(noBackupFilesDir, "image_http_cache"), 64L * 1024 * 1024))
                 .addInterceptor { chain ->
                     val request = chain.request().newBuilder()
                         .header("User-Agent", HttpClient.DEFAULT_UA)

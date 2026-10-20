@@ -671,12 +671,16 @@ fun DownloadsScreen(
                         })
                         val info = seriesInfo[showTitle]
                         val live = liveSeriesRemaining[showTitle]
-                        LaunchedEffect(isExpanded, info?.first) {
-                            if (!isExpanded || info == null) return@LaunchedEffect
-                            val prev = liveSeriesRemaining[showTitle]
-                            if (prev != null &&
-                                System.currentTimeMillis() - prev.checkedAtMs < 300_000L
-                            ) return@LaunchedEffect
+                        val explicitlyExpanded = expandedShows[showTitle] == true
+                        // Statuses for the live count must come from ALL tasks
+                        // of the show, not the status-filtered list, or a
+                        // filter inflates "remaining". The effect runs only on
+                        // an explicit expand; ProviderRegistry.loadEpisodes has
+                        // its own 5-minute cache, so the local TTL is gone and
+                        // a completion updates the count immediately.
+                        val allShowItems = viewModel.engine.tasks.value.filter { it.showTitle == showTitle }
+                        LaunchedEffect(explicitlyExpanded, info?.first, structureSig) {
+                            if (!explicitlyExpanded || info == null) return@LaunchedEffect
                             val details = try {
                                 com.anonrode.downloader.providers.ProviderRegistry.loadEpisodes(
                                     com.anonrode.downloader.data.models.ShowCard(
@@ -700,10 +704,10 @@ fun DownloadsScreen(
                                     checkedAtMs = System.currentTimeMillis()
                                 )
                             } else {
-                                val completed = showItems
+                                val completed = allShowItems
                                     .filter { it.status == TaskStatus.COMPLETED }
                                     .map { it.sourceUrl }.toSet()
-                                val inFlight = showItems
+                                val inFlight = allShowItems
                                     .filter { isInFlightStatus(it.status) }
                                     .map { it.sourceUrl }.toSet()
                                 LiveSeriesRemaining(

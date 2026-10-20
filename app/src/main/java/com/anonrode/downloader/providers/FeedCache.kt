@@ -147,7 +147,12 @@ object FeedCache {
         val oldByKey = old.associateBy { PosterStore.cardKey(it.site, it.url) }
         return fresh.map { card ->
             val prev = oldByKey[PosterStore.cardKey(card.site, card.url)]
-            if (card.posterUrl.isBlank() && prev?.posterUrl?.isNotBlank() == true) {
+            val incoming = PosterStore.normalizePosterUrl(card.posterUrl)
+            // Keep the known-good URL unless the new one is blank OR has not
+            // actually loaded yet. This is the upgrade path where PosterStore
+            // has no record but FeedCache still holds the previous poster.
+            val incomingUsable = incoming.isNotBlank() && PosterStore.isLoaded(incoming)
+            if (!incomingUsable && prev?.posterUrl?.isNotBlank() == true) {
                 card.copy(posterUrl = prev.posterUrl)
             } else {
                 card
@@ -162,8 +167,13 @@ object FeedCache {
         scope.launch {
             mutex.withLock {
                 try {
+                    // Write the CURRENT snapshot at lock time, not the value
+                    // captured by this mutate() call: two writers can queue in
+                    // either order, and the older one must never overwrite the
+                    // newer state on disk.
+                    val current = snapshot
                     val tmp = File(f.parentFile, "${f.name}.tmp")
-                    tmp.writeText(json.encodeToString(FeedSnapshot.serializer(), next))
+                    tmp.writeText(json.encodeToString(FeedSnapshot.serializer(), current))
                     tmp.renameTo(f)
                 } catch (_: Throwable) {}
             }

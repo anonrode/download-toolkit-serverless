@@ -476,6 +476,8 @@ object CategoryFeed {
     )
 
     private val rssEndPages = java.util.concurrent.ConcurrentHashMap<String, Int>()
+    private val rssEndAtMs = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    private val rssEndTtlMs = 30L * 60_000L
 
     private suspend fun fetchRssPage(
         site: String,
@@ -488,7 +490,13 @@ object CategoryFeed {
         // not of one page, so page N+1 must short-circuit from page N's 404.
         val feedKey = "$site|${category.label}|${path.substringBefore("?paged=")}"
         val endedAt = rssEndPages[feedKey]
-        if (endedAt != null && page > endedAt) return emptyList()
+        if (endedAt != null && page > endedAt) {
+            val checkedAt = rssEndAtMs[feedKey] ?: 0L
+            if (System.currentTimeMillis() - checkedAt < rssEndTtlMs) return emptyList()
+            // The feed may have grown since the 404; probe again.
+            rssEndPages.remove(feedKey)
+            rssEndAtMs.remove(feedKey)
+        }
 
         val base = DynamicRulesManager.getBaseUrl(site).trimEnd('/')
         if (base.isBlank()) return emptyList()
@@ -528,9 +536,13 @@ object CategoryFeed {
             // Page N is gone => the feed ended at N-1. Remember it, never
             // log it as an error, never retry it.
             rssEndPages[feedKey] = (page - 1).coerceAtLeast(1)
+            rssEndAtMs[feedKey] = System.currentTimeMillis()
             return emptyList()
         }
-        if (result.cards.isNotEmpty()) rssEndPages.remove(feedKey)
+        if (result.cards.isNotEmpty()) {
+            rssEndPages.remove(feedKey)
+            rssEndAtMs.remove(feedKey)
+        }
         return result.cards
     }
 

@@ -1183,7 +1183,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // Never submit an empty, whitespace-only or oversized paste. The
         // field shows the capped text, but a 12-paragraph blob must not turn
         // into provider queries.
-        if (newQuery.trim().length > SEARCH_QUERY_MAX) {
+        if (normalized.length > SEARCH_QUERY_MAX) {
             searchJob?.cancel()
             com.anonrode.downloader.data.net.HttpClient.cancelTagged("search")
             com.anonrode.downloader.data.net.HttpClient.cancelTagged("search-strategy")
