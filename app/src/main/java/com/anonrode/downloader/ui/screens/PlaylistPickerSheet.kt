@@ -330,14 +330,13 @@ fun PlaylistPickerSheet(viewModel: MainViewModel, onDismiss: () -> Unit) {
                                 .background(SurfaceCard),
                             contentAlignment = Alignment.Center
                         ) {
-                            if (entry.thumbnailUrl.isNotBlank()) {
-                                SubcomposeAsyncImage(
-                                    model = entry.thumbnailUrl,
-                                    contentDescription = null,
-                                    contentScale = ContentScale.Crop,
-                                    modifier = Modifier.fillMaxSize()
-                                )
-                            }
+                            com.anonrode.downloader.ui.components.PosterImageOrFallback(
+                                posterUrl = entry.thumbnailUrl,
+                                showTitle = entry.title,
+                                modifier = Modifier.fillMaxSize(),
+                                shape = RoundedCornerShape(Radius.sm),
+                                showFallbackTitle = false
+                            )
                             entry.durationSec.takeIf { it > 0 }?.let { d ->
                                 Box(
                                     modifier = Modifier

@@ -494,11 +494,12 @@ fun QuickShareCard(
                     contentAlignment = Alignment.Center
                 ) {
                     if (posterUrl.isNotBlank()) {
-                        coil.compose.AsyncImage(
-                            model = posterUrl,
-                            contentDescription = null,
-                            contentScale = ContentScale.Crop,
-                            modifier = Modifier.fillMaxSize()
+                        com.anonrode.downloader.ui.components.PosterImageOrFallback(
+                            posterUrl = posterUrl,
+                            showTitle = "",
+                            modifier = Modifier.fillMaxSize(),
+                            shape = thumbShape,
+                            showFallbackTitle = false
                         )
                     } else {
                         Icon(
