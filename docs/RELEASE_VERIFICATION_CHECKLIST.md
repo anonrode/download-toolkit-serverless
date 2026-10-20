@@ -1,8 +1,17 @@
 # Release verification checklist (v3.3.0)
 
-Phase-2 state: **no tag, no build, no OTA publish has been performed.** The
-remote tag currently points at `ee31741`; GitHub Release `v3.3.0` has 5 APKs.
-The final force-move happens only after every lane is green.
+Current state (2026-10-20): signed rules **rev 3 is published and synced to the
+VPS**; the branch carries the engine/UI/ops fixes up to `87cde3c`. No tag move
+or new APK build has been performed in this freeze. The remote tag still points
+at the previous release and GitHub Release `v3.3.0` has its existing 5 APKs.
+The final force-move happens only after the CI gate is green.
+
+## Signing-key custody
+
+Cold OTA keys live OUTSIDE the checkout: `<parent>/anon-ota-keys` or
+`$ANON_OTA_KEYS_DIR` (the legacy `<repo>/keys` is only a fallback). Never
+`git add` a `*.pem`; never commit a service-account JSON. The publish script
+refuses to emit an unsigned envelope.
 
 ## Per-lane gates (run before each push)
 
@@ -28,7 +37,9 @@ the full HLS matrix, log-upload proof, and FCM runtime test pass.
   `test(verify)`, `docs(verify)`.
 - One logical change per commit; body states root cause, fix, evidence, gates.
 - `git fetch origin && git pull --rebase` before push; push master only.
-- Never amend/rebase pushed commits. No tag, no release, no OTA payload edit.
+- Never amend/rebase pushed commits. No tag or release without the gate. OTA
+  payload changes go through `publish_rules.py` with a rev bump and the
+  `fleet-pin verified` line; never hand-edit the committed `.enc`.
 
 ## CI watch loop
 

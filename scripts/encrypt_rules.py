@@ -118,9 +118,21 @@ ROOT2_PUB_B64 = (
 # Pinned trust set for CI/fleet parity checks: [root-1, root-2].
 ROOT_PINS_B64 = [OTA_PUB_B64, ROOT2_PUB_B64]
 CHAIN_ALG = "P256-SHA256"
-# keys/ holds the cold custody material (root-2 root, leaf keys). Gitignored
-# explicitly AND every PEM pattern is ignored — private halves never ship.
-KEYS_DIR = os.path.join(REPO_ROOT, "keys")
+# Cold custody material (root-2 root, leaf keys) lives OUTSIDE the checkout:
+#   - ANON_OTA_KEYS_DIR env override, else
+#   - <parent of repo>/anon-ota-keys (the shipped location), else
+#   - <repo>/keys (legacy; kept for existing checkouts).
+# Private halves never ship and never enter git.
+def _resolve_keys_dir() -> str:
+    env_dir = os.environ.get("ANON_OTA_KEYS_DIR")
+    if env_dir:
+        return env_dir
+    sibling = os.path.join(os.path.dirname(REPO_ROOT), "anon-ota-keys")
+    if os.path.isdir(sibling):
+        return sibling
+    return os.path.join(REPO_ROOT, "keys")
+
+KEYS_DIR = _resolve_keys_dir()
 
 
 def pub_to_b64(pub) -> str:

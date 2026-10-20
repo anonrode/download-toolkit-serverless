@@ -38,11 +38,14 @@ a service-account credential.
 |---|---|
 | absent | BuildConfig defaults; register + subscribe `anon_test` |
 | `enabled=false` | kill switch: delete token, unsubscribe `anon_test` |
-| enabled + all four fields | override; appId change deletes/re-inits FirebaseApp |
+| enabled + all four fields | override; any credential change deletes/re-inits FirebaseApp |
 | enabled + incomplete | ignored; BuildConfig defaults stay active |
+| complete block, `enabled` omitted | treated as ENABLED (explicit `false` is the kill switch) |
 
 Logs contain only `token_ok`, `token_fail`, `topic_ok`, `topic_fail`, and
-`fcm_message` (message id/type/from). Never token, FID, or payload data values.
+`fcm_message` (message id/type/from). Never the token/FID, the payload body, or
+any credential. A token refresh re-reads the policy, so `enabled=false` stays
+silent even after the SDK issues a new token.
 
 ## Files
 
@@ -53,9 +56,10 @@ Logs contain only `token_ok`, `token_fail`, `topic_ok`, `topic_fail`, and
 - `proguard-rules.pro` — keep for the service.
 - `scripts/fcm/send_topic.py` — HTTP v1 sender (VPS only).
 
-## One-line AnonApp hook (owned by the UI agent)
+## AnonApp hook (already wired)
 
-Add once in `AnonApp.onCreate()`, after `RemoteLogger.install(this)`:
+This is already present in `AnonApp.onCreate()`, after
+`RemoteLogger.install(this)` — do not add it a second time:
 
 ```kotlin
 try { com.anonrode.downloader.update.FcmRegistrar.maybeRegister(this) } catch (_: Throwable) {}
