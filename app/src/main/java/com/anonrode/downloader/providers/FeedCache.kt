@@ -103,15 +103,57 @@ object FeedCache {
     fun categoryCards(label: String): List<ShowCard> =
         snapshot.categories[label]?.cards ?: emptyList()
 
-    fun saveTrending(cards: List<ShowCard>) =
-        mutate { it.copy(trending = cards, trendingAtMs = System.currentTimeMillis()) }
+    fun tile(label: String): TilePoster? = snapshot.tiles.firstOrNull { it.label == label }
 
-    fun saveCategory(label: String, cards: List<ShowCard>) = mutate {
-        it.copy(categories = it.categories + (label to CategoryEntry(System.currentTimeMillis(), cards)))
+    fun saveTrending(cards: List<ShowCard>) = mutate {
+        it.copy(
+            trending = mergeCardPosters(it.trending, cards),
+            trendingAtMs = System.currentTimeMillis()
+        )
     }
 
-    fun saveTiles(tiles: List<TilePoster>) =
-        mutate { it.copy(tiles = tiles, tilesAtMs = System.currentTimeMillis()) }
+    fun saveCategory(label: String, cards: List<ShowCard>) = mutate {
+        val old = it.categories[label]?.cards.orEmpty()
+        it.copy(
+            categories = it.categories + (
+                label to CategoryEntry(
+                    System.currentTimeMillis(),
+                    mergeCardPosters(old, cards)
+                )
+                )
+        )
+    }
+
+    /**
+     * Poster-preserving tile save: a blank slot for one label leaves that
+     * label's previous real URL untouched, and labels absent from [tiles]
+     * are kept. A failed refresh can never blank the disk cache.
+     */
+    fun saveTiles(tiles: List<TilePoster>) = mutate {
+        val merged = it.tiles.associateBy { t -> t.label }.toMutableMap()
+        for (t in tiles) {
+            if (t.posterUrl.isNotBlank()) merged[t.label] = TilePoster(t.label, t.posterUrl)
+        }
+        it.copy(tiles = merged.values.toList(), tilesAtMs = System.currentTimeMillis())
+    }
+
+    /**
+     * Defense in depth for the "never blank over good" contract: when a
+     * fresh card keeps its stable site|url key but arrives with no poster,
+     * the previously cached poster is carried forward.
+     */
+    private fun mergeCardPosters(old: List<ShowCard>, fresh: List<ShowCard>): List<ShowCard> {
+        if (old.isEmpty()) return fresh
+        val oldByKey = old.associateBy { PosterStore.cardKey(it.site, it.url) }
+        return fresh.map { card ->
+            val prev = oldByKey[PosterStore.cardKey(card.site, card.url)]
+            if (card.posterUrl.isBlank() && prev?.posterUrl?.isNotBlank() == true) {
+                card.copy(posterUrl = prev.posterUrl)
+            } else {
+                card
+            }
+        }
+    }
 
     private fun mutate(block: (FeedSnapshot) -> FeedSnapshot) {
         val f = file ?: return

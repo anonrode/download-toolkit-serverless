@@ -5,10 +5,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.GridItemSpan
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -58,23 +54,10 @@ fun AsianDramaExplorer(
 ) {
     BackHandler(onBack = onBack)
 
-    val gridState = rememberLazyGridState()
-
-    val shouldLoadMore by remember(cards.size, isLoading, isLoadingMore, hasMore) {
-        derivedStateOf {
-            if (!hasMore || isLoading || isLoadingMore || cards.isEmpty()) return@derivedStateOf false
-            val layoutInfo = gridState.layoutInfo
-            val totalItems = layoutInfo.totalItemsCount
-            val lastVisible = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
-            totalItems > 0 && lastVisible >= totalItems - 6
-        }
-    }
-
-    LaunchedEffect(shouldLoadMore) {
-        if (shouldLoadMore) {
-            onLoadMore()
-        }
-    }
+    // Every filter change starts a fresh grid state at the top. This is what
+    // removes the "scroll offset points past the new smaller subset" class
+    // of LazyGrid span crashes when a chip swaps in a 6-item subset.
+    val gridKey = "${region.name}|${era.name}|${statusFilter.name}|${activeGenre?.name}"
 
     Box(
         modifier = Modifier
@@ -245,97 +228,96 @@ fun AsianDramaExplorer(
                     .weight(1f)
                     .padding(horizontal = Spacing.md)
             ) {
-                if (isLoading && cards.isEmpty()) {
-                    Column(
-                        modifier = Modifier.fillMaxSize(),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.Center
-                    ) {
-                        CircularProgressIndicator(
-                            color = AccentPrimary,
-                            modifier = Modifier.size(36.dp)
-                        )
-                        Spacer(modifier = Modifier.height(Spacing.md))
-                        Text(
-                            text = "Loading ${region.label} titles…",
-                            color = TextSecondary,
-                            fontSize = 13.sp
-                        )
-                    }
-                } else if (failed && cards.isEmpty()) {
-                    Column(
-                        modifier = Modifier.fillMaxSize(),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Warning,
-                            contentDescription = null,
-                            tint = StatusError,
-                            modifier = Modifier.size(42.dp)
-                        )
-                        Spacer(modifier = Modifier.height(Spacing.md))
-                        Text(
-                            text = "Unable to load dramas from providers.",
-                            color = TextPrimary,
-                            fontWeight = FontWeight.SemiBold,
-                            fontSize = 14.sp
-                        )
-                        Spacer(modifier = Modifier.height(Spacing.sm))
-                        TextButton(onClick = onRefresh) {
-                            Text("Retry", color = AccentPrimary, fontWeight = FontWeight.Bold)
+                key(gridKey) {
+                    val gridState = rememberLazyGridState()
+                    val shouldLoadMore by remember(cards.size, isLoading, isLoadingMore, hasMore) {
+                        derivedStateOf {
+                            if (!hasMore || isLoading || isLoadingMore || cards.isEmpty()) return@derivedStateOf false
+                            val layoutInfo = gridState.layoutInfo
+                            val totalItems = layoutInfo.totalItemsCount
+                            val lastVisible = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+                            totalItems > 0 && lastVisible >= totalItems - 6
                         }
                     }
-                } else if (cards.isEmpty()) {
-                    Column(
-                        modifier = Modifier.fillMaxSize(),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.Center
-                    ) {
-                        Text(
-                            text = "No titles found matching this filter.",
-                            color = TextMuted,
-                            fontSize = 14.sp
-                        )
-                        Spacer(modifier = Modifier.height(Spacing.sm))
-                        TextButton(onClick = {
-                            onSelectStatus(DramaStatusFilter.ALL)
-                            onSelectGenre(null)
-                        }) {
-                            Text("Reset filters", color = AccentPrimary, fontWeight = FontWeight.Bold)
-                        }
+                    LaunchedEffect(shouldLoadMore) {
+                        if (shouldLoadMore) onLoadMore()
                     }
-                } else {
-                    LazyVerticalGrid(
-                        state = gridState,
-                        columns = GridCells.Fixed(3),
-                        horizontalArrangement = Arrangement.spacedBy(Spacing.sm),
-                        verticalArrangement = Arrangement.spacedBy(Spacing.md),
-                        contentPadding = PaddingValues(bottom = Spacing.xxl),
-                        modifier = Modifier.fillMaxSize()
-                    ) {
-                        items(cards, key = { it.url }) { show ->
+
+                    if (isLoading && cards.isEmpty()) {
+                        Column(
+                            modifier = Modifier.fillMaxSize(),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            CircularProgressIndicator(
+                                color = AccentPrimary,
+                                modifier = Modifier.size(36.dp)
+                            )
+                            Spacer(modifier = Modifier.height(Spacing.md))
+                            Text(
+                                text = "Loading ${region.label} titles…",
+                                color = TextSecondary,
+                                fontSize = 13.sp
+                            )
+                        }
+                    } else if (failed && cards.isEmpty()) {
+                        Column(
+                            modifier = Modifier.fillMaxSize(),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Warning,
+                                contentDescription = null,
+                                tint = StatusError,
+                                modifier = Modifier.size(42.dp)
+                            )
+                            Spacer(modifier = Modifier.height(Spacing.md))
+                            Text(
+                                text = "Unable to load dramas from providers.",
+                                color = TextPrimary,
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 14.sp
+                            )
+                            Spacer(modifier = Modifier.height(Spacing.sm))
+                            TextButton(onClick = onRefresh) {
+                                Text("Retry", color = AccentPrimary, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    } else if (cards.isEmpty()) {
+                        Column(
+                            modifier = Modifier.fillMaxSize(),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Text(
+                                text = "No titles found matching this filter.",
+                                color = TextMuted,
+                                fontSize = 14.sp
+                            )
+                            Spacer(modifier = Modifier.height(Spacing.sm))
+                            TextButton(onClick = {
+                                onSelectStatus(DramaStatusFilter.ALL)
+                                onSelectGenre(null)
+                            }) {
+                                Text("Reset filters", color = AccentPrimary, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    } else {
+                        StablePosterGrid(
+                            items = cards,
+                            gridState = gridState,
+                            modifier = Modifier.fillMaxSize(),
+                            contentPadding = PaddingValues(bottom = Spacing.xxl),
+                            horizontalArrangement = Arrangement.spacedBy(Spacing.sm),
+                            verticalArrangement = Arrangement.spacedBy(Spacing.md),
+                            isLoadingMore = isLoadingMore
+                        ) { show ->
                             DramaCardItem(
                                 show = show,
                                 showPosters = showPosters,
                                 onClick = { onOpen(show) }
                             )
-                        }
-                        if (isLoadingMore) {
-                            item(span = { GridItemSpan(maxLineSpan) }) {
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(vertical = Spacing.md),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    CircularProgressIndicator(
-                                        color = AccentPrimary,
-                                        strokeWidth = 2.dp,
-                                        modifier = Modifier.size(24.dp)
-                                    )
-                                }
-                            }
                         }
                     }
                 }
@@ -412,7 +394,11 @@ private fun DramaCardItem(
                     modifier = Modifier.fillMaxSize(),
                     shape = RoundedCornerShape(Radius.md),
                     fallbackIcon = Icons.Rounded.PlayArrow,
-                    showFallbackTitle = true
+                    showFallbackTitle = true,
+                    fallbackPosterUrl = com.anonrode.downloader.providers.PosterStore.lastGoodFor(show),
+                    onLoaded = {
+                        com.anonrode.downloader.providers.PosterStore.markLoaded(show, it)
+                    }
                 )
             } else {
                 PosterFallbackWell(

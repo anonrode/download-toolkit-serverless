@@ -24,10 +24,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.GridItemSpan
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -46,15 +42,16 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
-import coil.compose.AsyncImage
+import coil.compose.SubcomposeAsyncImage
 import coil.imageLoader
-import coil.request.ImageRequest
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -63,15 +60,25 @@ import com.anonrode.downloader.R
 import com.anonrode.downloader.data.models.ShowCard
 import com.anonrode.downloader.pipeline.VerdictPolicy
 import com.anonrode.downloader.providers.CategoryFeed
+import com.anonrode.downloader.providers.PosterNetwork
+import com.anonrode.downloader.providers.PosterStore
 import com.anonrode.downloader.ui.components.PosterFallbackWell
 import com.anonrode.downloader.ui.components.PosterImageOrFallback
+import com.anonrode.downloader.ui.components.PosterRequests
 import com.anonrode.downloader.ui.components.SearchListSkeleton
+import com.anonrode.downloader.ui.components.SkeletonBox
+import com.anonrode.downloader.ui.components.StablePosterGrid
 import com.anonrode.downloader.ui.components.TrendingRowSkeleton
+import com.anonrode.downloader.ui.components.rememberReduceMotion
+import com.anonrode.downloader.ui.components.rememberShimmerX
 import com.anonrode.downloader.ui.theme.*
 import com.anonrode.downloader.ui.util.TitleFormatting
 import com.anonrode.downloader.ui.util.pressScale
 import com.anonrode.downloader.util.UrlExtractor
 import com.anonrode.downloader.viewmodel.MainViewModel
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -145,20 +152,9 @@ fun HomeScreen(
         onDispose { cm.removePrimaryClipChangedListener(listener) }
     }
 
-    // Fast poster prefetching: prefetch the first 18 trending poster URLs with singleton ImageLoader
-    LaunchedEffect(uiState.trending) {
-        if (uiState.trending.isNotEmpty()) {
-            val urls = uiState.trending.take(18).map { it.posterUrl }.filter { it.isNotBlank() }
-            val imageLoader = context.imageLoader
-            urls.forEach { url ->
-                val request = ImageRequest.Builder(context)
-                    .data(url)
-                    .size(coil.size.Size.ORIGINAL)
-                    .build()
-                imageLoader.enqueue(request)
-            }
-        }
-    }
+    // Poster warm-up lives inside TrendingSection, where the LazyRow's
+    // viewport is known: it only requests OFF-SCREEN cards, so it can never
+    // duplicate a request a visible AsyncImage just made.
 
     Box(
         modifier = Modifier
@@ -659,7 +655,14 @@ fun HomeScreen(
         OverlaySurface(target = uiState.activeCategory) { category ->
             CategoryPage(
                 category = category,
-                cards = uiState.categoryCards,
+                // The exiting page must keep ITS list during the transition;
+                // reading the live categoryCards meant category B's data was
+                // laid out inside category A's exiting grid.
+                cards = if (uiState.activeCategory?.label == category.label) {
+                    uiState.categoryCards
+                } else {
+                    uiState.catalogRows[category.label].orEmpty()
+                },
                 isLoading = uiState.isCategoryLoading,
                 failed = uiState.categoryFailed,
                 showPosters = viewModel.engine.showPostersInResults,
@@ -677,7 +680,10 @@ fun HomeScreen(
                 era = uiState.activeDramaEra,
                 statusFilter = uiState.activeDramaStatus,
                 activeGenre = uiState.activeDramaGenre,
-                cards = uiState.dramaCards,
+                // Per-region snapshot: an exiting K-Drama page keeps its own
+                // cards while the incoming C-Drama page loads.
+                cards = uiState.dramaCardsByRegion[region]
+                    ?: if (uiState.activeDramaRegion == region) uiState.dramaCards else emptyList(),
                 isLoading = uiState.isDramaLoading,
                 failed = uiState.dramaFailed,
                 showPosters = viewModel.engine.showPostersInResults,
@@ -789,6 +795,72 @@ private fun <T : Any> OverlaySurface(target: T?, content: @Composable (T) -> Uni
     ) { state -> if (state != null) content(state) }
 }
 
+/**
+ * Bounded, cancellable poster warm-up for the trending row.
+ *
+ * Design constraints from the image audit:
+ *  - the effect key includes URLs AND poster URLs, so any streaming partial
+ *    cancels the previous job (LaunchedEffect cancellation also cancels the
+ *    in-flight Coil execute);
+ *  - only 6 unseen URLs are requested, sequentially, so the prefetcher can
+ *    never occupy more than one of the loader's six dispatcher slots;
+ *  - display size only (124x186dp in px), never Size.ORIGINAL;
+ *  - PosterRequests.markSeen is process-wide, so re-entering Home or a
+ *    later partial cannot enqueue the same URL again.
+ */
+@Composable
+private fun TrendingPosterPrefetch(
+    items: List<ShowCard>,
+    rowState: androidx.compose.foundation.lazy.LazyListState
+) {
+    val context = LocalContext.current
+    val density = LocalDensity.current
+    val widthPx = with(density) { 124.dp.roundToPx() }
+    val heightPx = with(density) { 186.dp.roundToPx() }
+    val key = remember(items) {
+        items.take(18).joinToString("|") { "${it.url}=${it.posterUrl}" }
+    }
+    LaunchedEffect(key) {
+        if (items.isEmpty()) return@LaunchedEffect
+        delay(350)
+        if (!PosterNetwork.isOnline) return@LaunchedEffect
+        // Viewport-aware: never race a request the visible row already made.
+        val info = rowState.layoutInfo
+        val firstVisible = info.visibleItemsInfo.firstOrNull()?.index ?: 0
+        val visibleCount = info.visibleItemsInfo.size
+        val beyondViewport = items.drop(firstVisible + visibleCount)
+        val urls = beyondViewport.asSequence()
+            .map { PosterStore.normalizePosterUrl(it.posterUrl) }
+            .filter { it.isNotBlank() }
+            .distinct()
+            .filter { !PosterStore.isLoaded(it) }
+            .filter { PosterRequests.markSeen(it) }
+            .take(6)
+            .toList()
+        if (urls.isEmpty()) return@LaunchedEffect
+        val loader = context.imageLoader
+        for (url in urls) {
+            if (!currentCoroutineContext().isActive) break
+            try {
+                loader.execute(
+                    PosterRequests.request(
+                        context = context,
+                        url = url,
+                        widthPx = widthPx,
+                        heightPx = heightPx,
+                        onLoaded = { PosterStore.markUrlLoaded(it) }
+                    )
+                )
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (_: Throwable) {
+                // A dead prefetch URL is not fatal; the visible card will
+                // paint its real fallback when the user reaches it.
+            }
+        }
+    }
+}
+
 @Composable
 private fun TrendingSection(
     modifier: Modifier = Modifier,
@@ -804,6 +876,7 @@ private fun TrendingSection(
     onOpen: (ShowCard) -> Unit
 ) {
     val rowState = rememberLazyListState()
+    TrendingPosterPrefetch(items = items, rowState = rowState)
 
     val shouldLoadMore by remember(items.size, isLoading, isLoadingMore, hasMore) {
         derivedStateOf {
@@ -1043,7 +1116,9 @@ private fun TrendingCard(
                     modifier = Modifier.fillMaxSize(),
                     shape = RoundedCornerShape(Radius.md),
                     fallbackIcon = Icons.Rounded.PlayArrow,
-                    showFallbackTitle = true
+                    showFallbackTitle = true,
+                    fallbackPosterUrl = PosterStore.lastGoodFor(show),
+                    onLoaded = { PosterStore.markLoaded(show, it) }
                 )
             } else {
                 PosterFallbackWell(
@@ -1088,35 +1163,58 @@ private fun TrendingCard(
  * genre missing there (or a blank slot) falls back to the live cached poster
  * from uiState.genreTiles. The tiles NAVIGATE — they are not filters.
  */
+/**
+ * Verified-real static previews — LAST RESORT ONLY.
+ *
+ * Every URL below was HEAD-verified 200 on 2026-10-19. The previous map had
+ * nine 404s (Action's back poster and BOTH posters of Horror, Romance,
+ * Sci-Fi, Anime). These are never allowed to outrank live/last-good art:
+ * GenreTileCard prefers the live feed URL and only falls back here while the
+ * first live fetch is in flight or after a total source failure.
+ */
 private val GENRE_POSTER_PREVIEWS: Map<String, Pair<String, String>> = mapOf(
     "Action" to Pair(
         "https://image.tmdb.org/t/p/w300/8cdWjvZQUExUUTzyp4t6EDMubfO.jpg",
-        "https://image.tmdb.org/t/p/w300/mKOBErGAKvQAh95Nq1t71v9gK6z.jpg"
+        "https://image.tmdb.org/t/p/w300/fZPSd91yGE9fCcCe6OoQr6E3Bev.jpg"
     ),
     "Romance" to Pair(
-        "https://image.tmdb.org/t/p/w300/2vP9kivc871s9s88qXzP8xJ87q0.jpg",
-        "https://image.tmdb.org/t/p/w300/o70rO8q83uD1e5Gz4b9z1s9q3r5.jpg"
+        "https://image.tmdb.org/t/p/w300/uDO8zWDhfWwoFdKS4fzkUJt0Rf0.jpg",
+        "https://image.tmdb.org/t/p/w300/9xjZS2rlVxm8SFx8kPC3aIGCOYQ.jpg"
     ),
     "Comedy" to Pair(
         "https://image.tmdb.org/t/p/w300/gKkl37BQuKTanygYQG1pyYgLVgf.jpg",
         "https://image.tmdb.org/t/p/w300/qJ2tW6WMUDux911r6m7haRef0WH.jpg"
     ),
     "Horror" to Pair(
-        "https://image.tmdb.org/t/p/w300/bShgiqB0Qy1QZc7d3d7r0.jpg",
-        "https://image.tmdb.org/t/p/w300/5qHoazZiaKoJnmeebOnjhq8Z4.jpg"
+        "https://image.tmdb.org/t/p/w300/lHV8HHlhwNup2VbpiACtlKzaGIQ.jpg",
+        "https://image.tmdb.org/t/p/w300/nAU74GmpUk7t5iklEp3bufwDq4n.jpg"
     ),
     "Sci-Fi" to Pair(
-        "https://image.tmdb.org/t/p/w300/6KErczPBROQty7QoIsxWZaEAY8j.jpg",
-        "https://image.tmdb.org/t/p/w300/gEU2QniE6EwfNDRA5reOqwqq9JS.jpg"
+        "https://image.tmdb.org/t/p/w300/9gk7adHYeDvHkCSEqAvQNLV5Uge.jpg",
+        "https://image.tmdb.org/t/p/w300/gajva2L0rPYkEWjzgFlBXCAVBE5.jpg"
     ),
     "Thriller" to Pair(
         "https://image.tmdb.org/t/p/w300/d5NXSklXo0qyIYkgV94XAgMIckC.jpg",
         "https://image.tmdb.org/t/p/w300/vQWk5YBFWF4bZaofAbv0tShwBvQ.jpg"
     ),
     "Anime" to Pair(
-        "https://image.tmdb.org/t/p/w300/9k9h9cq04P3s1G0a2x8Z4.jpg",
-        "https://image.tmdb.org/t/p/w300/hE24GYddaxB9MVZl1CaiI86M3kp.jpg"
+        "https://image.tmdb.org/t/p/w300/q719jXXEzOoYaps6babgKnONONX.jpg",
+        "https://image.tmdb.org/t/p/w300/39wmItIWsg5sZMyRUHLkWBcuVCM.jpg"
     )
+)
+
+private const val KDRAMA_HERO_POSTER =
+    "https://image.tmdb.org/t/p/w500/7IiTTgloJzvGI1TAYymCfbfl3vT.jpg"
+
+private const val CDRAMA_HERO_POSTER =
+    "https://image.tmdb.org/t/p/w500/vQWk5YBFWF4bZaofAbv0tShwBvQ.jpg"
+
+/** One genre tile's resolved art: primary, optional stack-back, and the
+ *  verified-real static URL to keep underneath a newly-arrived live poster. */
+private data class GenreTileArt(
+    val primary: String = "",
+    val secondary: String = "",
+    val fallback: String = ""
 )
 
 /**
@@ -1152,7 +1250,7 @@ private fun CategoryTilesGrid(
                 rowPairs.forEach { (cat, isMore) ->
                     Box(modifier = Modifier.weight(1f)) {
                         if (isMore) {
-                            ViewMoreTileCard(onClick = onMore)
+                            ViewMoreTileCard(liveTiles = liveTiles, onClick = onMore)
                         } else {
                             GenreTileCard(
                                 category = cat,
@@ -1170,9 +1268,47 @@ private fun CategoryTilesGrid(
     }
 }
 
-/** 2-column View More tile: H=80dp, R=14dp with explore compass icon. */
+/**
+ * 2-column View More tile. Once the seven genre posters have actually
+ * LOADED, this tile paints a 2x2 montage of those already-cached bitmaps —
+ * real art, and deliberately ZERO new image requests (it reads Coil's memory
+ * cache directly; it never enqueues). Until then it is the plain compass
+ * utility tile, never generated substitute art.
+ */
 @Composable
-private fun ViewMoreTileCard(onClick: () -> Unit) {
+private fun ViewMoreTileCard(
+    liveTiles: List<CategoryFeed.GenreTile>,
+    onClick: () -> Unit
+) {
+    val context = LocalContext.current
+    val candidates = remember(liveTiles) {
+        val live = liveTiles.flatMap { listOf(it.posterUrl, it.secondaryPosterUrl) }
+        // The exact verified-real static posters the seven genre tiles are
+        // already painting fill any category that has no live tile yet.
+        val statics = GENRE_POSTER_PREVIEWS.values.flatMap { listOf(it.first, it.second) }
+        (live + statics)
+            .map { PosterStore.normalizePosterUrl(it) }
+            .filter { it.isNotBlank() }
+            .distinct()
+            .take(8)
+    }
+    var loaded by remember(candidates) { mutableStateOf<List<String>>(emptyList()) }
+    LaunchedEffect(candidates) {
+        if (candidates.isEmpty()) return@LaunchedEffect
+        var attempts = 0
+        while (currentCoroutineContext().isActive && attempts < 80) {
+            val now = candidates.filter { PosterStore.isLoaded(it) }
+            if (now != loaded) loaded = now
+            if (now.size >= 4) break
+            attempts += 1
+            delay(250)
+        }
+    }
+    val bitmaps = remember(loaded, context) {
+        val cache = context.imageLoader.memoryCache
+        loaded.take(4).mapNotNull { cache?.get(it)?.bitmap }
+    }
+
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -1184,13 +1320,49 @@ private fun ViewMoreTileCard(onClick: () -> Unit) {
                 color = BorderHairline,
                 shape = RoundedCornerShape(14.dp)
             )
-            .clickable(onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = 8.dp),
+            .clickable(onClick = onClick),
         contentAlignment = Alignment.CenterStart
     ) {
+        if (bitmaps.size >= 2) {
+            Column(modifier = Modifier.fillMaxSize()) {
+                Row(modifier = Modifier.weight(1f)) {
+                    bitmaps.take(2).forEach { bitmap ->
+                        Image(
+                            bitmap = bitmap.asImageBitmap(),
+                            contentDescription = null,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxHeight()
+                        )
+                    }
+                }
+                if (bitmaps.size >= 4) {
+                    Row(modifier = Modifier.weight(1f)) {
+                        bitmaps.drop(2).take(2).forEach { bitmap ->
+                            Image(
+                                bitmap = bitmap.asImageBitmap(),
+                                contentDescription = null,
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .fillMaxHeight()
+                            )
+                        }
+                    }
+                }
+            }
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.58f))
+            )
+        }
         Row(
             verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 10.dp, vertical = 8.dp)
         ) {
             Box(
                 modifier = Modifier.size(width = 56.dp, height = 62.dp),
@@ -1200,7 +1372,12 @@ private fun ViewMoreTileCard(onClick: () -> Unit) {
                     modifier = Modifier
                         .size(44.dp)
                         .clip(CircleShape)
-                        .background(AccentPrimary.copy(alpha = 0.15f)),
+                        .background(Color.Black.copy(alpha = if (bitmaps.size >= 2) 0.45f else 0.18f))
+                        .border(
+                            1.dp,
+                            if (bitmaps.size >= 2) Color.White.copy(alpha = 0.18f) else BorderHairline,
+                            CircleShape
+                        ),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
@@ -1244,24 +1421,45 @@ private fun GenreTileCard(
     onClick: () -> Unit
 ) {
     val isDark = AnonTheme.colors.isDark
-    // Static previews win; a genre missing from the map — or a blank slot in
-    // it — falls back to the live cached poster from uiState.genreTiles
-    // (the fetch that used to be cached and never rendered).
-    val posters: Pair<String, String>? = remember(category.label, liveTiles) {
+    // LIVE / LAST-GOOD WINS. Static previews are the last resort (first-load
+    // in flight, or every live source failed); they never override live art.
+    val art = remember(category.label, liveTiles) {
         val live = liveTiles
             .firstOrNull { it.category.label.equals(category.label, ignoreCase = true) }
-            ?.posterUrl?.takeIf { it.isNotBlank() }
+        val liveFirst = live?.posterUrl
+            ?.takeIf { it.isNotBlank() }
+            ?.let { PosterStore.normalizePosterUrl(it) }
+        val liveSecond = live?.secondaryPosterUrl
+            ?.takeIf { it.isNotBlank() }
+            ?.let { PosterStore.normalizePosterUrl(it) }
+            ?.takeIf { it != liveFirst }
         val stat = GENRE_POSTER_PREVIEWS[category.label]
-        when {
-            stat != null -> {
-                val first = stat.first.ifBlank { live ?: "" }
-                val second = stat.second.ifBlank { live ?: first }
-                if (first.isBlank()) null else first to second
-            }
-            live != null -> live to live
-            else -> null
+        val statFirst = stat?.first
+            ?.takeIf { it.isNotBlank() }
+            ?.let { PosterStore.normalizePosterUrl(it) }
+        val statSecond = stat?.second
+            ?.takeIf { it.isNotBlank() }
+            ?.let { PosterStore.normalizePosterUrl(it) }
+            ?.takeIf { it != statFirst }
+
+        val primary = when {
+            !liveFirst.isNullOrBlank() -> liveFirst
+            !statFirst.isNullOrBlank() -> statFirst
+            else -> ""
         }
+        val secondary = when {
+            !liveSecond.isNullOrBlank() -> liveSecond
+            !statSecond.isNullOrBlank() && statSecond != primary -> statSecond
+            else -> ""
+        }
+        val fallback = when {
+            liveFirst != null && !statFirst.isNullOrBlank() && statFirst != liveFirst -> statFirst
+            liveFirst != null && !statSecond.isNullOrBlank() && statSecond != liveFirst -> statSecond
+            else -> ""
+        }
+        GenreTileArt(primary, secondary, fallback)
     }
+    val shimmerX = rememberShimmerX(rememberReduceMotion())
 
     Box(
         modifier = Modifier
@@ -1295,20 +1493,20 @@ private fun GenreTileCard(
                         .alpha(0.70f)
                         .clip(RoundedCornerShape(6.dp))
                 ) {
-                    val backUrl = posters?.second.orEmpty()
-                    if (backUrl.isNotBlank()) {
-                        AsyncImage(
-                            model = backUrl,
-                            contentDescription = null,
-                            contentScale = ContentScale.Crop,
-                            modifier = Modifier.fillMaxSize()
-                        )
-                    } else {
-                        PosterFallbackWell(
+                    if (art.secondary.isNotBlank()) {
+                        PosterImageOrFallback(
+                            posterUrl = art.secondary,
+                            showTitle = category.label,
                             modifier = Modifier.fillMaxSize(),
                             shape = RoundedCornerShape(6.dp),
-                            icon = genreIconFor(category.label),
-                            iconSize = 16.dp
+                            fallbackIcon = genreIconFor(category.label),
+                            showFallbackTitle = false
+                        )
+                    } else {
+                        SkeletonBox(
+                            modifier = Modifier.fillMaxSize(),
+                            shape = RoundedCornerShape(6.dp),
+                            x = shimmerX
                         )
                     }
                 }
@@ -1324,20 +1522,21 @@ private fun GenreTileCard(
                             RoundedCornerShape(6.dp)
                         )
                 ) {
-                    val frontUrl = posters?.first.orEmpty()
-                    if (frontUrl.isNotBlank()) {
-                        AsyncImage(
-                            model = frontUrl,
-                            contentDescription = null,
-                            contentScale = ContentScale.Crop,
-                            modifier = Modifier.fillMaxSize()
-                        )
-                    } else {
-                        PosterFallbackWell(
+                    if (art.primary.isNotBlank()) {
+                        PosterImageOrFallback(
+                            posterUrl = art.primary,
+                            showTitle = category.label,
                             modifier = Modifier.fillMaxSize(),
                             shape = RoundedCornerShape(6.dp),
-                            icon = genreIconFor(category.label),
-                            iconSize = 18.dp
+                            fallbackIcon = genreIconFor(category.label),
+                            showFallbackTitle = false,
+                            fallbackPosterUrl = art.fallback.takeIf { it.isNotBlank() }
+                        )
+                    } else {
+                        SkeletonBox(
+                            modifier = Modifier.fillMaxSize(),
+                            shape = RoundedCornerShape(6.dp),
+                            x = shimmerX
                         )
                     }
                 }
@@ -1510,46 +1709,23 @@ private fun CategoryPage(
                     }
                 }
             }
-            else -> LazyVerticalGrid(
-                state = gridState,
-                columns = GridCells.Fixed(3),
+            else -> StablePosterGrid(
+                items = cards,
+                gridState = gridState,
                 modifier = Modifier.fillMaxSize(),
+                columns = 3,
                 contentPadding = PaddingValues(
-                    start = Spacing.lg, end = Spacing.lg, bottom = Spacing.xl
+                    start = Spacing.lg, end = Spacing.lg, bottom = Spacing.xxl
                 ),
                 horizontalArrangement = Arrangement.spacedBy(Spacing.sm),
-                verticalArrangement = Arrangement.spacedBy(Spacing.md)
-            ) {
-                gridItems(cards, key = { it.url }) { show ->
-                    GridPosterCard(
-                        show = show,
-                        showPosters = showPosters,
-                        onClick = { onOpen(show) },
-                        // The grid streams in per-site partials — cards fade
-                        // in as they arrive, painted ones never move.
-                        modifier = Modifier.animateItem(
-                            fadeInSpec = Motion.ItemFadeIn,
-                            placementSpec = Motion.ItemPlacement,
-                            fadeOutSpec = Motion.ItemFadeOut
-                        )
-                    )
-                }
-                if (isLoadingMore) {
-                    item(span = { GridItemSpan(maxLineSpan) }) {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = Spacing.md),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            CircularProgressIndicator(
-                                color = AccentPrimary,
-                                strokeWidth = 2.dp,
-                                modifier = Modifier.size(24.dp)
-                            )
-                        }
-                    }
-                }
+                verticalArrangement = Arrangement.spacedBy(Spacing.md),
+                isLoadingMore = isLoadingMore
+            ) { show ->
+                GridPosterCard(
+                    show = show,
+                    showPosters = showPosters,
+                    onClick = { onOpen(show) }
+                )
             }
         }
     }
@@ -1595,7 +1771,9 @@ private fun GridPosterCard(
                     modifier = Modifier.fillMaxSize(),
                     shape = RoundedCornerShape(Radius.md),
                     fallbackIcon = Icons.Rounded.PlayArrow,
-                    showFallbackTitle = true
+                    showFallbackTitle = true,
+                    fallbackPosterUrl = PosterStore.lastGoodFor(show),
+                    onLoaded = { PosterStore.markLoaded(show, it) }
                 )
             } else {
                 PosterFallbackWell(
@@ -1871,7 +2049,9 @@ private fun PosterTile(show: ShowCard, showPosters: Boolean, faceTitle: String) 
                 modifier = Modifier.fillMaxSize(),
                 shape = RoundedCornerShape(Radius.md),
                 fallbackIcon = Icons.Rounded.PlayArrow,
-                showFallbackTitle = false
+                showFallbackTitle = false,
+                fallbackPosterUrl = PosterStore.lastGoodFor(show),
+                onLoaded = { PosterStore.markLoaded(show, it) }
             )
         } else {
             PosterFallbackWell(
@@ -1974,6 +2154,10 @@ private fun AsianDramaHeroSection(
     onOpenKdrama: () -> Unit,
     onOpenCdrama: () -> Unit
 ) {
+    val context = LocalContext.current
+    val density = LocalDensity.current
+    val heroWpx = with(density) { 180.dp.roundToPx() }
+    val heroHpx = with(density) { 96.dp.roundToPx() }
     Column(modifier = Modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -2015,11 +2199,18 @@ private fun AsianDramaHeroSection(
                 contentAlignment = Alignment.CenterStart
             ) {
                 // Subtle photographic backdrop
-                AsyncImage(
-                    model = "https://image.tmdb.org/t/p/w500/2vP9kivc871s9s88qXzP8xJ87q0.jpg",
+                SubcomposeAsyncImage(
+                    model = PosterRequests.request(
+                        context = context,
+                        url = KDRAMA_HERO_POSTER,
+                        widthPx = heroWpx,
+                        heightPx = heroHpx
+                    ),
                     contentDescription = null,
                     contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize().alpha(if (AnonTheme.colors.isDark) 0.32f else 0.22f)
+                    modifier = Modifier.fillMaxSize().alpha(if (AnonTheme.colors.isDark) 0.32f else 0.22f),
+                    loading = { Box(Modifier.fillMaxSize().background(SurfaceCard)) },
+                    error = { Box(Modifier.fillMaxSize().background(SurfaceCard)) }
                 )
                 Box(
                     modifier = Modifier
@@ -2093,11 +2284,18 @@ private fun AsianDramaHeroSection(
                 contentAlignment = Alignment.CenterStart
             ) {
                 // Subtle photographic backdrop
-                AsyncImage(
-                    model = "https://image.tmdb.org/t/p/w500/vQWk5YBFWF4bZaofAbv0tShwBvQ.jpg",
+                SubcomposeAsyncImage(
+                    model = PosterRequests.request(
+                        context = context,
+                        url = CDRAMA_HERO_POSTER,
+                        widthPx = heroWpx,
+                        heightPx = heroHpx
+                    ),
                     contentDescription = null,
                     contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize().alpha(if (AnonTheme.colors.isDark) 0.32f else 0.22f)
+                    modifier = Modifier.fillMaxSize().alpha(if (AnonTheme.colors.isDark) 0.32f else 0.22f),
+                    loading = { Box(Modifier.fillMaxSize().background(SurfaceCard)) },
+                    error = { Box(Modifier.fillMaxSize().background(SurfaceCard)) }
                 )
                 Box(
                     modifier = Modifier

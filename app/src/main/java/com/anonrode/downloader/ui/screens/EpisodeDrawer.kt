@@ -80,12 +80,14 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.DialogWindowProvider
 import androidx.core.view.WindowCompat
-import coil.compose.AsyncImage
+import coil.compose.SubcomposeAsyncImage
 import androidx.lifecycle.viewModelScope
 import com.anonrode.downloader.data.models.EpisodeItem
 import com.anonrode.downloader.data.models.ShowCard
 import com.anonrode.downloader.data.models.TaskStatus
-import com.anonrode.downloader.ui.components.PosterFallbackWell
+import com.anonrode.downloader.providers.PosterStore
+import com.anonrode.downloader.ui.components.PosterImageOrFallback
+import com.anonrode.downloader.ui.components.PosterRequests
 import com.anonrode.downloader.ui.components.SkeletonBox
 import com.anonrode.downloader.ui.components.rememberInfiniteSweep
 import com.anonrode.downloader.ui.components.rememberReduceMotion
@@ -106,6 +108,42 @@ import kotlinx.coroutines.withContext
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.abs
 import kotlin.math.roundToInt
+
+/**
+ * Shared "remaining" semantics for the episode drawer and the Downloads
+ * series card.
+ *
+ * PAUSED is NOT in flight. It is remaining work that the user can resume,
+ * and re-enqueueing that source URL resumes the existing task (see
+ * DownloadEngine.enqueue's resumableExisting branch) rather than creating a
+ * duplicate. FAILED is also remaining. Only COMPLETED and the four active /
+ * queued statuses count as done-or-in-flight.
+ */
+internal fun isInFlightStatus(status: TaskStatus): Boolean = when (status) {
+    TaskStatus.QUEUED,
+    TaskStatus.RESOLVING,
+    TaskStatus.DOWNLOADING,
+    TaskStatus.VALIDATING -> true
+    else -> false
+}
+
+internal fun remainingEpisodesOf(
+    episodes: List<EpisodeItem>,
+    completedUrls: Set<String>,
+    inFlightUrls: Set<String>
+): List<EpisodeItem> = episodes.filter {
+    it.url !in completedUrls && it.url !in inFlightUrls
+}
+
+/** Downloads-card hint: seriesTotal minus completed/in-flight tasks.
+ *  PAUSED and FAILED therefore keep the "Download remaining N" action
+ *  visible instead of silently decrementing it to zero. */
+internal fun seriesRemainingCount(seriesTotal: Int, statuses: List<TaskStatus>): Int {
+    val doneOrInFlight = statuses.count {
+        it == TaskStatus.COMPLETED || isInFlightStatus(it)
+    }
+    return (seriesTotal - doneOrInFlight).coerceAtLeast(0)
+}
 
 /*
  * ───────────────────────────────────────── THE MATH CONTRACT (proposal v6 drawer) ────────────────────────────────
@@ -246,9 +284,9 @@ fun EpisodeDrawer(
         }
     }
     // COMPLETED only: the green "✓ Downloaded" pill (and the 0.78 dim) must
-    // never claim a FAILED/QUEUED/PAUSED episode — the old single set kept
-    // every matching task, so failed episodes rendered as downloaded AND were
-    // excluded from Remaining.
+    // never claim a FAILED/QUEUED/PAUSED episode. PAUSED is intentionally NOT
+    // in flight: it is remaining work, and re-enqueueing it resumes the same
+    // task (DownloadEngine.enqueue's resumableExisting branch).
     val completedUrls = remember(showTasks) {
         showTasks.filter { it.status == TaskStatus.COMPLETED }
             .map { it.sourceUrl }.filter { it.isNotBlank() }.toSet()
@@ -256,16 +294,13 @@ fun EpisodeDrawer(
     // In-flight set (running or waiting) — excluded from Remaining, but
     // deliberately NOT shown as downloaded.
     val activeOrQueuedUrls = remember(showTasks) {
-        showTasks.filter {
-            it.status == TaskStatus.DOWNLOADING || it.status == TaskStatus.RESOLVING ||
-                it.status == TaskStatus.VALIDATING || it.status == TaskStatus.QUEUED ||
-                it.status == TaskStatus.PAUSED
-        }.map { it.sourceUrl }.filter { it.isNotBlank() }.toSet()
+        showTasks.filter { isInFlightStatus(it.status) }
+            .map { it.sourceUrl }.filter { it.isNotBlank() }.toSet()
     }
-    // Remaining = not completed AND not in flight: FAILED episodes stay here
-    // so they can be re-downloaded in one tap.
+    // Remaining = not completed AND not in flight: PAUSED and FAILED episodes
+    // stay here so they can be resumed/retried in one tap.
     val remainingEpisodes = remember(episodes, completedUrls, activeOrQueuedUrls) {
-        episodes.filter { it.url !in completedUrls && it.url !in activeOrQueuedUrls }
+        remainingEpisodesOf(episodes, completedUrls, activeOrQueuedUrls)
     }
 
     // One-shot auto-selection: fires once the drawer's live scrape lands. The
@@ -387,7 +422,7 @@ fun EpisodeDrawer(
                         parallelSockets = viewModel.engine.parallelSocketsPerFile,
                         verifiedDirectUrl = com.anonrode.downloader.pipeline.ResultVerifier.verifiedDirect(ep.url),
                         seriesUrl = show.url,
-                        seriesTotal = episodes.size,
+                        seriesTotal = maxOf(episodes.size, show.totalEpisodes),
                         posterUrl = show.posterUrl,
                         triggerQueueProcessing = isFinalEnqueue
                     )
@@ -709,21 +744,28 @@ fun EpisodeDrawer(
                                 )
                             )
                     )
-                    // Data-driven fill with cached poster
+                    // Data-driven fill with cached poster. Cache-only: the
+                    // visible 76x108 poster performs the single network
+                    // request; this blurred band must never re-request the
+                    // same URL (it simply stays on the gradient when cold).
                     if (show.posterUrl.isNotBlank()) {
-                        val backdropReq = coil.request.ImageRequest.Builder(LocalContext.current)
-                            .data(show.posterUrl)
-                            .memoryCacheKey(show.posterUrl)
-                            .placeholderMemoryCacheKey(show.posterUrl)
-                            .crossfade(120)
-                            .build()
-                        AsyncImage(
+                        val backdropReq = PosterRequests.request(
+                            context = LocalContext.current,
+                            url = show.posterUrl,
+                            widthPx = 360,
+                            heightPx = 360,
+                            fallbackUrl = PosterStore.lastGoodFor(show),
+                            networkAllowed = false
+                        )
+                        SubcomposeAsyncImage(
                             model = backdropReq,
                             contentDescription = null,
                             contentScale = ContentScale.Crop,
                             modifier = Modifier
                                 .fillMaxSize()
-                                .blur(24.dp)
+                                .blur(24.dp),
+                            loading = {},
+                            error = {}
                         )
                     }
                     // Rich dark scrim across entire height (preserves dark marquee in both Light and Dark mode)
@@ -782,40 +824,27 @@ fun EpisodeDrawer(
                             .background(BandPosterWell)
                             .border(1.dp, Color(0x1AFFFFFF), RoundedCornerShape(10.dp))
                     ) {
-                        if (show.posterUrl.isNotBlank()) {
-                            val posterReq = coil.request.ImageRequest.Builder(LocalContext.current)
-                                .data(show.posterUrl)
-                                .memoryCacheKey(show.posterUrl)
-                                .placeholderMemoryCacheKey(show.posterUrl)
-                                .crossfade(120)
-                                .build()
-                            AsyncImage(
-                                model = posterReq,
-                                contentDescription = null,
-                                contentScale = ContentScale.Crop,
-                                modifier = Modifier.fillMaxSize()
-                            )
-                        } else {
-                            // Shared stylized well instead of the old 2-letter
-                            // initial glyph; the keyed AsyncImage above is kept
-                            // for its memory-cache reuse (the well needs no
-                            // request, so the cache contract is untouched).
-                            PosterFallbackWell(
-                                modifier = Modifier.fillMaxSize(),
-                                shape = RoundedCornerShape(10.dp),
-                                icon = Icons.Rounded.PlayArrow,
-                                title = null
-                            )
-                        }
+                        PosterImageOrFallback(
+                            posterUrl = show.posterUrl,
+                            showTitle = show.title,
+                            modifier = Modifier.fillMaxSize(),
+                            shape = RoundedCornerShape(10.dp),
+                            fallbackIcon = Icons.Rounded.PlayArrow,
+                            showFallbackTitle = false,
+                            fallbackPosterUrl = PosterStore.lastGoodFor(show),
+                            onLoaded = { PosterStore.markLoaded(show, it) }
+                        )
                     }
 
-                    // Right column: badges row on top + bold title
+                    // Right column: badges row on top, title immediately under
+                    // it. No heightIn(min=posterH)/SpaceBetween: that pinned
+                    // the title to the poster's bottom edge (where the old
+                    // layout collided with the poster and left a dead gap).
                     Column(
                         modifier = Modifier
                             .weight(1f)
-                            .heightIn(min = posterH)
                             .offset(y = 16.dp),
-                        verticalArrangement = Arrangement.SpaceBetween
+                        verticalArrangement = Arrangement.Top
                     ) {
                         val isSingleMovie = episodes.size <= 1 && seasonGroups.size <= 1
                         val badgeLine = buildList {
@@ -847,6 +876,8 @@ fun EpisodeDrawer(
                                 }
                             }
                         }
+
+                        Spacer(modifier = Modifier.height(6.dp))
 
                         Column {
                             Text(
@@ -1210,7 +1241,7 @@ fun EpisodeDrawer(
                                                                 parallelSockets = viewModel.engine.parallelSocketsPerFile,
                                                                 verifiedDirectUrl = com.anonrode.downloader.pipeline.ResultVerifier.verifiedDirect(ep.url),
                                                                 seriesUrl = show.url,
-                                                                seriesTotal = episodes.size,
+                                                                seriesTotal = maxOf(episodes.size, show.totalEpisodes),
                                                                 posterUrl = show.posterUrl
                                                             )
                                                             onDismiss()

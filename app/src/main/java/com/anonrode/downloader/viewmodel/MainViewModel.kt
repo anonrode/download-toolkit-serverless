@@ -11,15 +11,30 @@ import com.anonrode.downloader.data.router.ParsedUrl
 import com.anonrode.downloader.data.router.UrlRouter
 import com.anonrode.downloader.engine.DownloadEngine
 import com.anonrode.downloader.providers.ProviderRegistry
+import com.anonrode.downloader.providers.PosterNetwork
+import com.anonrode.downloader.providers.PosterStore
 import com.anonrode.downloader.providers.RelevanceScorer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+
+/** Hard cap for search input. Multi-paragraph pastes were reaching provider
+ *  search endpoints as nonsense and produced invalid-JSON crawl failures. */
+private const val SEARCH_QUERY_MAX = 120
+
+private fun normalizeSearchQuery(raw: String): String =
+    raw.replace(Regex("""\s+"""), " ").trim().take(SEARCH_QUERY_MAX)
 
 data class HomeUiState(
     val query: String = "",
@@ -85,7 +100,13 @@ data class HomeUiState(
     val dramaFailed: Boolean = false,
     val dramaPage: Int = 1,
     val isDramaLoadingMore: Boolean = false,
-    val dramaHasMore: Boolean = true
+    val dramaHasMore: Boolean = true,
+    /** Per-region snapshot so an exiting overlay page never re-reads the
+     *  next region's live list during the AnimatedContent transition. */
+    val dramaCardsByRegion: Map<com.anonrode.downloader.providers.DramaRegion, List<ShowCard>> = emptyMap(),
+    /** True when the OS reports no usable network. PosterStore promotes the
+     *  last loaded URL to primary in this state (zero network attempts). */
+    val isOffline: Boolean = false
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -262,41 +283,38 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
+    // ── Genre tiles: one retry loop per category, backoff 2/5/15/60/300s ────
+
+    private val tileJobs = mutableMapOf<String, Job>()
+    /** Broadcast connection epoch: every retry waiter observes the change. */
+    private val networkEpoch = MutableStateFlow(0L)
+    private val tileRevalidateMs = 12L * 60 * 60 * 1000
+
     init {
         refreshStorageInfo()
-        // v3.1.6: paint the LAST session's feeds from disk before anything
-        // touches the network (user: "close it and open again, the last
-        // stuff will still be there"). The loaders below then refetch
-        // silently only when a group is stale (>30 min) or forced.
-        val cached = com.anonrode.downloader.providers.FeedCache.snapshot
-        val filterExplicit = engine.filterExplicitContent
-        val cachedTrending = com.anonrode.downloader.util.NollywoodFilter.filterSafe(
-            if (filterExplicit) com.anonrode.downloader.util.ExplicitContentFilter.filterSafe(cached.trending) else cached.trending
-        )
-        val cachedCategories = cached.categories.mapValues { e ->
-            val cards = if (filterExplicit) {
-                com.anonrode.downloader.util.ExplicitContentFilter.filterSafe(e.value.cards)
-            } else e.value.cards
-            e.value.copy(cards = com.anonrode.downloader.util.NollywoodFilter.filterSafe(cards))
+        val app = application as com.anonrode.downloader.AnonApp
+        // Hydrate only after BOTH files have been read. The old synchronous
+        // read raced AnonApp's background init: a slow cold start painted
+        // nothing and then started a network crawl over an empty cache.
+        viewModelScope.launch {
+            app.awaitCachesReady().await()
+            hydrateFromCaches()
+            app.awaitInitReady().await()
+            // loadTrending() itself returns early when the disk row is fresh;
+            // stale rows refetch silently behind the painted cards.
+            loadTrending()
+            loadGenreTiles()
         }
-
-        if (cachedTrending.isNotEmpty() || cachedCategories.isNotEmpty()) {
-            categoryCache.putAll(cachedCategories.mapValues { it.value.cards })
-            val tiles = cached.tiles.mapNotNull { t ->
-                com.anonrode.downloader.providers.CategoryFeed.CATEGORIES
-                    .firstOrNull { it.label == t.label }
-                    ?.let { com.anonrode.downloader.providers.CategoryFeed.GenreTile(it, t.posterUrl) }
-            }
-            _uiState.update {
-                it.copy(
-                    trending = cachedTrending,
-                    genreTiles = tiles,
-                    catalogRows = cachedCategories.mapValues { e -> e.value.cards }
-                )
+        viewModelScope.launch {
+            app.networkObserver.status.collect { status ->
+                val online = status.isConnected
+                PosterNetwork.isOnline = online
+                _uiState.update { it.copy(isOffline = !online) }
+                // Broadcast (not a single-consumer Channel): EVERY failed
+                // category must wake immediately on reconnect.
+                networkEpoch.value = networkEpoch.value + 1L
             }
         }
-        loadTrending()
-        loadGenreTiles()
         // Oracle verdicts ride their own stream: a background verification
         // landing seconds after the search flow completed still re-renders
         // (floats the card up + captions it) without restarting the crawl.
@@ -307,34 +325,166 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /** One fetch per app process, same rule as the trending row: six
-     *  per_page=1 requests, cached in memory, failure degrades to glyph
-     *  tiles instead of hiding the section. Disk-fresh (v3.1.6): zero
-     *  network — the hydrated tiles from FeedCache already render. */
-    private var genreTilesJob: Job? = null
-    fun loadGenreTiles(force: Boolean = false) {
-        if (genreTilesJob?.isActive == true) return
-        if (!force && _uiState.value.genreTiles.isNotEmpty() &&
-            com.anonrode.downloader.providers.FeedCache.isTilesFresh()
-        ) return
-        genreTilesJob = viewModelScope.launch {
-            try {
-                val tiles = withContext(Dispatchers.IO) {
-                    com.anonrode.downloader.providers.CategoryFeed.tilePosters(filterExplicit = engine.filterExplicitContent)
+    /** Disk hydration, now deterministic: FeedCache + PosterStore are ready
+     *  before the first state publish. Real last-good art wins; the static
+     *  preview map is only a UI-level last resort. */
+    private fun hydrateFromCaches() {
+        val cached = com.anonrode.downloader.providers.FeedCache.snapshot
+        val filterExplicit = engine.filterExplicitContent
+        val offline = !PosterNetwork.isOnline
+        val cachedTrending = PosterStore.enrich(
+            com.anonrode.downloader.util.NollywoodFilter.filterSafe(
+                if (filterExplicit) {
+                    com.anonrode.downloader.util.ExplicitContentFilter.filterSafe(cached.trending)
+                } else {
+                    cached.trending
                 }
-                if (tiles.any { it.posterUrl.isNotBlank() }) {
-                    _uiState.update { it.copy(genreTiles = tiles) }
-                    com.anonrode.downloader.providers.FeedCache.saveTiles(
-                        tiles.map { com.anonrode.downloader.providers.TilePoster(it.category.label, it.posterUrl) }
+            ),
+            offline
+        )
+        val cachedCategories = cached.categories.mapValues { e ->
+            val cards = if (filterExplicit) {
+                com.anonrode.downloader.util.ExplicitContentFilter.filterSafe(e.value.cards)
+            } else {
+                e.value.cards
+            }
+            e.value.copy(
+                cards = PosterStore.enrich(
+                    com.anonrode.downloader.util.NollywoodFilter.filterSafe(cards),
+                    offline
+                )
+            )
+        }
+        if (cachedTrending.isNotEmpty() || cachedCategories.isNotEmpty()) {
+            categoryCache.putAll(cachedCategories.mapValues { it.value.cards })
+        }
+        val tiles = com.anonrode.downloader.providers.CategoryFeed.CATEGORIES.mapNotNull { category ->
+            val urls = PosterStore.tileUrls(category.label)
+            when {
+                urls.isNotEmpty() -> com.anonrode.downloader.providers.CategoryFeed.GenreTile(
+                    category,
+                    urls.getOrElse(0) { "" },
+                    urls.getOrElse(1) { "" }
+                )
+                else -> com.anonrode.downloader.providers.FeedCache.tile(category.label)
+                    ?.posterUrl
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let { com.anonrode.downloader.providers.CategoryFeed.GenreTile(category, it) }
+            }
+        }
+        if (cachedTrending.isNotEmpty() || cachedCategories.isNotEmpty() || tiles.isNotEmpty()) {
+            _uiState.update {
+                it.copy(
+                    trending = cachedTrending,
+                    genreTiles = tiles,
+                    catalogRows = cachedCategories.mapValues { e -> e.value.cards },
+                    isOffline = offline
+                )
+            }
+        }
+    }
+
+    fun loadGenreTiles(force: Boolean = false) {
+        for (category in com.anonrode.downloader.providers.CategoryFeed.CATEGORIES) {
+            val running = tileJobs[category.label]
+            if (running?.isActive == true) {
+                if (force) running.cancel() else continue
+            }
+            if (!force) {
+                val urls = PosterStore.tileUrls(category.label)
+                val age = System.currentTimeMillis() - PosterStore.tileSavedAt(category.label)
+                if (urls.isNotEmpty() && age in 0 until tileRevalidateMs) continue
+            }
+            tileJobs[category.label] = viewModelScope.launch {
+                retryTileUntilSuccess(category, forceOnce = force)
+            }
+        }
+    }
+
+    private suspend fun retryTileUntilSuccess(
+        category: com.anonrode.downloader.providers.CategoryFeed.Category,
+        forceOnce: Boolean
+    ) {
+        var attempt = PosterStore.tileFailures(category.label)
+        var first = forceOnce
+        while (currentCoroutineContext().isActive) {
+            if (!PosterNetwork.isOnline) {
+                networkEpoch.first { PosterNetwork.isOnline }
+                continue
+            }
+            if (!first) {
+                val wait = PosterStore.nextTileRetryAt(category.label) - System.currentTimeMillis()
+                if (wait > 0) {
+                    val epoch = networkEpoch.value
+                    withTimeoutOrNull(wait) { networkEpoch.first { it != epoch } }
+                }
+            }
+            first = false
+            val urls = try {
+                withContext(Dispatchers.IO) {
+                    com.anonrode.downloader.providers.CategoryFeed.tilePostersFor(
+                        category,
+                        engine.filterExplicitContent,
+                        max = 2
                     )
                 }
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
-            } catch (_: Exception) {
-                // No throw-up: empty genreTiles already renders as name-tiles.
+            } catch (_: Throwable) {
+                emptyList()
             }
+            if (urls.any { it.isNotBlank() }) {
+                val merged = PosterStore.saveTileSuccess(category.label, urls)
+                PosterStore.flush()
+                publishGenreTile(category, merged)
+                com.anonrode.downloader.providers.FeedCache.saveTiles(currentTilesForCache())
+                return
+            }
+            attempt += 1
+            val backoff = tileBackoff(attempt)
+            PosterStore.recordTileFailure(
+                category.label,
+                attempt,
+                System.currentTimeMillis() + backoff
+            )
+            // Old art (if any) stays on screen; the retry loop keeps going.
+            val epoch = networkEpoch.value
+            withTimeoutOrNull(backoff) { networkEpoch.first { it != epoch } }
         }
     }
+
+    private fun tileBackoff(attempt: Int): Long = when (attempt) {
+        1 -> 2_000L
+        2 -> 5_000L
+        3 -> 15_000L
+        4 -> 60_000L
+        else -> 300_000L
+    }
+
+    private fun publishGenreTile(
+        category: com.anonrode.downloader.providers.CategoryFeed.Category,
+        urls: List<String>
+    ) {
+        _uiState.update { state ->
+            val byLabel = state.genreTiles.associateBy { it.category.label }.toMutableMap()
+            byLabel[category.label] = com.anonrode.downloader.providers.CategoryFeed.GenreTile(
+                category,
+                urls.getOrElse(0) { "" },
+                urls.getOrElse(1) { "" }
+            )
+            state.copy(
+                genreTiles = com.anonrode.downloader.providers.CategoryFeed.CATEGORIES
+                    .mapNotNull { byLabel[it.label] }
+            )
+        }
+    }
+
+    private fun currentTilesForCache(): List<com.anonrode.downloader.providers.TilePoster> =
+        _uiState.value.genreTiles.mapNotNull { tile ->
+            val primary = tile.posterUrl.ifBlank { tile.secondaryPosterUrl }
+            if (primary.isBlank()) null
+            else com.anonrode.downloader.providers.TilePoster(tile.category.label, primary)
+        }
 
     /** v3.1.6 cache-first: a disk-fresh row (<=30 min) painted at init means
      *  ZERO network this launch. Stale → refetch SILENTLY behind the painted
@@ -348,11 +498,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      *  memory + disk. force=true (the header Refresh tap) always crawls. */
     fun loadTrending(force: Boolean = false) {
         if (trendingJob?.isActive == true) return
-        if (!force && _uiState.value.trending.isNotEmpty() &&
+        val existing = _uiState.value.trending
+        if (!force && existing.isNotEmpty() &&
             com.anonrode.downloader.providers.FeedCache.isTrendingFresh()
         ) return
         trendingJob = viewModelScope.launch {
-            val showSpinner = _uiState.value.trending.isEmpty()
+            val showSpinner = existing.isEmpty()
             if (showSpinner) _uiState.update { it.copy(isTrendingLoading = true, trendingFailed = false, trendingPage = 1, trendingHasMore = true) }
             com.anonrode.downloader.util.DebugLog.user("trending: fetch started")
             try {
@@ -360,21 +511,41 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     // Streaming: each site re-publishes the partial
                     // round-robin merge the moment it lands, so the row fills
                     // while a laggard (9jarocks' RSS) is still crawling.
+                    // Only a genuinely empty screen streams: publishing a
+                    // page-1 partial over an existing multi-page list is the
+                    // shrink that trips LazyGrid.
                     com.anonrode.downloader.providers.TrendingFeed.fetch(
                         page = 1,
                         filterExplicit = engine.filterExplicitContent,
                         onPartial = { partial ->
-                            if (partial.isNotEmpty()) {
-                                _uiState.update { it.copy(trending = partial) }
+                            if (existing.isEmpty() && partial.isNotEmpty()) {
+                                val enriched = PosterStore.enrich(
+                                    partial.distinctBy { it.url },
+                                    offline = !PosterNetwork.isOnline
+                                )
+                                _uiState.update { it.copy(trending = enriched) }
                             }
                         }
                     )
                 }
                 if (items.isNotEmpty()) {
-                    _uiState.update {
-                        it.copy(trending = items, isTrendingLoading = false, trendingFailed = false, trendingPage = 1, trendingHasMore = true)
+                    _uiState.update { state ->
+                        val merged = mergeCards(state.trending, items)
+                        val enriched = PosterStore.enrich(
+                            merged.distinctBy { it.url },
+                            offline = !PosterNetwork.isOnline
+                        )
+                        state.copy(
+                            trending = enriched,
+                            isTrendingLoading = false,
+                            trendingFailed = false,
+                            trendingPage = 1,
+                            trendingHasMore = true
+                        )
                     }
-                    com.anonrode.downloader.providers.FeedCache.saveTrending(items)
+                    com.anonrode.downloader.providers.FeedCache.saveTrending(
+                        PosterStore.persistable(_uiState.value.trending)
+                    )
                 } else {
                     // Nothing new: keep whatever is painted; only the empty
                     // state earns the failure banner + Retry.
@@ -418,14 +589,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         card.url !in existingUrls &&
                         card.title.lowercase().filter(Char::isLetterOrDigit) !in existingTitles
                     }
+                    val enriched = PosterStore.enrich(
+                        (current.trending + distinctNew).distinctBy { it.url },
+                        offline = !PosterNetwork.isOnline
+                    )
 
                     current.copy(
-                        trending = current.trending + distinctNew,
+                        trending = enriched,
                         trendingPage = nextPage,
                         isTrendingLoadingMore = false,
                         trendingHasMore = distinctNew.isNotEmpty()
                     )
                 }
+                com.anonrode.downloader.providers.FeedCache.saveTrending(
+                    PosterStore.persistable(_uiState.value.trending)
+                )
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -433,6 +611,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _uiState.update { it.copy(isTrendingLoadingMore = false) }
             }
         }
+    }
+
+    /** Refresh must never shrink a painted multi-page list: update matching
+     *  URLs in place, append genuinely new ones, keep the old order, and cap
+     *  the result so repeated refreshes cannot grow the list without bound. */
+    private fun mergeCards(old: List<ShowCard>, fresh: List<ShowCard>): List<ShowCard> {
+        if (old.isEmpty()) return fresh
+        val freshByUrl = fresh.filter { it.url.isNotBlank() }.associateBy { it.url }
+        val oldUrls = old.map { it.url }.toHashSet()
+        val updatedOld = old.map { freshByUrl[it.url] ?: it }
+        val appended = fresh.filter { it.url.isNotBlank() && it.url !in oldUrls }
+        return (updatedOld + appended).distinctBy { it.url }.take(180)
     }
 
     private var categoryMoreJob: Job? = null
@@ -541,8 +731,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     ) {
         if (categoryJob?.isActive == true) return
         categoryMoreJob?.cancel()
-        val cached = categoryCache[category.label]
+        val rawCached = categoryCache[category.label]
             ?: com.anonrode.downloader.providers.FeedCache.categoryCards(category.label)
+        val cached = PosterStore.enrich(rawCached, offline = !PosterNetwork.isOnline)
         if (!force && cached.isNotEmpty() &&
             com.anonrode.downloader.providers.FeedCache.isCategoryFresh(category.label)
         ) {
@@ -551,7 +742,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     categoryCards = if (it.activeCategory?.label == category.label) cached else it.categoryCards,
                     catalogRows = it.catalogRows + (category.label to cached),
                     isCategoryLoading = false,
-                    categoryPage = 1,
+                    categoryPage = it.categoryPage,
                     categoryHasMore = true
                 )
             }
@@ -564,39 +755,54 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             com.anonrode.downloader.util.DebugLog.user("category '${category.label}': fetch started")
             try {
                 val cards = withContext(Dispatchers.IO) {
-                    // Streaming mixed partials (same contract as trending):
-                    // fast sites paint while a laggard crawls. Label-guarded
-                    // like the final write — a partial from a genre the user
-                    // already left must never bleed into the open page.
+                    // Only a first paint streams. A refresh over a painted
+                    // (possibly multi-page) list holds the old cards until a
+                    // nonempty final list lands: no shrink during scroll.
                     com.anonrode.downloader.providers.CategoryFeed.fetch(
                         category,
                         page = 1,
                         filterExplicit = engine.filterExplicitContent
                     ) { partial ->
-                        if (partial.isNotEmpty()) {
+                        if (cached.isEmpty() && partial.isNotEmpty()) {
+                            val enriched = PosterStore.enrich(
+                                partial.distinctBy { it.url },
+                                offline = !PosterNetwork.isOnline
+                            )
                             _uiState.update {
                                 it.copy(
-                                    categoryCards = if (it.activeCategory?.label == category.label) partial else it.categoryCards,
-                                    catalogRows = it.catalogRows + (category.label to partial)
+                                    categoryCards = if (it.activeCategory?.label == category.label) enriched else it.categoryCards,
+                                    catalogRows = it.catalogRows + (category.label to enriched)
                                 )
                             }
                         }
                     }
                 }
                 if (cards.isNotEmpty()) {
-                    categoryCache[category.label] = cards
-                    categoryPages[category.label] = 1
-                    com.anonrode.downloader.providers.FeedCache.saveCategory(category.label, cards)
-                    _uiState.update {
-                        it.copy(
-                            categoryCards = if (it.activeCategory?.label == category.label) cards else it.categoryCards,
-                            catalogRows = it.catalogRows + (category.label to cards),
+                    // Merge against THIS label's cache, never the live
+                    // categoryCards: the user may have opened another genre
+                    // while this crawl was running.
+                    val previous = categoryCache[category.label] ?: rawCached
+                    val merged = mergeCards(previous, cards)
+                    val enriched = PosterStore.enrich(
+                        merged.distinctBy { it.url },
+                        offline = !PosterNetwork.isOnline
+                    )
+                    categoryCache[category.label] = enriched
+                    if (previous.isEmpty()) categoryPages[category.label] = 1
+                    _uiState.update { current ->
+                        current.copy(
+                            categoryCards = if (current.activeCategory?.label == category.label) enriched else current.categoryCards,
+                            catalogRows = current.catalogRows + (category.label to enriched),
                             isCategoryLoading = false,
                             categoryFailed = false,
-                            categoryPage = 1,
+                            categoryPage = if (previous.isEmpty()) 1 else current.categoryPage,
                             categoryHasMore = true
                         )
                     }
+                    com.anonrode.downloader.providers.FeedCache.saveCategory(
+                        category.label,
+                        PosterStore.persistable(enriched)
+                    )
                 } else {
                     _uiState.update {
                         it.copy(
@@ -638,20 +844,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         filterExplicit = engine.filterExplicitContent
                     )
                 }
+                val base = categoryCache[category.label] ?: state.categoryCards
+                val existingUrls = base.map { it.url }.toSet()
+                val existingTitles = base.map { it.title.lowercase().filter(Char::isLetterOrDigit) }.toSet()
+                val distinctNew = newCards.filter { card ->
+                    card.url.isNotBlank() &&
+                    card.url !in existingUrls &&
+                    card.title.lowercase().filter(Char::isLetterOrDigit) !in existingTitles
+                }
+                val updated = PosterStore.enrich(
+                    (base + distinctNew).distinctBy { it.url },
+                    offline = !PosterNetwork.isOnline
+                )
+                categoryCache[category.label] = updated
+                categoryPages[category.label] = nextPage
                 _uiState.update { current ->
                     if (current.activeCategory?.label != category.label) return@update current
-                    val existingUrls = current.categoryCards.map { it.url }.toSet()
-                    val existingTitles = current.categoryCards.map { it.title.lowercase().filter(Char::isLetterOrDigit) }.toSet()
-
-                    val distinctNew = newCards.filter { card ->
-                        card.url.isNotBlank() &&
-                        card.url !in existingUrls &&
-                        card.title.lowercase().filter(Char::isLetterOrDigit) !in existingTitles
-                    }
-
-                    val updated = current.categoryCards + distinctNew
-                    categoryCache[category.label] = updated
-                    categoryPages[category.label] = nextPage
                     current.copy(
                         categoryCards = updated,
                         catalogRows = current.catalogRows + (category.label to updated),
@@ -660,6 +868,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         categoryHasMore = distinctNew.isNotEmpty()
                     )
                 }
+                com.anonrode.downloader.providers.FeedCache.saveCategory(
+                    category.label,
+                    PosterStore.persistable(updated)
+                )
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -680,11 +892,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (dramaJob?.isActive == true) dramaJob?.cancel()
         if (dramaMoreJob?.isActive == true) dramaMoreJob?.cancel()
         _uiState.update {
+            val cachedForRegion = it.dramaCardsByRegion[region].orEmpty()
             it.copy(
                 activeDramaRegion = region,
                 activeDramaEra = era,
                 activeDramaStatus = com.anonrode.downloader.providers.DramaStatusFilter.ALL,
                 activeDramaGenre = null,
+                // Never show the previous region's cards under the new hub.
+                dramaRawCards = emptyList(),
+                dramaCards = cachedForRegion,
                 isDramaLoading = true,
                 dramaFailed = false,
                 dramaPage = 1,
@@ -728,7 +944,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     genreFilter = it.activeDramaGenre
                 )
             }
-            it.copy(activeDramaStatus = status, dramaCards = filtered)
+            val enriched = PosterStore.enrich(filtered, offline = !PosterNetwork.isOnline)
+            it.copy(
+                activeDramaStatus = status,
+                dramaCards = enriched,
+                dramaCardsByRegion = it.dramaCardsByRegion + (region to enriched)
+            )
         }
     }
 
@@ -745,13 +966,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     genreFilter = genre
                 )
             }
-            it.copy(activeDramaGenre = genre, dramaCards = filtered)
+            val enriched = PosterStore.enrich(filtered, offline = !PosterNetwork.isOnline)
+            it.copy(
+                activeDramaGenre = genre,
+                dramaCards = enriched,
+                dramaCardsByRegion = it.dramaCardsByRegion + (region to enriched)
+            )
         }
     }
 
     fun closeAsianDramaHub() {
         if (dramaJob?.isActive == true) dramaJob?.cancel()
         if (dramaMoreJob?.isActive == true) dramaMoreJob?.cancel()
+        // Keep dramaCardsByRegion: the AnimatedContent exit still paints the
+        // closing page from its own immutable snapshot.
         _uiState.update {
             it.copy(
                 activeDramaRegion = null,
@@ -787,17 +1015,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         force: Boolean
     ) {
         val key = com.anonrode.downloader.providers.AsianDramaFeed.cacheKeyFor(region, era)
-        val cached = com.anonrode.downloader.providers.FeedCache.categoryCards(key)
+        val rawCached = com.anonrode.downloader.providers.FeedCache.categoryCards(key)
+        val cached = PosterStore.enrich(rawCached, offline = !PosterNetwork.isOnline)
         if (cached.isNotEmpty()) {
-            val initialFiltered = cached.filter { card ->
-                com.anonrode.downloader.providers.DramaTagClassifier.matchesFilter(
-                    card, region, era, _uiState.value.activeDramaStatus, _uiState.value.activeDramaGenre
-                )
-            }
+            val initialFiltered = PosterStore.enrich(
+                cached.filter { card ->
+                    com.anonrode.downloader.providers.DramaTagClassifier.matchesFilter(
+                        card, region, era, _uiState.value.activeDramaStatus, _uiState.value.activeDramaGenre
+                    )
+                },
+                offline = !PosterNetwork.isOnline
+            )
             _uiState.update {
                 it.copy(
                     dramaRawCards = cached,
                     dramaCards = initialFiltered,
+                    dramaCardsByRegion = it.dramaCardsByRegion + (region to initialFiltered),
                     isDramaLoading = !com.anonrode.downloader.providers.FeedCache.isCategoryFresh(key),
                     dramaPage = 1,
                     isDramaLoadingMore = false,
@@ -818,33 +1051,48 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     forceRefresh = force,
                     filterExplicit = engine.filterExplicitContent,
                     onPartial = { partial ->
-                        if (_uiState.value.activeDramaRegion == region && _uiState.value.activeDramaEra == era) {
+                        if (cached.isEmpty() &&
+                            _uiState.value.activeDramaRegion == region &&
+                            _uiState.value.activeDramaEra == era
+                        ) {
                             val filtered = partial.filter { card ->
                                 com.anonrode.downloader.providers.DramaTagClassifier.matchesFilter(
                                     card, region, era, _uiState.value.activeDramaStatus, _uiState.value.activeDramaGenre
                                 )
                             }
+                            val enrichedRaw = PosterStore.enrich(partial, offline = !PosterNetwork.isOnline)
+                            val enriched = PosterStore.enrich(filtered, offline = !PosterNetwork.isOnline)
                             _uiState.update {
-                                it.copy(dramaRawCards = partial, dramaCards = filtered, isDramaLoading = false)
+                                it.copy(
+                                    dramaRawCards = enrichedRaw,
+                                    dramaCards = enriched,
+                                    dramaCardsByRegion = it.dramaCardsByRegion + (region to enriched),
+                                    isDramaLoading = false
+                                )
                             }
                         }
                     }
                 )
                 if (_uiState.value.activeDramaRegion == region && _uiState.value.activeDramaEra == era) {
-                    val filtered = cards.filter { card ->
-                        com.anonrode.downloader.providers.DramaTagClassifier.matchesFilter(
-                            card, region, era, _uiState.value.activeDramaStatus, _uiState.value.activeDramaGenre
-                        )
-                    }
-                    _uiState.update {
-                        it.copy(
-                            dramaRawCards = cards,
-                            dramaCards = filtered,
+                    _uiState.update { current ->
+                        val base = if (current.dramaRawCards.isEmpty()) cached else current.dramaRawCards
+                        val merged = mergeCards(base, cards)
+                        val filtered = merged.filter { card ->
+                            com.anonrode.downloader.providers.DramaTagClassifier.matchesFilter(
+                                card, region, era, current.activeDramaStatus, current.activeDramaGenre
+                            )
+                        }
+                        val enrichedRaw = PosterStore.enrich(merged, offline = !PosterNetwork.isOnline)
+                        val enriched = PosterStore.enrich(filtered, offline = !PosterNetwork.isOnline)
+                        current.copy(
+                            dramaRawCards = enrichedRaw,
+                            dramaCards = enriched,
+                            dramaCardsByRegion = current.dramaCardsByRegion + (region to enriched),
                             isDramaLoading = false,
-                            dramaFailed = cards.isEmpty() && it.dramaRawCards.isEmpty(),
-                            dramaPage = 1,
+                            dramaFailed = enrichedRaw.isEmpty(),
+                            dramaPage = if (current.dramaRawCards.isEmpty()) 1 else current.dramaPage,
                             isDramaLoadingMore = false,
-                            dramaHasMore = cards.isNotEmpty()
+                            dramaHasMore = merged.isNotEmpty()
                         )
                     }
                 }
@@ -895,7 +1143,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         card.title.lowercase().filter(Char::isLetterOrDigit) !in existingTitles
                     }
 
-                    val updatedRaw = current.dramaRawCards + distinctNew
+                    val updatedRaw = PosterStore.enrich(
+                        (current.dramaRawCards + distinctNew).distinctBy { it.url },
+                        offline = !PosterNetwork.isOnline
+                    )
                     val filtered = updatedRaw.filter { card ->
                         com.anonrode.downloader.providers.DramaTagClassifier.matchesFilter(
                             card = card,
@@ -905,10 +1156,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             genreFilter = current.activeDramaGenre
                         )
                     }
+                    val enriched = PosterStore.enrich(filtered, offline = !PosterNetwork.isOnline)
 
                     current.copy(
                         dramaRawCards = updatedRaw,
-                        dramaCards = filtered,
+                        dramaCards = enriched,
+                        dramaCardsByRegion = current.dramaCardsByRegion + (region to enriched),
                         dramaPage = nextPage,
                         isDramaLoadingMore = false,
                         dramaHasMore = distinctNew.isNotEmpty()
@@ -924,12 +1177,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun onQueryChanged(newQuery: String) {
-        _uiState.update { it.copy(query = newQuery) }
+        val normalized = normalizeSearchQuery(newQuery)
+        _uiState.update { it.copy(query = normalized) }
         debounceJob?.cancel()
-        val q = newQuery.trim()
+        // Never submit an empty, whitespace-only or oversized paste. The
+        // field shows the capped text, but a 12-paragraph blob must not turn
+        // into provider queries.
+        if (newQuery.trim().length > SEARCH_QUERY_MAX) {
+            searchJob?.cancel()
+            com.anonrode.downloader.data.net.HttpClient.cancelTagged("search")
+            com.anonrode.downloader.data.net.HttpClient.cancelTagged("search-strategy")
+            _uiState.update { it.copy(isSearching = false, searchError = null) }
+            return
+        }
+        val q = normalized
         if (q.length >= 2) {
             debounceJob = viewModelScope.launch {
-                kotlinx.coroutines.delay(350)
+                delay(350)
                 search(q)
             }
         } else {
@@ -1024,7 +1288,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun search(query: String = _uiState.value.query) {
-        val q = query.trim()
+        if (query.trim().length > SEARCH_QUERY_MAX) return
+        val q = normalizeSearchQuery(query)
         if (q.isBlank()) return
         // Dedupe: the log showed the same query+filter re-fired seconds apart
         // (double keystroke), doubling the whole crawl. Skip when an identical

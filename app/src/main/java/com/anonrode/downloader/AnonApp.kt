@@ -10,26 +10,60 @@ import coil.ImageLoaderFactory
 import com.anonrode.downloader.data.net.HttpClient
 import com.anonrode.downloader.engine.DownloadEngine
 import com.anonrode.downloader.engine.DownloadRepository
+import com.anonrode.downloader.providers.PosterNetwork
+import com.anonrode.downloader.providers.PosterStore
+import com.anonrode.downloader.util.NetworkObserver
 import com.yausername.ffmpeg.FFmpeg
 import com.yausername.youtubedl_android.YoutubeDL
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import java.io.File
+import java.util.concurrent.TimeUnit
 
 class AnonApp : Application(), ImageLoaderFactory {
 
     lateinit var engine: DownloadEngine
         private set
 
+    /** One live connectivity source for the engine, the poster cache and the
+     *  image prefetcher (no second ConnectivityManager callback per feature). */
+    lateinit var networkObserver: NetworkObserver
+        private set
+
+    /** Completed after FeedCache + PosterStore have read their JSON. The
+     *  ViewModel awaits this before hydrating, killing the cold-start race
+     *  where the first composition read an empty cache and never re-read it. */
+    private val cachesReady = CompletableDeferred<Unit>()
+
+    /** Completed after scraper rules / host health are live, so the first
+     *  network crawl cannot race rule initialization. */
+    private val initReady = CompletableDeferred<Unit>()
+
+    fun awaitCachesReady(): Deferred<Unit> = cachesReady
+
+    fun awaitInitReady(): Deferred<Unit> = initReady
+
     override fun onCreate() {
         super.onCreate()
         instance = this
         repository.initPersistence(filesDir, this)
         com.anonrode.downloader.util.DebugLog.init(this)
-        engine = DownloadEngine(this, repository, com.anonrode.downloader.util.NetworkObserver(this))
+        networkObserver = NetworkObserver(this)
+        PosterNetwork.isOnline = networkObserver.status.value.isConnected
+        engine = DownloadEngine(this, repository, networkObserver)
+        // Keep the process-wide poster flag honest for the whole session.
+        appScope.launch {
+            networkObserver.status.collect { status ->
+                PosterNetwork.isOnline = status.isConnected
+            }
+        }
         // Torrent selective-file picker: the engine suspends on this callback
         // while the Compose dialog (HomeScreen) shows the swarm's file list.
         engine.onTorrentFileSelection = { files ->
@@ -64,13 +98,32 @@ class AnonApp : Application(), ImageLoaderFactory {
         registerActivityLifecycleCallbacks(foregroundTracker)
         com.anonrode.downloader.update.EngagementScheduler.noteAppOpen(this)
         appScope.launch {
+            // Cache reads gate the ViewModel's initial hydrate. Keep them in
+            // their own block so a rules/AES failure still releases the UI.
             try {
-                // Non-critical startup initializations: disk I/O, AES decryption,
-                // and JSON decoding offloaded to Dispatchers.IO to prevent cold-start ANR.
+                com.anonrode.downloader.providers.FeedCache.init(this@AnonApp)
+                PosterStore.init(this@AnonApp)
+            } catch (t: Throwable) {
+                Log.e("AnonApp", "Feed/poster cache init error", t)
+            } finally {
+                cachesReady.complete(Unit)
+            }
+            try {
+                // Rules and host health must be live before the first crawl.
                 com.anonrode.downloader.data.rules.DynamicRulesManager.init(this@AnonApp)
                 com.anonrode.downloader.pipeline.HostHealth.init(this@AnonApp)
-                com.anonrode.downloader.providers.FeedCache.init(this@AnonApp)
-
+                // FCM registration is inert until the OTA payload enables it;
+                // this onCreate call covers the cold start before any sync.
+                try {
+                    com.anonrode.downloader.update.FcmRegistrar.maybeRegister(this@AnonApp)
+                } catch (_: Throwable) {
+                }
+            } catch (t: Throwable) {
+                Log.e("AnonApp", "Background initialization error", t)
+            } finally {
+                initReady.complete(Unit)
+            }
+            try {
                 initYoutubeDlInternal(this@AnonApp)
                 maybeSyncRules()
                 // Phase 2 activation hooks: also run once here so a
@@ -194,21 +247,47 @@ class AnonApp : Application(), ImageLoaderFactory {
         }
     }
 
-    override fun newImageLoader(): ImageLoader {
-        val dispatcher = okhttp3.Dispatcher().apply {
-            maxRequests = 64
-            maxRequestsPerHost = 16
-        }
-        val client = HttpClient.shared.newBuilder()
-            .dispatcher(dispatcher)
-            .addInterceptor { chain ->
-                val request = chain.request().newBuilder()
-                    .header("User-Agent", HttpClient.DEFAULT_UA)
-                    .build()
-                chain.proceed(request)
-            }
-            .build()
+    /**
+     * The ONLY production image client. PosterImages owns the hard limits:
+     * six concurrent requests, three per host, short timeouts. Feed/resolver
+     * traffic keeps its own dispatcher (HttpClient.shared), so a poster
+     * stampede can never starve a download resolution.
+     */
+    internal fun buildImageHttpClient(): okhttp3.OkHttpClient =
+        PosterImages.configure(
+            HttpClient.shared.newBuilder()
+                .addInterceptor { chain ->
+                    val request = chain.request().newBuilder()
+                        .header("User-Agent", HttpClient.DEFAULT_UA)
+                        .build()
+                    chain.proceed(request)
+                }
+                .build()
+        )
 
+    /**
+     * 250 MB poster cache in noBackupFilesDir (app-private, not OS-evictable,
+     * and excluded from cloud backup so a 250 MB art cache never blows the
+     * 25 MB backup quota). The old cacheDir location is migrated once when
+     * possible so an upgrade keeps its offline art.
+     */
+    private fun imageCacheDir(): File {
+        val target = File(noBackupFilesDir, "image_cache")
+        if (!target.exists()) {
+            val legacy = File(cacheDir, "image_cache")
+            if (legacy.exists()) {
+                try {
+                    legacy.renameTo(target)
+                } catch (_: Throwable) {
+                }
+            }
+        }
+        if (!target.exists()) target.mkdirs()
+        return target
+    }
+
+    override fun newImageLoader(): ImageLoader {
+        val client = buildImageHttpClient()
         return ImageLoader.Builder(this)
             .okHttpClient(client)
             .memoryCache {
@@ -218,10 +297,13 @@ class AnonApp : Application(), ImageLoaderFactory {
             }
             .diskCache {
                 coil.disk.DiskCache.Builder()
-                    .directory(cacheDir.resolve("image_cache"))
-                    .maxSizeBytes(150L * 1024 * 1024)
+                    .directory(imageCacheDir())
+                    .maxSizeBytes(250L * 1024 * 1024)
                     .build()
             }
+            // CDNs commonly send no-store/private on poster bytes. The disk
+            // cache exists precisely to survive that, so ignore the headers.
+            .respectCacheHeaders(false)
             .crossfade(120)
             .build()
     }
@@ -316,4 +398,32 @@ class AnonApp : Application(), ImageLoaderFactory {
             return ytdlpReady
         }
     }
+}
+
+/**
+ * Hard image-plane policy, extracted so JVM/Robolectric tests can pin it
+ * without booting the Application. Six total in flight, three per host:
+ * enough to fill a 3-column grid, low enough that poster traffic cannot
+ * monopolize sockets, battery or a slow source host.
+ */
+object PosterImages {
+    const val MAX_REQUESTS = 6
+    const val MAX_REQUESTS_PER_HOST = 3
+    const val CONNECT_TIMEOUT_SECONDS = 8L
+    const val READ_TIMEOUT_SECONDS = 20L
+    const val CALL_TIMEOUT_SECONDS = 25L
+
+    fun newDispatcher(): okhttp3.Dispatcher = okhttp3.Dispatcher().apply {
+        maxRequests = MAX_REQUESTS
+        maxRequestsPerHost = MAX_REQUESTS_PER_HOST
+    }
+
+    fun configure(base: okhttp3.OkHttpClient): okhttp3.OkHttpClient =
+        base.newBuilder()
+            .dispatcher(newDispatcher())
+            .connectionPool(okhttp3.ConnectionPool(8, 5, TimeUnit.MINUTES))
+            .connectTimeout(CONNECT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            .readTimeout(READ_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            .callTimeout(CALL_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            .build()
 }

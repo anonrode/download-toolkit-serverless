@@ -86,6 +86,34 @@ import kotlinx.coroutines.withContext
 private const val PREF_SORT = "downloader_settings"
 private const val PREF_SORT_KEY = "pref_downloads_sort"
 
+/**
+ * Remaining-action visibility, shared by every Downloads layout.
+ *
+ * The stored `seriesTotal` is an ENQUEUE-TIME estimate and is never
+ * authoritative. Until a live provider check has run (`liveRemaining ==
+ * null`), a folder with a seriesUrl and at least one task keeps a "Check
+ * remaining" path. Once the live episode list confirms zero missing episodes
+ * (`liveRemaining == 0`), the action hides; a positive live count shows the
+ * exact number. A failed live check stays null and therefore keeps the path.
+ */
+internal fun shouldShowRemainingAction(
+    hasSeriesUrl: Boolean,
+    hasTasks: Boolean,
+    liveRemaining: Int?
+): Boolean {
+    if (!hasSeriesUrl || !hasTasks) return false
+    return liveRemaining == null || liveRemaining > 0
+}
+
+/** Last live episode-list check for one show (5-minute TTL mirrors
+ *  ProviderRegistry's own drawer cache). known=false means the check failed;
+ *  the UI then keeps the "Check remaining" path. */
+private data class LiveSeriesRemaining(
+    val known: Boolean,
+    val count: Int,
+    val checkedAtMs: Long
+)
+
 // ─── Downloads v6 status chroma (mock: ui-proposal-downloads-v6-drawer.html) ─────
 // The light paper theme stays; state colour is defined HERE (Theme.kt colors
 // untouched). State is ALWAYS colour + WORD + GLYPH — never colour alone
@@ -377,13 +405,15 @@ fun DownloadsScreen(
             .filter { it.seriesUrl.isNotBlank() }
             .groupBy { it.showTitle }
         byShow.mapValues { (_, items) ->
-            // Only COMPLETED or in-flight tasks count against the remaining
-            // total — a FAILED task used to decrement this chip, so a series
-            // with failures read "0 left" while episodes were still missing.
-            // FAILED rows now stay counted as remaining (mirrors the drawer's
-            // Remaining semantics).
-            val doneOrInFlight = items.count { it.status != TaskStatus.FAILED }
-            (items.maxOf { it.seriesTotal } - doneOrInFlight).coerceAtLeast(0)
+            // Only COMPLETED or genuinely in-flight tasks count against the
+            // remaining total. PAUSED is NOT in flight (it is remaining work
+            // the user can resume), and FAILED stays remaining too — the old
+            // `status != FAILED` counted PAUSED as done, so an all-paused
+            // series dropped to 0 and the action disappeared entirely.
+            seriesRemainingCount(
+                seriesTotal = items.maxOf { it.seriesTotal },
+                statuses = items.map { it.status }
+            )
         }.filterValues { it > 0 }
     }
     val seriesInfo = remember(structureSig) {
@@ -626,6 +656,9 @@ fun DownloadsScreen(
             }
         } else {
             val expandedShows = remember { mutableStateMapOf<String, Boolean>() }
+            // Live per-show episode checks, refreshed on folder expand (the
+            // ProviderRegistry call itself carries a 5-minute TTL cache).
+            val liveSeriesRemaining = remember { mutableStateMapOf<String, LiveSeriesRemaining>() }
 
             LazyColumn(
                 verticalArrangement = Arrangement.spacedBy(Spacing.md),
@@ -637,6 +670,50 @@ fun DownloadsScreen(
                             it.status == TaskStatus.DOWNLOADING || it.status == TaskStatus.RESOLVING
                         })
                         val info = seriesInfo[showTitle]
+                        val live = liveSeriesRemaining[showTitle]
+                        LaunchedEffect(isExpanded, info?.first) {
+                            if (!isExpanded || info == null) return@LaunchedEffect
+                            val prev = liveSeriesRemaining[showTitle]
+                            if (prev != null &&
+                                System.currentTimeMillis() - prev.checkedAtMs < 300_000L
+                            ) return@LaunchedEffect
+                            val details = try {
+                                com.anonrode.downloader.providers.ProviderRegistry.loadEpisodes(
+                                    com.anonrode.downloader.data.models.ShowCard(
+                                        title = showTitle,
+                                        url = info.first,
+                                        site = info.second
+                                    )
+                                )
+                            } catch (e: kotlinx.coroutines.CancellationException) {
+                                throw e
+                            } catch (_: Exception) {
+                                null
+                            }
+                            val episodes = details?.episodes.orEmpty()
+                            liveSeriesRemaining[showTitle] = if (episodes.isEmpty()) {
+                                // Check failed or provider returned nothing:
+                                // keep the "Check remaining" path, do not hide.
+                                LiveSeriesRemaining(
+                                    known = false,
+                                    count = 0,
+                                    checkedAtMs = System.currentTimeMillis()
+                                )
+                            } else {
+                                val completed = showItems
+                                    .filter { it.status == TaskStatus.COMPLETED }
+                                    .map { it.sourceUrl }.toSet()
+                                val inFlight = showItems
+                                    .filter { isInFlightStatus(it.status) }
+                                    .map { it.sourceUrl }.toSet()
+                                LiveSeriesRemaining(
+                                    known = true,
+                                    count = remainingEpisodesOf(episodes, completed, inFlight).size,
+                                    checkedAtMs = System.currentTimeMillis()
+                                )
+                            }
+                        }
+                        val liveCount = live?.takeIf { it.known }?.count
                         ShowFolderCard(
                             showTitle = showTitle,
                             items = showItems,
@@ -644,7 +721,12 @@ fun DownloadsScreen(
                             onToggleExpand = {
                                 expandedShows[showTitle] = !isExpanded
                             },
-                            remainingCount = seriesRemaining[showTitle] ?: 0,
+                            remainingCount = liveCount ?: (seriesRemaining[showTitle] ?: 0),
+                            showRemainingAction = shouldShowRemainingAction(
+                                hasSeriesUrl = info != null,
+                                hasTasks = showItems.isNotEmpty(),
+                                liveRemaining = liveCount
+                            ),
                             onDownloadRemaining = if (info != null) {
                                 {
                                     viewModel.openRemainingEpisodes(showTitle, info.first, info.second)
@@ -668,13 +750,24 @@ fun DownloadsScreen(
                             // folder, so the shortcut never depends on the sort.)
                             val remainingShow = groupItems.map { it.showTitle }
                                 .distinct()
-                                .filter { (seriesRemaining[it] ?: 0) > 0 }
+                                .filter { seriesInfo[it] != null }
                                 .singleOrNull()
                             val info = remainingShow?.let { seriesInfo[it] }
+                            val liveCount = remainingShow
+                                ?.let { liveSeriesRemaining[it] }
+                                ?.takeIf { it.known }
+                                ?.count
                             DownloadsGroupHeader(
                                 title = header,
                                 count = groupItems.size,
-                                remainingCount = remainingShow?.let { seriesRemaining[it] } ?: 0,
+                                remainingCount = liveCount
+                                    ?: remainingShow?.let { seriesRemaining[it] }
+                                    ?: 0,
+                                showRemainingAction = shouldShowRemainingAction(
+                                    hasSeriesUrl = info != null,
+                                    hasTasks = groupItems.isNotEmpty(),
+                                    liveRemaining = liveCount
+                                ),
                                 onDownloadRemaining = if (remainingShow != null && info != null) {
                                     { viewModel.openRemainingEpisodes(remainingShow, info.first, info.second) }
                                 } else null
@@ -1057,10 +1150,11 @@ private fun DownloadsGroupHeader(
     title: String,
     count: Int,
     remainingCount: Int = 0,
+    showRemainingAction: Boolean = false,
     onDownloadRemaining: (() -> Unit)? = null
 ) {
     val countColor = groupCountColor(title, downloadsChroma(AnonTheme.colors.isDark))
-    val action: (() -> Unit)? = onDownloadRemaining?.takeIf { remainingCount > 0 }
+    val action: (() -> Unit)? = onDownloadRemaining?.takeIf { showRemainingAction }
     Layout(
         modifier = Modifier
             .fillMaxWidth()
@@ -1158,17 +1252,19 @@ private fun InlineRemainingAction(count: Int, onClick: () -> Unit) {
             modifier = Modifier.size(12.dp)
         )
         Text(
-            text = "Download remaining ",
+            text = if (count > 0) "Download remaining " else "Check remaining",
             fontSize = 11.sp,
             fontWeight = FontWeight.SemiBold,
             color = TextSecondary
         )
-        Text(
-            text = count.toString(),
-            fontSize = 11.sp,
-            fontWeight = FontWeight.Bold,
-            color = TextPrimary
-        )
+        if (count > 0) {
+            Text(
+                text = count.toString(),
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                color = TextPrimary
+            )
+        }
     }
 }
 
@@ -2013,6 +2109,7 @@ private fun ShowFolderCard(
     isExpanded: Boolean,
     onToggleExpand: () -> Unit,
     remainingCount: Int = 0,
+    showRemainingAction: Boolean = false,
     onDownloadRemaining: (() -> Unit)? = null,
     onPlayTask: (DownloadTask) -> Unit,
     onPauseTask: (String) -> Unit,
@@ -2123,7 +2220,7 @@ private fun ShowFolderCard(
             // refusing the tap just because a folder is folded was the
             // original complaint this feature exists to fix. Restyled inline
             // for v5 (was a bulk chip).
-            if (onDownloadRemaining != null && remainingCount > 0) {
+            if (onDownloadRemaining != null && showRemainingAction) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -2219,6 +2316,7 @@ fun DownloadCard(
     onCancel: () -> Unit,
     onDelete: () -> Unit = onCancel,
     remainingCount: Int = 0,
+    showRemainingAction: Boolean = false,
     onDownloadRemaining: (() -> Unit)? = null
 ) {
     val isCompleted = task.status == TaskStatus.COMPLETED
@@ -2628,7 +2726,7 @@ fun DownloadCard(
             // Track 4: series chip in the flat (non-"By Show") sort modes —
             // the folder card carries it in library mode, these cards carry it
             // everywhere else so the shortcut never depends on the sort.
-            if (onDownloadRemaining != null && remainingCount > 0) {
+            if (onDownloadRemaining != null && showRemainingAction) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -2636,7 +2734,11 @@ fun DownloadCard(
                     horizontalArrangement = Arrangement.End
                 ) {
                     BulkActionChip(
-                        label = "Download Remaining ($remainingCount left)",
+                        label = if (remainingCount > 0) {
+                            "Download Remaining ($remainingCount left)"
+                        } else {
+                            "Check remaining"
+                        },
                         icon = Icons.Rounded.Download,
                         iconTint = AccentPrimary,
                         onClick = onDownloadRemaining

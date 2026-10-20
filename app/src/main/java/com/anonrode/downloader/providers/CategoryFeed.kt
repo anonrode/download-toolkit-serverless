@@ -4,9 +4,11 @@ import com.anonrode.downloader.data.models.ShowCard
 import com.anonrode.downloader.data.net.HttpClient
 import com.anonrode.downloader.data.rules.DynamicRulesManager
 import com.anonrode.downloader.util.NameSanitizer
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.jsoup.Jsoup
 
@@ -49,6 +51,10 @@ object CategoryFeed {
     const val PER_ROW_LIMIT = 12
 
     private const val TIMEOUT_MS = 7000L
+
+    /** Tile probes get a longer budget: the live-measured nepu/nkiri calls
+     *  routinely take 8-15s, and the old 7s ceiling threw that art away. */
+    internal const val TILE_TIMEOUT_MS = 10_000L
 
     /**
      * A genre: label, per-site query overrides ([termFor]), the candidate
@@ -150,8 +156,14 @@ object CategoryFeed {
     /** Global default priority (candidates without an explicit list). */
     internal val SITE_FEEDS: List<String> = listOf("nkiri", "9jarocks", "naijaprey", "naijavault")
 
-    /** A Home genre tile: the category plus its current top-post poster. */
-    data class GenreTile(val category: Category, val posterUrl: String)
+    /** A Home genre tile: the category plus its current top-post artwork.
+     *  [posterUrl] and [secondaryPosterUrl] are both REAL remote/cached URLs;
+     *  the secondary slot is optional (blank when only one was found). */
+    data class GenreTile(
+        val category: Category,
+        val posterUrl: String,
+        val secondaryPosterUrl: String = ""
+    )
 
     /**
      * Fetch a genre page: ONE mixed card list. Sites race concurrently with
@@ -205,11 +217,15 @@ object CategoryFeed {
                 } else {
                     String.format(template, encodedTerm(term))
                 }
-                TrendingFeed.fetchRss(
-                    site, path,
-                    confirmTerms = category.aliases,
-                    filterExplicit = filterExplicit
-                )
+                if (page > 1) {
+                    fetchRssPage(site, path, category, page, filterExplicit)
+                } else {
+                    TrendingFeed.fetchRss(
+                        site, path,
+                        confirmTerms = category.aliases,
+                        filterExplicit = filterExplicit
+                    )
+                }
             }
             FeedKind.API_JSON -> {
                 if (site == "asianc") {
@@ -353,8 +369,8 @@ object CategoryFeed {
     }
 
     /**
-     * The Home genre-tile row: each category's CURRENT top-post poster —
-     * the first candidate site that answers with artwork wins, so a nepu
+     * The Home genre-tile row: each category's CURRENT top-post artwork —
+     * the first candidate site that answers with real art wins, so a nepu
      * genre with zero title matches (its search IS title matching) falls
      * through to nkiri's lite REST poster instead of a blank tile.
      * Lite requests only (~2KB via _fields / API per_page=1): tiles are
@@ -362,31 +378,160 @@ object CategoryFeed {
      */
     suspend fun tilePosters(filterExplicit: Boolean = true): List<GenreTile> = coroutineScope {
         CATEGORIES.map { category ->
-            async { GenreTile(category, tilePosterFor(category, filterExplicit)) }
+            async {
+                val urls = tilePostersFor(category, filterExplicit, max = 2)
+                GenreTile(
+                    category = category,
+                    posterUrl = urls.getOrElse(0) { "" },
+                    secondaryPosterUrl = urls.getOrElse(1) { "" }
+                )
+            }
         }.awaitAll()
     }
 
-    private suspend fun tilePosterFor(category: Category, filterExplicit: Boolean = true): String {
-        for (site in category.candidateSites()) {
-            val (kind, template) = FEED_SOURCES[site] ?: continue
-            val term = category.termFor(site)
-            val poster = withTimeoutOrNull(TIMEOUT_MS) {
-                when (kind) {
-                    FeedKind.WP_REST -> TrendingFeed.fetchWpRestLitePoster(site, term, filterExplicit)
-                    FeedKind.RSS -> TrendingFeed.fetchRss(
-                        site, String.format(template, encodedTerm(term)),
-                        confirmTerms = category.aliases,
-                        filterExplicit = filterExplicit
-                    ).firstOrNull { !filterExplicit || !com.anonrode.downloader.util.ExplicitContentFilter.isExplicit(it) }?.posterUrl.orEmpty()
-                    FeedKind.API_JSON -> TrendingFeed.fetchApiSearch(site, term, 5)
-                        .firstOrNull { !filterExplicit || !com.anonrode.downloader.util.ExplicitContentFilter.isExplicit(it) }?.posterUrl.orEmpty()
-                    FeedKind.ANIME_PROVIDER -> AnitakuProvider.search(term)
-                        .firstOrNull { !filterExplicit || !com.anonrode.downloader.util.ExplicitContentFilter.isExplicit(it) }?.posterUrl.orEmpty()
-                }
-            }.orEmpty()
-            if (poster.isNotBlank()) return poster
+    /**
+     * Up to [max] distinct REAL poster URLs for one category.
+     *
+     * The first three candidate sites are raced concurrently (each under
+     * [TILE_TIMEOUT_MS]); results are consumed in candidate PRIORITY order,
+     * so a fast lower-priority site never outranks the preferred source.
+     * Slow sources are the known failure mode (thenkiri 8-15s), hence the
+     * longer ceiling and the parallel race. Coroutine cancellation on an
+     * early fill keeps the worst case at one timeout, not one per site.
+     */
+    internal suspend fun tilePostersFor(
+        category: Category,
+        filterExplicit: Boolean = true,
+        max: Int = 2
+    ): List<String> = coroutineScope {
+        val sites = category.candidateSites().take(3)
+        if (sites.isEmpty()) return@coroutineScope emptyList()
+        val probes = sites.map { site ->
+            async(Dispatchers.IO) {
+                site to (
+                    withTimeoutOrNull(TILE_TIMEOUT_MS) {
+                        try {
+                            tilePosterFromSite(site, category, filterExplicit)
+                        } catch (e: kotlinx.coroutines.CancellationException) {
+                            throw e
+                        } catch (_: Throwable) {
+                            ""
+                        }
+                    } ?: ""
+                    )
+            }
         }
-        return ""
+        val out = mutableListOf<String>()
+        for (probe in probes) {
+            val url = probe.await().second
+            if (url.isNotBlank()) {
+                val clean = PosterStore.normalizePosterUrl(url)
+                if (clean.isNotBlank() && clean !in out) out.add(clean)
+                if (out.size >= max) break
+            }
+        }
+        if (out.size >= max) probes.forEach { it.cancel() }
+        out
+    }
+
+    /** One site's best real poster URL for a genre (lite requests only). */
+    private suspend fun tilePosterFromSite(
+        site: String,
+        category: Category,
+        filterExplicit: Boolean
+    ): String {
+        val (kind, template) = FEED_SOURCES[site] ?: return ""
+        val term = category.termFor(site)
+        return when (kind) {
+            FeedKind.WP_REST -> TrendingFeed.fetchWpRestLitePoster(site, term, filterExplicit)
+            FeedKind.RSS -> TrendingFeed.fetchRss(
+                site, String.format(template, encodedTerm(term)),
+                confirmTerms = category.aliases,
+                filterExplicit = filterExplicit
+            ).firstOrNull {
+                !filterExplicit || !com.anonrode.downloader.util.ExplicitContentFilter.isExplicit(it)
+            }?.posterUrl.orEmpty()
+            FeedKind.API_JSON -> TrendingFeed.fetchApiSearch(site, term, 5)
+                .firstOrNull {
+                    !filterExplicit || !com.anonrode.downloader.util.ExplicitContentFilter.isExplicit(it)
+                }?.posterUrl.orEmpty()
+            FeedKind.ANIME_PROVIDER -> AnitakuProvider.search(term)
+                .firstOrNull {
+                    !filterExplicit || !com.anonrode.downloader.util.ExplicitContentFilter.isExplicit(it)
+                }?.posterUrl.orEmpty()
+        }
+    }
+
+    /**
+     * Paginated RSS fetch with an explicit end-of-feed signal.
+     *
+     * `9jarocks .../search/action/feed/rss2/?paged=3 -> 404` is WordPress
+     * saying "there is no page 3", not a transport error. It must not be
+     * logged or retried. We remember the last valid page per feed so a later
+     * page request short-circuits instead of re-probing the same 404.
+     */
+    private data class RssPageResult(
+        val cards: List<ShowCard>,
+        val endOfFeed: Boolean = false
+    )
+
+    private val rssEndPages = java.util.concurrent.ConcurrentHashMap<String, Int>()
+
+    private suspend fun fetchRssPage(
+        site: String,
+        path: String,
+        category: Category,
+        page: Int,
+        filterExplicit: Boolean
+    ): List<ShowCard> {
+        // Key WITHOUT the ?paged=N suffix: the 404 is a property of the feed,
+        // not of one page, so page N+1 must short-circuit from page N's 404.
+        val feedKey = "$site|${category.label}|${path.substringBefore("?paged=")}"
+        val endedAt = rssEndPages[feedKey]
+        if (endedAt != null && page > endedAt) return emptyList()
+
+        val base = DynamicRulesManager.getBaseUrl(site).trimEnd('/')
+        if (base.isBlank()) return emptyList()
+        val url = "$base$path"
+
+        val result = withContext(Dispatchers.IO) {
+            try {
+                HttpClient.awaitOriginCooldown(url)
+                val request = okhttp3.Request.Builder()
+                    .url(url)
+                    .header("Referer", "$base/")
+                    .header("User-Agent", HttpClient.DEFAULT_UA)
+                    .build()
+                HttpClient.shared.newCall(request).execute().use { response ->
+                    when {
+                        response.code == 404 -> RssPageResult(emptyList(), endOfFeed = true)
+                        !response.isSuccessful -> RssPageResult(emptyList())
+                        else -> {
+                            val xml = response.body?.string().orEmpty()
+                            RssPageResult(
+                                if (xml.isBlank()) emptyList()
+                                else TrendingFeed.parseRssItems(
+                                    xml, site, base, category.aliases, filterExplicit
+                                )
+                            )
+                        }
+                    }
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (_: Throwable) {
+                RssPageResult(emptyList())
+            }
+        }
+
+        if (result.endOfFeed) {
+            // Page N is gone => the feed ended at N-1. Remember it, never
+            // log it as an error, never retry it.
+            rssEndPages[feedKey] = (page - 1).coerceAtLeast(1)
+            return emptyList()
+        }
+        if (result.cards.isNotEmpty()) rssEndPages.remove(feedKey)
+        return result.cards
     }
 
     private fun encodedTerm(term: String): String = java.net.URLEncoder.encode(term, "UTF-8")
