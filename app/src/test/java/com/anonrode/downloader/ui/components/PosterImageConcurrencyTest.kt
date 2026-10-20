@@ -44,7 +44,7 @@ class PosterImageDispatcherTest {
         servers.clear()
     }
 
-    @Test
+    @Test(timeout = 45_000)
     fun sixTotalAndThreePerHost() {
         val one = MockWebServer().also { servers.add(it); it.start() }
         val two = MockWebServer().also { servers.add(it); it.start() }

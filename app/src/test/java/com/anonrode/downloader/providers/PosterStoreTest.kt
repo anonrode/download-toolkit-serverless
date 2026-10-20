@@ -75,7 +75,7 @@ class PosterStoreTest {
         assertTrue(PosterStore.tileUrls("Horror").isEmpty())
     }
 
-    @Test
+    @Test(timeout = 45_000)
     fun tileSuccessPersistsAcrossReinit() = runBlocking {
         val a = "https://example.com/anime-a.jpg"
         PosterStore.saveTileSuccess("Anime", listOf(a))

@@ -42,7 +42,7 @@ class StablePosterGridTest {
         site = "test"
     )
 
-    @Test
+    @Test(timeout = 45_000)
     fun appendAndLoadMoreDuringFlingDoesNotCrash() {
         val items = mutableStateOf((0 until 60).map(::card))
         val loadingMore = mutableStateOf(false)
@@ -78,7 +78,7 @@ class StablePosterGridTest {
         composeRule.onNodeWithText("Card 89").assertExists()
     }
 
-    @Test
+    @Test(timeout = 45_000)
     fun filterShrinkWhileScrolledDoesNotCrash() {
         val items = mutableStateOf((0 until 60).map(::card))
         composeRule.setContent {

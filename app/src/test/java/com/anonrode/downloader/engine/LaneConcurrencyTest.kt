@@ -83,7 +83,7 @@ class LaneConcurrencyTest {
         dir.deleteRecursively()
     }
 
-    @Test
+    @Test(timeout = 45_000)
     fun threeTasksStayWithinGlobalBudgetAndAllComplete() = runBlocking {
         val budget = HostPolicyRegistry.LaneBudget
         val grants = listOf("a", "b", "c").map { id ->
