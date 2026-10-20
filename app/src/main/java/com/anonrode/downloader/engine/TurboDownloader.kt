@@ -408,9 +408,6 @@ object TurboDownloader {
             }
 
             val sockets = HostPolicyRegistry.effectiveSocketsForUrl(safe, configuredSockets)
-            // Hard ceiling for post-admission growth: the global controller can
-            // raise this task's grant, but never past the per-host policy.
-            val hostCeiling = HostPolicyRegistry.effectiveSocketsForUrl(safe, 16)
             val useSegmented = acceptsRanges && total > MIN_SEGMENTED_SIZE && sockets > 1
 
             val partFile = File(dest.absolutePath + ".part")
@@ -655,6 +652,9 @@ object TurboDownloader {
             // the steal DECISION itself still runs under synchronized(plan)
             // so two workers can never split the same victim.
             val plan = CopyOnWriteArrayList(state.loadOrCreate(total, sockets))
+        // Post-admission growth ceiling: the controller may raise this task's
+        // grant, but never past the per-host policy.
+        val hostCeiling = HostPolicyRegistry.effectiveSocketsForUrl(url, 16)
         val initialBytes = plan.sumOf { (it.current - it.start).coerceAtLeast(0L) }
         val done = AtomicLong(initialBytes)
             val failed = AtomicBoolean(false)
