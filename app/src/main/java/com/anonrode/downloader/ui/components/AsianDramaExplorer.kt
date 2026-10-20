@@ -57,7 +57,7 @@ fun AsianDramaExplorer(
     // Every filter change starts a fresh grid state at the top. This is what
     // removes the "scroll offset points past the new smaller subset" class
     // of LazyGrid span crashes when a chip swaps in a 6-item subset.
-    val gridKey = "${region.name}|${era.name}|${statusFilter.name}|${activeGenre?.name}"
+    val gridKey = "${region.name}|${era.name}|${statusFilter.name}|${activeGenre?.id}"
 
     Box(
         modifier = Modifier

@@ -1306,7 +1306,7 @@ private fun ViewMoreTileCard(
     }
     val bitmaps = remember(loaded, context) {
         val cache = context.imageLoader.memoryCache
-        loaded.take(4).mapNotNull { cache?.get(it)?.bitmap }
+        loaded.take(4).mapNotNull { cache?.get(coil.memory.MemoryCache.Key(it))?.bitmap }
     }
 
     Box(
