@@ -2,6 +2,7 @@ package com.anonrode.downloader.ui.components
 
 import android.app.Application
 import androidx.test.core.app.ApplicationProvider
+import kotlinx.coroutines.runBlocking
 import coil.request.CachePolicy
 import coil.size.Size
 import com.anonrode.downloader.PosterImages
@@ -132,9 +133,9 @@ class PosterRequestFactoryTest {
             widthPx = 372,
             heightPx = 558
         )
-        assertEquals(Size(372, 558), request.size)
+        assertEquals(Size(372, 558), runBlocking { request.sizeResolver.size() })
         assertEquals("https://image.tmdb.org/t/p/w342/abc.jpg", request.diskCacheKey)
-        assertEquals("https://image.tmdb.org/t/p/w342/abc.jpg", request.memoryCacheKey)
+        assertEquals("https://image.tmdb.org/t/p/w342/abc.jpg", request.memoryCacheKey?.key)
         assertEquals(CachePolicy.ENABLED, request.networkCachePolicy)
     }
 
