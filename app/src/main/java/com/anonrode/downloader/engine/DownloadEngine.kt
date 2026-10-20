@@ -55,7 +55,7 @@ internal object HlsPlaylist {
 
     private val URI_VALUE = Pattern.compile("URI=\"([^\"]+)\"")
 
-    private val IV_ATTRIBUTE = Regex("""\s+IV=0x[0-9A-Fa-f]+""")
+    private val IV_ATTRIBUTE = Regex("""(?:^|,)\s*IV=0x[0-9A-Fa-f]+""")
 
     fun resolveSegmentUrl(base: String, uri: String): String? {
         if (uri.startsWith("http://") || uri.startsWith("https://")) return uri
@@ -1094,7 +1094,6 @@ class DownloadEngine(
         // Progress Banking Guard. A GARBAGE artifact (HTML/tiny/bad
         // signature) is not banked progress, so it must not veto failover —
         // but real partials still do. Never fail over when:
-        //  - the backend actually reported bytes,
         //  - a real .part / .aria2 partial exists,
         //  - a >1 MB artifact exists (a plausible real download).
         val garbage = garbageFile != null && isGarbageArtifact(garbageFile)
@@ -1105,7 +1104,7 @@ class DownloadEngine(
                 (ariaControl.exists() && ariaControl.length() > 0L)
             val largeArtifact = listOfNotNull(garbageFile, File(task.filePath))
                 .any { it.exists() && it.isFile && it.length() > 1024L * 1024L }
-            if (task.downloadedBytes > 0L || realPartial || largeArtifact) {
+            if (realPartial || largeArtifact) {
                 com.anonrode.downloader.util.DebugLog.resolve(
                     "task=${task.id} failover: garbage output but real partial/large artifact exists — not failing over"
                 )
@@ -2731,6 +2730,20 @@ class DownloadEngine(
         }
     }
 
+    /**
+     * Non-suspending monitor helper. The giant startTask coroutine must not
+     * contain a synchronized block: Kotlin 2.x's coroutine codegen
+     * stack-overflows in checkForSuspensionPointInsideMonitor on that CFG
+     * (observed on CI 2026-10-20, DownloadEngine.startTask invokeSuspend).
+     */
+    private fun adoptExtensionPath(taskId: String, updatedFile: File): Boolean = synchronized(enqueueLock) {
+        val pathTaken = repository.snapshot().any { it.id != taskId && it.filePath == updatedFile.absolutePath }
+        if (!pathTaken && !updatedFile.exists()) {
+            repository.update(taskId) { it.copy(filePath = updatedFile.absolutePath) }
+            true
+        } else false
+    }
+
     private fun startTask(initialTask: DownloadTask, lockAlreadyHeld: Boolean = false) {
         if (!lockAlreadyHeld && !runtimeRegistry.tryAcquireStartLock(initialTask.id)) return
         val live = repository.find(initialTask.id)
@@ -2927,13 +2940,7 @@ class DownloadEngine(
                         // Same reservation lock as enqueue(): without it a concurrent
                         // enqueue can pick this exact path between our snapshot and
                         // our update, and two tasks end up owning one destination.
-                        val renamed = synchronized(enqueueLock) {
-                            val pathTaken = repository.snapshot().any { it.id != task.id && it.filePath == updatedFile.absolutePath }
-                            if (!pathTaken && !updatedFile.exists()) {
-                                repository.update(task.id) { it.copy(filePath = updatedFile.absolutePath) }
-                                true
-                            } else false
-                        }
+                        val renamed = adoptExtensionPath(task.id, updatedFile)
                         if (renamed) {
                             task = repository.find(task.id) ?: task.copy(filePath = updatedFile.absolutePath)
                         }
@@ -3266,6 +3273,17 @@ class DownloadEngine(
                                     )
                                     try { artifact.delete() } catch (_: Exception) {}
                                     producedFile = null
+                                    // A 1-byte "success" already wrote a phantom
+                                    // downloadedBytes=1 via onProgress; reset it so
+                                    // the failover guard sees zero banked bytes.
+                                    repository.update(task.id) {
+                                        it.copy(
+                                            downloadedBytes = 0L,
+                                            totalBytes = 0L,
+                                            speedBytesPerSec = 0.0,
+                                            etaSeconds = 0L
+                                        )
+                                    }
                                     turboStubRecovered = true
                                 } else {
                                     producedFile = artifact
