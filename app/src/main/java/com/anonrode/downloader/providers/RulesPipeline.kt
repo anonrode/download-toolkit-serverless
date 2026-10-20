@@ -6,6 +6,7 @@ import com.anonrode.downloader.data.models.ShowCard
 import com.anonrode.downloader.data.net.HttpClient
 import com.anonrode.downloader.data.rules.DynamicRulesManager
 import com.anonrode.downloader.data.rules.Pipeline
+import com.anonrode.downloader.data.rules.PipelineBind
 import com.anonrode.downloader.data.rules.PipelineSource
 import com.anonrode.downloader.data.rules.PipelineStep
 import com.anonrode.downloader.data.rules.PipelineTerminal
@@ -91,6 +92,16 @@ object RulesPipeline {
         val directUrl: String?,
         val referer: String = "",
         val subtitles: List<com.anonrode.downloader.data.models.SubtitleTrack> = emptyList()
+    )
+
+    /** One anchor's declared identity + the raw token style (season remap
+     *  evidence). Object-level because Kotlin does not allow local data
+     *  classes. */
+    private data class SeasonToken(
+        val season: Int?,
+        val episode: Int?,
+        val raw: String,
+        val style: String
     )
 
     // ---------------------------------------------------------------- search
@@ -1346,8 +1357,13 @@ object RulesPipeline {
         }
         el.selectFirst("description")?.let { candidates.add(it) }
         if (candidates.isEmpty()) el.selectFirst("content|encoded")?.let { candidates.add(it) }
-        return candidates.firstOrNull()?.let { if (it.tagName() == "description") it.text() else it.html() }
-            ?: el.html()
+        return candidates.firstOrNull()?.let {
+            // RSS content:encoded is ESCAPED HTML text; text() decodes the
+            // entities so the <img src> is parseable. HTML cards keep html().
+            if (it.tagName().contains("encoded", ignoreCase = true) ||
+                it.tagName().equals("description", ignoreCase = true)
+            ) it.text() else it.html()
+        } ?: el.html()
     }
 
     /** First usable <img> URL inside an HTML fragment (compiled 9jaRocks
@@ -1746,13 +1762,6 @@ object RulesPipeline {
         } else null
         val declarationMatches = declaration != null && kept.isNotEmpty() &&
             (declaration.second - declaration.first + 1) == kept.size
-
-        data class SeasonToken(
-            val season: Int?,
-            val episode: Int?,
-            val raw: String,
-            val style: String
-        )
 
         fun seasonToken(href: String, text: String): SeasonToken {
             for (target in listOf(href, text)) {
@@ -2249,6 +2258,17 @@ object RulesPipeline {
      */
     internal fun walkJson(root: Any?, path: String): List<Any?> {
         if (path.isBlank()) return listOfNotNull(root)
+        // Root-array item paths ("$[]" / "$" / "[]"): WordPress REST and the
+        // NaijaVault search return a bare JSON array. Without this the first
+        // segment looked for a "$" KEY on each element and yielded nothing
+        // (the pipeline silently returned 0 cards).
+        if (path == "$[]" || path == "$" || path == "[]") {
+            return when (root) {
+                is JSONArray -> (0 until root.length()).map { root.opt(it) }
+                null -> emptyList()
+                else -> listOf(root)
+            }
+        }
         var current = listOf(root)
         for (segment in path.split('.')) {
             if (segment.isBlank()) continue
