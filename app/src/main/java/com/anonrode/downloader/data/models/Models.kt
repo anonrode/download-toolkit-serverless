@@ -34,7 +34,11 @@ data class EpisodeItem(
     val site: String,
     val sizeText: String = "",
     val isDownloaded: Boolean = false,
-    val mirrorUrls: List<String> = emptyList()
+    val mirrorUrls: List<String> = emptyList(),
+    /** Authoritative season number; 0 = legacy row (derive from episodeNum). */
+    val season: Int = 0,
+    /** Authoritative episode number inside [season]; 0 = legacy row. */
+    val episode: Int = 0
 )
 
 @Serializable
@@ -45,12 +49,26 @@ data class ShowDetails(
 )
 
 @Serializable
+data class SubtitleTrack(
+    /** Absolute http(s) URL of the subtitle file (vtt/srt/ass). */
+    val url: String,
+    /** BCP-47-ish language tag from the source ("en", "pt-BR", "und"). */
+    val lang: String = "",
+    /** "vtt" | "srt" | "ass" | "" (inferred from url/extension by the engine). */
+    val kind: String = ""
+)
+
+@Serializable
 data class DownloadRecipe(
     val directUrl: String,
     val filename: String,
     val headers: Map<String, String> = emptyMap(),
     val backend: String = "aria2c",
-    val parallelSockets: Int = 16
+    val parallelSockets: Int = 16,
+    /** Soft subtitle tracks the resolver proved for this episode. The engine
+     *  fetches them as sidecars after the video completes; a subtitle
+     *  failure never fails the video. Empty = no tracks known. */
+    val subtitles: List<SubtitleTrack> = emptyList()
 )
 
 @Serializable
@@ -112,5 +130,9 @@ data class DownloadTask(
      *  "" for direct/social/torrent downloads, which keep the initials tile.
      *  Serialized like any other field; journals persisted by older builds
      *  simply load as "" (initials fallback). */
-    val posterUrl: String = ""
+    val posterUrl: String = "",
+    /** Authoritative season number; 0 = legacy task (derive from episodeNum). */
+    val season: Int = 0,
+    /** Authoritative episode number inside [season]; 0 = legacy task. */
+    val episode: Int = 0
 )

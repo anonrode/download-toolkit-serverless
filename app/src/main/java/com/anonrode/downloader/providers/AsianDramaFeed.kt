@@ -45,10 +45,13 @@ object AsianDramaFeed {
 
         // 2. Fetch live across candidate providers concurrently
         return coroutineScope {
-            val candidateSites = when (region) {
-                DramaRegion.KDRAMA -> listOf("dramakey", "asianc", "dramarain", "nepu", "nkiri", "9jarocks")
-                DramaRegion.CDRAMA -> listOf("dramarain", "dramakey", "asianc", "nepu", "nkiri", "9jarocks")
-            }
+            // OTA kill-switch: disabled sites never join the drama fan-out.
+            val candidateSites = SiteGate.filterEnabled(
+                when (region) {
+                    DramaRegion.KDRAMA -> listOf("dramakey", "asianc", "dramarain", "nepu", "nkiri", "9jarocks")
+                    DramaRegion.CDRAMA -> listOf("dramarain", "dramakey", "asianc", "nepu", "nkiri", "9jarocks")
+                }
+            )
 
             val slots = arrayOfNulls<List<ShowCard>>(candidateSites.size)
             val lock = Any()
@@ -88,6 +91,7 @@ object AsianDramaFeed {
         page: Int,
         filterExplicit: Boolean
     ): List<ShowCard> {
+        if (!SiteGate.isEnabled(site)) return emptyList()
         return try {
             when (site) {
                 "asianc" -> fetchAsianC(region, era, page, filterExplicit)

@@ -265,22 +265,44 @@ object HttpClient {
 
     private val retryAfterCooldown = RetryAfterCooldown()
 
-    /** Optional coroutine admission wait; existing synchronous APIs never sleep. */
-    suspend fun awaitOriginCooldown(url: String) {
-        retryAfterCooldown.waitUntilUsable(safeUrl(url))
+    /**
+     * Request class used for BOTH cooldown scoping and scheduler priority.
+     * Derived from the existing per-call `tag`, so no call site changes:
+     * search/source-list traffic is SEARCH, the verify oracle is VERIFY, and
+     * everything else (resolvers, preflight, direct fetches) is DOWNLOAD.
+     */
+    private fun requestScope(tag: String?): String = when (tag?.lowercase()) {
+        "search", "search-strategy", "trending", "feed", "home" -> RetryAfterCooldown.SCOPE_SEARCH
+        "verify" -> RetryAfterCooldown.SCOPE_VERIFY
+        else -> RetryAfterCooldown.SCOPE_DOWNLOAD
     }
 
-    private fun admitRequest(url: String) {
-        val remaining = retryAfterCooldown.remainingMs(safeUrl(url))
+    private fun requestClass(tag: String?): OriginRequestClass = when (requestScope(tag)) {
+        RetryAfterCooldown.SCOPE_SEARCH -> OriginRequestClass.SEARCH
+        RetryAfterCooldown.SCOPE_VERIFY -> OriginRequestClass.VERIFY
+        else -> OriginRequestClass.DOWNLOAD
+    }
+
+    /** Optional coroutine admission wait; existing synchronous APIs never sleep. */
+    suspend fun awaitOriginCooldown(url: String, scope: String = RetryAfterCooldown.SCOPE_DOWNLOAD) {
+        retryAfterCooldown.waitUntilUsable(safeUrl(url), scope)
+    }
+
+    private fun admitRequest(url: String, tag: String? = null) {
+        val remaining = retryAfterCooldown.remainingMs(safeUrl(url), scope = requestScope(tag))
         if (remaining > 0) throw OriginCooldownException(safeUrl(url))
     }
 
-    private fun recordCooldown(response: Response) {
+    private fun recordCooldown(response: Response, tag: String? = null) {
         // Attribute to the request that actually received the response, including
         // redirects, not the initial URL or the global diagnostic lastFailure.
         val code = response.code
         if (code == 429 || code == 503) {
-            retryAfterCooldown.record(response.request.url.toString(), response.header("Retry-After"))
+            retryAfterCooldown.record(
+                response.request.url.toString(),
+                response.header("Retry-After"),
+                scope = requestScope(tag)
+            )
         }
     }
 
@@ -293,9 +315,9 @@ object HttpClient {
      * admission gate honored the recorded window — probeTerminal/probe and
      * the VidsrcResolver mirror walk kept firing through it.
      */
-    fun isOriginCoolingDown(url: String): Boolean {
+    fun isOriginCoolingDown(url: String, scope: String = RetryAfterCooldown.SCOPE_DOWNLOAD): Boolean {
         val safe = try { safeUrl(url) } catch (_: Exception) { return false }
-        return retryAfterCooldown.remainingMs(safe) > 0L
+        return retryAfterCooldown.remainingMs(safe, scope = scope) > 0L
     }
 
     /**
@@ -625,6 +647,20 @@ object HttpClient {
     // Raw get() still transfers response ownership to its caller. getText() instead
     // consumes inside this scope, retaining cancellation registration during reads.
     private fun <T> executeGet(url: String, referer: String?, headers: Map<String, String>, tag: String?, permissive: Boolean, client: OkHttpClient = if (permissive) permissiveClient else shared, consume: (Response) -> T): T {
+        // Cooldown + metering: the class comes from the existing tag, so a
+        // download fan-out's 429 can no longer park SEARCH on the same origin
+        // and the per-origin scheduler keeps search ahead of verify/fan-out.
+        admitRequest(url, tag)
+        val cls = requestClass(tag)
+        val admitted = OriginLoadScheduler.acquire(url, cls)
+        try {
+            return executeGetInner(url, referer, headers, tag, permissive, client, consume)
+        } finally {
+            if (admitted) OriginLoadScheduler.release(url, cls)
+        }
+    }
+
+    private fun <T> executeGetInner(url: String, referer: String?, headers: Map<String, String>, tag: String?, permissive: Boolean, client: OkHttpClient = if (permissive) permissiveClient else shared, consume: (Response) -> T): T {
         // SSRF floor, page plane. safeDns filters DNS-resolved hosts, but OkHttp
         // SKIPS the custom Dns for IP-literal hosts (RouteSelector:
         // canParseAsIpAddress -> raw getByName; fact-checked against 4.12.0
@@ -758,11 +794,18 @@ object HttpClient {
      * Callers needing Job cancellation must supply a per-call bridge; never cancel globally.
      */
     internal inline fun <T> executeCancellable(client: OkHttpClient, req: Request, block: (Response) -> T): T {
-        val call = registerResolverCall(client, req)
+        val permitUrl = req.url.toString()
+        val permitClass = OriginRequestClass.DOWNLOAD
+        val admitted = OriginLoadScheduler.acquire(permitUrl, permitClass)
         try {
-            return executeResolverCall(call).use(block)
+            val call = registerResolverCall(client, req)
+            try {
+                return executeResolverCall(call).use(block)
+            } finally {
+                unregisterResolverCall(call)
+            }
         } finally {
-            unregisterResolverCall(call)
+            if (admitted) OriginLoadScheduler.release(permitUrl, permitClass)
         }
     }
 
@@ -798,7 +841,8 @@ object HttpClient {
     }
 
     /** Remaining per-origin cooldown ms (0 = usable). */
-    fun remainingCooldownMs(url: String): Long = retryAfterCooldown.remainingMs(safeUrl(url))
+    fun remainingCooldownMs(url: String, scope: String = RetryAfterCooldown.SCOPE_DOWNLOAD): Long =
+        retryAfterCooldown.remainingMs(safeUrl(url), scope = scope)
 
     /**
      * Hard cap on any body read through [cappedText]/[cappedBytes]. Resolver
@@ -903,10 +947,9 @@ object HttpClient {
     // Injected client keeps regression tests socket-free without mutating shared state.
     internal fun getTextWithClient(client: OkHttpClient, url: String, referer: String? = null, headers: Map<String, String> = emptyMap(), acceptStatus: Set<Int> = emptySet(), tag: String? = null, maxBytes: Long = MAX_TEXT_BYTES, onFailure: FailureListener? = null): String? {
         return try {
-            admitRequest(url)
             executeGet(url, referer, headers, tag, false, client) { res ->
                 res.use { r ->
-                    recordCooldown(r)
+                    recordCooldown(r, tag)
                     if (r.isSuccessful || r.code in acceptStatus) {
                         // The host answered: clear any stale "dead" mark. The
                         // previous behavior treated a 2xx on a previously-failed
@@ -957,8 +1000,18 @@ object HttpClient {
         postFormWithClient(shared, url, form, referer, headers, tag, maxBytes, onFailure)
 
     internal fun postFormWithClient(client: OkHttpClient, url: String, form: Map<String, String>, referer: String? = null, headers: Map<String, String> = emptyMap(), tag: String? = null, maxBytes: Long = MAX_TEXT_BYTES, onFailure: FailureListener? = null): String? {
+        val cls = requestClass(tag)
+        val admitted = runCatching { OriginLoadScheduler.acquire(url, cls) }.getOrDefault(false)
+        try {
+            return postFormInner(client, url, form, referer, headers, tag, maxBytes, onFailure)
+        } finally {
+            if (admitted) OriginLoadScheduler.release(url, cls)
+        }
+    }
+
+    private fun postFormInner(client: OkHttpClient, url: String, form: Map<String, String>, referer: String? = null, headers: Map<String, String> = emptyMap(), tag: String? = null, maxBytes: Long = MAX_TEXT_BYTES, onFailure: FailureListener? = null): String? {
         return try {
-            admitRequest(url)
+            admitRequest(url, tag)
             refuseUnsafeTarget(url) // same floor as get() — INSIDE the try so an
             // unsafe target journal+returns null exactly like getText does; one
             // guard throwing for one verb and returning null for the other is
@@ -996,7 +1049,7 @@ object HttpClient {
                     com.anonrode.downloader.util.DebugLog.net(
                         "POST ${safeUrl(url)} -> ${res.code} in ${System.currentTimeMillis() - started}ms"
                     )
-                    recordCooldown(res)
+                    recordCooldown(res, tag)
                     if (res.isSuccessful) {
                         readCappedText(res, maxBytes, propagateFailure = onFailure != null)
                     } else {
@@ -1027,8 +1080,18 @@ object HttpClient {
         postJsonWithClient(shared, url, json, referer, headers, tag, maxBytes)
 
     internal fun postJsonWithClient(client: OkHttpClient, url: String, json: String, referer: String? = null, headers: Map<String, String> = emptyMap(), tag: String? = null, maxBytes: Long = MAX_TEXT_BYTES, onFailure: FailureListener? = null): String? {
+        val cls = requestClass(tag)
+        val admitted = runCatching { OriginLoadScheduler.acquire(url, cls) }.getOrDefault(false)
+        try {
+            return postJsonInner(client, url, json, referer, headers, tag, maxBytes, onFailure)
+        } finally {
+            if (admitted) OriginLoadScheduler.release(url, cls)
+        }
+    }
+
+    private fun postJsonInner(client: OkHttpClient, url: String, json: String, referer: String? = null, headers: Map<String, String> = emptyMap(), tag: String? = null, maxBytes: Long = MAX_TEXT_BYTES, onFailure: FailureListener? = null): String? {
         return try {
-            admitRequest(url)
+            admitRequest(url, tag)
             refuseUnsafeTarget(url)
             val mediaType = parseMediaType("application/json; charset=utf-8")
             val body = okhttp3.RequestBody.create(mediaType, json)
@@ -1062,7 +1125,7 @@ object HttpClient {
                     com.anonrode.downloader.util.DebugLog.net(
                         "POST_JSON ${safeUrl(url)} -> ${res.code} in ${System.currentTimeMillis() - started}ms"
                     )
-                    recordCooldown(res)
+                    recordCooldown(res, tag)
                     if (res.isSuccessful) {
                         readCappedText(res, maxBytes, propagateFailure = onFailure != null)
                     } else {
@@ -1098,8 +1161,28 @@ object HttpClient {
         timeoutMs: Long = 0L,
         tag: String? = null
     ): HttpRawResult? {
+        val cls = requestClass(tag)
+        val admitted = runCatching { OriginLoadScheduler.acquire(url, cls) }.getOrDefault(false)
+        try {
+            return executeRawInner(client, url, method, bodyPayload, referer, headers, maxBytes, timeoutMs, tag)
+        } finally {
+            if (admitted) OriginLoadScheduler.release(url, cls)
+        }
+    }
+
+    private fun executeRawInner(
+        client: OkHttpClient,
+        url: String,
+        method: String = "GET",
+        bodyPayload: okhttp3.RequestBody? = null,
+        referer: String? = null,
+        headers: Map<String, String> = emptyMap(),
+        maxBytes: Long = MAX_TEXT_BYTES,
+        timeoutMs: Long = 0L,
+        tag: String? = null
+    ): HttpRawResult? {
         return try {
-            admitRequest(url)
+            admitRequest(url, tag)
             refuseUnsafeTarget(url)
             val reqBuilder = Request.Builder()
                 .url(safeUrl(url))
@@ -1166,7 +1249,7 @@ object HttpClient {
                     com.anonrode.downloader.util.DebugLog.net(
                         "RAW $method ${safeUrl(url)} -> ${res.code} in ${System.currentTimeMillis() - started}ms"
                     )
-                    recordCooldown(res)
+                    recordCooldown(res, tag)
                     val bodyText = if (method.uppercase() != "HEAD" && res.body != null) {
                         readCappedText(res, maxBytes, propagateFailure = false)
                     } else null
@@ -1205,10 +1288,12 @@ object HttpClient {
         // the probe would burn its full timeout re-triggering the rate limit
         // (see isOriginCoolingDown doc). "Not reachable" is the honest answer
         // for a host that has asked us to back off.
-        if (isOriginCoolingDown(url)) {
+        if (isOriginCoolingDown(url, requestScope(tag))) {
             com.anonrode.downloader.util.DebugLog.net("PROBE ${url.take(140)} skipped — origin in Retry-After cooldown")
             return false
         }
+        val permitClass = requestClass(tag)
+        val admitted = OriginLoadScheduler.acquire(url, permitClass, maxWaitMs = 2_000L)
         // Request construction (Builder.url, newCall) sits INSIDE the try on
         // purpose: okhttp3 throws IllegalArgumentException for a malformed
         // URL, and probe's contract is "answer true/false, never throw" —
@@ -1250,6 +1335,7 @@ object HttpClient {
                         attempt++
                         retry = true
                     } else {
+                        if (res.code == 429 || res.code == 503) recordCooldown(res, tag)
                         // 2xx proves the host serves; 416 (range not satisfiable
                         // for a bounded probe) still proves it is alive.
                         val ok = res.code in 200..299 || res.code == 416
@@ -1272,6 +1358,8 @@ object HttpClient {
         } catch (e: Exception) {
             com.anonrode.downloader.util.DebugLog.net("PROBE ${url.take(140)} FAILED ${e.javaClass.simpleName}: ${e.message}")
             return false
+        } finally {
+            if (admitted) OriginLoadScheduler.release(url, permitClass)
         }
     }
 
@@ -1312,10 +1400,16 @@ object HttpClient {
         // without touching the wire. Resolvers read null as "no proof, defer"
         // and the download path revalidates after the window — a live host that
         // asked us to back off is never re-hit inside the window.
-        if (isOriginCoolingDown(url)) {
+        if (isOriginCoolingDown(url, requestScope(tag))) {
             com.anonrode.downloader.util.DebugLog.net("TERMINAL ${url.take(140)} skipped — origin in Retry-After cooldown")
             return null
         }
+        // Metered admission (download class): fan-out probes must not crowd
+        // out a waiting search/verify on the same origin. Probe is 1 KiB and
+        // bounded by its own timeout, so the scheduler wait is capped well
+        // below it (fail-open on timeout).
+        val permitClass = requestClass(tag)
+        val admitted = OriginLoadScheduler.acquire(url, permitClass, maxWaitMs = 2_000L)
         // Request construction inside the try, exactly as in [probe]: "returns
         // null ONLY on network failure" is the documented contract, and an
         // IllegalArgumentException from a malformed URL must honor it.
@@ -1354,6 +1448,7 @@ object HttpClient {
                         continue
                     }
                     res.use { r ->
+                        if (r.code == 429 || r.code == 503) recordCooldown(r, tag)
                         val ct = r.header("Content-Type")?.lowercase() ?: ""
                         val total = acceptsTerminalResponse(
                             r.code, r.header("Content-Length"), r.header("Content-Range"), r.header("Content-Type"), url
@@ -1380,6 +1475,8 @@ object HttpClient {
                 "TERMINAL ${url.take(140)} FAILED ${e.javaClass.simpleName}: ${e.message}"
             )
             return null
+        } finally {
+            if (admitted) OriginLoadScheduler.release(url, permitClass)
         }
     }
 
@@ -1570,4 +1667,155 @@ internal fun isTlsChainFailure(e: Throwable): Boolean {
         t = t.cause
     }
     return false
+}
+
+// ---------------------------------------------------------------------------
+// Per-origin request scheduler (NEPU rule-13 invariant, 2026-10-20)
+// ---------------------------------------------------------------------------
+
+/**
+ * Request class for the per-origin scheduler. Priority order is SEARCH >
+ * VERIFY > DOWNLOAD (fan-out): a waiting search is served before any new
+ * verify/download starts on that origin, and a waiting verify before any new
+ * download. Existing in-flight requests are never preempted — the goal is to
+ * stop a resolver fan-out from starving the user's search, not to abort work.
+ */
+internal enum class OriginRequestClass { SEARCH, VERIFY, DOWNLOAD }
+
+/**
+ * Small per-origin admission gate shared by every HttpClient request path.
+ *
+ * Caps (per origin): SEARCH 3, VERIFY 2, DOWNLOAD 2, total 4. The DOWNLOAD cap
+ * is the evidence-backed number from the NEPU log review ("<=2 concurrent
+ * fan-out requests per origin while a download resolves"); search keeps three
+ * slots because the live 11:09 probe tolerated five concurrent search GETs but
+ * five concurrent + typing + fan-out is what produced the 451/429 storm.
+ *
+ * Blocking, bounded wait (default 4 s). On timeout the caller proceeds WITHOUT
+ * a permit (fail-open): metering must never become a new source of hangs.
+ * The gate map is bounded and entries with no active/waiting users are
+ * removed, so this cannot grow with the number of hosts seen.
+ */
+internal object OriginLoadScheduler {
+
+    private const val MAX_SEARCH = 3
+    private const val MAX_VERIFY = 2
+    private const val MAX_DOWNLOAD = 2
+    private const val MAX_TOTAL = 4
+    private const val MAX_GATES = 64
+    private const val MAX_WAIT_MS = 4_000L
+
+    private class Gate {
+        var activeSearch = 0
+        var activeVerify = 0
+        var activeDownload = 0
+        var waitSearch = 0
+        var waitVerify = 0
+        var waitDownload = 0
+        fun activeTotal() = activeSearch + activeVerify + activeDownload
+        fun empty() = activeTotal() == 0 && waitSearch + waitVerify + waitDownload == 0
+    }
+
+    private val lock = java.util.concurrent.locks.ReentrantLock()
+    private val changed = lock.newCondition()
+    private val gates = HashMap<String, Gate>()
+
+    private fun canStart(g: Gate, cls: OriginRequestClass): Boolean {
+        if (g.activeTotal() >= MAX_TOTAL) return false
+        return when (cls) {
+            OriginRequestClass.SEARCH -> g.activeSearch < MAX_SEARCH
+            OriginRequestClass.VERIFY -> g.activeVerify < MAX_VERIFY && g.waitSearch == 0
+            OriginRequestClass.DOWNLOAD ->
+                g.activeDownload < MAX_DOWNLOAD && g.waitSearch == 0 && g.waitVerify == 0
+        }
+    }
+
+    private fun incActive(g: Gate, cls: OriginRequestClass) {
+        when (cls) {
+            OriginRequestClass.SEARCH -> g.activeSearch++
+            OriginRequestClass.VERIFY -> g.activeVerify++
+            OriginRequestClass.DOWNLOAD -> g.activeDownload++
+        }
+    }
+
+    private fun decActive(g: Gate, cls: OriginRequestClass) {
+        when (cls) {
+            OriginRequestClass.SEARCH -> g.activeSearch = (g.activeSearch - 1).coerceAtLeast(0)
+            OriginRequestClass.VERIFY -> g.activeVerify = (g.activeVerify - 1).coerceAtLeast(0)
+            OriginRequestClass.DOWNLOAD -> g.activeDownload = (g.activeDownload - 1).coerceAtLeast(0)
+        }
+    }
+
+    private fun incWaiting(g: Gate, cls: OriginRequestClass) {
+        when (cls) {
+            OriginRequestClass.SEARCH -> g.waitSearch++
+            OriginRequestClass.VERIFY -> g.waitVerify++
+            OriginRequestClass.DOWNLOAD -> g.waitDownload++
+        }
+    }
+
+    private fun decWaiting(g: Gate, cls: OriginRequestClass) {
+        when (cls) {
+            OriginRequestClass.SEARCH -> g.waitSearch = (g.waitSearch - 1).coerceAtLeast(0)
+            OriginRequestClass.VERIFY -> g.waitVerify = (g.waitVerify - 1).coerceAtLeast(0)
+            OriginRequestClass.DOWNLOAD -> g.waitDownload = (g.waitDownload - 1).coerceAtLeast(0)
+        }
+    }
+
+    /** @return true when a permit was taken; false = fail-open (no release). */
+    fun acquire(url: String, cls: OriginRequestClass, maxWaitMs: Long = MAX_WAIT_MS): Boolean {
+        val origin = try { RetryAfterCooldown.originOf(url) } catch (_: Exception) { null } ?: return false
+        val deadline = System.currentTimeMillis() + maxWaitMs.coerceAtLeast(0L)
+        lock.lock()
+        try {
+            var gate = gates[origin]
+            if (gate == null) {
+                if (gates.size >= MAX_GATES) {
+                    gates.entries.removeIf { it.value.empty() }
+                    if (gates.size >= MAX_GATES) return false
+                }
+                gate = Gate()
+                gates[origin] = gate
+            }
+            while (true) {
+                val g = gates[origin] ?: return false
+                if (canStart(g, cls)) {
+                    incActive(g, cls)
+                    return true
+                }
+                incWaiting(g, cls)
+                try {
+                    val remaining = deadline - System.currentTimeMillis()
+                    if (remaining <= 0L) return false
+                    changed.await(remaining, java.util.concurrent.TimeUnit.MILLISECONDS)
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    return false
+                } finally {
+                    decWaiting(g, cls)
+                }
+            }
+        } finally {
+            lock.unlock()
+        }
+    }
+
+    fun release(url: String, cls: OriginRequestClass) {
+        val origin = try { RetryAfterCooldown.originOf(url) } catch (_: Exception) { return } ?: return
+        lock.lock()
+        try {
+            val g = gates[origin] ?: return
+            decActive(g, cls)
+            changed.signalAll()
+            if (g.empty()) gates.remove(origin)
+        } finally {
+            lock.unlock()
+        }
+    }
+
+    /** Tests only: drop all tracked state (thread-safe). */
+    internal fun clearForTests() {
+        lock.lock()
+        try { gates.clear() } finally { lock.unlock() }
+    }
 }

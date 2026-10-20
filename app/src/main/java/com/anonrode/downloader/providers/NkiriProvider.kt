@@ -19,12 +19,20 @@ object NkiriProvider : SiteProvider {
     override val mainUrl: String get() = DynamicRulesManager.getBaseUrl(name)
 
     override suspend fun search(query: String): List<ShowCard> {
+        if (!SiteGate.isEnabled(name)) return emptyList()
         // OTA pipeline first: a signed playbook can rewrite this site's search
         // (selectors, mirrors, filters) without an app update. Non-empty wins;
         // anything less falls through to the compiled path below untouched.
         DynamicRulesManager.getPipeline(name)?.search?.let { pl ->
             val results = RulesPipeline.runSearch(name, pl, query)
-            if (results.isNotEmpty()) return results
+            if (results.isNotEmpty()) {
+                // The rev-2/3 payload binds `attr:img:src` on an HTML search
+                // page that carries no <img> at all (live-verified 2026-10-20:
+                // 5 h2.entry-title anchors, 0 images) — every card shipped a
+                // blank tile. Backfill from the compiled WP-REST extractor
+                // that produced artwork before the pipeline took over.
+                return backfillPosters(query, results)
+            }
         }
 
         val results = mutableListOf<ShowCard>()
@@ -94,7 +102,40 @@ object NkiriProvider : SiteProvider {
                 }
             }
         } catch (_: Exception) {}
-        return results
+        return PosterBackfill.sanitize(results)
+    }
+
+    /**
+     * Compiles the poster map once for the cards a pipeline answer left blank.
+     * The REST search is the same request the compiled path already made
+     * before the payload took over, so this restores prior behavior rather
+     * than adding a new source.
+     */
+    private suspend fun backfillPosters(query: String, pipelineCards: List<ShowCard>): List<ShowCard> {
+        return PosterBackfill.backfill(PosterBackfill.sanitize(pipelineCards)) { missing ->
+            if (missing.isEmpty()) return@backfill emptyMap()
+            val map = mutableMapOf<String, String>()
+            for (base in DynamicRulesManager.getBaseUrls(name)) {
+                if (base.isBlank()) continue
+                val compiled = try {
+                    TrendingFeed.fetchWpRestFrom(
+                        base, name, query, REST_LIMIT,
+                        extraParams = "&orderby=relevance", tag = "search"
+                    )
+                } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    emptyList()
+                }
+                for (c in compiled) {
+                    if (c.posterUrl.isNotBlank()) {
+                        map[PosterBackfill.normalizeKey(c.url)] = c.posterUrl
+                    }
+                }
+                if (compiled.isNotEmpty()) break
+            }
+            map
+        }
     }
 
     private const val REST_LIMIT = 15
@@ -110,6 +151,7 @@ object NkiriProvider : SiteProvider {
     }
 
     override suspend fun loadEpisodes(showUrl: String): ShowDetails {
+        if (!SiteGate.isEnabled(name)) return ShowDetails(show = ShowCard(title = "NKiri Show", url = showUrl, site = name))
         val cleanUrl = showUrl.substringBefore("?")
 
         DynamicRulesManager.getPipeline(name)?.episodes?.let { pl ->
@@ -118,10 +160,10 @@ object NkiriProvider : SiteProvider {
                 val card = ShowCard(
                     title = res.metaTitle ?: "NKiri Show",
                     url = cleanUrl,
-                    posterUrl = res.metaPoster ?: "",
+                    posterUrl = if (PosterBackfill.isUsablePoster(res.metaPoster.orEmpty())) res.metaPoster.orEmpty() else "",
                     site = name
                 )
-                return ShowDetails(show = card, synopsis = res.metaSynopsis ?: "", episodes = res.episodes)
+                return ShowDetails(show = card, synopsis = res.metaSynopsis ?: "", episodes = stampPipelineSeasons(res.episodes))
             }
         }
 
@@ -239,7 +281,13 @@ object NkiriProvider : SiteProvider {
 
                     if (nums.size > 1) {
                         for (n in nums) {
-                            val key = if (slugSeason != null && slugSeason >= 2 && n in 1..99) slugSeason * 100 + n else n
+                            // Season identity is explicit now: the slug season
+                            // (or season 1) + the declared episode number.
+                            // episodeNum is only the collision-free identity
+                            // key (SeasonEpisode.encode, 1000-base) — never a
+                            // season*100 value a decoder could misread.
+                            val seasonForRow = slugSeason?.takeIf { it >= 1 } ?: 1
+                            val key = com.anonrode.downloader.util.SeasonEpisode.encode(seasonForRow, n)
                             val existingIdx = episodes.indexOfFirst { it.episodeNum == key }
                             if (existingIdx >= 0) {
                                 val existing = episodes[existingIdx]
@@ -256,7 +304,9 @@ object NkiriProvider : SiteProvider {
                                         title = "Episode $n",
                                         url = href,
                                         episodeNum = key,
-                                        site = name
+                                        site = name,
+                                        season = seasonForRow,
+                                        episode = n
                                     )
                                 )
                             }
@@ -278,16 +328,26 @@ object NkiriProvider : SiteProvider {
                             SEASON_EP_REGEX.find(filename)?.groupValues?.getOrNull(2)?.toIntOrNull()
                         }
                         val plainNum = nums.firstOrNull() ?: count
-                        val plainPinned = slugSeason != null && slugSeason >= 2 && plainNum in 1..99
+                        val plainPinned = slugSeason != null && slugSeason >= 1 && plainNum in 1..999
                         val num: Int
                         val seasonLabel: String?
+                        val rowSeason: Int
+                        val rowEpisode: Int
                         if (seasonEp != null && tokenE != null) {
-                            num = seasonEp.first * 100 + tokenE
-                            seasonLabel = "S%02dE%02d".format(seasonEp.first, tokenE)
+                            rowSeason = seasonEp.first.coerceAtLeast(1)
+                            rowEpisode = tokenE
+                            num = com.anonrode.downloader.util.SeasonEpisode.encode(rowSeason, rowEpisode)
+                            seasonLabel = "S%02dE%02d".format(rowSeason, rowEpisode)
                         } else if (plainPinned) {
-                            num = slugSeason * 100 + plainNum
-                            seasonLabel = "S%02dE%02d".format(slugSeason, plainNum)
+                            rowSeason = slugSeason!!.coerceAtLeast(1)
+                            rowEpisode = plainNum
+                            num = com.anonrode.downloader.util.SeasonEpisode.encode(rowSeason, rowEpisode)
+                            seasonLabel = "S%02dE%02d".format(rowSeason, rowEpisode)
                         } else {
+                            // Flat single-season numbering: never 100-base, so
+                            // a 150-episode season cannot masquerade as S02E50.
+                            rowSeason = 1
+                            rowEpisode = plainNum
                             num = plainNum
                             seasonLabel = null
                         }
@@ -315,7 +375,9 @@ object NkiriProvider : SiteProvider {
                                     title = epTitle,
                                     url = href,
                                     episodeNum = num,
-                                    site = name
+                                    site = name,
+                                    season = rowSeason,
+                                    episode = rowEpisode
                                 )
                             )
                             if (num >= count) count = plainNum + 1
@@ -343,12 +405,33 @@ object NkiriProvider : SiteProvider {
 
             episodes.sortWith(compareBy({ it.episodeNum }, { it.title }))
 
-            val card = ShowCard(title = title, url = cleanUrl, posterUrl = poster, site = name)
+            val card = ShowCard(
+                title = title,
+                url = cleanUrl,
+                posterUrl = if (PosterBackfill.isUsablePoster(poster)) poster else "",
+                site = name
+            )
             return ShowDetails(show = card, synopsis = synopsis, episodes = episodes)
         } catch (_: Exception) {
             return ShowDetails(show = show)
         }
     }
+
+    /** Explicit season/episode for pipeline rows that carry none. NKiri is a
+     *  legacy 100-based site, so SeasonEpisode.of decodes its historical
+     *  episodeNum correctly; new rows are re-encoded collision-free. */
+    private fun stampPipelineSeasons(episodes: List<EpisodeItem>): List<EpisodeItem> =
+        episodes.map { ep ->
+            if (ep.season > 0 && ep.episode > 0) ep
+            else {
+                val (s, e) = com.anonrode.downloader.util.SeasonEpisode.of(ep)
+                ep.copy(
+                    season = s,
+                    episode = e,
+                    episodeNum = com.anonrode.downloader.util.SeasonEpisode.encode(s, e)
+                )
+            }
+        }
 
     override suspend fun resolveEpisode(episodeUrl: String, quality: String): DownloadRecipe {
         // nkiri's download-manager buttons now point at /dl/download-<id>/?redirect=

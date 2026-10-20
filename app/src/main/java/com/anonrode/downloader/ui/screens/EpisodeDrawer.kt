@@ -86,6 +86,7 @@ import com.anonrode.downloader.data.models.EpisodeItem
 import com.anonrode.downloader.data.models.ShowCard
 import com.anonrode.downloader.data.models.TaskStatus
 import com.anonrode.downloader.providers.PosterStore
+import com.anonrode.downloader.util.SeasonEpisode
 import com.anonrode.downloader.ui.components.PosterImageOrFallback
 import com.anonrode.downloader.ui.components.PosterRequests
 import com.anonrode.downloader.ui.components.SkeletonBox
@@ -348,21 +349,38 @@ fun EpisodeDrawer(
         // every keystroke. Only a parsed non-empty set re-marks the list
         // (clearing stays available via "none"/backspace-to-empty/above).
         if (targetNums.isEmpty()) return
-        updateSelected(episodes.filter { it.episodeNum in targetNums }.map { it.url }.toSet())
+        updateSelected(
+            episodes.filter { ep ->
+                SeasonEpisode.episodeOf(ep) in targetNums ||
+                    ep.episodeNum in targetNums ||
+                    SeasonEpisode.sortKey(SeasonEpisode.seasonOf(ep), SeasonEpisode.episodeOf(ep)) in targetNums
+            }.map { it.url }.toSet()
+        )
     }
 
-    // Dynamic Season Grouping for 1-Tap Filter Chips
+    // Dynamic Season Grouping for 1-Tap Filter Chips.
+    // Season identity is explicit (EpisodeItem.season) when the parser knows
+    // it. Fallbacks: an SxxEyy title token, a "season-N" page/URL token, the
+    // NEPU-style season path, then the legacy episodeNum convention. The old
+    // unconditional `episodeNum / 100` is what moved 9jaRocks S01E101+ (and
+    // flat per-season 1..N pages) into a fictional Season 2.
     val seasonGroups = remember(episodes) {
         val groups = mutableMapOf<Int, MutableList<EpisodeItem>>()
         for (ep in episodes) {
-            val seasonMatch = Regex("S([0-9]{1,2})(?:E([0-9]{1,3}))?", RegexOption.IGNORE_CASE).find(ep.title)
-            val sNum = seasonMatch?.groupValues?.getOrNull(1)?.toIntOrNull()
+            val titleToken = Regex("S([0-9]{1,2})(?:E([0-9]{1,3}))?", RegexOption.IGNORE_CASE)
+                .find(ep.title)?.groupValues?.getOrNull(1)?.toIntOrNull()
+            val sNum = ep.season.takeIf { it > 0 }
+                ?: titleToken
+                ?: Regex("season[\\s._-]*(\\d{1,2})", RegexOption.IGNORE_CASE)
+                    .find("${ep.title} ${ep.url}")?.groupValues?.getOrNull(1)?.toIntOrNull()
                 ?: Regex("/watch/(?:tv|movie)/\\d+/(\\d+)(?:/|$)", RegexOption.IGNORE_CASE)
                     .find(ep.url)?.groupValues?.getOrNull(1)?.toIntOrNull()
-                ?: if (ep.episodeNum >= 100) ep.episodeNum / 100 else 1
+                ?: SeasonEpisode.seasonOf(ep)
             groups.getOrPut(sNum) { mutableListOf() }.add(ep)
         }
-        groups.toSortedMap().mapValues { (_, values) -> values.sortedBy { it.episodeNum } }
+        groups.toSortedMap().mapValues { (_, values) ->
+            values.sortedWith(compareBy({ SeasonEpisode.episodeOf(it) }, { it.title }))
+        }
     }
     var expandedSeasons by remember(show.url, seasonGroups.keys) {
         mutableStateOf(seasonGroups.keys)
@@ -382,7 +400,8 @@ fun EpisodeDrawer(
             .distinctBy { it.url }
             .sortedWith(compareBy(
                 { episode -> seasonGroups.entries.firstOrNull { it.value.any { it === episode } }?.key ?: Int.MAX_VALUE },
-                { it.episodeNum }
+                { SeasonEpisode.episodeOf(it) },
+                { it.title }
             ))
         if (toEnqueue.isEmpty()) {
             Toast.makeText(context, "Select at least one episode first", Toast.LENGTH_SHORT).show()
@@ -409,10 +428,15 @@ fun EpisodeDrawer(
                     viewModel.engine.enqueue(
                         showTitle = cleanFolder,
                         episodeNum = ep.episodeNum,
+                        season = ep.season,
+                        episode = ep.episode,
                         episodeTitle = com.anonrode.downloader.util.NameSanitizer.formatEpisodeTitle(
                             showTitle = show.title,
                             episodeNum = ep.episodeNum,
-                            rawEpisodeLabel = ep.title
+                            rawEpisodeLabel = ep.title,
+                            season = ep.season,
+                            episode = ep.episode,
+                            site = ep.site.ifBlank { show.site }
                         ),
                         sourceUrl = ep.url,
                         mirrorUrls = ep.mirrorUrls,
@@ -1228,10 +1252,15 @@ fun EpisodeDrawer(
                                                             viewModel.engine.enqueue(
                                                                 showTitle = com.anonrode.downloader.util.NameSanitizer.cleanShowFolder(show.title),
                                                                 episodeNum = ep.episodeNum,
+                                                                season = ep.season,
+                                                                episode = ep.episode,
                                                                 episodeTitle = com.anonrode.downloader.util.NameSanitizer.formatEpisodeTitle(
                                                                     showTitle = show.title,
                                                                     episodeNum = ep.episodeNum,
-                                                                    rawEpisodeLabel = ep.title
+                                                                    rawEpisodeLabel = ep.title,
+                                                                    season = ep.season,
+                                                                    episode = ep.episode,
+                                                                    site = ep.site.ifBlank { show.site }
                                                                 ),
                                                                 sourceUrl = ep.url,
                                                                 mirrorUrls = ep.mirrorUrls,

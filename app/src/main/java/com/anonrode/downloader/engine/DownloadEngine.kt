@@ -26,19 +26,21 @@ import java.util.regex.Matcher
 import java.util.regex.Pattern
 
 /**
- * Some providers encode SxxEyy as one integer (113 = S01E13): 9jarocks
- * historically, and nepu's Avatar-style catalog (2026-10-19 failover evidence:
- * episodeNum=113 against a 6-item season-1 list). Returns null when the number
- * is not a plausible season-encoded value.
+ * Normalize a packed episode number into (season, episode), or null when it
+ * is NOT packed. The single source of truth is util.SeasonEpisode: 1000-base
+ * values are unambiguous on every site; the historical 100-base decode applies
+ * only to sites that actually used it (9jaRocks is flat — 113 is S01E113, not
+ * S01E13 — and the codec deliberately excludes it).
  */
 internal fun normalizeSeasonEncodedEpisodeNumber(site: String, episodeNum: Int): Pair<Int, Int>? {
     if (episodeNum < 100) return null
-    val season = episodeNum / 100
-    val episode = episodeNum % 100
-    if (season !in 1..30 || episode !in 1..99) return null
+    val pair = com.anonrode.downloader.util.SeasonEpisode.of(site, 0, 0, episodeNum)
+    // Flat numbering comes back unchanged (S1, same episode) — not packed.
+    if (pair.second == episodeNum) return null
+    if (pair.first !in 1..30 || pair.second !in 1..999) return null
     // site is part of the contract for logging/telemetry call sites.
     if (site.length > 512) return null
-    return Pair(season, episode)
+    return pair
 }
 
 /**
@@ -244,6 +246,70 @@ class DownloadEngine(
 
     private val engineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val runtimeRegistry = TaskRuntimeRegistry()
+
+    /**
+     * Per-task backend failure tracker (progress-banking guard correction,
+     * 2026-10-20). A task with banked bytes used to veto failover forever,
+     * which parked f8cf38d2 at 1,669 KiB against a URL class that could never
+     * progress (the nsrplay self-loop). Failover is now allowed when the
+     * SAME terminal URL has burned a full backend ladder (>=3 failures) and
+     * the task's banked bytes belong to that URL — the corruption protection
+     * stays for a partial that is making progress; the dead-end escape opens
+     * only for a proven-unprogressable source.
+     */
+    private data class BackendFailures(val url: String, val count: Int, val lastAtMs: Long)
+    private val backendFailures = java.util.concurrent.ConcurrentHashMap<String, BackendFailures>()
+
+    private fun noteBackendFailure(task: DownloadTask, failedUrl: String) {
+        if (failedUrl.isBlank()) return
+        val now = System.currentTimeMillis()
+        backendFailures.compute(task.id) { _, old ->
+            if (old != null && old.url == failedUrl) old.copy(count = old.count + 1, lastAtMs = now)
+            else BackendFailures(failedUrl, 1, now)
+        }
+    }
+
+    private fun clearBackendFailures(taskId: String) {
+        backendFailures.remove(taskId)
+    }
+
+    /** True when the task's banked bytes belong to a URL that exhausted at
+     *  least one full backend ladder (or is already poisoned as a decoy). */
+    private fun bankedSourceUnprogressable(task: DownloadTask): Boolean {
+        val current = task.directUrl.trim()
+        if (current.isNotBlank() && com.anonrode.downloader.pipeline.ResolveCache.isPoisoned(current)) return true
+        val failures = backendFailures[task.id] ?: return false
+        if (failures.count < 3) return false
+        return failures.url == current || current.isBlank()
+    }
+
+    /**
+     * Same-show duplicate-terminal guard (Servamp S01E01 == S01E02,
+     * 2026-10-20). Two DIFFERENT episodes of one show must never download the
+     * SAME direct terminal. The comparison is host+path (query/signature
+     * dropped: a CDN signs per request), and only for provable media/HLS
+     * URLs. Returns the conflicting task, or null.
+     */
+    internal fun findDuplicateTerminal(task: DownloadTask, resolvedUrl: String): DownloadTask? {
+        if (resolvedUrl.isBlank()) return null
+        val classifier = com.anonrode.downloader.pipeline.UrlClassifier
+        val looksTerminal = isDirectMediaUrl(resolvedUrl) || isProvablyDirectFile(resolvedUrl) ||
+            classifier.isManifestShaped(resolvedUrl)
+        if (!looksTerminal) return null
+        val target = classifier.canonicalMediaPath(resolvedUrl) ?: return null
+        val mine = com.anonrode.downloader.util.SeasonEpisode.of(task)
+        return repository.snapshot().firstOrNull { other ->
+            if (other.id == task.id) return@firstOrNull false
+            if (other.status == TaskStatus.FAILED) return@firstOrNull false
+            if (!other.showTitle.equals(task.showTitle, ignoreCase = true)) return@firstOrNull false
+            if (other.directUrl.isBlank()) return@firstOrNull false
+            val otherPath = classifier.canonicalMediaPath(other.directUrl) ?: return@firstOrNull false
+            if (otherPath != target) return@firstOrNull false
+            val theirs = com.anonrode.downloader.util.SeasonEpisode.of(other)
+            theirs != mine
+        }
+    }
+
     private val progressWatchdog by lazy {
         ProgressWatchdog(
             repository = repository,
@@ -660,6 +726,11 @@ class DownloadEngine(
         /** Downloads-card thumbnail art (v6 mock frame 1); "" keeps the
          *  initials tile. Callers without artwork just keep the default. */
         posterUrl: String = "",
+        /** Authoritative season/episode identity from the drawer's
+         *  EpisodeItem (util.SeasonEpisode). 0 = legacy caller: the engine
+         *  derives the pair from episodeNum via SeasonEpisode.of(). */
+        season: Int = 0,
+        episode: Int = 0,
         triggerQueueProcessing: Boolean = true
     ): String {
         val downloadFolder = getDownloadDirectory(showTitle, createDirs = false)
@@ -742,7 +813,9 @@ class DownloadEngine(
                 mirrorUrls = MirrorPool.sources(sourceUrl, mirrorUrls).filter { it != sourceUrl },
                 seriesUrl = seriesUrl,
                 seriesTotal = seriesTotal,
-                posterUrl = posterUrl
+                posterUrl = posterUrl,
+                season = season.coerceAtLeast(0),
+                episode = episode.coerceAtLeast(0)
             )
 
             repository.addFirst(task)
@@ -1123,11 +1196,16 @@ class DownloadEngine(
             // Proven garbage is deleted BEFORE the requeue so the new source
             // never resumes onto it or treats it as a completed artifact.
             try { garbageFile?.delete() } catch (_: Exception) {}
-        } else if (task.downloadedBytes > 0L || bytesLanded(task) > 0L) {
+        } else if ((task.downloadedBytes > 0L || bytesLanded(task) > 0L) && !bankedSourceUnprogressable(task)) {
             com.anonrode.downloader.util.DebugLog.resolve(
-                "task=${task.id} failover: skipped because task already banked ${bytesLanded(task)} bytes"
+                "task=${task.id} failover: skipped because task already banked ${bytesLanded(task)} bytes on a source still making progress"
             )
             return false
+        } else if (task.downloadedBytes > 0L || bytesLanded(task) > 0L) {
+            com.anonrode.downloader.util.DebugLog.resolve(
+                "task=${task.id} failover: banked ${bytesLanded(task)} bytes belong to a proven-unprogressable source " +
+                    "(${backendFailures[task.id]?.let { "ladder failures=${it.count}" } ?: "poisoned URL"}) — allowing failover"
+            )
         }
         if (task.site.isBlank()) return false
         if (task.directUrl.startsWith("magnet:", ignoreCase = true)) return false
@@ -1191,7 +1269,9 @@ class DownloadEngine(
             return batch ?: emptyList()
         }
 
-        val firstProviders = ProviderRegistry.allProviders.filter { provider ->
+        // OTA kill switch: a disabled site accepts no NEW work, so failover
+        // must never select one (its existing tasks may still finish).
+        val firstProviders = ProviderRegistry.enabledProviders.filter { provider ->
             val pName = provider.name.lowercase()
             provider.searchEnabled &&
                 pName in allowedCluster &&
@@ -1208,7 +1288,7 @@ class DownloadEngine(
         if (isAsian && candidates.none { card ->
                 titleMatches(query, card.title) && card.site.lowercase() in allowedCluster
             }) {
-            val animeProviders = ProviderRegistry.allProviders.filter { provider ->
+            val animeProviders = ProviderRegistry.enabledProviders.filter { provider ->
                 provider.name.lowercase() in ANIME_SECOND_PASS_SITES &&
                     provider.searchEnabled &&
                     tried.none { it.equals(provider.name, ignoreCase = true) }
@@ -1224,6 +1304,9 @@ class DownloadEngine(
             .asSequence()
             .filter { card ->
                 val candSite = card.site.lowercase()
+                // OTA kill switch (re-checked at CARD level too: a provider
+                // disabled mid-search must not win the failover).
+                if (!ProviderRegistry.isSiteEnabled(card.site)) return@filter false
                 // Layer 1: Genre / Cluster Boundary Guard on candidate card
                 val clusterMatch = if (candSite in secondPassSites) {
                     true
@@ -1331,13 +1414,25 @@ class DownloadEngine(
                         continue
                     }
                     val isSingleMovie = details.episodes.size == 1 && origEpNum <= 1 && origSeason == 1 && !origIsExplicitSeries
-                    val matchingEp = details.episodes.firstOrNull { candEp ->
+                    val identityMatches = details.episodes.filter { candEp ->
                         if (isSingleMovie) true
                         else {
                             val (candS, candE) = parseCandidateSeasonAndEpisode(card, candEp)
                             candS == origSeason && candE == origEpNum
                         }
                     }
+                    // Season test 9: when (season, episode) collides (specials
+                    // like E5.5 vs E5), the TASK TITLE disambiguates.
+                    val specialMarker = Regex("""(?i)\bs\d{1,2}\s*e(\d{1,4})\.(\d)\b""")
+                        .find(task.episodeTitle)
+                        ?.let { "${it.groupValues[1]}.${it.groupValues[2]}" }
+                    val matchingEp = if (specialMarker != null) {
+                        identityMatches.firstOrNull { ep ->
+                            Regex("""(?i)(?:^|[^a-z0-9])e(?:p|pisode)?\s*(\d{1,4})\.(\d)(?![a-z0-9])""")
+                                .find("${ep.title} ${ep.url}")
+                                ?.let { "${it.groupValues[1]}.${it.groupValues[2]}" } == specialMarker
+                        } ?: identityMatches.firstOrNull()
+                    } else identityMatches.firstOrNull()
                     if (matchingEp == null) {
                         com.anonrode.downloader.util.DebugLog.resolve(
                             "task=${task.id} failover: no episode matching S${origSeason}E${origEpNum} in \"${card.title}\""
@@ -1394,6 +1489,7 @@ class DownloadEngine(
             // The task is re-pointed at a different source: its previous
             // source's dead-URL marks must not answer for the new one.
             ResolveBudget.forgetTask(task.id)
+            clearBackendFailures(task.id)
 
             // Safe to delete partial files ONLY after verifying task is actively continuing (not user paused)
             try {
@@ -1508,13 +1604,12 @@ class DownloadEngine(
         normalizeSeasonEncodedEpisodeNumber(site, episodeNum)
 
     internal fun parseSeasonAndEpisode(task: DownloadTask): Pair<Int, Int> {
-        if (task.episodeNum >= 100) {
-            val normalized = normalizeSeasonEncodedEpisode(task.site, task.episodeNum)
-            val seasonEncodedSite = task.site.equals("9jarocks", ignoreCase = true) ||
-                task.site.equals("nepu", ignoreCase = true)
-            if (normalized != null && (seasonEncodedSite || !isAsianDramaContext(task))) {
-                return normalized
-            }
+        // Authoritative identity first (util.SeasonEpisode): explicit task
+        // fields, then the 1000-base encoding, then the site-scoped legacy
+        // 100-base decode (9jarocks is flat and never decoded as packed).
+        if (task.season > 0 || task.episode > 0 || task.episodeNum > 0) {
+            val codec = com.anonrode.downloader.util.SeasonEpisode.of(task)
+            if (codec.first > 0 && codec.second > 0) return codec
         }
         val text = "${task.showTitle} ${task.episodeTitle} ${task.sourceUrl}".lowercase()
         val season = Regex("""(?:s|season)[\s._-]?0*(\d{1,2})\b""")
@@ -1529,23 +1624,15 @@ class DownloadEngine(
     }
 
     internal fun parseCandidateSeasonAndEpisode(card: com.anonrode.downloader.data.models.ShowCard, ep: com.anonrode.downloader.data.models.EpisodeItem): Pair<Int, Int> {
-        if (ep.episodeNum >= 100) {
-            val normalized = normalizeSeasonEncodedEpisode(card.site, ep.episodeNum)
-            val seasonEncodedSite = card.site.equals("9jarocks", ignoreCase = true) ||
-                card.site.equals("nepu", ignoreCase = true)
-            if (normalized != null && (seasonEncodedSite || card.site.lowercase() !in ASIAN_DRAMA_CLUSTER)) {
-                return normalized
-            }
+        if (ep.season > 0 || ep.episode > 0 || ep.episodeNum > 0) {
+            val codec = com.anonrode.downloader.util.SeasonEpisode.of(ep)
+            if (codec.first > 0 && codec.second > 0) return codec
         }
         val text = "${card.title} ${ep.title} ${ep.url}".lowercase()
         val season = Regex("""(?:s|season)[\s._-]?0*(\d{1,2})\b""")
             .find(text)?.groupValues?.get(1)?.toIntOrNull() ?: 1
         val epNum = if (ep.episodeNum > 0) {
-            if (ep.episodeNum >= 100 && card.site.lowercase() !in ASIAN_DRAMA_CLUSTER) {
-                ep.episodeNum % 100
-            } else {
-                ep.episodeNum
-            }
+            ep.episodeNum
         } else {
             Regex("""(?:e|ep|episode)[\s._-]?0*(\d{1,3})\b""")
                 .find(text)?.groupValues?.get(1)?.toIntOrNull() ?: 0
@@ -1878,6 +1965,36 @@ class DownloadEngine(
     private fun isRateLimitedError(msg: String?): Boolean =
         msg != null && (msg.contains("429") || msg.contains("Too Many Requests", ignoreCase = true))
 
+    /**
+     * User-facing error translation (AGENTS rule 14, 2026-10-20): the raw
+     * `CanceledException` wrapper, the empty `ERROR: ` aggregate, and bare
+     * cooldown class names leaked into task cards. Every branch below states
+     * what happened and what the user can do — never a Java class name.
+     */
+    internal fun humanizeDownloadError(raw: String?): String {
+        val msg = raw?.trim().orEmpty()
+        if (msg.isBlank()) {
+            return "The source server returned an empty response instead of a video. Tap retry to fetch a fresh link."
+        }
+        val lower = msg.lowercase()
+        if (lower.contains("canceledexception") || lower.contains("backendinterrupted") ||
+            (lower.contains("canceled") && lower.contains("yt-dlp"))
+        ) {
+            return "The source server stopped sending video data (the stream stalled). " +
+                "Tap retry to fetch a fresh link, or choose another server/episode."
+        }
+        if (lower == "error:" || lower == "error" || lower.endsWith(": error:")) {
+            return "The source server returned an empty response instead of a video. Tap retry to fetch a fresh link."
+        }
+        if (lower.contains("origincooldown") || lower.contains("cooling down")) {
+            return "The source server is rate-limiting downloads right now — it will retry automatically."
+        }
+        if (lower.contains("http 451") || lower.contains("unavailable for legal reasons")) {
+            return "The source is not available from this network right now (HTTP 451). Try another site or server."
+        }
+        return msg
+    }
+
     private fun parkFloorMs(cycles: Int): Long =
         (cycles.toLong() * PARK_REQUEUE_FLOOR_MS).coerceAtMost(PARK_REQUEUE_MAX_MS)
 
@@ -1976,6 +2093,98 @@ class DownloadEngine(
     private fun getUserAgentForUrl(url: String): String {
         val policyUa = com.anonrode.downloader.data.rules.DynamicRulesManager.resolveUserAgent(url)
         return if (policyUa.isNotBlank()) policyUa else com.anonrode.downloader.data.net.HttpClient.DEFAULT_UA
+    }
+
+    /**
+     * Soft-subtitle sidecars for direct-source downloads (2026-10-20).
+     *
+     * Only tracks a provider/recipe PROVED for this episode (ResolvedHints)
+     * are fetched. Files land next to the video as
+     * `<stem>.<lang>.srt|.vtt|.ass` — exactly the discovery pattern the player
+     * already scans (`<videoStem>*`). Every failure is swallowed and journaled:
+     * a missing subtitle must never fail or delay a completed video.
+     *
+     * Runs at most 3 tracks, each capped at 512 KiB, and validates the body
+     * shape (WEBVTT / SRT cue / ASS header) so an HTML error page is never
+     * written as a subtitle.
+     */
+    private suspend fun downloadSubtitleSidecars(task: DownloadTask, video: File) {
+        if (!downloadSubtitles || task.audioOnly) return
+        val tracks = (com.anonrode.downloader.pipeline.ResolvedHints.subtitlesFor(task.sourceUrl) +
+            com.anonrode.downloader.pipeline.ResolvedHints.subtitlesFor(task.directUrl) +
+            com.anonrode.downloader.providers.SubtitleSurfaces.tracksFor(task.sourceUrl)
+                .map { com.anonrode.downloader.data.models.SubtitleTrack(it.url, it.language, it.format) } +
+            com.anonrode.downloader.providers.SubtitleSurfaces.tracksFor(task.directUrl)
+                .map { com.anonrode.downloader.data.models.SubtitleTrack(it.url, it.language, it.format) })
+            .filter { it.url.startsWith("http", ignoreCase = true) }
+            .distinctBy { it.url.substringBefore('?').lowercase() }
+        if (tracks.isEmpty()) return
+        withContext(Dispatchers.IO) {
+            val referer = com.anonrode.downloader.pipeline.ResolvedHints.refererFor(task.directUrl)
+                ?: com.anonrode.downloader.pipeline.ResolvedHints.refererFor(task.sourceUrl)
+                ?: getRefererForUrl(task.directUrl)
+            for (track in tracks.take(3)) {
+                try {
+                    if (track.url.isBlank() || !track.url.startsWith("http", ignoreCase = true)) continue
+                    val body = com.anonrode.downloader.data.net.HttpClient.get(
+                        track.url,
+                        referer = referer.takeIf { it.isNotBlank() },
+                        tag = "subtitles"
+                    ).use { res ->
+                        if (!res.isSuccessful) null
+                        else com.anonrode.downloader.data.net.HttpClient.cappedText(res, maxBytes = 512L * 1024L)
+                    } ?: continue
+                    val trimmed = body.trimStart('\uFEFF', ' ', '\r', '\n', '\t')
+                    if (trimmed.startsWith("<html", ignoreCase = true) || trimmed.startsWith("<!doctype", ignoreCase = true)) {
+                        com.anonrode.downloader.util.DebugLog.resolve(
+                            "task=${task.id} subtitle rejected (HTML body) ${track.url.take(100)}"
+                        )
+                        continue
+                    }
+                    val kind = subtitleExtension(track.kind, track.url, trimmed)
+                    val lang = sanitizeSubtitleLang(track.lang)
+                    val dest = File(video.parentFile, "${video.nameWithoutExtension}.$lang.$kind")
+                    if (dest.exists() && dest.length() > 16L) continue
+                    val tmp = File(video.parentFile, "${dest.name}.tmp")
+                    tmp.writeText(trimmed)
+                    if (!tmp.renameTo(dest)) {
+                        dest.writeText(trimmed)
+                        tmp.delete()
+                    }
+                    com.anonrode.downloader.util.DebugLog.resolve(
+                        "task=${task.id} subtitle sidecar saved ${dest.name} (${dest.length()}B)"
+                    )
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (e: Exception) {
+                    com.anonrode.downloader.util.DebugLog.resolve(
+                        "task=${task.id} subtitle sidecar failed (${e.javaClass.simpleName}) ${track.url.take(100)}"
+                    )
+                }
+            }
+        }
+    }
+
+    internal fun sanitizeSubtitleLang(raw: String): String {
+        val clean = raw.trim().lowercase()
+            .replace('_', '-')
+            .replace(Regex("""[^a-z0-9-]"""), "")
+            .trim('-')
+            .take(16)
+        return clean.ifBlank { "und" }
+    }
+
+    internal fun subtitleExtension(kindHint: String, url: String, body: String): String {
+        val hint = kindHint.trim().lowercase().removePrefix(".")
+        if (hint in setOf("vtt", "srt", "ass", "ssa")) return if (hint == "ssa") "ass" else hint
+        val pathExt = url.substringBefore('?').substringBefore('#').substringAfterLast('.', "").lowercase()
+        if (pathExt in setOf("vtt", "srt", "ass", "ssa")) return if (pathExt == "ssa") "ass" else pathExt
+        val head = body.take(4096)
+        return when {
+            head.startsWith("WEBVTT", ignoreCase = true) -> "vtt"
+            head.contains("[Script Info]", ignoreCase = true) || head.contains("[Events]", ignoreCase = true) -> "ass"
+            else -> "srt"
+        }
     }
 
     // Adaptive-streaming manifest detection (monolith is_streaming_link parity):
@@ -2689,6 +2898,10 @@ class DownloadEngine(
                 runtimeRegistry.getActiveJob(taskId)?.cancel()
                 return
             }
+            // A backend ladder was killed on this URL. Remember it so a
+            // banked partial from the SAME dead source can still escape via
+            // cross-provider failover.
+            noteBackendFailure(t, t.directUrl.ifBlank { t.sourceUrl })
             if (t.downloadedBytes == 0L && bytesLanded(t) == 0L && attemptCrossProviderFailover(t)) {
                 runtimeRegistry.getActiveJob(taskId)?.cancel()
                 return
@@ -2822,6 +3035,12 @@ class DownloadEngine(
                     repository.update(task.id) { it.copy(status = TaskStatus.RESOLVING) }
                     updateServiceState(force = true)
 
+                    // D-α fix (2026-10-20): a 90s resolve timeout must not park
+                    // a task that is actively downloading. If real bytes are
+                    // banked on a RESUMABLE terminal, keep it and continue;
+                    // failover is allowed when that source is proven
+                    // unprogressable (>=3 ladder failures / poisoned URL).
+                    var keepBankedUrl = false
                     val resolved = try {
                         kotlinx.coroutines.withTimeout(RESOLVE_TIMEOUT_MS) {
                             val candidates = if (task.mirrorUrls.isEmpty()) listOf(permUrl) else
@@ -2851,15 +3070,61 @@ class DownloadEngine(
                         }
                     } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
                         com.anonrode.downloader.util.DebugLog.error("task=${task.id} resolution timed out after ${RESOLVE_TIMEOUT_MS / 1000}s")
+                        noteBackendFailure(task, task.directUrl.ifBlank { streamUrl })
                         if (attemptCrossProviderFailover(task)) return@launch
-                        throw Exception("Link resolution timed out — the site took too long to answer. Retry, or try another server/episode.")
+                        val landed = bytesLanded(task)
+                        val resumable = streamUrl.isNotBlank() && streamUrl != task.sourceUrl &&
+                            (isDirectMediaUrl(streamUrl) || isProvablyDirectFile(streamUrl) || isHlsNow)
+                        if (landed > 0L && resumable && !bankedSourceUnprogressable(task)) {
+                            com.anonrode.downloader.util.DebugLog.resolve(
+                                "task=${task.id} resolution timed out but $landed banked bytes are on a resumable terminal — continuing instead of parking"
+                            )
+                            keepBankedUrl = true
+                            null
+                        } else {
+                            throw Exception("Link resolution timed out — the site took too long to answer. Retry, or try another server/episode.")
+                        }
                     }
                     if (!resolved.isNullOrBlank()) {
                         com.anonrode.downloader.util.DebugLog.resolve("task=${task.id} resolved -> ${resolved.take(120)}")
                         runtimeRegistry.getOrCreate(task.id).resetParkingAndFailoverState()
                         ResolveBudget.forgetTask(task.id)
+                        clearBackendFailures(task.id)
                         streamUrl = com.anonrode.downloader.pipeline.UrlClassifier.stripPreviewParam(resolved)
-                    } else if (isKnownLockerHost(streamUrl) || !isDirectMediaUrl(streamUrl)) {
+                        // Same-show duplicate-terminal guard (Servamp): two
+                        // different episodes must not share one direct URL.
+                        val duplicate = findDuplicateTerminal(task, streamUrl)
+                        if (duplicate != null) {
+                            com.anonrode.downloader.util.DebugLog.error(
+                                "task=${task.id} DUPLICATE terminal for S${com.anonrode.downloader.util.SeasonEpisode.of(task).first}" +
+                                    "E${com.anonrode.downloader.util.SeasonEpisode.of(task).second} already used by task=${duplicate.id} " +
+                                    "(${streamUrl.take(120)}) — rejecting and re-resolving without cache"
+                            )
+                            com.anonrode.downloader.pipeline.ResolveCache.poison(streamUrl)
+                            com.anonrode.downloader.pipeline.ResolveCache.invalidate(
+                                com.anonrode.downloader.pipeline.ResolveCache.keyFor(permUrl, task.quality ?: defaultQuality)
+                            )
+                            val fresh = try {
+                                resolveStreamUrl(
+                                    permUrl, task.site, task.quality ?: defaultQuality,
+                                    allowCacheHit = false, memoTaskId = task.id
+                                )
+                            } catch (_: Exception) { null }
+                            if (!fresh.isNullOrBlank() && fresh != streamUrl && findDuplicateTerminal(task, fresh) == null) {
+                                streamUrl = com.anonrode.downloader.pipeline.UrlClassifier.stripPreviewParam(fresh)
+                                com.anonrode.downloader.util.DebugLog.resolve(
+                                    "task=${task.id} duplicate guard: fresh distinct terminal ${streamUrl.take(120)}"
+                                )
+                            } else {
+                                noteBackendFailure(task, streamUrl)
+                                if (attemptCrossProviderFailover(task)) return@launch
+                                throw Exception(
+                                    "This episode resolved to another episode's file — the source is serving the wrong episode. " +
+                                        "Choose another server/episode."
+                                )
+                            }
+                        }
+                    } else if (!keepBankedUrl && (isKnownLockerHost(streamUrl) || !isDirectMediaUrl(streamUrl))) {
                         if (task.site.isNotBlank()) {
                             val host = com.anonrode.downloader.pipeline.UrlClassifier.extractHost(streamUrl)
                             com.anonrode.downloader.util.DebugLog.resolve("task=${task.id} resolver chain EMPTY for ${streamUrl.take(120)} (host=$host) — failing cleanly")
@@ -2913,21 +3178,43 @@ class DownloadEngine(
                     }
                 }
 
-                val isHlsStream = com.anonrode.downloader.pipeline.UrlClassifier.isStreamingLink(streamUrl)
-                val isProvablyDirect = isProvablyDirectFile(streamUrl) || isDirectMediaUrl(streamUrl) || isHlsStream
-                val isEmbedOrPage = !isMagnet && !isProvablyDirect && run {
-                    if (task.site.isNotBlank()) {
-                        false
-                    } else if (!isSocial) {
-                        val tp = com.anonrode.downloader.data.net.HttpClient.probeTerminal(
-                            streamUrl,
-                            referer = getRefererForUrl(streamUrl)
-                        )
-                        tp?.totalBytes == null
-                    } else {
-                        true
-                    }
+                // Evidence-based backend routing (2026-10-20). The old
+                // name-heuristics contradicted each other about stream-proxy
+                // and sent a self-referential playlist to yt-dlp 6 times.
+                // inspectTerminal() is a bounded probe: direct MP4 -> Turbo/
+                // aria2c, genuine m3u8 -> yt-dlp, decoy -> rejected here.
+                val terminalEvidence = if (!isMagnet && !isSocial) {
+                    com.anonrode.downloader.pipeline.UrlClassifier.inspectTerminal(
+                        streamUrl,
+                        referer = getRefererForUrl(streamUrl),
+                        tag = "engine-route"
+                    )
+                } else null
+                if (terminalEvidence?.kind == com.anonrode.downloader.pipeline.UrlClassifier.TerminalKind.SELF_REFERENTIAL ||
+                    terminalEvidence?.kind == com.anonrode.downloader.pipeline.UrlClassifier.TerminalKind.STUB
+                ) {
+                    com.anonrode.downloader.pipeline.ResolveCache.poison(streamUrl)
+                    noteBackendFailure(task, streamUrl)
+                    com.anonrode.downloader.util.DebugLog.error(
+                        "task=${task.id} source returned a placeholder playlist (${terminalEvidence.kind}: ${terminalEvidence.reason}) — ${streamUrl.take(120)}"
+                    )
+                    if (attemptCrossProviderFailover(task)) return@launch
+                    throw Exception(
+                        "The source server returned a placeholder playlist instead of a video. " +
+                            "Tap retry to fetch a fresh link, or choose another server/episode."
+                    )
                 }
+                val isHlsByEvidence = terminalEvidence?.kind ==
+                    com.anonrode.downloader.pipeline.UrlClassifier.TerminalKind.HLS_PLAYLIST
+                val isHlsStream = isHlsByEvidence ||
+                    (terminalEvidence == null && com.anonrode.downloader.pipeline.UrlClassifier.isStreamingLink(streamUrl))
+                val isDirectByEvidence = terminalEvidence?.kind ==
+                    com.anonrode.downloader.pipeline.UrlClassifier.TerminalKind.DIRECT_MEDIA
+                val isProvablyDirect = isDirectByEvidence || isProvablyDirectFile(streamUrl) ||
+                    isDirectMediaUrl(streamUrl) || isHlsStream
+                val isEmbedOrPage = !isMagnet && !isSocial && !isProvablyDirect &&
+                    terminalEvidence?.kind == com.anonrode.downloader.pipeline.UrlClassifier.TerminalKind.UNKNOWN &&
+                    !com.anonrode.downloader.pipeline.UrlClassifier.isDirectMediaPath(streamUrl)
                 val finalBackend = if (isSocial || isHlsStream || isEmbedOrPage || task.audioOnly) "yt-dlp" else "aria2c"
                 var isExtractor = isSocial || task.audioOnly || isEmbedOrPage
                 // A stale-link re-resolve can change the stream type (HLS ->
@@ -3015,7 +3302,11 @@ class DownloadEngine(
                 // falling back to host policy rules from OTA playbook, and finally default UA.
                 val taskReferer = task.headers.entries.firstOrNull { it.key.equals("referer", ignoreCase = true) }?.value?.takeIf { it.isNotBlank() }
                 val taskUa = task.headers.entries.firstOrNull { it.key.equals("user-agent", ignoreCase = true) }?.value?.takeIf { it.isNotBlank() }
-                var refererToPass = taskReferer ?: getRefererForUrl(streamUrl)
+                // Recipe-declared CDN referer (nsrplay data.referer -> vimeos)
+                // outranks the host-policy table for THIS resolved stream.
+                val hintedReferer = com.anonrode.downloader.pipeline.ResolvedHints.refererFor(streamUrl)
+                    ?: com.anonrode.downloader.pipeline.ResolvedHints.refererFor(permUrl)
+                var refererToPass = taskReferer ?: hintedReferer ?: getRefererForUrl(streamUrl)
                 var uaToPass = taskUa ?: getUserAgentForUrl(streamUrl)
                 fun buildHeaders(ref: String, ua: String): MutableMap<String, String> {
                     val m = mutableMapOf("User-Agent" to ua)
@@ -3065,7 +3356,7 @@ class DownloadEngine(
                         }
                         streamUrl = fresh
                         recomputeExtractor()
-                        refererToPass = taskReferer ?: getRefererForUrl(streamUrl)
+                        refererToPass = taskReferer ?: com.anonrode.downloader.pipeline.ResolvedHints.refererFor(streamUrl) ?: getRefererForUrl(streamUrl)
                         uaToPass = taskUa ?: getUserAgentForUrl(streamUrl)
                         hdrs = buildHeaders(refererToPass, uaToPass)
                         val freshIsHls = com.anonrode.downloader.pipeline.UrlClassifier.isStreamingLink(streamUrl)
@@ -3230,7 +3521,7 @@ class DownloadEngine(
                                 if (!fresh.isNullOrBlank() && fresh != streamUrl &&
                                     (isDirectMediaUrl(fresh) || isProvablyDirectFile(fresh))) {
                                     streamUrl = com.anonrode.downloader.pipeline.UrlClassifier.stripPreviewParam(fresh)
-                                    refererToPass = taskReferer ?: getRefererForUrl(streamUrl)
+                                    refererToPass = taskReferer ?: com.anonrode.downloader.pipeline.ResolvedHints.refererFor(streamUrl) ?: getRefererForUrl(streamUrl)
                                     uaToPass = taskUa ?: getUserAgentForUrl(streamUrl)
                                     hdrs = buildHeaders(refererToPass, uaToPass)
                                     rejection = StreamValidator.validateResult(streamUrl, hdrs)
@@ -3283,7 +3574,7 @@ class DownloadEngine(
                                 val fresh = resolveStreamUrl(permUrl, task.site, task.quality ?: defaultQuality, allowCacheHit = false)
                                 if (!fresh.isNullOrBlank() && fresh != streamUrl) {
                                     streamUrl = com.anonrode.downloader.pipeline.UrlClassifier.stripPreviewParam(fresh)
-                                    refererToPass = taskReferer ?: getRefererForUrl(streamUrl)
+                                    refererToPass = taskReferer ?: com.anonrode.downloader.pipeline.ResolvedHints.refererFor(streamUrl) ?: getRefererForUrl(streamUrl)
                                     uaToPass = taskUa ?: getUserAgentForUrl(streamUrl)
                                     hdrs = buildHeaders(refererToPass, uaToPass)
                                     repository.update(task.id) { it.copy(directUrl = streamUrl) }
@@ -3352,7 +3643,7 @@ class DownloadEngine(
                             if (!fresh.isNullOrBlank() && fresh != streamUrl &&
                                 (isDirectMediaUrl(fresh) || isProvablyDirectFile(fresh))) {
                                 streamUrl = com.anonrode.downloader.pipeline.UrlClassifier.stripPreviewParam(fresh)
-                                refererToPass = taskReferer ?: getRefererForUrl(streamUrl)
+                                refererToPass = taskReferer ?: com.anonrode.downloader.pipeline.ResolvedHints.refererFor(streamUrl) ?: getRefererForUrl(streamUrl)
                                 uaToPass = taskUa ?: getUserAgentForUrl(streamUrl)
                                 hdrs = buildHeaders(refererToPass, uaToPass)
                                 repository.update(task.id) { it.copy(directUrl = streamUrl) }
@@ -3802,6 +4093,11 @@ class DownloadEngine(
                     // inline scanFile never bound the scanner service and
                     // silently no-opped — downloads stayed invisible to the
                     // gallery until a system rescan (user report 2026-09-13).
+                    // Sidecars before the media scan so the player's
+                    // <videoStem>* discovery sees them immediately. Never
+                    // fails the video.
+                    try { downloadSubtitleSidecars(task, producedFile) } catch (_: Throwable) {}
+
                     com.anonrode.downloader.util.MediaScan.notifyFile(context, producedFile)
 
                     if (completionNotifications) {
@@ -3844,6 +4140,11 @@ class DownloadEngine(
                     // inline scanFile never bound the scanner service and
                     // silently no-opped — downloads stayed invisible to the
                     // gallery until a system rescan (user report 2026-09-13).
+                    // Sidecars before the media scan so the player's
+                    // <videoStem>* discovery sees them immediately. Never
+                    // fails the video.
+                    try { downloadSubtitleSidecars(task, producedFile) } catch (_: Throwable) {}
+
                     com.anonrode.downloader.util.MediaScan.notifyFile(context, producedFile)
                     com.anonrode.downloader.util.DebugLog.write("completed-unverified task=${task.id} file=${producedFile.absolutePath} bytes=$finalBytes validation=none")
                     val selfJob = coroutineContext[Job]
@@ -3967,17 +4268,23 @@ class DownloadEngine(
                 }
             } catch (e: Exception) {
                 if (coroutineContext.isActive) {
-                    val errMsg = e.message ?: "Download error"
+                    val rawErr = e.message ?: "Download error"
+                    val rateLimited = isRateLimitedError(rawErr)
+                    // Never surface a Java wrapper/empty aggregate to the user
+                    // (AGENTS rule 14). The raw text still drives failover and
+                    // the rate-limit park decision above.
+                    val errMsg = humanizeDownloadError(rawErr)
                     // THE RULE again: any backend chain that finally threw —
                     // including the "yt-dlp failed after 3 attempt(s)" wrap of
                     // a 429 storm — parks when bytes are banked or the server
                     // explicitly asked us to wait (StreamValidator's
                     // "HTTP 429" rejection throws into this catch).
                     val live = repository.find(task.id) ?: task
+                    noteBackendFailure(live, live.directUrl.ifBlank { task.directUrl })
                     if (live.downloadedBytes == 0L && bytesLanded(live) == 0L && attemptCrossProviderFailover(live)) {
                         return@launch
                     }
-                    if (!parkInsteadOfFail(live, errMsg, forcePark = isRateLimitedError(errMsg))) {
+                    if (!parkInsteadOfFail(live, errMsg, forcePark = rateLimited)) {
                         repository.update(task.id) { it.copy(status = TaskStatus.FAILED, errorMessage = errMsg) }
                         com.anonrode.downloader.service.DownloadService.notifyFailed(context, task.id, task.episodeTitle, errMsg)
                         // Terminal FAILED cleanup, same rule + guard as the

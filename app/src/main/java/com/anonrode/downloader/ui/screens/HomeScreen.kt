@@ -58,10 +58,12 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.anonrode.downloader.R
 import com.anonrode.downloader.data.models.ShowCard
+import com.anonrode.downloader.data.rules.DynamicRulesManager
 import com.anonrode.downloader.pipeline.VerdictPolicy
 import com.anonrode.downloader.providers.CategoryFeed
 import com.anonrode.downloader.providers.PosterNetwork
 import com.anonrode.downloader.providers.PosterStore
+import com.anonrode.downloader.providers.SiteGate
 import com.anonrode.downloader.ui.components.PosterFallbackWell
 import com.anonrode.downloader.ui.components.PosterImageOrFallback
 import com.anonrode.downloader.ui.components.PosterRequests
@@ -93,20 +95,34 @@ fun HomeScreen(
     val context = LocalContext.current
     val keyboardController = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
 
-    val filters = listOf(
-        "all" to "All Sites",
-        "torrents" to "Torrents (TPB)",
-        "nkiri" to "NKiri",
-        "9jarocks" to "9jaRocks",
-        "asianc" to "AsianC",
-        "dramakey" to "DramaKey",
-        "anitaku" to "Anitaku Anime",
-        "pluto" to "Pluto Movies",
-        "nepu" to "Nepu HD",
-        "naijavault" to "NaijaVault",
-        "naijaprey" to "NaijaPrey",
-        "dramarain" to "DramaRain"
-    )
+    // Site chips follow the OTA kill-switch (rev-4 `disabledSites`): "All
+    // Sites" and Torrents stay, a disabled provider disappears. Keyed on the
+    // rules version so an OTA activation recomposes the row. Absent/old/
+    // broken payload => every provider enabled (isSiteEnabled default true).
+    val rulesVersion by DynamicRulesManager.version.collectAsState()
+    val filters = remember(rulesVersion) {
+        listOf("all" to "All Sites", "torrents" to "Torrents (TPB)") +
+            listOf(
+                "nkiri" to "NKiri",
+                "9jarocks" to "9jaRocks",
+                "asianc" to "AsianC",
+                "dramakey" to "DramaKey",
+                "anitaku" to "Anitaku Anime",
+                "pluto" to "Pluto Movies",
+                "nepu" to "Nepu HD",
+                "naijavault" to "NaijaVault",
+                "naijaprey" to "NaijaPrey",
+                "dramarain" to "DramaRain"
+            ).filter { SiteGate.isEnabled(it.first) }
+    }
+
+    // A payload that disables the currently selected site must not leave the
+    // grid filtered by an invisible chip — fall back to All Sites.
+    LaunchedEffect(rulesVersion) {
+        if (filters.none { it.first == uiState.selectedFilter }) {
+            viewModel.onFilterSelected("all")
+        }
+    }
 
     var clipboardSnippet by remember { mutableStateOf<String?>(null) }
 

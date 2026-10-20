@@ -281,10 +281,10 @@ class RulesPipelineTest {
         // sibling heading of the anchor's parent wins over the generic anchor text
         assertEquals("Episode 3 - The Return", result.episodes[0].title)
         assertEquals("https://downloadwella.com/f/3", result.episodes[0].url)
-        assertEquals(1, result.episodes[0].episodeNum)
+        assertEquals(1001, result.episodes[0].episodeNum) // SeasonEpisode.encode(1,1)
         // anchor text used when valid; duplicate url deduped
         assertEquals("Episode 1 File", result.episodes[1].title)
-        assertEquals(2, result.episodes[1].episodeNum)
+        assertEquals(1002, result.episodes[1].episodeNum)
         // no meta spec -> null meta (provider keeps its own)
         assertNull(result.metaTitle)
     }
@@ -329,14 +329,14 @@ class RulesPipelineTest {
         assertEquals(4, result.episodes.size)
         // Season 1 first (ascending), position restarts inside it
         assertEquals("S01 E01", result.episodes[0].title)
-        assertEquals(101, result.episodes[0].episodeNum)
+        assertEquals(1001, result.episodes[0].episodeNum) // encode(1,1)
         assertEquals("https://lightdl.cc/d/a1", result.episodes[0].url)
         assertEquals("S01 E02", result.episodes[1].title)
-        assertEquals(102, result.episodes[1].episodeNum)
+        assertEquals(1002, result.episodes[1].episodeNum)
         assertEquals("S02 E01", result.episodes[2].title)
-        assertEquals(201, result.episodes[2].episodeNum)
+        assertEquals(2001, result.episodes[2].episodeNum)
         assertEquals("https://lightdl.cc/d/b2", result.episodes[3].url)
-        assertEquals(202, result.episodes[3].episodeNum)
+        assertEquals(2002, result.episodes[3].episodeNum)
     }
 
     @Test
@@ -374,21 +374,21 @@ class RulesPipelineTest {
         )
         assertEquals(3, pinned.episodes.size)
         assertEquals("S02 E01", pinned.episodes[0].title)
-        assertEquals(201, pinned.episodes[0].episodeNum)
+        assertEquals(2001, pinned.episodes[0].episodeNum)
         assertEquals("S02 E02", pinned.episodes[1].title)
-        assertEquals(202, pinned.episodes[1].episodeNum)
+        assertEquals(2002, pinned.episodes[1].episodeNum)
 
         val plain = RulesPipeline.extractEpisodes(
             "nkiri", step(items), htmlOutcome(html), baseVars,
             "https://thenkiri.test/inside-the-circle-s01-complete-tv-series/"
         )
-        assertEquals(1, plain.episodes[0].episodeNum) // season-1 slug: historical 1..N
+        assertEquals(1001, plain.episodes[0].episodeNum) // encode(1,1)
 
         val noSeason = RulesPipeline.extractEpisodes(
             "nkiri", step(items), htmlOutcome(html), baseVars,
             "https://thenkiri.test/vincenzo-korean-drama/"
         )
-        assertEquals(1, noSeason.episodes[0].episodeNum)
+        assertEquals(1001, noSeason.episodes[0].episodeNum)
     }
 
     @Test
@@ -421,9 +421,9 @@ class RulesPipelineTest {
         // Conflict (S01 tokens vs s02 slug) -> pin off: S01 tokens stay plain,
         // the S02 token keeps its own season*100 coding from the heuristic.
         assertEquals(3, result.episodes.size)
-        assertEquals(1, result.episodes[0].episodeNum)
-        assertEquals(2, result.episodes[1].episodeNum)
-        assertEquals(201, result.episodes[2].episodeNum)
+        assertEquals(1001, result.episodes[0].episodeNum)
+        assertEquals(1002, result.episodes[1].episodeNum)
+        assertEquals(2001, result.episodes[2].episodeNum)
     }
 
     @Test
@@ -457,10 +457,10 @@ class RulesPipelineTest {
         )
         assertEquals(3, result.episodes.size)
         // Tokened anchors: heuristic s*100+e coding, untouched by the pin.
-        assertEquals(201, result.episodes[0].episodeNum)
-        assertEquals(202, result.episodes[1].episodeNum)
+        assertEquals(2001, result.episodes[0].episodeNum)
+        assertEquals(2002, result.episodes[1].episodeNum)
         // The untokened anchor rides the slug pin into the same season space.
-        assertEquals(203, result.episodes[2].episodeNum)
+        assertEquals(2003, result.episodes[2].episodeNum)
     }
 
     @Test
@@ -546,10 +546,10 @@ class RulesPipelineTest {
         // Eps 1..99 keep their season codes, ep 100 keeps the plain 100
         // (no collision with 101..199); ep 101 collided with ep 1's 101 and
         // was re-stamped above the max.
-        assertEquals(101, nums[0])
-        assertEquals(199, nums[98])
-        assertEquals(100, nums[99])
-        assertEquals(200, nums[100])
+        assertEquals(1001, nums[0])
+        assertEquals(1099, nums[98])
+        assertEquals(1100, nums[99])
+        assertEquals(1101, nums[100])
         // The title still carries the TRUE page number (S01 E101) and the
         // right href — only the internal re-resolve key moved.
         assertEquals("S01 E101", result.episodes[100].title)
@@ -582,11 +582,11 @@ class RulesPipelineTest {
         assertEquals(2, result.episodes.size)
         // image-only anchor: number from url regex, label falls back to counter
         assertEquals("Episode 1", result.episodes[0].title)
-        assertEquals(1, result.episodes[0].episodeNum)
+        assertEquals(1001, result.episodes[0].episodeNum)
         assertEquals("https://site.test/show-episode-1", result.episodes[0].url)
         // text anchor keeps its text as label, number derived from text
         assertEquals("2", result.episodes[1].title)
-        assertEquals(2, result.episodes[1].episodeNum)
+        assertEquals(1002, result.episodes[1].episodeNum)
     }
 
     @Test
@@ -607,7 +607,7 @@ class RulesPipelineTest {
         assertEquals(1, result.episodes.size)
         assertEquals("Movie / Episode 1", result.episodes[0].title)
         assertEquals("https://site.test/movie/one", result.episodes[0].url)
-        assertEquals(1, result.episodes[0].episodeNum)
+        assertEquals(1, result.episodes[0].episodeNum) // movie fallback keeps the plain key
     }
 
     @Test
@@ -638,10 +638,10 @@ class RulesPipelineTest {
         assertEquals(3, result.episodes.size) // ?ref=home duplicate deduped by captures
         assertEquals("S01 E01", result.episodes[0].title)
         assertEquals("https://nepu.test/watch/tv/10/1/1", result.episodes[0].url)
-        assertEquals(1, result.episodes[0].episodeNum)
+        assertEquals(1001, result.episodes[0].episodeNum)
         assertEquals("S01 E02", result.episodes[1].title)
         assertEquals("S02 E03", result.episodes[2].title)
-        assertEquals(3, result.episodes[2].episodeNum)
+        assertEquals(1003, result.episodes[2].episodeNum)
     }
 
     @Test
@@ -759,8 +759,8 @@ class RulesPipelineTest {
             "dramakey", step(items), htmlOutcome(html), vars, "https://dramakey.test/drama/x"
         )
         assertEquals(2, result.episodes.size)
-        assertEquals(301, result.episodes[0].episodeNum) // seasonCode(3, 1)
-        assertEquals(302, result.episodes[1].episodeNum)
+        assertEquals(3001, result.episodes[0].episodeNum) // SeasonEpisode.encode(3,1)
+        assertEquals(3002, result.episodes[1].episodeNum)
     }
 
     @Test

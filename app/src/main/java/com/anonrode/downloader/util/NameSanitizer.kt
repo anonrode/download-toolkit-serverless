@@ -245,9 +245,19 @@ object NameSanitizer {
      * Formats an episode file title: "{BaseShow} S{SS}E{EE}".
      * If episodeNum <= 0, or if the link is a single/multi-part movie, returns the clean show name.
      */
-    fun formatEpisodeTitle(showTitle: String, episodeNum: Int, rawEpisodeLabel: String = ""): String {
+    fun formatEpisodeTitle(
+        showTitle: String,
+        episodeNum: Int,
+        rawEpisodeLabel: String = "",
+        season: Int = 0,
+        episode: Int = 0,
+        site: String = ""
+    ): String {
         val cleanShow = cleanShowFolder(showTitle)
-        if (episodeNum <= 0) {
+        val resolved = SeasonEpisode.of(site, season, episode, episodeNum)
+        val resolvedSeason = resolved.first
+        val resolvedEpisode = resolved.second
+        if (episodeNum <= 0 && season <= 0) {
             return safeComponent(cleanShow, maxChars = 80)
         }
 
@@ -270,7 +280,7 @@ object NameSanitizer {
             val explicitZipSeason = Regex("""\bS(\d{1,2})\b""", RegexOption.IGNORE_CASE).find(rawClean)?.groupValues?.get(1)?.toIntOrNull()
                 ?: seasonMatch?.let { m ->
                     (m.groupValues[1].ifEmpty { m.groupValues[2].ifEmpty { m.groupValues[3] } }).toIntOrNull()
-                } ?: if (episodeNum >= 100) (episodeNum / 100) else 1
+                } ?: resolvedSeason
             val zs = explicitZipSeason.toString().padStart(2, '0')
             return safeComponent("$cleanShow S${zs} Complete Season ZIP", maxChars = 80)
         }
@@ -278,7 +288,7 @@ object NameSanitizer {
         // Single movie / multi-part movie detection:
         // No season in show title, no explicit season/episode in raw label,
         // and either labelled as a movie/server link or episodeNum <= 1 with no episode token.
-        if (seasonMatch == null && explicitSm == null && (isMovieLabel || (partMatch != null) || (epMatch == null && episodeNum <= 1 && !rawClean.contains("Episode", ignoreCase = true)))) {
+        if (seasonMatch == null && explicitSm == null && (isMovieLabel || (partMatch != null) || (epMatch == null && resolvedEpisode <= 1 && !rawClean.contains("Episode", ignoreCase = true)))) {
             return if (partMatch != null) {
                 safeComponent("$cleanShow Part ${partMatch.groupValues[1]}", maxChars = 80)
             } else {
@@ -298,11 +308,11 @@ object NameSanitizer {
             ?: seasonMatch?.let { m ->
                 (m.groupValues[1].ifEmpty { m.groupValues[2].ifEmpty { m.groupValues[3] } }).toIntOrNull()
             }
-            ?: if (episodeNum >= 100) (episodeNum / 100) else 1
+            ?: resolvedSeason
 
         val finalEpNum = explicitSm?.groupValues?.getOrNull(2)?.toIntOrNull()
             ?: epMatch?.groupValues?.getOrNull(1)?.toIntOrNull()
-            ?: if (episodeNum >= 100) (episodeNum % 100) else episodeNum
+            ?: resolvedEpisode
 
         val s = seasonNum.toString().padStart(2, '0')
         val e = finalEpNum.toString().padStart(2, '0')

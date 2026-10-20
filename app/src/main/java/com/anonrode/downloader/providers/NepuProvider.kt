@@ -23,7 +23,31 @@ import java.util.regex.Pattern
 object NepuProvider : SiteProvider {
     override val name: String = "nepu"
     override val mainUrl: String get() = DynamicRulesManager.getBaseUrl(name)
+
+    /**
+     * SRV_MAP mirrors are EPISODE-specific: the show page embeds the default
+     * S01E01 cluster, and the old per-tmdb key made those literals candidates
+     * for EVERY episode of the show (Servamp S01E01==S01E02, and every NEPU
+     * episode in the 2026-10-20 log). The key now carries the episode the
+     * page actually represents; a show-level page (no /s/e in the URL) is
+     * cached under "show" and may only serve S1E1.
+     */
     internal val srvMapCache = ConcurrentHashMap<String, Map<String, String>>()
+
+    internal fun srvMapKey(tmdbId: String, season: Int?, episode: Int?): String =
+        if (season != null && episode != null && season > 0 && episode > 0) {
+            "$tmdbId|$season|$episode"
+        } else "$tmdbId|show"
+
+    private fun srvMapFor(tmdbId: String, season: Int?, episode: Int?): Map<String, String> {
+        if (season != null && episode != null) {
+            srvMapCache[srvMapKey(tmdbId, season, episode)]?.let { return it }
+            if (season == 1 && episode == 1) {
+                srvMapCache[srvMapKey(tmdbId, null, null)]?.let { return it }
+            }
+        }
+        return emptyMap()
+    }
 
     override suspend fun search(query: String): List<ShowCard> {
         // OTA pipeline first (JSON API + URL synthesis live in the playbook);
@@ -137,6 +161,17 @@ object NepuProvider : SiteProvider {
         return out
     }
 
+    /**
+     * True only when [url] explicitly names this tmdb/season/episode. A URL
+     * that carries no episode identity is NOT usable as an episode mirror
+     * (the srvMap show-level leak). Pure, unit-tested.
+     */
+    internal fun mirrorNamesEpisode(url: String, tmdbId: String, season: Int, episode: Int): Boolean {
+        val parsed = com.anonrode.downloader.resolvers.parseEpisodeFromUrl(url) ?: return false
+        if (parsed.first.isNotBlank() && tmdbId.isNotBlank() && parsed.first != tmdbId) return false
+        return parsed.second == season && parsed.third == episode
+    }
+
     internal fun buildMirrors(
         mediaType: String,
         tmdbId: String,
@@ -169,8 +204,16 @@ object NepuProvider : SiteProvider {
         )
         liveClusters.forEach { addMirror(it) }
 
-        // Dynamic server mappings extracted from site HTML
-        srvMap.values.forEach { addMirror(it) }
+        // Dynamic server mappings extracted from site HTML. STRICT episode
+        // pinning: an srvMap literal is usable only when its URL names the
+        // requested (season, episode). Mismatched or show-level (unparseable)
+        // values are dropped — keeping them is what put an S1E1 URL into an
+        // S2E7 candidate list and reused it from ResolveCache.
+        if (isTv) {
+            srvMap.values.forEach { candidate ->
+                if (mirrorNamesEpisode(candidate, tmdbId, season!!, episode!!)) addMirror(candidate)
+            }
+        }
 
         val legacySynthetic = listOf(
             "https://vidsrc.mov/embed/$tvPath",
@@ -222,7 +265,10 @@ object NepuProvider : SiteProvider {
                 val html = fetchUnlockedHtml(showUrl)
                 val srvMap = extractSrvMap(html)
                 if (srvMap.isNotEmpty() && tmdbId.isNotBlank()) {
-                    srvMapCache[tmdbId] = srvMap
+                    val pageRef = EPISODE_PATTERN.matcher(showUrl)
+                    val pageSeason = if (pageRef.find()) pageRef.group(1)?.toIntOrNull() else null
+                    val pageEpisode = if (pageSeason != null) pageRef.group(2)?.toIntOrNull() else null
+                    srvMapCache[srvMapKey(tmdbId, pageSeason, pageEpisode)] = srvMap
                 }
                 val doc = Jsoup.parse(html, showUrl)
 
@@ -283,9 +329,11 @@ object NepuProvider : SiteProvider {
                         EpisodeItem(
                             title = "S%02d E%02d".format(season, episode),
                             url = url,
-                            episodeNum = season * 100 + episode,
+                            episodeNum = com.anonrode.downloader.util.SeasonEpisode.encode(season, episode),
                             site = name,
-                            mirrorUrls = mirrors
+                            mirrorUrls = mirrors,
+                            season = season,
+                            episode = episode
                         )
                     )
                 }
@@ -301,7 +349,7 @@ object NepuProvider : SiteProvider {
         } catch (_: Exception) { "" }
         val srvMap = extractSrvMap(html)
         if (srvMap.isNotEmpty() && tmdbId.isNotBlank()) {
-            srvMapCache[tmdbId] = srvMap
+            srvMapCache[srvMapKey(tmdbId, null, null)] = srvMap
         }
         val doc = Jsoup.parse(html, showUrl)
         val movieTitle = doc.selectFirst("h1")?.text()?.trim()
@@ -317,63 +365,82 @@ object NepuProvider : SiteProvider {
                 url = showUrl,
                 episodeNum = 1,
                 site = name,
-                mirrorUrls = mirrors
+                mirrorUrls = mirrors,
+                season = 1,
+                episode = 1
             )
         )
         return ShowDetails(show = finalCard, synopsis = movieSynopsis ?: "", episodes = episodes)
     }
 
     override suspend fun resolveEpisode(episodeUrl: String, quality: String): DownloadRecipe {
-        val ota = RulesPipeline.runResolveForSite(name, episodeUrl, quality)
-        var direct = ota ?: ResolverRegistry.resolve(episodeUrl, quality)
+        val tvMatch = Regex("""watch/tv/(\d+)(?:/(\d+)/(\d+))?""").find(episodeUrl)
+        val movieMatch = Regex("""watch/movie/(\d+)""").find(episodeUrl)
+        val isTv = tvMatch != null
+        val tmdbId = tvMatch?.groupValues?.get(1)
+            ?: movieMatch?.groupValues?.get(1)
+            ?: episodeUrl.substringAfterLast('/').substringBefore('?')
+        val season = tvMatch?.groupValues?.getOrNull(2)?.toIntOrNull() ?: if (isTv) 1 else null
+        val episode = tvMatch?.groupValues?.getOrNull(3)?.toIntOrNull() ?: if (isTv) 1 else null
+
+        // OTA recipe first — detailed so the recipe's CDN referer (`upref`,
+        // nsrplay data.referer) and subtitle list survive into the recipe.
+        val detailed = RulesPipeline.runResolveForSiteDetailed(name, episodeUrl, quality)
+        var direct = detailed?.directUrl ?: ResolverRegistry.resolve(episodeUrl, quality)
 
         // If primary URL didn't resolve to a stream, try the other embed servers!
-        if (direct.isNullOrBlank()) {
-            val tvMatch = Regex("""watch/tv/(\d+)(?:/(\d+)/(\d+))?""").find(episodeUrl)
-            val movieMatch = Regex("""watch/movie/(\d+)""").find(episodeUrl)
-            val isTv = tvMatch != null
-            val tmdbId = tvMatch?.groupValues?.get(1)
-                ?: movieMatch?.groupValues?.get(1)
-                ?: episodeUrl.substringAfterLast('/').substringBefore('?')
-            val season = tvMatch?.groupValues?.getOrNull(2)?.toIntOrNull() ?: if (isTv) 1 else null
-            val episode = tvMatch?.groupValues?.getOrNull(3)?.toIntOrNull() ?: if (isTv) 1 else null
+        if (direct.isNullOrBlank() && tmdbId.isNotBlank() && tmdbId.all { it.isDigit() }) {
+            // EPISODE-PINNED srvMap only: never the show-level map for a
+            // non-S1E1 request (cross-episode mirror leak).
+            val srvMap = srvMapFor(tmdbId, season, episode)
+                .ifEmpty {
+                    try {
+                        val html = fetchUnlockedHtml(episodeUrl)
+                        extractSrvMap(html).also {
+                            if (it.isNotEmpty()) {
+                                srvMapCache[srvMapKey(tmdbId, season, episode)] = it
+                            }
+                        }
+                    } catch (_: Exception) { emptyMap() }
+                }
             val mediaType = if (isTv) "tv" else "movie"
-
-            if (tmdbId.isNotBlank() && tmdbId.all { it.isDigit() }) {
-                val srvMap = srvMapCache[tmdbId] ?: try {
-                    val html = fetchUnlockedHtml(episodeUrl)
-                    extractSrvMap(html).also { if (it.isNotEmpty()) srvMapCache[tmdbId] = it }
-                } catch (_: Exception) { emptyMap() }
-
-                // Mirror sweep via resolveAny (boundedFirstSuccess, 3-wide
-                // sliding window, first success cancels the rest — the same
-                // bounded race the AsianC sweep uses) instead of the
-                // sequential candidate loop.
-                // bypassHealth=true (share-31 log, 2026-10-16 12:05, Servamp):
-                // this list is issued BY THE PROVIDER for this episode, but
-                // HostHealth's cross-session backoff still pre-skipped every
-                // candidate (2,189 health-gate ERR hops in one share, zero
-                // requests fired; hosts marked dead under old behavior —
-                // vidsrc.mov now works, vidsrc.fyi now iframes vsembed). Only the pre-judge skip lifts: full attempt
-                // budgets stay, and fresh outcomes re-record health, so a
-                // mirror that is genuinely dead re-earns its backoff on this
-                // very pass.
-                direct = ResolverRegistry.resolveAny(
-                    buildMirrors(mediaType, tmdbId, season, episode, srvMap = srvMap, primaryUrl = episodeUrl),
-                    quality,
-                    bypassHealth = true
-                )
-            }
+            // Mirror sweep via resolveAny (settle-and-score, episode-pinned
+            // candidates; bypassHealth=true because this list is issued by the
+            // provider for THIS episode and stale cross-session backoffs must
+            // not pre-skip it — fresh outcomes still re-record health).
+            direct = ResolverRegistry.resolveAny(
+                buildMirrors(mediaType, tmdbId, season, episode, srvMap = srvMap, primaryUrl = episodeUrl),
+                quality,
+                bypassHealth = true,
+                episode = if (isTv && season != null && episode != null) {
+                    com.anonrode.downloader.resolvers.EpisodeRef(season, episode, tmdbId)
+                } else null
+            )
         }
 
-        if (direct.isNullOrBlank()) direct = ""
-        var filename = direct.substringAfterLast('/').substringBefore('?').ifEmpty { "media.mp4" }
+        val finalUrl = direct.orEmpty()
+        var filename = finalUrl.substringAfterLast('/').substringBefore('?').ifEmpty { "media.mp4" }
         if (filename.lowercase().endsWith(".m3u8")) filename = filename.dropLast(5) + ".mp4"
+
+        // Backend decision is EVIDENCE-based, never a blanket "yt-dlp":
+        // a direct media path goes to Turbo/aria2c; only a genuine manifest
+        // keeps yt-dlp. Unknown shapes stay aria2c (Turbo sniffs magic bytes).
+        val isManifest = finalUrl.isNotBlank() &&
+            (com.anonrode.downloader.pipeline.UrlClassifier.isStreamingLink(finalUrl) ||
+                com.anonrode.downloader.pipeline.UrlClassifier.isManifestShaped(finalUrl))
+        val backend = if (isManifest) "yt-dlp" else "aria2c"
+
+        val headers = detailed?.referer?.takeIf { it.isNotBlank() }
+            ?.let { mapOf("Referer" to it) }
+            ?: emptyMap()
+
         return DownloadRecipe(
-            directUrl = direct,
+            directUrl = finalUrl,
             filename = filename,
-            backend = "yt-dlp",
-            parallelSockets = 16
+            headers = headers,
+            backend = backend,
+            parallelSockets = 16,
+            subtitles = detailed?.subtitles.orEmpty()
         )
     }
 

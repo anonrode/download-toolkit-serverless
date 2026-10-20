@@ -2,6 +2,7 @@ package com.anonrode.downloader.ui.components
 
 import com.anonrode.downloader.data.models.DownloadTask
 import com.anonrode.downloader.data.models.TaskStatus
+import com.anonrode.downloader.util.SeasonEpisode
 
 /**
  * Pure sort / bucket logic for the Downloads tab. Lives in `ui/components`
@@ -184,7 +185,13 @@ object DownloadsSorter {
      * movie-only show, numeric for a series.
      */
     internal val EPISODE_ORDER: Comparator<DownloadTask> =
-        compareBy<DownloadTask> { if (it.episodeNum > 0) it.episodeNum else Int.MAX_VALUE }
+        compareBy<DownloadTask> {
+            if (it.episodeNum > 0 || it.season > 0 || it.episode > 0) {
+                SeasonEpisode.sortKey(SeasonEpisode.seasonOf(it), SeasonEpisode.episodeOf(it))
+            } else {
+                Int.MAX_VALUE
+            }
+        }
             .thenBy { it.createdAt }
 
     /**

@@ -41,6 +41,35 @@ object ProviderRegistry {
     val allProviders: List<SiteProvider>
         get() = staticProviders + DynamicRulesManager.getDynamicProviders()
 
+    /**
+     * Providers that may accept NEW work right now: the full registry minus
+     * every site the signed payload's `contentPolicy.disabledSites` switch
+     * holds OFF. Consumers: search fan-out, feed/site lists, failover.
+     *
+     * [getProvider] deliberately stays UNFILTERED: an already-running
+     * download must still resolve its own episode after the operator disables
+     * the site ("existing/running downloads may finish"). Only start-of-work
+     * paths consult this list.
+     */
+    val enabledProviders: List<SiteProvider>
+        get() = allProviders.filter { DynamicRulesManager.isSiteEnabled(it.name) }
+
+    /** Names of the currently enabled providers (UI chip lists / diagnostics). */
+    fun enabledProviderNames(): List<String> = enabledProviders.map { it.name }
+
+    /** The OTA kill-switch verdict for one provider id (default true). */
+    fun isSiteEnabled(site: String): Boolean = DynamicRulesManager.isSiteEnabled(site)
+
+    /** Snapshot of (provider id -> enabled) for the current registry. */
+    fun siteEnabledSnapshot(): Map<String, Boolean> =
+        DynamicRulesManager.siteEnabledSnapshot(allProviders.map { it.name })
+
+    /** Drops cards belonging to a disabled site. Exposed for the home/trending
+     *  and category/Asian feed consumers, which fan out to site-specific
+     *  fetchers rather than through [searchStreaming]. */
+    fun filterEnabledCards(cards: List<ShowCard>): List<ShowCard> =
+        cards.filter { DynamicRulesManager.isSiteEnabled(it.site) }
+
     fun getProvider(site: String): SiteProvider? {
         return allProviders.find { it.name.equals(site, ignoreCase = true) }
     }
@@ -122,12 +151,15 @@ object ProviderRegistry {
         val staleKeys = searchCache.keys.filter { it.endsWith("::${siteFilter ?: "all"}") && it != cacheKey }
         for (sk in staleKeys) searchCache.remove(sk)
 
-        val currentProviders = allProviders
+        // Site-filter resolution must also honor the OTA kill switch: an
+        // explicitly requested disabled site returns no cards, exactly like a
+        // site with no results — no request is fired for it.
+        val currentProviders = enabledProviders
         val targets = if (!siteFilter.isNullOrBlank() && siteFilter != "all") {
             currentProviders.filter { it.name.equals(siteFilter, ignoreCase = true) || it.name.contains(siteFilter, ignoreCase = true) || siteFilter.contains(it.name, ignoreCase = true) }
         } else {
             currentProviders
-        }.filter { it.searchEnabled }
+        }.filter { it.searchEnabled && DynamicRulesManager.isSiteEnabled(it.name) }
 
         val timeoutMs = if (targets.size == 1) 15000L else 7000L
         val accumulated = java.util.Collections.synchronizedList(mutableListOf<ShowCard>())
@@ -138,7 +170,7 @@ object ProviderRegistry {
                 launch(Dispatchers.IO) {
                     try {
                         val raw = withTimeoutOrNull(timeoutMs) { provider.search(query) } ?: emptyList()
-                        val items = filteredItems(provider, raw)
+                        val items = filterEnabledCards(filteredItems(provider, raw))
                         if (items.isNotEmpty()) {
                             emitMutex.withLock {
                                 accumulated.addAll(items)
@@ -181,6 +213,13 @@ object ProviderRegistry {
 
     suspend fun loadEpisodes(show: ShowCard): ShowDetails {
         val provider = getProvider(show.site) ?: return ShowDetails(show = show)
+        // OTA kill switch: a disabled site accepts no NEW work. Returning the
+        // empty drawer (instead of throwing) is the same shape a site with no
+        // episodes produces, so the UI shows its normal "no episodes" state.
+        if (!DynamicRulesManager.isSiteEnabled(show.site)) {
+            DebugLog.resolve("site disabled by OTA policy: refusing new episode load for ${show.site}")
+            return ShowDetails(show = show)
+        }
         // Drawer cache: the activity log showed the same ~130KiB show page being
         // re-fetched up to 5 times in one browsing session (every drawer open).
         // A 5-minute TTL per show kills that waste; the drawer's per-open job
@@ -211,6 +250,10 @@ object ProviderRegistry {
             filename = episodeUrl.substringAfterLast('/').substringBefore('?').ifEmpty { "media.mp4" },
             backend = "aria2c"
         )
-        return withContext(Dispatchers.IO) { provider.resolveEpisode(episodeUrl, quality) }
+        val recipe = withContext(Dispatchers.IO) { provider.resolveEpisode(episodeUrl, quality) }
+        // Carry the recipe's headers/subtitles across the String-only resolver
+        // boundary (engine header propagation + subtitle sidecars).
+        com.anonrode.downloader.pipeline.ResolvedHints.remember(episodeUrl, recipe)
+        return recipe
     }
 }

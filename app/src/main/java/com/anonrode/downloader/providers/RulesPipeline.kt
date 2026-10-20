@@ -59,6 +59,40 @@ object RulesPipeline {
         val synopsis: String get() = metaSynopsis.orEmpty()
     }
 
+    /** Extra outputs a resolve recipe can declare: the CDN referer it needs
+     *  (`upref` bind from e.g. nsrplay `data.referer`) and soft subtitle
+     *  tracks (`subsurl`/`subslang`/`subskind` binds). */
+    class ResolveCapture {
+        var referer: String = ""
+        val subtitleUrls = mutableListOf<String>()
+        val subtitleLangs = mutableListOf<String>()
+        val subtitleKinds = mutableListOf<String>()
+
+        fun subtitles(): List<com.anonrode.downloader.data.models.SubtitleTrack> {
+            val out = mutableListOf<com.anonrode.downloader.data.models.SubtitleTrack>()
+            val seen = mutableSetOf<String>()
+            subtitleUrls.forEachIndexed { idx, raw ->
+                val url = raw.trim()
+                if (url.isBlank() || !url.startsWith("http")) return@forEachIndexed
+                if (!seen.add(url)) return@forEachIndexed
+                out.add(
+                    com.anonrode.downloader.data.models.SubtitleTrack(
+                        url = url,
+                        lang = subtitleLangs.getOrNull(idx)?.trim().orEmpty(),
+                        kind = subtitleKinds.getOrNull(idx)?.trim().orEmpty()
+                    )
+                )
+            }
+            return out
+        }
+    }
+
+    data class PipelineResolveResult(
+        val directUrl: String?,
+        val referer: String = "",
+        val subtitles: List<com.anonrode.downloader.data.models.SubtitleTrack> = emptyList()
+    )
+
     // ---------------------------------------------------------------- search
 
     suspend fun runSearch(
@@ -263,10 +297,12 @@ object RulesPipeline {
 
     /** HLS decoy check that also honors the response Content-Type: a vidsrc
      *  `_stream?id=` URL has no "m3u8" in its text, so the URL-only gate alone
-     *  missed a 200 + 1-byte mpegurl answer. */
+     *  missed a 200 + 1-byte mpegurl answer. The mpegurl floor is the SAME
+     *  1024-byte class the non-HLS branch applies (a genuine playlist under
+     *  1 KiB with no variant/segment is a decoy, never media). */
     internal fun isHlsTerminalStub(url: String, totalBytes: Long, contentType: String): Boolean =
         com.anonrode.downloader.pipeline.LinkResolver.isHlsStubTerminal(url, totalBytes) ||
-            (contentType.contains("mpegurl", ignoreCase = true) && totalBytes < 8L)
+            (contentType.contains("mpegurl", ignoreCase = true) && totalBytes < com.anonrode.downloader.pipeline.LinkResolver.HLS_STUB_MIN_BYTES)
 
     /** Runs one step's source list according to its mode, returning the
      *  extracted items of the winning source(s). */
@@ -490,7 +526,7 @@ object RulesPipeline {
     private fun JsoupXml(body: String): Document =
         org.jsoup.Jsoup.parse(body, "", org.jsoup.parser.Parser.xmlParser())
 
-    private fun applyBinds(step: PipelineStep, outcome: StepOutcome, vars: MutableMap<String, String>) {
+    private fun applyBinds(step: PipelineStep, outcome: StepOutcome, vars: MutableMap<String, String>, capture: ResolveCapture? = null) {
         val (powBinds, regularBinds) = step.bind.partition { it.powSha256 != null }
         for (bind in regularBinds) {
             val sourceContent = when {
@@ -507,13 +543,33 @@ object RulesPipeline {
                 if (unpacked.isNotBlank()) unpacked else sourceContent
             } else sourceContent
 
+            // Subtitle-list binds are multi-valued by design: `subsurl` /
+            // `subslang` / `subskind` collect EVERY match (the nsrplay JSON
+            // carries an array), paired by index in the capture. A missing
+            // list is not an error — most episodes have no soft subs.
+            if (bind.name == "subsurl" || bind.name.startsWith("subsurl.") ||
+                bind.name == "subslang" || bind.name.startsWith("subslang.") ||
+                bind.name == "subskind" || bind.name.startsWith("subskind.")
+            ) {
+                val values = collectBindValues(bind, outcome, targetText, vars)
+                if (capture != null && values.isNotEmpty()) {
+                    when {
+                        bind.name.startsWith("subsurl") -> capture.subtitleUrls.addAll(values)
+                        bind.name.startsWith("subslang") -> capture.subtitleLangs.addAll(values)
+                        else -> capture.subtitleKinds.addAll(values)
+                    }
+                }
+                if (values.isNotEmpty()) vars[bind.name] = values.first().trim()
+                continue
+            }
+
             var value: String? = when {
                 bind.header.isNotBlank() -> targetText.takeIf { it.isNotBlank() }
                 bind.cookie.isNotBlank() -> targetText.takeIf { it.isNotBlank() }
                 bind.regex.isNotBlank() -> {
                     val target = if (targetText.length > 1024 * 1024) targetText.take(1024 * 1024) else targetText
                     val m = try { Regex(bind.regex).find(target) } catch (_: Exception) { null }
-                    m?.groupValues?.getOrNull(bind.group)
+                    m?.let { regexBindValue(it, bind.group) }
                 }
                 bind.jsonPath.isNotBlank() -> walkJson(outcome.json, bind.jsonPath).firstOrNull()?.let { jsonToString(it) }
                 bind.selector.isNotBlank() -> outcome.doc?.selectFirst(bind.selector)?.let { el ->
@@ -550,6 +606,62 @@ object RulesPipeline {
             } else null
             if (!value.isNullOrBlank()) vars[bind.name] = value.trim()
         }
+    }
+
+    /**
+     * Regex bind value. group > 0 = that capture, exactly as before. group 0
+     * with capture groups present = FIRST NON-EMPTY CAPTURE, then the whole
+     * match — this gives a payload a data-declared primary/fallback pair
+     * without a new schema field (e.g. bind `proxy` with
+     * `"directUrl"\\s*:\\s*"(...)"|"playUrl"\\s*:\\s*"(...)"`: use directUrl
+     * when present, playUrl otherwise). Binds whose regex has no capture
+     * groups keep the historical whole-match semantics.
+     */
+    internal fun regexBindValue(match: MatchResult, group: Int): String? {
+        if (group > 0) return match.groupValues.getOrNull(group)
+        val captures = match.groupValues.drop(1)
+        if (captures.any { it.isNotBlank() }) return captures.firstOrNull { it.isNotBlank() }
+        return match.value.takeIf { it.isNotBlank() }
+    }
+
+    /** Every value a bind can produce (JSON arrays, repeated regex matches,
+     *  selector lists). Used by the multi-valued subtitle binds. */
+    private fun collectBindValues(
+        bind: PipelineBind,
+        outcome: StepOutcome,
+        targetText: String,
+        vars: Map<String, String>
+    ): List<String> {
+        val out = mutableListOf<String>()
+        try {
+            when {
+                bind.jsonPath.isNotBlank() -> {
+                    walkJson(outcome.json, bind.jsonPath).forEach { node ->
+                        jsonToString(node)?.let { v -> if (v.isNotBlank()) out.add(v.trim()) }
+                    }
+                }
+                bind.regex.isNotBlank() -> {
+                    val target = if (targetText.length > 1024 * 1024) targetText.take(1024 * 1024) else targetText
+                    Regex(bind.regex).findAll(target).forEach { m ->
+                        regexBindValue(m, bind.group)?.takeIf { it.isNotBlank() }?.let { out.add(it.trim()) }
+                    }
+                }
+                bind.selector.isNotBlank() -> {
+                    outcome.doc?.select(bind.selector)?.forEach { el ->
+                        val raw = when {
+                            bind.attr.equals("abs:src", true) || bind.attr.equals("src", true) ->
+                                el.attr("abs:src").ifBlank { el.attr("src") }
+                            bind.attr.isNotBlank() -> el.attr(bind.attr)
+                            else -> el.text()
+                        }
+                        if (raw.isNotBlank()) out.add(raw.trim())
+                    }
+                }
+                else -> targetText.takeIf { it.isNotBlank() }?.let { out.add(it.trim()) }
+            }
+        } catch (_: Exception) {}
+        return out.map { if (bind.transforms.isNotEmpty()) applyTransforms(it, bind.transforms) else it }
+            .filter { it.isNotBlank() }
     }
 
     /** Hard cap on 302 Location hops the terminal probe may walk (see the
@@ -707,7 +819,21 @@ object RulesPipeline {
         quality: String,
         depth: Int = 0,
         visitedSites: Set<String> = emptySet()
-    ): String? {
+    ): String? = runResolveForSiteDetailed(site, episodeUrl, quality, depth, visitedSites)?.directUrl
+
+    /**
+     * Detailed resolve entry: same recipe execution as [runResolveForSite],
+     * plus the recipe-declared CDN referer (`upref`) and subtitle tracks.
+     * Providers use it to fill DownloadRecipe.headers/subtitles; the
+     * String-only entry above keeps the existing DynamicLocker contract.
+     */
+    suspend fun runResolveForSiteDetailed(
+        site: String,
+        episodeUrl: String,
+        quality: String,
+        depth: Int = 0,
+        visitedSites: Set<String> = emptySet()
+    ): PipelineResolveResult? {
         if (depth >= ResolverRegistry.RESOLVE_DEPTH_LIMIT) {
             DebugLog.resolve("$site pipeline resolve: depth limit reached at $depth — refusing")
             return null
@@ -728,7 +854,8 @@ object RulesPipeline {
             return null
         }
         return try {
-            runResolveInner(site, sp.resolve, term, episodeUrl, depth) { cand ->
+            val capture = ResolveCapture()
+            val direct = runResolveInner(site, sp.resolve, term, episodeUrl, depth, capture = capture) { cand ->
                 ResolverRegistry.resolve(
                     cand,
                     quality,
@@ -738,6 +865,8 @@ object RulesPipeline {
                     visitedSites = nextVisited
                 )
             }
+            if (direct == null && capture.referer.isBlank() && capture.subtitleUrls.isEmpty()) null
+            else PipelineResolveResult(direct, capture.referer, capture.subtitles())
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (e: Exception) {
@@ -772,6 +901,7 @@ object RulesPipeline {
         episodeUrl: String,
         depth: Int,
         fetchCounter: AtomicInteger? = null,
+        capture: ResolveCapture? = null,
         handoff: suspend (String) -> String?
     ): String? {
         val bases = DynamicRulesManager.getBaseUrls(site)
@@ -818,7 +948,19 @@ object RulesPipeline {
                     DebugLog.resolve("$site pipeline resolve: byte budget exceeded (${consumed}B) at step $idx — refusing")
                     return null
                 }
-                applyBinds(step, outcome, vars)
+                applyBinds(step, outcome, vars, capture)
+                if (capture != null) {
+                    vars["upref"]?.takeIf { it.isNotBlank() }?.let { capture.referer = it.trim() }
+                }
+                // Provider-side subtitle contract: parse any `subtitles`/
+                // `tracks` array out of the JSON response (all live key
+                // variants) and record it for this episode URL. The engine
+                // consumes SubtitleSurfaces.tracksFor() when writing sidecars.
+                if (outcome.json != null) {
+                    try {
+                        SubtitleSurfaces.recordFromResolveJson(episodeUrl, outcome.body)
+                    } catch (_: Exception) {}
+                }
                 bound = true
                 if (step.mode != "merge") break
             }
@@ -833,6 +975,9 @@ object RulesPipeline {
         }
 
         var candidate = resolveCandidate(terminal, episodeUrl, vars) ?: return null
+        // Payload-template concatenation repair ("https://vidsrc.buzz" + a
+        // bound url that already carries the scheme -> vidsrc.buzzhttps://…).
+        candidate = com.anonrode.downloader.pipeline.UrlClassifier.repairConcatenatedUrl(candidate)
         if (terminal.stripQueryParams.isNotEmpty()) {
             for (param in terminal.stripQueryParams) {
                 candidate = stripQueryParam(candidate, param)
@@ -887,7 +1032,26 @@ object RulesPipeline {
             val hlsStub = isHlsTerminalStub(probeUrl, tp.totalBytes, tp.contentType)
             if (hlsStub) {
                 DebugLog.resolve("$site pipeline resolve: probe rejected HLS stub (${tp.totalBytes}B, ct=${tp.contentType.take(40)}) ${probeUrl.take(140)}")
+                com.anonrode.downloader.pipeline.ResolveCache.poison(probeUrl)
                 return null
+            }
+            // Structural evidence (2026-10-20): a 390-byte self-referential
+            // master passes the size probe but can never reach media. Inspect
+            // the body before returning the terminal; reject + poison the
+            // nsrplay stream-proxy class so no cache can replay it.
+            val evidence = com.anonrode.downloader.pipeline.UrlClassifier.inspectTerminal(
+                probeUrl, referer = ref, tag = "rules-terminal"
+            )
+            when (evidence.kind) {
+                com.anonrode.downloader.pipeline.UrlClassifier.TerminalKind.SELF_REFERENTIAL,
+                com.anonrode.downloader.pipeline.UrlClassifier.TerminalKind.STUB -> {
+                    DebugLog.resolve(
+                        "$site pipeline resolve: terminal evidence rejected ${evidence.kind} (${evidence.reason}) ${probeUrl.take(140)}"
+                    )
+                    com.anonrode.downloader.pipeline.ResolveCache.poison(probeUrl)
+                    return null
+                }
+                else -> {}
             }
             DebugLog.resolve("$site pipeline resolve: terminal validated (${tp.totalBytes}B, hops=$hops) ${probeUrl.take(140)}")
             return probeUrl
@@ -1027,7 +1191,12 @@ object RulesPipeline {
     // ------------------------------------------------------ search extraction
 
     /** One candidate card: either a Jsoup element (html/rss) or a JSON object. */
-    internal class CardCtx(val element: Element?, val json: JSONObject?, val vars: Map<String, String>)
+    internal class CardCtx(
+        val element: Element?,
+        val json: JSONObject?,
+        val vars: Map<String, String>,
+        val pageUrl: String = ""
+    )
 
     internal fun extractSearchCards(
         site: String,
@@ -1044,13 +1213,13 @@ object RulesPipeline {
                 .map { obj ->
                     val itemVars = HashMap(vars)
                     defaults.forEach { (k, v) -> if (obj.opt(k) == null || obj.opt(k) == JSONObject.NULL) itemVars.putIfAbsent(k, v) }
-                    CardCtx(null, obj, itemVars)
+                    CardCtx(null, obj, itemVars, outcome.baseUrl)
                 }
-            "rss" -> outcome.doc?.select("item")?.map { CardCtx(it, null, vars) } ?: emptyList()
+            "rss" -> outcome.doc?.select("item")?.map { CardCtx(it, null, vars, outcome.baseUrl) } ?: emptyList()
             else -> {
                 val selector = items.optString("cardSelector")
                 if (selector.isBlank()) return emptyList()
-                outcome.doc?.select(selector)?.map { CardCtx(it, null, vars) } ?: emptyList()
+                outcome.doc?.select(selector)?.map { CardCtx(it, null, vars, outcome.baseUrl) } ?: emptyList()
             }
         }).take(MAX_SEARCH_CONTEXTS)  // bound the WORK, not just the output —
         // see MAX_SEARCH_CONTEXTS.
@@ -1079,7 +1248,7 @@ object RulesPipeline {
                         resolveField(spec, "var", ctx, m)?.let { m[k] = it }
                     }
                 }
-                CardCtx(ctx.element, ctx.json, m)
+                CardCtx(ctx.element, ctx.json, m, ctx.pageUrl)
             } else ctx
 
             val url = resolveFieldOpt(urlSpec, "url", itemVars)?.let { u ->
@@ -1091,7 +1260,7 @@ object RulesPipeline {
             val title = resolveFieldOpt(titleSpec, "title", itemVars)?.trim()
             if (title.isNullOrBlank()) continue
 
-            val poster = resolveFieldOpt(posterSpec, "poster", itemVars)?.trim() ?: ""
+            val poster = sanitizePosterUrl(resolveFieldOpt(posterSpec, "poster", itemVars)?.trim() ?: "")
             val year = resolveFieldOpt(yearSpec, "year", itemVars)?.trim() ?: ""
             val category = resolveCategory(categorySpec, itemVars, title)
 
@@ -1125,6 +1294,15 @@ object RulesPipeline {
 
             spec.startsWith("literal:") -> spec.substringAfter(":")
 
+            // 9jaRocks-class RSS: the real poster lives in the inline <img> of
+            // `<content:encoded>` — the RSS <enclosure> is the MKV locker file.
+            // Runs the exact compiled-provider image regex over the item HTML.
+            spec == "desc-img" || spec.startsWith("desc-img:") -> {
+                val css = if (spec.startsWith("desc-img:")) spec.substringAfter(":") else ""
+                val html = ctx.descriptionHtml(css)
+                firstImageUrlFromHtml(html, ctx.baseUrl())
+            }
+
             spec.startsWith("link:") -> {
                 val el = ctx.linkElement(spec.substringAfter(":")) ?: return null
                 if (fieldName == "url") el.absHrefFallback() else el.text()
@@ -1154,6 +1332,62 @@ object RulesPipeline {
 
     private fun CardCtx.scope(): Element? = element
     private fun CardCtx.href(): String? = element?.let { if (it.tagName() == "a") it.absHrefFallback() else null }
+    private fun CardCtx.baseUrl(): String = pageUrl.ifBlank { vars["base"].orEmpty() }
+
+    /** The card's description HTML for desc-img: RSS `content:encoded` /
+     *  `description`, or the card element's own inner HTML. */
+    private fun CardCtx.descriptionHtml(css: String): String {
+        val el = element ?: return ""
+        if (css.isNotBlank()) return el.selectFirst(css)?.html().orEmpty()
+        val candidates = mutableListOf<Element>()
+        el.selectFirst("content")?.let { candidates.add(it) }
+        for (child in el.children()) {
+            if (child.tagName().contains("encoded", ignoreCase = true)) candidates.add(child)
+        }
+        el.selectFirst("description")?.let { candidates.add(it) }
+        if (candidates.isEmpty()) el.selectFirst("content|encoded")?.let { candidates.add(it) }
+        return candidates.firstOrNull()?.let { if (it.tagName() == "description") it.text() else it.html() }
+            ?: el.html()
+    }
+
+    /** First usable <img> URL inside an HTML fragment (compiled 9jaRocks
+     *  regex parity: src / data-src / data-original / data-lazy-src). */
+    internal fun firstImageUrlFromHtml(html: String, baseUrl: String): String? {
+        if (html.isBlank()) return null
+        return try {
+            val doc = org.jsoup.Jsoup.parse(html, baseUrl)
+            val img = doc.selectFirst("img") ?: return null
+            val raw = listOf("src", "data-src", "data-original", "data-lazy-src")
+                .map { img.attr(it).trim() }
+                .firstOrNull { it.isNotBlank() && !it.startsWith("data:") }
+                ?: return null
+            HttpClient.safeResolveUri(baseUrl, raw).ifBlank { raw }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private val NON_IMAGE_FILE_EXT = Regex(
+        """\.(?:mkv|mp4|avi|mov|webm|m3u8|mpd|zip|rar|7z|tar|gz|torrent|apk|exe|pdf)(?:$|[?#])""",
+        RegexOption.IGNORE_CASE
+    )
+
+    /**
+     * A search card's poster must be an IMAGE URL. The 9jaRocks RSS
+     * `<enclosure>` is the MKV locker file, and a payload that bound it
+     * painted every tile blank while sending Coil a file-host request.
+     * Non-http, data:, and media/archive paths become "" (the provider's
+     * compiled backfill / initials tile then owns the card) — never a wrong
+     * poster and never a wasted locker fetch.
+     */
+    internal fun sanitizePosterUrl(raw: String): String {
+        val url = raw.trim()
+        if (url.isBlank()) return ""
+        if (!url.startsWith("http://", true) && !url.startsWith("https://", true)) return ""
+        val pathAndQuery = url.substringAfter("://", url)
+        if (NON_IMAGE_FILE_EXT.containsMatchIn(pathAndQuery)) return ""
+        return url
+    }
     private fun CardCtx.linkElement(css: String): Element? {
         val el = element ?: return null
         return if (el.tagName() == "a") el else el.selectFirst(css)
@@ -1261,11 +1495,9 @@ object RulesPipeline {
         // When present, anchors are collected PER SECTION, sections sort by
         // parsed season ascending (dramakey renders NEWEST season first), and
         // the in-section position restarts so counter labels and {num} become
-        // season-relative. episodeNum = season*100 + position — the convention
-        // EpisodeDrawer already decodes (`episodeNum >= 100 -> / 100`) and the
-        // engine's re-resolve requires (it picks an episode with
-        // firstOrNull { episodeNum == task.episodeNum }, so numbers must stay
-        // unique across seasons).
+        // season-relative. Explicit season/episode are stamped on every item;
+        // episodeNum = SeasonEpisode.encode (1000-base) — collision-free past
+        // E99 and never confused with a flat 9jaRocks number.
         val grouping = items.optJSONObject("sectionGrouping")
         val seasonSpec = grouping?.optString("seasonSpec").orEmpty()
         val labelTemplate = grouping?.optString("labelTemplate").orEmpty()
@@ -1279,11 +1511,9 @@ object RulesPipeline {
 
         // ---- slug-pinned season (the 9jarocks/NaijaVault-class season post:
         // one post per season whose URL or title carries "season-N"/"s-N" and
-        // whose episode list renumbers from 1). Flat pipelines (asianc /
-        // dramarain / naijaprey / nkiri — no in-page season sections) encode
-        // the pinned season into episodeNum = season*100 + num for N >= 2 so
-        // each season of a series surfaces as its own drawer chip; season-1
-        // and seasonless posts keep the historical 1..N numbering untouched.
+        // whose episode list renumbers from 1). The pin seeds un-tokened
+        // anchors into the page's season; explicit season/episode and the
+        // 1000-base episodeNum carry the identity (SeasonEpisode).
         // Anchors that carry their OWN SxxEyy token keep token coding (the
         // heuristic path's s>=2 branch) — the pin only seeds anchors that
         // declare no season of their own, and it is ignored entirely when the
@@ -1436,130 +1666,233 @@ object RulesPipeline {
             return "Episode $num"
         }
 
-        /** Grouped/flat label: template when the section carries a season and
-         *  one is configured, otherwise the plain labelChain result. */
         fun seasonLabel(ctx: AnchorCtx, num: Int, season: Int?, tmpl: String): String {
             val chainLabel = labelFor(ctx, num)
             return if (season != null && tmpl.isNotBlank())
                 fillSeasonTemplate(tmpl, season, num, chainLabel) else chainLabel
         }
 
-        // Combined posts expand into one EpisodeItem per real episode (same
-        // anchor URL reused — never an invented one). A positional number only
-        // applies when the anchor carries no episode tokens; positional count
-        // walks over already-numbered items so the two ranges cannot collide.
-        // Grouped pages count WITHIN the current section (season), so S2's
-        // first anchor is ep 1 of season 2, not ep 13 of the show.
-        // Season-pinned pages record every emitted key (tokened anchors
-        // included) so positional rows land in the season's first FREE slot
-        // instead of duplicating a token sibling's number.
-        val usedKeys = HashSet<Int>(kept.size * 2)
-        kept.forEach { (_, nums) -> nums.forEach { n -> usedKeys.add(n) } }
+        // ---- season identity + numbering (verified spec 2026-10-20)
+        //
+        // Live 9jaRocks pages are per-season posts whose season lives in the
+        // slug/title; a single mislabeled filename token (Link Click S04E01/
+        // S04E09) or an un-tokened anchor (Ace "...Part.II.E02") used to
+        // create fake seasons or S01E02 rows. Precedence:
+        //   in-page SEASON N markers > page declaration (Episode N Added with
+        //   an exactly matching anchor count) > page pin (when it matches the
+        //   dominant token season and outliers are sparse/gap-filling/style
+        //   outliers) > per-anchor token season > nearest preceding season >
+        //   dominant > S1.
+        // Episode: token > E/Episode N > numbering chain > position in season.
+        // season/episode are explicit on EpisodeItem; episodeNum is
+        // SeasonEpisode.encode (1000-base, collision-free past E99).
+        val pageTitleRaw = (doc.title().orEmpty() + " " + (doc.selectFirst("h1")?.text().orEmpty())).trim()
+        val slugAndTitle = "$showUrl $pageTitleRaw"
+        val titleRangeMatch = Regex("""(?i)\bseason\s*(\d{1,2})\s*[-\u2013\u2014]\s*(\d{1,2})\b""").find(slugAndTitle)
+        val titleSeasons = Regex("""(?i)\bseason\s*(\d{1,2})\b""").findAll(pageTitleRaw)
+            .mapNotNull { it.groupValues.getOrNull(1)?.toIntOrNull() }
+            .distinct().toList()
+        val slugSeason = Regex("""(?i)season[-_ ]?(\d{1,2})(?:\b|[-_])""").find(showUrl)
+            ?.groupValues?.getOrNull(1)?.toIntOrNull()
+        val titleSeason = Regex("""(?i)\bseason\s*(\d{1,2})\b""").find(pageTitleRaw)
+            ?.groupValues?.getOrNull(1)?.toIntOrNull()
+            ?: Regex("""(?i)\bS(\d{1,2})\b""").find(pageTitleRaw)
+                ?.groupValues?.getOrNull(1)?.toIntOrNull()
+        val pagePin = if (titleRangeMatch != null) null else (effectiveUrlSeason ?: slugSeason ?: titleSeason)
+        val titleNamesOtherSeason = pagePin != null && titleSeasons.any { it != pagePin }
+
+        // Marker map: only the main content scope feeds season markers; a
+        // related-posts carousel outside .entry-content must never split.
+        val markerByAnchor = java.util.IdentityHashMap<Element, Int>()
+        if (!grouped) {
+            val root = doc.selectFirst(".entry-content") ?: doc.body() ?: doc
+            val anchorSet = java.util.Collections.newSetFromMap(java.util.IdentityHashMap<Element, Boolean>())
+            kept.forEach { pair -> pair.first.ctx.element?.let { anchorSet.add(it) } }
+            val markerRe = Regex("""(?i)^\s*SEASON\s*(\d{1,2})\s*$""")
+            var currentSeason: Int? = null
+            for (el in root.getAllElements()) {
+                val txt = el.text().trim()
+                if (txt.length in 6..28) {
+                    val m = markerRe.find(txt)
+                    if (m != null) {
+                        m.groupValues.getOrNull(1)?.toIntOrNull()?.let { currentSeason = it }
+                    }
+                }
+                if (currentSeason != null && el.tagName().equals("a", ignoreCase = true) &&
+                    anchorSet.contains(el)
+                ) {
+                    markerByAnchor[el] = currentSeason!!
+                }
+            }
+        }
+
+        // Page declaration (3a): "Episode N Added/Fixed" => S(pin)E1..EN,
+        // "Episode X-Y Added/Fixed" => S(pin)EX..EY. Only when the anchor
+        // count matches the declared count - otherwise it is a changelog.
+        val declaration = if (!grouped && pagePin != null) {
+            val declRe = Regex("""(?i)episode\s+(\d{1,4})(?:\s*[-\u2013\u2014]\s*(\d{1,4}))?\s+(?:added|fixed)""")
+            val m = declRe.find(pageTitleRaw)
+            // "Episode N Added" declares 1..N (a count), NOT the single
+            // episode N; "Episode X-Y Added" declares X..Y. Treating N as a
+            // range start rejected the Ace page (2 anchors vs 1 expected).
+            val declaredEnd = m?.groupValues?.getOrNull(2)?.toIntOrNull()
+                ?: m?.groupValues?.getOrNull(1)?.toIntOrNull()
+            val declaredStart = if (declaredEnd != null && !m?.groupValues?.getOrNull(2).isNullOrBlank()) {
+                m?.groupValues?.getOrNull(1)?.toIntOrNull()
+            } else 1
+            if (declaredStart != null && declaredEnd != null && declaredEnd >= declaredStart) {
+                declaredStart to declaredEnd
+            } else null
+        } else null
+        val declarationMatches = declaration != null && kept.isNotEmpty() &&
+            (declaration.second - declaration.first + 1) == kept.size
+
+        data class SeasonToken(
+            val season: Int?,
+            val episode: Int?,
+            val raw: String,
+            val style: String
+        )
+
+        fun seasonToken(href: String, text: String): SeasonToken {
+            for (target in listOf(href, text)) {
+                val m = SXX_EYY_TOKEN.find(target) ?: continue
+                val raw = m.value
+                val style = raw.any { it.isLowerCase() }.toString() + "|" +
+                    raw.any { it.isUpperCase() }.toString() + "|" +
+                    raw.filterNot { it.isLetterOrDigit() }
+                return SeasonToken(
+                    season = m.groupValues.getOrNull(1)?.toIntOrNull(),
+                    episode = m.groupValues.getOrNull(2)?.toIntOrNull(),
+                    raw = raw,
+                    style = style
+                )
+            }
+            val eRe = Regex("""(?i)(?:^|[^a-z0-9])e(?:p|pisode)?[\s._-]*(\d{1,4})(?![a-z0-9])""")
+            for (target in listOf(href.substringAfterLast('/').substringBefore('?'), text)) {
+                val m = eRe.find(target) ?: continue
+                val ep = m.groupValues.getOrNull(1)?.toIntOrNull() ?: continue
+                return SeasonToken(null, ep, m.value, "")
+            }
+            return SeasonToken(null, null, "", "")
+        }
+
+        val tokens = kept.map { seasonToken(it.first.ctx.href, it.first.ctx.text) }
+        val pinSeasonEpisodes = tokens.asSequence()
+            .filter { (it.season ?: pagePin) == pagePin && it.episode != null }
+            .mapNotNull { it.episode }
+            .toSet()
+        val tokenSeasons = tokens.mapNotNull { it.season }
+        val dominantSeason = tokenSeasons.groupingBy { it }.eachCount().entries
+            .sortedWith(compareByDescending<Map.Entry<Int, Int>> { it.value }.thenByDescending { it.key == pagePin })
+            .firstOrNull()?.key
+        val majorityStyle = tokens.filter { it.season != null }
+            .groupingBy { it.style }.eachCount().maxByOrNull { it.value }?.key
+        val outlierIndices = tokens.indices.filter { idx ->
+            val t = tokens[idx]
+            pagePin != null && t.season != null && t.season != pagePin
+        }
+        val sparseOutliers = outlierIndices.sorted().zipWithNext().all { (a, b) -> b - a > 1 }
+        val allowedOutlierCount = maxOf(2, kotlin.math.ceil(kept.size * 0.2).toInt())
+        val outlierEpisodesMissing = outlierIndices.all { idx ->
+            val ep = tokens[idx].episode
+            ep != null && pinSeasonEpisodes.isNotEmpty() && ep !in pinSeasonEpisodes
+        }
+        val outlierStylesDiffer = outlierIndices.all { idx ->
+            val style = tokens[idx].style
+            style.isNotBlank() && majorityStyle != null && style != majorityStyle
+        }
+        // 3b fallback: pin wins a token outlier ONLY with all evidence present.
+        val remapOutliers = !grouped && markerByAnchor.isEmpty() && titleRangeMatch == null &&
+            !titleNamesOtherSeason && pagePin != null && dominantSeason == pagePin &&
+            outlierIndices.isNotEmpty() && outlierIndices.size <= allowedOutlierCount &&
+            sparseOutliers && outlierEpisodesMissing && outlierStylesDiffer
+
+        fun nearestPrecedingSeason(index: Int): Int? {
+            for (i in index - 1 downTo 0) tokens[i].season?.let { return it }
+            return null
+        }
+
+        fun sameTitle(a: String, b: String): Boolean =
+            a.trim().equals(b.trim(), ignoreCase = true)
+
         val builtList = mutableListOf<EpisodeItem>()
-        var positional = 0
-        var lastSeason: Int? = null
-        var posInSeason = 0
-        kept.forEach { (col, nums) ->
-            val ctx = col.ctx
-            val season = col.season
-            if (season != lastSeason) { lastSeason = season; posInSeason = 0 }
-            if (nums.isEmpty()) {
-                positional += 1
-                val position = if (season != null) { posInSeason += 1; posInSeason } else positional
-                val posNum = deriveNum(ctx, position)
-                // Slug-pinned season for flat pipelines: the post is one
-                // season that renumbers 1..N, so its position lands in the
-                // season*100 chip space (only for season >= 2 — see urlSeason).
-                // Grouped pages already carry the section season, so the pin
-                // never compounds there.
-                var num = posNum
-                var pinnedLabelNum = posNum
-                if (!grouped && effectiveUrlSeason != null && posNum in 1..99) {
-                    var candidate = posNum
-                    while (candidate in 1..99 &&
-                        usedKeys.contains(effectiveUrlSeason * 100 + candidate)
-                    ) candidate++
-                    if (candidate in 1..99) {
-                        num = effectiveUrlSeason * 100 + candidate
-                        pinnedLabelNum = candidate
+        val seasonPositions = HashMap<Int, Int>()
+        kept.forEachIndexed { index, pair ->
+            val ctx = pair.first.ctx
+            val legacyNums = pair.second
+            val token = tokens[index]
+            val sectionSeason = pair.first.season
+            var season = when {
+                grouped -> sectionSeason ?: pagePin ?: 1
+                markerByAnchor.containsKey(ctx.element) -> markerByAnchor[ctx.element]!!
+                declarationMatches -> pagePin!!
+                token.season != null && !(remapOutliers && index in outlierIndices) -> token.season
+                else -> pagePin ?: nearestPrecedingSeason(index) ?: dominantSeason ?: 1
+            }
+            if (season <= 0) season = 1
+            val position = (seasonPositions[season] ?: 0) + 1
+            seasonPositions[season] = position
+
+            // Combined posts (one anchor, several real episodes) expand from
+            // the parsed legacy numbers; a single anchor uses its own token.
+            val episodes: List<Int> = when {
+                declarationMatches -> listOf(declaration!!.first + index)
+                legacyNums.size > 1 -> legacyNums.map { n ->
+                    when {
+                        n >= 1000 -> n % 1000
+                        n >= 100 -> n % 100
+                        else -> n
                     }
+                }.filter { it > 0 }
+                else -> listOf(token.episode ?: deriveNum(ctx, position).coerceAtLeast(1))
+            }
+            episodes.forEach { rawEpisode ->
+                val episode = rawEpisode.coerceAtLeast(1)
+                // A grouped page whose section header carries no parseable
+                // season keeps its plain chain label (the season identity
+                // still defaults to 1 for the codec).
+                val labelSeason = if (grouped) sectionSeason else season
+                var title = seasonLabel(ctx, episode, labelSeason, labelTemplate)
+                if (urlSeasonTemplate.isNotBlank() && !grouped) {
+                    title = fillSeasonTemplate(urlSeasonTemplate, season, episode, title)
                 }
-                // Device bug class 2026-09-13 (Rocks/Nkiri/DramaKey): an
-                // unmarked anchor whose text says "SERVER n"/"PART n" is a
-                // mirror or split of ONE file, not a positional episode.
-                // Checked code-side so every playbook site inherits it
-                // without numbering-chain gymnastics.
-                val mirrorTitle = DownloadLinkLabels.serverOrPart(
-                    ctx.text, ctx.href.substringAfterLast('/').substringBefore('?')
-                )
-                val title = mirrorTitle ?: if (num != posNum && urlSeasonTemplate.isNotBlank()) {
-                    // Pinned slug season overrides the flat label so the
-                    // row reads "S02 E05" like the grouped dramakey pages.
-                    fillSeasonTemplate(urlSeasonTemplate, effectiveUrlSeason, pinnedLabelNum, labelFor(ctx, posNum))
-                } else seasonLabel(ctx, posNum, season, labelTemplate)
-                val built = EpisodeItem(
-                    title = title,
-                    url = ctx.href,
-                    episodeNum = if (season != null) seasonCode(season, num) else num,
-                    site = site
-                )
-                usedKeys.add(built.episodeNum)
-                builtList.add(built)
-            } else {
-                // An expanded post's heading/label describes the whole post
-                // ("Episode 17 & 18"); only the counter gives each expanded
-                // item its own correct title. Advance posInSeason to the HIGHEST
-                // episode the post consumed, not by 1 — otherwise the next
-                // position-based anchor reuses a number already emitted as a
-                // token (Ep 2&3 -> 102,103 then posInSeason=1 -> next anchor
-                // position 2 -> 1*100+2 = 102 again -> the engine re-resolves
-                // the wrong episode).
-                if (season != null) posInSeason = maxOf(posInSeason + 1, nums.maxOrNull() ?: posInSeason)
-                nums.forEach { n ->
-                    val base = if (nums.size > 1) "Episode $n" else labelFor(ctx, n)
-                    val seasonCoded = if (!grouped && effectiveUrlSeason != null && n in 1..99) {
-                        // Plain number (an E-token or heading number without a
-                        // season) under a season-pinned post -> season*100 key.
-                        effectiveUrlSeason * 100 + n
-                    } else n
-                    val coded = seasonCode(season, seasonCoded)
-                    val title = when {
-                        seasonCoded != n && urlSeasonTemplate.isNotBlank() ->
-                            fillSeasonTemplate(urlSeasonTemplate, effectiveUrlSeason, n, base)
-                        nums.size > 1 || season == null || labelTemplate.isBlank() -> base
-                        else -> fillSeasonTemplate(labelTemplate, season, n, base)
-                    }
-                    val built = EpisodeItem(title = title, url = ctx.href, episodeNum = coded, site = site)
-                    usedKeys.add(coded)
-                    builtList.add(built)
+                val seasonScoped = (grouped && sectionSeason != null) || pagePin != null ||
+                    markerByAnchor.isNotEmpty() || tokens.any { it.season != null }
+                if (seasonScoped && !Regex("""(?i)s\d{1,2}\s*e\d{1,3}""").containsMatchIn(title)) {
+                    title = "S%02d E%02d".format(season, episode)
                 }
+                // Transparency: a remapped/overridden token keeps its raw text.
+                val tokenContradicts = token.raw.isNotBlank() && (
+                    (token.season != null && token.season != season) ||
+                        (token.episode != null && token.episode != episode)
+                )
+                if (tokenContradicts && !title.contains(token.raw, ignoreCase = true)) {
+                    title = "$title (file labeled ${token.raw})"
+                }
+                val duplicateTitle = builtList.any {
+                    it.season == season && it.episode == episode && sameTitle(it.title, title)
+                }
+                if (duplicateTitle) return@forEach
+                builtList.add(
+                    EpisodeItem(
+                        title = title,
+                        url = ctx.href,
+                        episodeNum = com.anonrode.downloader.util.SeasonEpisode.encode(season, episode),
+                        site = site,
+                        season = season,
+                        episode = episode
+                    )
+                )
             }
         }
         var built: List<EpisodeItem> = builtList
-
-        // ---- uniqueness safety net (grouped pages, and season-pinned pages)
-        // The engine re-resolves an episode by firstOrNull { episodeNum == … }
-        // — duplicates silently pick the wrong one. seasonCode guarantees
-        // uniqueness while nums stay <=99 and counters stay aligned, but a
-        // pathological page (100+ episodes in one season, or a token that
-        // collides across seasons because `num !in 1..99` falls back to the
-        // plain num) can still emit a duplicate. Make every grouped or
-        // season-pinned list provably unique: re-stamp collisions above the
-        // list maximum. The item KEEPS its correct title (labels were already
-        // built from the true numbers); only the internal re-resolve key moves.
-        if (grouped || effectiveUrlSeason != null) {
-            val seen = HashSet<Int>(built.size)
-            var overflow = (built.maxOfOrNull { it.episodeNum } ?: 0) + 1
-            built = built.map { e ->
-                if (seen.add(e.episodeNum)) e else e.copy(episodeNum = overflow++)
-            }
-        }
 
         // ---- ordering
         val sortBy = items.optString("sortBy", "none")
         if (sortBy == "captures") {
             built = kept
-                .mapIndexed { idx, (anchorCtx, _) -> idx to anchorCtx.ctx }
+                .mapIndexed { idx, pair -> idx to pair.first.ctx }
                 .sortedWith(
                     compareBy(
                         { numericCapture(it.second.captures, 0) },
@@ -1568,25 +1901,22 @@ object RulesPipeline {
                     )
                 )
                 .mapIndexed { newIdx, (_, ctx) ->
-                    val num = newIdx + 1
-                    if (!grouped && effectiveUrlSeason != null) {
-                        // asianc-class captures pages under a season slug: the
-                        // sort order is the numbering, so the pin applies to the
-                        // sorted position exactly like the positional path.
-                        EpisodeItem(
-                            title = if (urlSeasonTemplate.isNotBlank())
-                                fillSeasonTemplate(urlSeasonTemplate, effectiveUrlSeason, num, labelFor(ctx, num))
-                            else labelFor(ctx, num),
-                            url = ctx.href,
-                            episodeNum = seasonCode(effectiveUrlSeason, num),
-                            site = site
-                        )
-                    } else {
-                        EpisodeItem(title = labelFor(ctx, num), url = ctx.href, episodeNum = num, site = site)
-                    }
+                    val episode = newIdx + 1
+                    val season = effectiveUrlSeason ?: pagePin ?: 1
+                    EpisodeItem(
+                        title = if (urlSeasonTemplate.isNotBlank())
+                            fillSeasonTemplate(urlSeasonTemplate, season, episode, labelFor(ctx, episode))
+                        else if (pagePin != null) "S%02d E%02d".format(season, episode)
+                        else labelFor(ctx, episode),
+                        url = ctx.href,
+                        episodeNum = com.anonrode.downloader.util.SeasonEpisode.encode(season, episode),
+                        site = site,
+                        season = season,
+                        episode = episode
+                    )
                 }
         } else if (sortByNumber) {
-            built = built.sortedBy { it.episodeNum }
+            built = built.sortedBy { com.anonrode.downloader.util.SeasonEpisode.sortKey(it.season, it.episode) }
         }
 
         // ---- single-episode fallback
@@ -1603,7 +1933,9 @@ object RulesPipeline {
                             title = fb.optString("title").ifBlank { "Episode 1" },
                             url = showUrl,
                             episodeNum = 1,
-                            site = site
+                            site = site,
+                            season = 1,
+                            episode = 1
                         )
                     )
                 }
@@ -1724,7 +2056,7 @@ object RulesPipeline {
                             // show than the page, so bail (old behavior).
                             s != null && s in 2..99 && allowTokenSeasons -> {
                                 val ep = groups[1].toIntOrNull()
-                                if (ep != null) s * 100 + ep else null
+                                if (ep != null) com.anonrode.downloader.util.SeasonEpisode.encode(s, ep) else null
                             }
                             else -> null
                         }
@@ -1732,7 +2064,8 @@ object RulesPipeline {
                         groups.lastOrNull()?.toIntOrNull()
                     }
                     val n = seasonEp
-                    if (n != null && n in 1..2000) numbers.add(n)
+                    // 1000-base season codes are legal up to season 99 x 999.
+                    if (n != null && n in 1..99_999) numbers.add(n)
                 }
             }
         }
@@ -1799,13 +2132,6 @@ object RulesPipeline {
         val raw = docField(seasonSpec, section, vars) ?: return null
         return Regex("""\d+""").find(raw)?.value?.toIntOrNull()?.takeIf { it in 1..99 }
     }
-
-    /** The codebase's episodeNum convention (EpisodeDrawer decodes it, the
-     *  engine's re-resolve requires uniqueness): season*100 + number. Falls
-     *  back to the plain number when there is no season or the number would
-     *  overflow the hundreds slot. */
-    private fun seasonCode(season: Int?, num: Int): Int =
-        if (season == null || num !in 1..99) num else season * 100 + num
 
     /** Grouped-label template: {season}/{num} support the same %d format
      *  knobs as fillCaptureTemplate; {label} embeds the labelChain result.
@@ -1978,7 +2304,13 @@ object RulesPipeline {
         for (alt in chain.split('|')) {
             var node: Any? = item
             for (seg in alt.split('.')) {
-                node = (node as? JSONObject)?.opt(seg)
+                // Array indexes in a path ("_embedded.wp:featuredmedia.0.source_url")
+                // are how the WordPress REST response exposes the featured media.
+                node = when (val current = node) {
+                    is JSONObject -> current.opt(seg)
+                    is JSONArray -> seg.toIntOrNull()?.let { idx -> current.opt(idx) }
+                    else -> null
+                }
             }
             if (node == null || node == JSONObject.NULL) continue
             var str = node.toString()

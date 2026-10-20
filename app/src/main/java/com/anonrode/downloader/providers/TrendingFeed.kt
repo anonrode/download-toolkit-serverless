@@ -31,6 +31,9 @@ import org.jsoup.Jsoup
 object TrendingFeed {
 
     private const val PER_SITE_LIMIT = 8
+
+    /** Sites whose cards this feed merges, in slot order. */
+    internal val FEED_SITES = listOf("naijavault", "nkiri", "naijaprey", "9jarocks")
     private const val ROW_LIMIT = 16
     private const val TIMEOUT_MS = 7000L
 
@@ -81,10 +84,10 @@ object TrendingFeed {
         val npFeedPath = if (page > 1) "/feed/?paged=$page" else "/feed/"
         val rocksFeedPath = if (page > 1) "/feed/?paged=$page" else "/feed/"
         listOf(
-            async { fetchSlot(0) { fetchWpRest("naijavault", page = page, filterExplicit = filterExplicit) } },
-            async { fetchSlot(1) { fetchWpRest("nkiri", page = page, filterExplicit = filterExplicit) } },
-            async { fetchSlot(2) { fetchRss("naijaprey", npFeedPath, filterExplicit = filterExplicit) } },
-            async { fetchSlot(3) { fetchRss("9jarocks", rocksFeedPath, filterExplicit = filterExplicit) } }
+            async { fetchSlot(0) { if (!SiteGate.isEnabled("naijavault")) emptyList() else fetchWpRest("naijavault", page = page, filterExplicit = filterExplicit) } },
+            async { fetchSlot(1) { if (!SiteGate.isEnabled("nkiri")) emptyList() else fetchWpRest("nkiri", page = page, filterExplicit = filterExplicit) } },
+            async { fetchSlot(2) { if (!SiteGate.isEnabled("naijaprey")) emptyList() else fetchRss("naijaprey", npFeedPath, filterExplicit = filterExplicit) } },
+            async { fetchSlot(3) { if (!SiteGate.isEnabled("9jarocks")) emptyList() else fetchRss("9jarocks", rocksFeedPath, filterExplicit = filterExplicit) } }
         ).awaitAll()
         val perSite = slots.map { it ?: emptyList() }
 
@@ -178,9 +181,10 @@ object TrendingFeed {
         confirmTerms: Set<String>? = null,
         filterExplicit: Boolean = true
     ): List<ShowCard> {
+        if (!SiteGate.isEnabled(site)) return emptyList()
         val url = wpRestUrl(base, query, limit, page, extraParams) ?: return emptyList()
         val json = HttpClient.getText(url, referer = "${base.trimEnd('/')}/", tag = tag) ?: return emptyList()
-        return gateWpRest(parseWpRestPosts(json, site), confirmTerms, filterExplicit = filterExplicit)
+        return PosterBackfill.sanitize(gateWpRest(parseWpRestPosts(json, site), confirmTerms, filterExplicit = filterExplicit))
     }
 
     /** Pure endpoint assembly — shape live-verified 2026-09-14 on nkiri.top
@@ -290,10 +294,11 @@ object TrendingFeed {
         confirmTerms: Set<String>? = null,
         filterExplicit: Boolean = true
     ): List<ShowCard> {
+        if (!SiteGate.isEnabled(site)) return emptyList()
         val base = DynamicRulesManager.getBaseUrl(site).trimEnd('/')
         if (base.isBlank()) return emptyList()
         val xml = HttpClient.getText("$base$path", referer = "$base/", tag = "trending") ?: return emptyList()
-        return parseRssItems(xml, site, base, confirmTerms, filterExplicit = filterExplicit)
+        return PosterBackfill.sanitize(parseRssItems(xml, site, base, confirmTerms, filterExplicit = filterExplicit))
     }
 
     /** Pure RSS parse (JVM-testable): items → cards, poster = first <img> in
@@ -422,13 +427,14 @@ object TrendingFeed {
     // body-mention noise is structurally impossible: results are title matches.
 
     internal suspend fun fetchApiSearch(site: String, term: String, limit: Int): List<ShowCard> {
+        if (!SiteGate.isEnabled(site)) return emptyList()
         val base = DynamicRulesManager.getBaseUrl(site).trimEnd('/')
         if (base.isBlank()) return emptyList()
         val enc = java.net.URLEncoder.encode(term, "UTF-8")
         val url = if (site == "nepu") "$base/api/search?q=$enc" else "$base/api?a=search&keyword=$enc"
         val json = HttpClient.getText(url, referer = "$base/", tag = "trending") ?: return emptyList()
         val cards = if (site == "nepu") parseNepuResults(json, site, base) else parseAsiancResults(json, site, base)
-        return (if (site == "nepu") NepuProvider.filterAvailable(cards) else cards).take(limit)
+        return PosterBackfill.sanitize((if (site == "nepu") NepuProvider.filterAvailable(cards) else cards).take(limit))
     }
 
     /** nepu: TMDB-proxy — {results:[{id, media_type, title|name, poster_path}]}
@@ -506,6 +512,7 @@ object TrendingFeed {
         query: String,
         filterExplicit: Boolean = true
     ): String {
+        if (!SiteGate.isEnabled(site)) return ""
         val base = DynamicRulesManager.getBaseUrl(site)
         val limit = if (filterExplicit) 3 else 1
         val url = wpRestLiteUrl(base, query, limit) ?: return ""
@@ -523,5 +530,163 @@ object TrendingFeed {
             }
             ""
         } catch (_: Exception) { "" }
+    }
+}
+
+/**
+ * Cross-provider poster guardrail (rule 15/16: compiled extraction is the
+ * source of truth; a broken OTA payload may degrade freshness, never
+ * correctness).
+ *
+ * Every provider that lets an OTA pipeline answer first calls
+ * [backfill] on the pipeline result:
+ *  1. [sanitize] blanks a poster that is provably not an image (locker file,
+ *     media container, archive, HTML/PHP endpoint, data: URI). This is the
+ *     9jaRocks regression — the payload bound `attr:enclosure:url`, whose
+ *     first enclosure is the MKV locker file, so Coil fetched a video and
+ *     painted a blank tile.
+ *  2. [backfill] joins the missing rows against the provider's COMPILED
+ *     extractor by URL key, so NKiri / 9jaRocks / NaijaVault cards keep the
+ *     artwork the compiled path has always produced.
+ *
+ * Lookups are URL-keyed and cached process-wide (6 h positive, 30 min
+ * negative), so repeated keystrokes never re-fetch the same search.
+ */
+object PosterBackfill {
+
+    private const val MAX_ENTRIES = 512
+    private const val POSITIVE_TTL_MS = 6 * 60 * 60 * 1000L
+    private const val NEGATIVE_TTL_MS = 30 * 60 * 1000L
+
+    private data class Entry(val url: String, val expiresAtMs: Long)
+
+    private val lock = Any()
+    private val cache = object : LinkedHashMap<String, Entry>(MAX_ENTRIES, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Entry>?): Boolean =
+            size > MAX_ENTRIES
+    }
+
+    /** Definitive non-image targets: media containers, archives, page endpoints. */
+    private val NON_IMAGE_EXT = Regex(
+        """(?i)\.(?:mkv|mp4|m4v|avi|webm|mov|flv|ts|m3u8|mp3|m4a|aac|wav|flac|ogg|opus|zip|rar|7z|torrent|srt|vtt|ass|ssa|html?|php)(?:[?#].*)?$"""
+    )
+
+    /** Locker/document hosts: a URL here is a download page, never artwork. */
+    private val NON_IMAGE_HOST = Regex(
+        """(?i)https?://(?:[^/]*\.)?(?:loadedfiles|downloadwella|wetafiles|waffi|vikingfile|lulacloud|kissorgrab|wildshare|pixeldrain|nkiserv|lightdl|np-downloader)\.[^/]+/"""
+    )
+
+    private val SCHEME_HOST = Regex("""^([a-zA-Z]+://[^/]+)(/.*)?$""")
+
+    /**
+     * True only for an http(s) URL that is not a known file/page endpoint.
+     * Unknown hosts without a damning extension are accepted: a blank tile is
+     * worse than a URL Coil may still load, and false "non-image" verdicts
+     * would discard real CDN artwork.
+     */
+    fun isUsablePoster(url: String): Boolean {
+        val u = url.trim()
+        if (u.isEmpty()) return false
+        if (!u.startsWith("http://", ignoreCase = true) && !u.startsWith("https://", ignoreCase = true)) return false
+        if (u.startsWith("data:", ignoreCase = true) || u.startsWith("about:", ignoreCase = true)) return false
+        if (NON_IMAGE_EXT.containsMatchIn(u)) return false
+        if (NON_IMAGE_HOST.containsMatchIn(u)) return false
+        return true
+    }
+
+    /** URL-keyed join key: fragment-free, trailing-slash-free, host-lowercased. */
+    fun normalizeKey(url: String): String {
+        val clean = url.trim().substringBefore('#')
+        if (clean.isEmpty()) return ""
+        val m = SCHEME_HOST.find(clean)
+        val normalized = if (m != null) m.groupValues[1].lowercase() + (m.groupValues[2]) else clean
+        return normalized.trimEnd('/')
+    }
+
+    /** Drops provably non-image posters so no blank tile reaches the grid. */
+    fun sanitize(cards: List<ShowCard>): List<ShowCard> {
+        if (cards.isEmpty()) return cards
+        var changed = false
+        val out = cards.map { card ->
+            if (card.posterUrl.isNotBlank() && !isUsablePoster(card.posterUrl)) {
+                changed = true
+                card.copy(posterUrl = "")
+            } else card
+        }
+        return if (changed) out else cards
+    }
+
+    /** Remembers a compiled lookup result (blank = negative cache). */
+    fun remember(site: String, url: String, posterUrl: String) {
+        val key = site.trim().lowercase() + "|" + normalizeKey(url)
+        if (key.endsWith("|")) return
+        val clean = if (isUsablePoster(posterUrl)) posterUrl.trim() else ""
+        synchronized(lock) {
+            cache[key] = Entry(clean, System.currentTimeMillis() + if (clean.isEmpty()) NEGATIVE_TTL_MS else POSITIVE_TTL_MS)
+        }
+    }
+
+    fun cached(site: String, url: String): String? {
+        val key = site.trim().lowercase() + "|" + normalizeKey(url)
+        synchronized(lock) {
+            val entry = cache[key] ?: return null
+            if (entry.expiresAtMs < System.currentTimeMillis()) {
+                cache.remove(key)
+                return null
+            }
+            return entry.url
+        }
+    }
+
+    internal fun clearForTest() = synchronized(lock) { cache.clear() }
+
+    /**
+     * Backfills unusable posters from a compiled extractor.
+     *
+     * [lookup] receives the cards that still need artwork (same site, usually
+     * one search's worth) and returns `normalizeKey(url) -> posterUrl` for
+     * whatever its compiled path found. One compiled request per caller, and
+     * only when at least one card needs it; every returned URL is cached, so
+     * a repeated search costs zero network.
+     */
+    suspend fun backfill(
+        cards: List<ShowCard>,
+        lookup: suspend (List<ShowCard>) -> Map<String, String>
+    ): List<ShowCard> {
+        val base = sanitize(cards)
+        if (base.isEmpty()) return base
+        val resolved = HashMap<String, String>()
+        val missing = mutableListOf<ShowCard>()
+        for (card in base) {
+            if (card.posterUrl.isNotBlank()) continue
+            val hit = cached(card.site, card.url)
+            if (hit != null) {
+                if (hit.isNotBlank()) resolved[normalizeKey(card.url)] = hit
+            } else {
+                missing.add(card)
+            }
+        }
+        if (missing.isNotEmpty()) {
+            val found = try {
+                lookup(missing)
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                emptyMap()
+            }
+            for (card in missing) {
+                val key = normalizeKey(card.url)
+                val poster = found[key].orEmpty()
+                remember(card.site, card.url, poster)
+                if (poster.isNotBlank()) resolved[key] = poster
+            }
+        }
+        if (resolved.isEmpty()) return base
+        return base.map { card ->
+            if (card.posterUrl.isNotBlank()) card else {
+                val poster = resolved[normalizeKey(card.url)] ?: return@map card
+                card.copy(posterUrl = poster)
+            }
+        }
     }
 }

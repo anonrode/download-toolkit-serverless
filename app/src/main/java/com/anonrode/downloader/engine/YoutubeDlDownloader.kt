@@ -62,6 +62,33 @@ object YoutubeDlDownloader {
             message.contains("read interrupted by close() on another thread")
     }
 
+    /** Every ladder run ended in a native-teardown wrapper (not a platform
+     *  verdict). User-facing text must name the stall, never the class. */
+    internal fun isAllCanceledLadder(errors: String, attempts: Int): Boolean {
+        if (attempts <= 0) return false
+        val lines = errors.lineSequence().map { it.trim() }.filter { it.startsWith("run ") }.toList()
+        if (lines.isEmpty()) return false
+        return lines.all { line ->
+            val detail = line.substringAfter(':').trim().lowercase()
+            detail.contains("canceledexception") || detail.contains("backendinterrupted") ||
+                detail.contains("interrupted")
+        }
+    }
+
+    /** yt-dlp's empty `ERROR: ` aggregate (the 87.7 MiB park-loop class):
+     *  every run line carries no reason text. */
+    internal fun isEmptyYtDlpError(errors: String): Boolean {
+        val text = errors.trim()
+        if (text.isBlank()) return true
+        val lines = text.lineSequence().map { it.trim() }.filter { it.isNotBlank() }.toList()
+        if (lines.isEmpty()) return true
+        return lines.all { line ->
+            val detail = line.substringAfter(':', "").trim()
+            detail.isBlank() || detail.equals("ERROR", ignoreCase = true) ||
+                detail.equals("ERROR:", ignoreCase = true)
+        }
+    }
+
     /**
      * Terminal yt-dlp errors: the extractor answered with a condition that
      * retrying IDENTICAL arguments cannot change. Substring matches, all
@@ -201,6 +228,8 @@ object YoutubeDlDownloader {
         estimatedTotal: Long = 0L
     ): File? {
         if (!targetDir.exists()) targetDir.mkdirs()
+        // A kill marker from a PREVIOUS run must never abort this fresh one.
+        killRequested.remove(taskId)
 
         val isMagnet = sourceUrl.startsWith("magnet:", ignoreCase = true)
         // When a rewritten master file is supplied, yt-dlp consumes that file
@@ -678,8 +707,18 @@ object YoutubeDlDownloader {
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (e: Exception) {
-                if (isNativeBackendInterruption(e) && !coroutineContext.isActive) {
-                    throw BackendInterruptedException("yt-dlp backend interrupted; preserving partial data")
+                // Watchdog/engine teardown kills the NATIVE process while the
+                // coroutine is still active, so `!isActive` alone missed it
+                // and the ladder re-ran the identical doomed attempt 3x (24
+                // CanceledException lines in the 2026-10-20 log). The explicit
+                // kill marker makes a teardown terminal for THIS run: abort
+                // the ladder so the engine can re-resolve a fresh URL instead
+                // of replaying the same dead one.
+                if (isNativeBackendInterruption(e) && (killRequested.containsKey(taskId) || !coroutineContext.isActive)) {
+                    throw BackendInterruptedException(
+                        "The source server stopped sending video data (the stream stalled). " +
+                            "Tap retry to fetch a fresh link."
+                    )
                 }
                 errors.append("run ").append(attempts).append(": ").append(e.message ?: e.javaClass.simpleName).append('\n')
                 lastErrorMessage = e.message ?: e.javaClass.simpleName
@@ -847,6 +886,14 @@ object YoutubeDlDownloader {
                 // Bot-check wall that player-client rotation could not clear
                 // this session. Honest + actionable, not a generic ladder dump.
                 "YouTube/Google flagged this session for sign-in (bot-check) even across player-client rotation. A manual retry in a little while usually clears it as the session rotates. ${errors.toString().trim().lineSequence().lastOrNull()?.take(200) ?: ""}"
+            } else if (produced == null && isAllCanceledLadder(errors.toString(), attempts)) {
+                // The "YouTube exception" the user saw: a native teardown per
+                // attempt surfaced as CanceledException. Say what actually
+                // happened — the source stopped streaming — never the raw
+                // wrapper class.
+                "The source server stopped sending video data (the stream stalled) and the link was killed. Tap retry to fetch a fresh link."
+            } else if (produced == null && isEmptyYtDlpError(errors.toString())) {
+                "The source server returned an empty response instead of a video. Tap retry to fetch a fresh link."
             } else {
                 "yt-dlp failed after $attempts attempt(s): ${errors.toString().trim()}"
             }
@@ -985,8 +1032,21 @@ object YoutubeDlDownloader {
 
     private val activeNativeProcesses = java.util.concurrent.ConcurrentHashMap<String, Process>()
 
+    /** taskId -> kill timestamp. Set by [killProcess] (watchdog/pause/engine
+     *  teardown) and cleared when a NEW download run starts, so an in-flight
+     *  attempt can distinguish "our process was torn down on purpose" from a
+     *  real extractor failure instead of retrying the same dead URL. */
+    private val killRequested = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    internal fun isKillRequested(taskId: String): Boolean = killRequested.containsKey(taskId)
+
     fun killProcess(taskId: String) {
         com.anonrode.downloader.util.DebugLog.backend("task=$taskId killProcess (native teardown)")
+        killRequested[taskId] = System.currentTimeMillis()
+        if (killRequested.size > 64) {
+            val cutoff = System.currentTimeMillis() - 10 * 60_000L
+            killRequested.entries.removeIf { it.value < cutoff }
+        }
         try {
             YoutubeDL.getInstance().destroyProcessById(taskId)
         } catch (_: Exception) {}

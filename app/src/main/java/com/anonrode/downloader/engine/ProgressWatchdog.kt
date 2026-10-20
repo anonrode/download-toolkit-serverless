@@ -131,8 +131,15 @@ class ProgressWatchdog(
                 windowStartDisk = disk
                 windowStartParsed = parsed
                 windowStartTime = now
-                if (windowBps >= bestWindowBps * 0.5 || bestWindowBps < 1.0 * 1024 * 1024) {
+                // Soft reset, never a hard zero: a download that alternates
+                // short bursts with stalls must not restart the "kill #1"
+                // counter forever (the DEV2 63-kill false-positive loop).
+                // Only a genuinely healthy window (>= 64 KiB/s AND at least
+                // half the best window) clears the whole count.
+                if (windowBps >= 64 * 1024 && windowBps >= bestWindowBps * 0.5) {
                     stallKills = 0
+                } else if (stallKills > 0) {
+                    stallKills--
                 }
             }
 
@@ -140,7 +147,13 @@ class ProgressWatchdog(
             val magnetTask = streamUrl.startsWith("magnet:", ignoreCase = true)
             val attemptBoundary = if (magnetTask) 90_000L else maxOf(stallKills * stallTimeoutMs * 2, stallTimeoutMs)
             val stalledLong = (now - lastActivity) > stallTimeoutMs
-            val isStalledOrCrawling = stalledLong || crawlStalled
+            // A crawl verdict additionally requires NO growth in the last
+            // half-timeout: the old code killed active transfers whose 60s
+            // window total stayed under the floor even though bytes were
+            // arriving every poll (server evidence: idle=0s crawl=true
+            // best=940KiB/s x63). Bytes moving = not a stall.
+            val recentlyActive = (now - lastActivity) <= (stallTimeoutMs / 2).coerceAtLeast(1_000L)
+            val isStalledOrCrawling = stalledLong || (crawlStalled && !recentlyActive)
 
             if (!magnetTask &&
                 !throttleGrace &&

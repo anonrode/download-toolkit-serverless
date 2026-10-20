@@ -206,6 +206,9 @@ object ResultVerifier {
                 // skipped for site-fairness must stay eligible for pass 1
                 // (a separate "considered" set once poisoned every backfill).
                 if (key.isEmpty() || chosen.contains(key)) continue
+                // OTA kill switch: never spend verify budget on a site the
+                // operator disabled (no new work for that site).
+                if (!ProviderRegistry.isSiteEnabled(card.site)) continue
                 if (pass == 0 && !seenSites.add(card.site)) continue
                 if (skip(card)) continue
                 chosen.add(key)

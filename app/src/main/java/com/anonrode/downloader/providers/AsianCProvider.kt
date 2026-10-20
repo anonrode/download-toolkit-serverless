@@ -22,10 +22,23 @@ object AsianCProvider : SiteProvider {
     override val mainUrl: String get() = com.anonrode.downloader.data.rules.DynamicRulesManager.getBaseUrl(name)
 
     override suspend fun search(query: String): List<ShowCard> {
+        if (!SiteGate.isEnabled(name)) return emptyList()
         com.anonrode.downloader.data.rules.DynamicRulesManager.getPipeline(name)?.search?.let { pl ->
             val results = RulesPipeline.runSearch(name, pl, query)
-            if (results.isNotEmpty()) return results
+            if (results.isNotEmpty()) {
+                return PosterBackfill.backfill(PosterBackfill.sanitize(results)) { missing ->
+                    if (missing.isEmpty()) emptyMap()
+                    else searchCompiled(query).mapNotNull { card ->
+                        if (card.posterUrl.isBlank()) null
+                        else PosterBackfill.normalizeKey(card.url) to card.posterUrl
+                    }.toMap()
+                }
+            }
         }
+        return searchCompiled(query)
+    }
+
+    private suspend fun searchCompiled(query: String): List<ShowCard> {
         val results = mutableListOf<ShowCard>()
         try {
             val encoded = URLEncoder.encode(query, "UTF-8")
@@ -55,10 +68,13 @@ object AsianCProvider : SiteProvider {
                 }
             }
         } catch (_: Exception) {}
-        return results
+        return PosterBackfill.sanitize(results)
     }
 
     override suspend fun loadEpisodes(showUrl: String): ShowDetails {
+        if (!SiteGate.isEnabled(name)) {
+            return ShowDetails(show = ShowCard(title = "Asian Drama", url = showUrl, site = name))
+        }
         val show = ShowCard(title = "Asian Drama", url = showUrl, site = name)
         com.anonrode.downloader.data.rules.DynamicRulesManager.getPipeline(name)?.episodes?.let { pl ->
             val res = RulesPipeline.runEpisodes(name, pl, showUrl)
@@ -66,7 +82,7 @@ object AsianCProvider : SiteProvider {
                 val card = ShowCard(
                     title = res.title.ifBlank { show.title },
                     url = showUrl,
-                    posterUrl = res.posterUrl.ifBlank { show.posterUrl },
+                    posterUrl = if (PosterBackfill.isUsablePoster(res.posterUrl)) res.posterUrl else "",
                     site = name
                 )
                 return ShowDetails(show = card, synopsis = res.synopsis, episodes = res.episodes)
@@ -158,13 +174,16 @@ object AsianCProvider : SiteProvider {
                         episodes[idx] = existing.copy(mirrorUrls = existing.mirrorUrls + href)
                     }
                 } else {
+                    val rowSeason = (slugSeason ?: 1).coerceAtLeast(1)
                     drafts.add(
                         Draft(
                             EpisodeItem(
                                 title = cleanTitle,
                                 url = href,
-                                episodeNum = epNum,
-                                site = name
+                                episodeNum = com.anonrode.downloader.util.SeasonEpisode.encode(rowSeason, epNum),
+                                site = name,
+                                season = rowSeason,
+                                episode = epNum
                             ),
                             fractional = epFrac != null
                         )
@@ -191,12 +210,39 @@ object AsianCProvider : SiteProvider {
             if (episodes.isEmpty()) {
                 val player = doc.selectFirst("#video-embed iframe, .video-embed iframe, .watch-content iframe, iframe[src]")
                 if (player != null) {
-                    episodes.add(EpisodeItem(title = "Full Movie", url = showUrl, episodeNum = 1, site = name))
+                    episodes.add(
+                        EpisodeItem(
+                            title = "Full Movie",
+                            url = showUrl,
+                            episodeNum = com.anonrode.downloader.util.SeasonEpisode.encode(1, 1),
+                            site = name,
+                            season = 1,
+                            episode = 1
+                        )
+                    )
                 }
             }
+            if (episodes.isEmpty()) {
+                // Live 2026-10-20: /drama-detail/a-certain-dark-item-2026
+                // serves `<ul class="list-episode-item-2 all-episode"></ul>`
+                // (zero <li>) and no player — a genuine site-side data gap,
+                // not a selector miss. Real titles parse 12/20/25 episodes
+                // with the same selectors. Say so instead of failing mutely.
+                com.anonrode.downloader.util.DebugLog.resolve(
+                    "asianc: detail page exposes no episode list and no player (site-side data gap): $showUrl"
+                )
+            }
 
-            val card = ShowCard(title = title, url = showUrl, posterUrl = poster, site = name)
-            return ShowDetails(show = card, synopsis = synopsis, episodes = episodes.sortedWith(compareBy({ it.episodeNum }, { it.title })))
+            val subtitleTracks = SubtitleSurfaces.parsePageTracks(doc, showUrl)
+            if (subtitleTracks.isNotEmpty()) SubtitleSurfaces.record(showUrl, subtitleTracks)
+
+            val card = ShowCard(
+                title = title,
+                url = showUrl,
+                posterUrl = if (PosterBackfill.isUsablePoster(poster)) poster else "",
+                site = name
+            )
+            return ShowDetails(show = card, synopsis = synopsis, episodes = episodes.sortedWith(compareBy({ it.season.coerceAtLeast(1) }, { it.episode }, { it.title })))
         } catch (_: Exception) {
             return ShowDetails(show = show)
         }

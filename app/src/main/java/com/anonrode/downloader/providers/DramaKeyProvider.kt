@@ -30,12 +30,23 @@ object DramaKeyProvider : SiteProvider {
     override val searchEnabled: Boolean get() = true
 
     override suspend fun search(query: String): List<ShowCard> {
+        if (!SiteGate.isEnabled(name)) return emptyList()
         // OTA pipeline first; non-empty wins, else compiled path below.
         DynamicRulesManager.getPipeline(name)?.search?.let { pl ->
             val results = RulesPipeline.runSearch(name, pl, query)
-            if (results.isNotEmpty()) return results
+            if (results.isNotEmpty()) {
+                return PosterBackfill.backfill(PosterBackfill.sanitize(results)) { missing ->
+                    searchCompiled(query).mapNotNull { card ->
+                        if (card.posterUrl.isBlank()) null
+                        else PosterBackfill.normalizeKey(card.url) to card.posterUrl
+                    }.toMap()
+                }
+            }
         }
+        return searchCompiled(query)
+    }
 
+    private suspend fun searchCompiled(query: String): List<ShowCard> {
         val results = mutableListOf<ShowCard>()
         try {
             val clean = query.trim()
@@ -119,10 +130,13 @@ object DramaKeyProvider : SiteProvider {
         } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) throw e
         }
-        return results
+        return PosterBackfill.sanitize(results)
     }
 
     override suspend fun loadEpisodes(showUrl: String): ShowDetails {
+        if (!SiteGate.isEnabled(name)) {
+            return ShowDetails(show = ShowCard(title = "Asian Drama", url = showUrl, site = name))
+        }
         val show = ShowCard(title = "Asian Drama", url = showUrl, site = name)
 
         DynamicRulesManager.getPipeline(name)?.episodes?.let { pl ->
@@ -131,10 +145,10 @@ object DramaKeyProvider : SiteProvider {
                 val card = ShowCard(
                     title = res.metaTitle ?: "Asian Drama",
                     url = showUrl,
-                    posterUrl = res.metaPoster ?: "",
+                    posterUrl = if (PosterBackfill.isUsablePoster(res.metaPoster.orEmpty())) res.metaPoster.orEmpty() else "",
                     site = name
                 )
-                return ShowDetails(show = card, synopsis = res.metaSynopsis ?: "", episodes = res.episodes)
+                return ShowDetails(show = card, synopsis = res.metaSynopsis ?: "", episodes = stampPipelineSeasons(res.episodes))
             }
         }
 
@@ -154,14 +168,7 @@ object DramaKeyProvider : SiteProvider {
             // Host allowlist shared by the accordion and flat sweeps (the 2026
             // dramakey rebuild moved the site's per-episode buttons to
             // lightdl.cc — live-verified 2026-10-15).
-            fun isEpisodeTarget(h: String): Boolean =
-                h.contains("lightdl.cc") ||
-                    h.contains("downloadwella.com") || h.contains("wetafiles.com") ||
-                    h.contains("loadedfiles.") || h.contains("dood.") ||
-                    h.contains("mega.") || h.contains("/download/") || h.contains("?download") ||
-                    h.contains("vikingfile") || h.contains("kissorgrab") ||
-                    h.contains("wildshare") || h.contains("waffi") ||
-                    com.anonrode.downloader.pipeline.StrictLinkClassifier.isKnownLocker(h)
+            fun isEpisodeTarget(h: String): Boolean = this.isEpisodeTarget(h)
 
             // ── Season accordion (playbook-mirror). The rebuilt site renders
             // one .season-accordion per season whose .season-header carries
@@ -208,8 +215,10 @@ object DramaKeyProvider : SiteProvider {
                             EpisodeItem(
                                 title = "S%d E%02d".format(seasonNum, posNum) + quality,
                                 url = href,
-                                episodeNum = seasonNum * 100 + posNum,
-                                site = name
+                                episodeNum = com.anonrode.downloader.util.SeasonEpisode.encode(seasonNum, posNum),
+                                site = name,
+                                season = seasonNum,
+                                episode = posNum
                             )
                         )
                     }
@@ -273,30 +282,41 @@ object DramaKeyProvider : SiteProvider {
                 val label = epMatch?.let { m ->
                     "S${m.groupValues[1]} E${m.groupValues[2]}"
                 } ?: DownloadLinkLabels.serverOrPart(a.text(), filename)
-                // Season-pinned positional rows renumber from 1 inside their
-                // season, so the drawer key (and label) must carry the slug's
-                // season — unchanged for season-1/no-slug posts.
-                val positionalNum = if (slugSeason != null && slugSeason >= 2 && count in 1..99)
-                    slugSeason * 100 + count else count
-                val positionalLabel = if (slugSeason != null && slugSeason >= 2 && count in 1..99)
-                    "S$slugSeason E%02d".format(count) else "Episode $count"
-
-                val parsedNum = epMatch?.let { m ->
-                    val s = m.groupValues[1].toIntOrNull() ?: 1
-                    val e = m.groupValues[2].toIntOrNull() ?: 1
-                    s * 100 + e
-                } ?: Regex("""(?i)\b(?:Episode|Ep|E)[- ]*(\d{1,4})\b""").find(a.text())?.groupValues?.get(1)?.toIntOrNull()
-
+                // The token's own SxxEyy is authoritative; a slug season pins
+                // text-only rows; seasonless posts stay in season 1. 100-base
+                // is gone — episodeNum is SeasonEpisode.encode (1000-base).
+                val baseSeason = (slugSeason ?: 1).coerceAtLeast(1)
+                val tokenSeason = epMatch?.groupValues?.get(1)?.toIntOrNull()?.coerceAtLeast(1) ?: baseSeason
+                val tokenEpisode = epMatch?.groupValues?.get(2)?.toIntOrNull()
+                val textEpisode = Regex("""(?i)\b(?:Episode|Ep|E)[- ]*(\d{1,4})\b""").find(a.text())
+                    ?.groupValues?.get(1)?.toIntOrNull()
+                val rowSeason: Int
+                val rowEpisode: Int
+                when {
+                    tokenEpisode != null -> {
+                        rowSeason = tokenSeason
+                        rowEpisode = tokenEpisode
+                    }
+                    textEpisode != null -> {
+                        rowSeason = baseSeason
+                        rowEpisode = textEpisode
+                    }
+                    else -> {
+                        rowSeason = baseSeason
+                        rowEpisode = count
+                    }
+                }
+                val positionalLabel = if (rowSeason >= 2) "S$rowSeason E%02d".format(rowEpisode) else "Episode $rowEpisode"
                 val labelFinal = label?.let { it + (quality ?: "") } ?: positionalLabel
-                val num = parsedNum?.let { pn ->
-                    if (pn !in 100..9999 && slugSeason != null && slugSeason >= 2 && pn in 1..99) slugSeason * 100 + pn else pn
-                } ?: positionalNum
+
                 episodes.add(
                     EpisodeItem(
                         title = labelFinal,
                         url = href,
-                        episodeNum = num,
-                        site = name
+                        episodeNum = com.anonrode.downloader.util.SeasonEpisode.encode(rowSeason, rowEpisode),
+                        site = name,
+                        season = rowSeason,
+                        episode = rowEpisode
                     )
                 )
                 count++
@@ -306,11 +326,48 @@ object DramaKeyProvider : SiteProvider {
             // row's positional key colliding with a later text-resolved "Ep N"
             // row keeps the engine's firstOrNull re-resolve honest.
             reStampDuplicateKeys(episodes)
-            val card = ShowCard(title = title, url = showUrl, posterUrl = poster, site = name)
-            return ShowDetails(show = card, synopsis = synopsis, episodes = episodes.sortedWith(compareBy({ it.episodeNum }, { it.title })))
+            val card = ShowCard(
+                title = title,
+                url = showUrl,
+                posterUrl = if (PosterBackfill.isUsablePoster(poster)) poster else "",
+                site = name
+            )
+            return ShowDetails(
+                show = card,
+                synopsis = synopsis,
+                episodes = episodes.sortedWith(compareBy({ it.season.coerceAtLeast(1) }, { it.episode }, { it.title }))
+            )
         } catch (_: Exception) {
             return ShowDetails(show = show)
         }
+    }
+
+    private fun stampPipelineSeasons(episodes: List<EpisodeItem>): List<EpisodeItem> =
+        episodes.map { ep ->
+            if (ep.season > 0 && ep.episode > 0) {
+                ep.copy(episodeNum = com.anonrode.downloader.util.SeasonEpisode.encode(ep.season, ep.episode))
+            } else {
+                val (s, e) = com.anonrode.downloader.util.SeasonEpisode.of(ep)
+                ep.copy(
+                    season = s,
+                    episode = e,
+                    episodeNum = com.anonrode.downloader.util.SeasonEpisode.encode(s, e)
+                )
+            }
+        }
+
+    /** True for the site's per-episode locker/gateway links. Extracted so the
+     *  live click-through shape (12 downloadwella SxxExx anchors, 2026-10-20)
+     *  is pinned by a JVM test instead of an inline lambda. */
+    internal fun isEpisodeTarget(href: String): Boolean {
+        val h = href.lowercase()
+        return h.contains("lightdl.cc") ||
+            h.contains("downloadwella.com") || h.contains("wetafiles.com") ||
+            h.contains("loadedfiles.") || h.contains("dood.") ||
+            h.contains("mega.") || h.contains("/download/") || h.contains("?download") ||
+            h.contains("vikingfile") || h.contains("kissorgrab") ||
+            h.contains("wildshare") || h.contains("waffi") ||
+            com.anonrode.downloader.pipeline.StrictLinkClassifier.isKnownLocker(h)
     }
 
     /** Uniqueness net (RulesPipeline parity): the engine re-resolves an

@@ -19,10 +19,26 @@ object NaijaVaultProvider : SiteProvider {
     override val mainUrl: String get() = DynamicRulesManager.getBaseUrl(name)
 
     override suspend fun search(query: String): List<ShowCard> {
+        if (!SiteGate.isEnabled(name)) return emptyList()
         DynamicRulesManager.getPipeline(name)?.search?.let { pl ->
             val results = RulesPipeline.runSearch(name, pl, query)
-            if (results.isNotEmpty()) return results
+            if (results.isNotEmpty()) {
+                // The payload binds no poster (rev 2/3: `poster: null`); the
+                // REST response carries jetpack/featured media, so backfill
+                // the compiled art instead of rendering blank tiles.
+                return PosterBackfill.backfill(PosterBackfill.sanitize(results)) { missing ->
+                    if (missing.isEmpty()) emptyMap()
+                    else searchCompiled(query).mapNotNull { card ->
+                        if (card.posterUrl.isBlank()) null
+                        else PosterBackfill.normalizeKey(card.url) to card.posterUrl
+                    }.toMap()
+                }
+            }
         }
+        return searchCompiled(query)
+    }
+
+    private suspend fun searchCompiled(query: String): List<ShowCard> {
         val results = mutableListOf<ShowCard>()
         val noLinks = mutableListOf<ShowCard>()
         try {
@@ -72,7 +88,7 @@ object NaijaVaultProvider : SiteProvider {
             if (e is kotlinx.coroutines.CancellationException) throw e
             // silently ignore others
         }
-        return if (results.isEmpty()) noLinks else results
+        return PosterBackfill.sanitize(if (results.isEmpty()) noLinks else results)
     }
 
     private fun isJunkSameSite(href: String, siteHost: String?): Boolean =
@@ -98,8 +114,10 @@ object NaijaVaultProvider : SiteProvider {
             EpisodeItem(
                 title = DownloadLinkLabels.serverOrPart(t, resolved) ?: t.ifBlank { "Download $count" },
                 url = resolved,
-                episodeNum = count,
-                site = name
+                episodeNum = com.anonrode.downloader.util.SeasonEpisode.encode(1, count),
+                site = name,
+                season = 1,
+                episode = count
             )
         }
         // Only explicit server labels establish interchangeable movie mirrors;
@@ -114,6 +132,9 @@ object NaijaVaultProvider : SiteProvider {
     }
 
     override suspend fun loadEpisodes(showUrl: String): ShowDetails {
+        if (!SiteGate.isEnabled(name)) {
+            return ShowDetails(show = ShowCard(title = "NaijaVault Media", url = showUrl, site = name))
+        }
         val show = ShowCard(title = "NaijaVault Media", url = showUrl, site = name)
         DynamicRulesManager.getPipeline(name)?.episodes?.let { pl ->
             val res = RulesPipeline.runEpisodes(name, pl, showUrl)
@@ -121,10 +142,10 @@ object NaijaVaultProvider : SiteProvider {
                 val card = ShowCard(
                     title = res.title.ifBlank { show.title },
                     url = showUrl,
-                    posterUrl = res.posterUrl.ifBlank { show.posterUrl },
+                    posterUrl = if (PosterBackfill.isUsablePoster(res.posterUrl)) res.posterUrl else "",
                     site = name
                 )
-                return ShowDetails(show = card, synopsis = res.synopsis, episodes = res.episodes)
+                return ShowDetails(show = card, synopsis = res.synopsis, episodes = stampPipelineSeasons(res.episodes))
             }
         }
         try {
@@ -188,7 +209,16 @@ object NaijaVaultProvider : SiteProvider {
                         !isJunkSameSite(h, siteHost) && com.anonrode.downloader.resolvers.LockerRegistry.isKnownMedia(h)
                     }?.attr("abs:href").orEmpty()
                     if (fallback.isBlank()) emptyList()
-                    else listOf(EpisodeItem(title = "Download 1", url = fallback, episodeNum = 1, site = name))
+                    else listOf(
+                        EpisodeItem(
+                            title = "Download 1",
+                            url = fallback,
+                            episodeNum = com.anonrode.downloader.util.SeasonEpisode.encode(1, 1),
+                            site = name,
+                            season = 1,
+                            episode = 1
+                        )
+                    )
                 }
                 if (movieItems.isNotEmpty()) {
                     com.anonrode.downloader.util.DebugLog.resolve(
@@ -309,18 +339,23 @@ object NaijaVaultProvider : SiteProvider {
                     val text = a.text().trim()
                     val parsedNum = Regex("""(?i)\b(?:Episode|Ep|E)[- ]*(\d{1,4})\b""").find(text)?.groupValues?.get(1)?.toIntOrNull()
                         ?: Regex("""(?i)\b(?:Episode|Ep|E)[- ]*(\d{1,4})\b""").find(href)?.groupValues?.get(1)?.toIntOrNull()
-                    val seasonNum = slugSeason?.takeIf { it >= 2 && parsedNum != null && parsedNum in 1..99 }
+                    val seasonNum = slugSeason?.takeIf { it >= 2 && parsedNum != null && parsedNum in 1..999 }
                     val epNum = if (seasonNum != null) parsedNum else null
+                    val rowSeason = seasonNum ?: 1
+                    val rowEpisode = epNum ?: (parsedNum ?: count)
                     episodes.add(
                         EpisodeItem(
                             title = if (seasonNum != null && epNum != null) {
                                 "S%02dE%02d".format(seasonNum, epNum)
                             } else if (text.isNotBlank() && !text.equals("Download", ignoreCase = true)) text else "Download $count",
                             url = href,
-                            episodeNum = if (seasonNum != null && epNum != null) seasonNum * 100 + epNum else (parsedNum ?: count++),
-                            site = name
+                            episodeNum = com.anonrode.downloader.util.SeasonEpisode.encode(rowSeason, rowEpisode),
+                            site = name,
+                            season = rowSeason,
+                            episode = rowEpisode
                         )
                     )
+                    if (seasonNum == null && parsedNum == null) count++
                 }
             }
 
@@ -375,8 +410,12 @@ object NaijaVaultProvider : SiteProvider {
                                 EpisodeItem(
                                     title = epTitle,
                                     url = href,
-                                    episodeNum = missing,
-                                    site = name
+                                    episodeNum = com.anonrode.downloader.util.SeasonEpisode.encode(
+                                        (slugSeason ?: 1).coerceAtLeast(1), missing
+                                    ),
+                                    site = name,
+                                    season = (slugSeason ?: 1).coerceAtLeast(1),
+                                    episode = missing
                                 )
                             )
                             com.anonrode.downloader.util.DebugLog.resolve("naijavault: gap-fill recovered episode $missing -> $href")
@@ -408,12 +447,15 @@ object NaijaVaultProvider : SiteProvider {
                     if (u.isBlank() || u in rawSeen || u in seen) continue
                     if (isJunkSameSite(u, siteHost)) continue
                     rawSeen.add(u)
+                    val rawEpisode = count++
                     episodes.add(
                         EpisodeItem(
                             title = "Download ${episodes.size + 1}",
                             url = u,
-                            episodeNum = count++,
-                            site = name
+                            episodeNum = com.anonrode.downloader.util.SeasonEpisode.encode(1, rawEpisode),
+                            site = name,
+                            season = 1,
+                            episode = rawEpisode
                         )
                     )
                 }

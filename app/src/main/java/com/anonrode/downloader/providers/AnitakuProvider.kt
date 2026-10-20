@@ -14,6 +14,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.withContext
 import java.net.URI
 import java.util.regex.Pattern
 
@@ -93,8 +94,7 @@ object AnitakuProvider : SiteProvider {
         term: String,
         cleaned: CleanedQuery
     ): List<ShowCard> {
-        val batch = mutableListOf<ShowCard>()
-        try {
+        return try {
             val form = mapOf("action" to "ts_ac_do_search", "ts_ac_query" to term)
             val body = HttpClient.postForm(
                 url = ajaxUrl,
@@ -103,8 +103,18 @@ object AnitakuProvider : SiteProvider {
                 headers = mapOf("X-Requested-With" to "XMLHttpRequest"),
                 tag = "search"
             ) ?: return emptyList()
-            val json = JSONObject(body)
+            parseAjaxCards(body, cleaned)
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
 
+    /** Pure admin-ajax parse (captured-fixture JVM test). Shape:
+     *  `{"anime":[{"all":[{post_link, post_title, post_image, post_sub}]}]}`. */
+    internal fun parseAjaxCards(body: String, cleaned: CleanedQuery): List<ShowCard> {
+        val batch = mutableListOf<ShowCard>()
+        try {
+            val json = JSONObject(body)
             val keys = json.keys()
             while (keys.hasNext()) {
                 val key = keys.next()
@@ -125,7 +135,7 @@ object AnitakuProvider : SiteProvider {
                                 ShowCard(
                                     title = displayTitle,
                                     url = link,
-                                    posterUrl = image,
+                                    posterUrl = if (PosterBackfill.isUsablePoster(image)) image else "",
                                     site = name,
                                     category = "Anime ${if (sub.isNotBlank()) "($sub)" else ""}"
                                 )
@@ -139,82 +149,162 @@ object AnitakuProvider : SiteProvider {
     }
 
     override suspend fun search(query: String): List<ShowCard> {
+        if (!SiteGate.isEnabled(name)) return emptyList()
         val cleaned = SeasonNoiseStripper.clean(query)
-        val expandedTerms = AnimeOracle.expandTerms(cleaned.coreTitle)
-        val primaryTerm = if (cleaned.coreTitle.length >= 2) cleaned.coreTitle else query.trim()
-        val searchTerms = if (expandedTerms.isNotEmpty()) expandedTerms else listOf(primaryTerm)
+        val cacheKey = query.trim().lowercase()
+        cachedSearch(cacheKey)?.let { return it }
 
-        // OTA pipeline first (dual admin-ajax POST merge lives in the playbook)
+        val results = searchLive(cleaned, query)
+        rememberSearch(cacheKey, results)
+        return results
+    }
+
+    private suspend fun searchLive(cleaned: CleanedQuery, rawQuery: String): List<ShowCard> {
+        val expandedTerms = AnimeOracle.expandTerms(cleaned.coreTitle)
+        val primaryTerm = if (cleaned.coreTitle.length >= 2) cleaned.coreTitle else rawQuery.trim()
+        val searchTerms = (if (expandedTerms.isNotEmpty()) expandedTerms else listOf(primaryTerm))
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .distinctBy { it.lowercase() }
+
+        // OTA pipeline first (dual admin-ajax POST merge lives in the playbook).
+        // ONE term only: the payload can answer multiple terms itself, and the
+        // old 2-term loop doubled every POST during per-keystroke searches.
         DynamicRulesManager.getPipeline(name)?.search?.let { pl ->
             val otaResults = mutableListOf<ShowCard>()
-            for (term in searchTerms.take(2)) {
-                val res = RulesPipeline.runSearch(name, pl, term)
-                if (res.isNotEmpty()) {
-                    otaResults.addAll(res.map {
-                        it.copy(title = formatDisplayTitle(it.title, cleaned.coreTitle))
-                    })
-                }
+            val res = RulesPipeline.runSearch(name, pl, primaryTerm)
+            if (res.isNotEmpty()) {
+                otaResults.addAll(res.map { it.copy(title = formatDisplayTitle(it.title, cleaned.coreTitle)) })
             }
             if (otaResults.isNotEmpty()) {
-                return postProcessResults(otaResults, cleaned)
+                return backfillAnimePosters(primaryTerm, postProcessResults(otaResults, cleaned))
             }
         }
 
-        return coroutineScope {
-            val endpoints = listOf(
-                "https://gogoanime.or.at/wp-admin/admin-ajax.php" to "https://gogoanime.or.at/",
-                "https://anitaku.com.ro/wp-admin/admin-ajax.php" to "https://anitaku.com.ro/"
-            )
-
-            // Concurrently query (terms x endpoints)
-            val deferreds = searchTerms.take(2).flatMap { term ->
-                endpoints.map { (ajaxUrl, referer) ->
-                    async(Dispatchers.IO) {
-                        fetchAjaxCards(ajaxUrl, referer, term, cleaned)
-                    }
+        // Compiled path: ONE term × ONE host at a time, sequentially. The old
+        // (terms × both hosts) concurrent fan-out was 4 blocking POSTs on every
+        // keystroke — live timing 2026-10-20: 0.8 s healthy, 2.1–2.7 s under
+        // repeat load, which is exactly the admin-ajax timeout class in the
+        // device logs. Fallbacks only run when the previous answer was empty.
+        val hosts = searchHosts()
+        var fallbackCards: List<ShowCard> = emptyList()
+        for (term in searchTerms.take(2)) {
+            for ((ajaxUrl, referer) in hosts) {
+                val cards = withContext(Dispatchers.IO) { fetchAjaxCards(ajaxUrl, referer, term, cleaned) }
+                if (cards.isNotEmpty()) {
+                    return backfillAnimePosters(term, postProcessResults(cards, cleaned))
                 }
             }
+            if (fallbackCards.isEmpty()) {
+                fallbackCards = withContext(Dispatchers.IO) { searchHtml(term, cleaned) }
+            }
+        }
+        if (fallbackCards.isNotEmpty()) return backfillAnimePosters(cleaned.coreTitle, fallbackCards)
+        return emptyList()
+    }
 
-            val allResults = deferreds.awaitAll().flatten()
-            val distinct = postProcessResults(allResults, cleaned)
-            if (distinct.isNotEmpty()) return@coroutineScope distinct
+    /** Primary host first (live 2026-10-20: 11 cards vs 4 on the mirror). */
+    private fun searchHosts(): List<Pair<String, String>> {
+        val configured = DynamicRulesManager.getBaseUrls(name)
+            .map { it.trim().trimEnd('/') }
+            .filter { it.startsWith("http", ignoreCase = true) }
+        val hosts = (listOf("https://gogoanime.or.at") + configured + listOf("https://anitaku.com.ro"))
+            .distinctBy { it.lowercase() }
+        return hosts.take(2).map { "$it/wp-admin/admin-ajax.php" to "$it/" }
+    }
 
-            // HTML search fallback on gogoanime.or.at if AJAX autocomplete returned empty
-            try {
-                val searchUrl = "https://gogoanime.or.at/?s=" + java.net.URLEncoder.encode(cleaned.coreTitle, "UTF-8")
-                val html = HttpClient.getText(searchUrl, referer = "https://gogoanime.or.at/")
-                if (!html.isNullOrBlank()) {
-                    val doc = Jsoup.parse(html, searchUrl)
-                    val items = mutableListOf<ShowCard>()
-                    for (el in doc.select(".film_list-wrap .flw-item, .last_episodes ul li, .items li, .listupd article, div.anime-card")) {
-                        val a = el.selectFirst("a[href]") ?: continue
-                        val href = a.attr("abs:href").ifBlank { a.attr("href") }
-                        if (href.isBlank() || href.contains("/category/") || href.contains("/genre/")) continue
-                        val titleEl = el.selectFirst(".film-name, .name, .entry-title, h2, h3") ?: a
-                        val title = titleEl.text().trim()
-                        val img = el.selectFirst("img[src]")?.let { it.attr("abs:src").ifBlank { it.attr("src") } } ?: ""
-                        if (title.isNotBlank()) {
-                            val displayTitle = formatDisplayTitle(title, cleaned.coreTitle)
-                            items.add(
-                                ShowCard(
-                                    title = displayTitle,
-                                    url = href,
-                                    posterUrl = img,
-                                    site = name,
-                                    category = "Anime"
-                                )
-                            )
-                        }
-                    }
-                    if (items.isNotEmpty()) return@coroutineScope postProcessResults(items, cleaned)
-                }
-            } catch (_: Exception) {}
-
+    /** HTML search fallback; current theme is `.listupd > article.bs > .bsx > a`. */
+    private fun searchHtml(term: String, cleaned: CleanedQuery): List<ShowCard> {
+        return try {
+            val base = searchHosts().first().second
+            val searchUrl = base + "?s=" + java.net.URLEncoder.encode(term, "UTF-8")
+            val html = HttpClient.getText(searchUrl, referer = base) ?: return emptyList()
+            val doc = Jsoup.parse(html, searchUrl)
+            val items = mutableListOf<ShowCard>()
+            for (el in doc.select(
+                ".listupd article, .listupd .bs, .bs .bsx, .film_list-wrap .flw-item, " +
+                    ".last_episodes ul li, .items li, div.anime-card"
+            )) {
+                val a = el.selectFirst("a[href]") ?: continue
+                val href = a.attr("abs:href").ifBlank { a.attr("href") }
+                if (href.isBlank() || href.contains("/category/") || href.contains("/genre/")) continue
+                val titleEl = el.selectFirst(".film-name, .name, .entry-title, h2, h3") ?: a
+                val title = titleEl.text().trim().ifBlank { a.attr("title").trim() }
+                if (title.isBlank()) continue
+                if (items.any { it.url == href }) continue
+                val img = el.selectFirst("img[src], img[data-src]")?.let {
+                    it.attr("abs:src").ifBlank { it.attr("abs:data-src") }
+                        .ifBlank { it.attr("data-src") }.ifBlank { it.attr("src") }
+                } ?: ""
+                items.add(
+                    ShowCard(
+                        title = formatDisplayTitle(title, cleaned.coreTitle),
+                        url = href,
+                        posterUrl = if (PosterBackfill.isUsablePoster(img)) img else "",
+                        site = name,
+                        category = "Anime"
+                    )
+                )
+            }
+            postProcessResults(items, cleaned)
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
             emptyList()
         }
     }
 
+    /** Backfills a pipeline card's blank poster from the compiled AJAX search. */
+    private suspend fun backfillAnimePosters(term: String, cards: List<ShowCard>): List<ShowCard> {
+        val clean = PosterBackfill.sanitize(cards)
+        if (clean.none { it.posterUrl.isBlank() }) return clean
+        val cleaned = SeasonNoiseStripper.clean(term)
+        val posters = HashMap<String, String>()
+        for ((ajaxUrl, referer) in searchHosts()) {
+            val compiled = withContext(Dispatchers.IO) { fetchAjaxCards(ajaxUrl, referer, term, cleaned) }
+            if (compiled.isEmpty()) continue
+            for (card in compiled) {
+                if (card.posterUrl.isNotBlank()) {
+                    posters[PosterBackfill.normalizeKey(card.url)] = card.posterUrl
+                }
+            }
+            break
+        }
+        return PosterBackfill.backfill(clean) { posters }
+    }
+
+    private fun cachedSearch(key: String): List<ShowCard>? = synchronized(searchCacheLock) {
+        val hit = searchCache[key] ?: return null
+        if (hit.expiresAtMs < System.currentTimeMillis()) {
+            searchCache.remove(key)
+            return null
+        }
+        hit.cards
+    }
+
+    private fun rememberSearch(key: String, cards: List<ShowCard>) {
+        if (key.isBlank() || cards.isEmpty()) return
+        synchronized(searchCacheLock) {
+            searchCache[key] = CachedSearch(cards, System.currentTimeMillis() + SEARCH_CACHE_TTL_MS)
+        }
+    }
+
+    internal fun clearSearchCacheForTest() {
+        synchronized(searchCacheLock) { searchCache.clear() }
+    }
+
+    private data class CachedSearch(val cards: List<ShowCard>, val expiresAtMs: Long)
+    private const val SEARCH_CACHE_TTL_MS = 5 * 60 * 1000L
+    private val searchCacheLock = Any()
+    private val searchCache = object : java.util.LinkedHashMap<String, CachedSearch>(64, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, CachedSearch>?): Boolean =
+            size > 64
+    }
+
     override suspend fun loadEpisodes(showUrl: String): ShowDetails {
+        if (!SiteGate.isEnabled(name)) {
+            return ShowDetails(show = ShowCard(title = "Anime", url = showUrl, site = name))
+        }
         val show = ShowCard(title = "Anime", url = showUrl, site = name)
 
         DynamicRulesManager.getPipeline(name)?.episodes?.let { pl ->
@@ -223,7 +313,7 @@ object AnitakuProvider : SiteProvider {
                 val card = ShowCard(
                     title = res.metaTitle ?: "Anime",
                     url = showUrl,
-                    posterUrl = res.metaPoster ?: "",
+                    posterUrl = if (PosterBackfill.isUsablePoster(res.metaPoster.orEmpty())) res.metaPoster.orEmpty() else "",
                     site = name
                 )
                 return ShowDetails(show = card, synopsis = res.metaSynopsis ?: "", episodes = res.episodes)
@@ -243,8 +333,14 @@ object AnitakuProvider : SiteProvider {
             val episodes = mutableListOf<EpisodeItem>()
             val seen = mutableSetOf<String>()
             PostContentSanitizer.clean(doc)
+            // Live 2026-10-20 (gogoanime.or.at): the list is
+            // `.eplister ul li a > .epl-num` + `.epl-title`; the old selector
+            // set already matched .eplister but read the number from raw
+            // anchor text (which also carries the show title and "1" from
+            // "Season 1" — the .epl-num cell is the exact episode).
             val epLinks = doc.select(
-                ".bixbox.bxcl.epcheck a, .eplister ul li a, .episodes a, ul.episodes-lists li a, a[href*='-episode-'], a[href*='-movie-'], a[href*='episode']"
+                ".eplister ul li a, .bixbox.bxcl.epcheck a, .episodes a, ul.episodes-lists li a, " +
+                    "#episode_page a, a[href*='-episode-'], a[href*='-movie-'], a[href*='episode']"
             )
 
             for (a in epLinks) {
@@ -257,10 +353,11 @@ object AnitakuProvider : SiteProvider {
 
                 if (href.isBlank() || href == showUrl || href in seen || href.contains("/category/") || href.contains("/genre/")) continue
                 if (showUrl.contains("/anime/") && href.endsWith("/anime/")) continue
-                val nameText = a.text().trim()
+                val nameText = a.selectFirst(".epl-title")?.text()?.trim().orEmpty().ifBlank { a.text().trim() }
                 if (PostContentSanitizer.isSiblingPostAnchorText(nameText)) continue
                 seen.add(href)
-                val num = Regex("""\d+""").find(nameText)?.value?.toIntOrNull()
+                val num = a.selectFirst(".epl-num")?.text()?.trim()?.toIntOrNull()
+                    ?: Regex("""\d+""").find(nameText)?.value?.toIntOrNull()
                     ?: Regex("""episode-(\d+)""", RegexOption.IGNORE_CASE).find(href)?.groupValues?.get(1)?.toIntOrNull()
                     ?: (episodes.size + 1)
 
@@ -268,8 +365,10 @@ object AnitakuProvider : SiteProvider {
                     EpisodeItem(
                         title = if (nameText.isNotBlank() && !nameText.equals("#", ignoreCase = true)) nameText else "Episode $num",
                         url = href,
-                        episodeNum = num,
-                        site = name
+                        episodeNum = com.anonrode.downloader.util.SeasonEpisode.encode(1, num),
+                        site = name,
+                        season = 1,
+                        episode = num
                     )
                 )
             }
@@ -282,14 +381,26 @@ object AnitakuProvider : SiteProvider {
                         EpisodeItem(
                             title = "Movie / Episode 1",
                             url = showUrl,
-                            episodeNum = 1,
-                            site = name
+                            episodeNum = com.anonrode.downloader.util.SeasonEpisode.encode(1, 1),
+                            site = name,
+                            season = 1,
+                            episode = 1
                         )
                     )
                 }
             }
 
-            val card = ShowCard(title = title, url = showUrl, posterUrl = poster, site = name)
+            // Subtitle surfaces on the show/episode page (srt/vtt/ass links or
+            // <track> elements) — recorded for the engine's sidecar step.
+            val subtitleTracks = SubtitleSurfaces.parsePageTracks(doc, showUrl)
+            if (subtitleTracks.isNotEmpty()) SubtitleSurfaces.record(showUrl, subtitleTracks)
+
+            val card = ShowCard(
+                title = title,
+                url = showUrl,
+                posterUrl = if (PosterBackfill.isUsablePoster(poster)) poster else "",
+                site = name
+            )
             return ShowDetails(show = card, synopsis = synopsis, episodes = episodes.sortedBy { it.episodeNum })
         } catch (_: Exception) {
             return ShowDetails(show = show)
@@ -311,6 +422,8 @@ object AnitakuProvider : SiteProvider {
 
                 // 1. Direct candidate player embeds on page (newplayer.php, megaplay.buzz, megaplays.se, takuembed)
                 val doc = Jsoup.parse(html, episodeUrl)
+                val subtitleTracks = SubtitleSurfaces.parsePageTracks(doc, episodeUrl)
+                if (subtitleTracks.isNotEmpty()) SubtitleSurfaces.record(episodeUrl, subtitleTracks)
                 val candidates = mutableListOf<String>()
                 for (a in doc.select(".anime_muti_link a[data-video], .servers a[data-video], .anime_muti_link a[href]")) {
                     val dataVideo = a.attr("data-video").ifEmpty { a.attr("href") }

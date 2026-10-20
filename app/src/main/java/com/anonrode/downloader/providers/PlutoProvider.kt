@@ -21,10 +21,23 @@ object PlutoProvider : SiteProvider {
     override val mainUrl: String get() = DynamicRulesManager.getBaseUrl(name)
 
     override suspend fun search(query: String): List<ShowCard> {
+        if (!SiteGate.isEnabled(name)) return emptyList()
         DynamicRulesManager.getPipeline(name)?.search?.let { pl ->
             val results = RulesPipeline.runSearch(name, pl, query)
-            if (results.isNotEmpty()) return results
+            if (results.isNotEmpty()) {
+                return PosterBackfill.backfill(PosterBackfill.sanitize(results)) { missing ->
+                    if (missing.isEmpty()) emptyMap()
+                    else searchCompiled(query).mapNotNull { card ->
+                        if (card.posterUrl.isBlank()) null
+                        else PosterBackfill.normalizeKey(card.url) to card.posterUrl
+                    }.toMap()
+                }
+            }
         }
+        return searchCompiled(query)
+    }
+
+    private suspend fun searchCompiled(query: String): List<ShowCard> {
         val results = mutableListOf<ShowCard>()
         try {
             val clean = query.replace("'", "").replace("’", "").trim()
@@ -62,10 +75,13 @@ object PlutoProvider : SiteProvider {
                 )
             }
         } catch (_: Exception) {}
-        return results
+        return PosterBackfill.sanitize(results)
     }
 
     override suspend fun loadEpisodes(showUrl: String): ShowDetails {
+        if (!SiteGate.isEnabled(name)) {
+            return ShowDetails(show = ShowCard(title = "Pluto Title", url = showUrl, site = name))
+        }
         val show = ShowCard(title = "Pluto Title", url = showUrl, site = name)
         DynamicRulesManager.getPipeline(name)?.episodes?.let { pl ->
             val res = RulesPipeline.runEpisodes(name, pl, showUrl)
@@ -73,7 +89,7 @@ object PlutoProvider : SiteProvider {
                 val card = ShowCard(
                     title = res.title.ifBlank { show.title },
                     url = showUrl,
-                    posterUrl = res.posterUrl.ifBlank { show.posterUrl },
+                    posterUrl = if (PosterBackfill.isUsablePoster(res.posterUrl)) res.posterUrl else "",
                     site = name
                 )
                 return ShowDetails(show = card, synopsis = res.synopsis, episodes = res.episodes)
@@ -108,19 +124,26 @@ object PlutoProvider : SiteProvider {
                 val showSlug = showUrl.substringAfterLast('/').substringBefore('?')
                 val stem = slugStem(showSlug)
                 val seasonLinkRegex = Regex("""-season-\d+""", RegexOption.IGNORE_CASE)
+                // Page-level season (title/slug), shared by the season-hub and
+                // legacy-scan branches below.
+                val pageSeason = parseSeasonNumber(title) ?: parseSeasonNumber(showSlug) ?: 1
 
                 val seenUrls = mutableSetOf<String>()
                 val seenEpKeys = mutableSetOf<String>()
-                fun addEpisode(href: String, epTitle: String, epNum: Int, key: String) {
+                fun addEpisode(href: String, epTitle: String, season: Int, episode: Int, key: String) {
                     if (href.isBlank() || href in seenUrls || key in seenEpKeys) return
                     seenUrls.add(href)
                     seenEpKeys.add(key)
+                    val rowSeason = season.coerceAtLeast(1)
+                    val rowEpisode = episode.coerceAtLeast(1)
                     episodes.add(
                         EpisodeItem(
-                            title = epTitle.ifBlank { "Episode $epNum" },
+                            title = epTitle.ifBlank { "Episode $rowEpisode" },
                             url = href,
-                            episodeNum = epNum,
-                            site = name
+                            episodeNum = com.anonrode.downloader.util.SeasonEpisode.encode(rowSeason, rowEpisode),
+                            site = name,
+                            season = rowSeason,
+                            episode = rowEpisode
                         )
                     )
                 }
@@ -139,13 +162,16 @@ object PlutoProvider : SiteProvider {
                     val selfTitle = title
                         .replace(Regex("""(?i)\s*download\s*(mp4|mkv|hd)?\s*$"""), "")
                         .trim()
-                    val epNum = selfKey?.let { it.first * 100 + it.second } ?: 1
                     val epTitle = if (selfKey != null) {
                         "S%02dE%02d".format(selfKey.first, selfKey.second)
                     } else {
                         selfTitle
                     }
-                    addEpisode(showUrl, epTitle, epNum, selfKey?.let { "s${it.first}e${it.second}" } ?: showUrl)
+                    addEpisode(
+                        showUrl, epTitle,
+                        selfKey?.first ?: 1, selfKey?.second ?: 1,
+                        selfKey?.let { "s${it.first}e${it.second}" } ?: showUrl
+                    )
                 }
 
                 // 2. Previous/next navigation on episode pages. Those links
@@ -166,7 +192,6 @@ object PlutoProvider : SiteProvider {
                         if (delta == 0) continue
                         val num = selfKey.second + delta
                         if (num < 1) continue
-                        val epCode = selfKey.first * 100 + num
                         val label = a.text().trim()
                             .replace(Regex("""^(previous|next)\s+episode\b\s*""", RegexOption.IGNORE_CASE), "")
                             .trim()
@@ -175,7 +200,7 @@ object PlutoProvider : SiteProvider {
                         } else {
                             "S%02dE%02d - $label".format(selfKey.first, num)
                         }
-                        addEpisode(href, epTitle, epCode, "s${selfKey.first}e$num")
+                        addEpisode(href, epTitle, selfKey.first, num, "s${selfKey.first}e$num")
                     }
                 }
 
@@ -247,10 +272,9 @@ object PlutoProvider : SiteProvider {
                                             val epNum = epKey?.second ?: EP_TEXT_REGEX.find(combined)?.groupValues?.get(1)?.toIntOrNull()
                                             val epSeason = epKey?.first ?: sNum
                                             if (epNum != null) {
-                                                val epCode = epSeason * 100 + epNum
                                                 val epTitle = "S%02dE%02d".format(epSeason, epNum)
                                                 synchronized(episodes) {
-                                                    addEpisode(href, epTitle, epCode, "s${epSeason}e${epNum}")
+                                                    addEpisode(href, epTitle, epSeason, epNum, "s${epSeason}e${epNum}")
                                                 }
                                             }
                                         }
@@ -260,7 +284,7 @@ object PlutoProvider : SiteProvider {
                         }.awaitAll()
                     }
                 } else {
-                    val currentSeasonNum = parseSeasonNumber(title) ?: parseSeasonNumber(showSlug) ?: 1
+                    val currentSeasonNum = pageSeason
                     val pagPages = mutableListOf(showUrl)
                     for (pa in mainPanel.select(".pagination-list a[href], a[href*='/page/']")) {
                         val pHref = pa.attr("abs:href").ifBlank { HttpClient.safeResolveUri(showUrl, pa.attr("href")) }.substringBefore('#')
@@ -294,9 +318,8 @@ object PlutoProvider : SiteProvider {
                             val epNum = epKey?.second ?: EP_TEXT_REGEX.find(combined)?.groupValues?.get(1)?.toIntOrNull()
                             val epSeason = epKey?.first ?: currentSeasonNum
                             if (epNum != null) {
-                                val epCode = epSeason * 100 + epNum
                                 val epTitle = "S%02dE%02d".format(epSeason, epNum)
-                                addEpisode(href, epTitle, epCode, "s${epSeason}e${epNum}")
+                                addEpisode(href, epTitle, epSeason, epNum, "s${epSeason}e${epNum}")
                             }
                         }
                     }
@@ -315,17 +338,18 @@ object PlutoProvider : SiteProvider {
                         val label = a.text().trim()
                             .replace(Regex("""^(previous|next)\s+episode\b\s*""", RegexOption.IGNORE_CASE), "")
                             .trim()
-                        val epCode = if (key != null) key.first * 100 + key.second else (episodes.size + 1)
+                        val rowSeason = key?.first ?: pageSeason
+                        val rowEpisode = key?.second ?: (episodes.size + 1)
                         val epTitle = if (key != null) {
                             "S%02dE%02d".format(key.first, key.second)
                         } else {
-                            label.ifBlank { "Episode $epCode" }
+                            label.ifBlank { "Episode $rowEpisode" }
                         }
-                        addEpisode(href, epTitle, epCode, key?.let { "s${it.first}e${it.second}" } ?: href)
+                        addEpisode(href, epTitle, rowSeason, rowEpisode, key?.let { "s${it.first}e${it.second}" } ?: href)
                     }
                 }
 
-                episodes.sortBy { it.episodeNum }
+                episodes.sortWith(compareBy({ it.season.coerceAtLeast(1) }, { it.episode }, { it.episodeNum }))
             } else {
                 // Movie download links from the detail page. The old
                 // selectFirst kept ONLY THE FIRST anchor: a film published
@@ -338,21 +362,41 @@ object PlutoProvider : SiteProvider {
                 }.distinct()
                 when (dlHrefs.size) {
                     0 -> episodes.add(
-                        EpisodeItem(title = "Full Movie", url = showUrl, episodeNum = 1, site = name)
+                        EpisodeItem(
+                            title = "Full Movie", url = showUrl,
+                            episodeNum = com.anonrode.downloader.util.SeasonEpisode.encode(1, 1),
+                            site = name, season = 1, episode = 1
+                        )
                     )
                     1 -> episodes.add(
-                        EpisodeItem(title = "Full Movie", url = dlHrefs.first(), episodeNum = 1, site = name)
+                        EpisodeItem(
+                            title = "Full Movie", url = dlHrefs.first(),
+                            episodeNum = com.anonrode.downloader.util.SeasonEpisode.encode(1, 1),
+                            site = name, season = 1, episode = 1
+                        )
                     )
                     else -> dlHrefs.forEachIndexed { i, h ->
                         val label = DownloadLinkLabels.serverOrPart(h.substringAfterLast('/'))
                             ?: "Full Movie (link ${i + 1})"
-                        episodes.add(EpisodeItem(title = label, url = h, episodeNum = i + 1, site = name))
+                        episodes.add(
+                            EpisodeItem(
+                                title = label, url = h,
+                                episodeNum = com.anonrode.downloader.util.SeasonEpisode.encode(1, i + 1),
+                                site = name, season = 1, episode = i + 1
+                            )
+                        )
                     }
                 }
             }
 
             com.anonrode.downloader.util.DebugLog.resolve("pluto loadEpisodes: found ${episodes.size} episodes")
-            return ShowDetails(show = show.copy(title = title, posterUrl = poster), episodes = episodes)
+            return ShowDetails(
+                show = show.copy(
+                    title = title,
+                    posterUrl = if (PosterBackfill.isUsablePoster(poster)) poster else ""
+                ),
+                episodes = episodes
+            )
         } catch (e: Exception) {
             com.anonrode.downloader.util.DebugLog.error("pluto loadEpisodes exception: ${e.javaClass.simpleName}: ${e.message}")
             return ShowDetails(show = show)

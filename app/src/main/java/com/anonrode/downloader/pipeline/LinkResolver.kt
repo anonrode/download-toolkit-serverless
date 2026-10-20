@@ -1,5 +1,6 @@
 package com.anonrode.downloader.pipeline
 
+import com.anonrode.downloader.data.models.SubtitleTrack
 import com.anonrode.downloader.data.net.HttpClient
 import com.anonrode.downloader.providers.ProviderRegistry
 import com.anonrode.downloader.resolvers.ResolverRegistry
@@ -86,7 +87,7 @@ object LinkResolver {
         if (path.contains("/api/file/") || path.contains("/api/download/") || path.contains("/token/download/")) return true
         if (host.contains("lightdl.cc") && (path.contains("/api/download/") || path.contains("/api/files/"))) return true
         if (path.endsWith(".m3u8") || path.endsWith(".mpd") || lower.contains(".m3u8?") || lower.contains(".mpd?")) return true
-        if (lower.contains("playlist.php") || lower.contains("/api/orion/") || lower.contains("stream-proxy")) return true
+        if (lower.contains("playlist.php") || lower.contains("/api/orion/")) return true
         if ((host.startsWith("hls.") || host.startsWith("stream.")) && (host.contains("vidbasic.") || host.contains("vidb.top"))) return true
         if (host.contains("lisaido.top") || host.contains("premilkyway.com")) return true
 
@@ -202,13 +203,46 @@ object LinkResolver {
         recordHealth: Boolean = true,
         memoTaskId: String? = null
     ): String? {
-        fun accept(out: String?): Boolean {
+        fun acceptShape(out: String?): Boolean {
             if (out.isNullOrBlank()) return false
             if (out == permUrl) return false
             if (isProvablyDirectFile(out) || isDirectMediaUrl(out) || out.contains(".m3u8", ignoreCase = true) || out.contains(".mpd", ignoreCase = true)) {
                 return true
             }
             return !isKnownLockerHost(out)
+        }
+
+        /** Shape + EVIDENCE acceptance (2026-10-20). A URL that survives the
+         *  shape rules but is a manifest-shaped endpoint is inspected once:
+         *  a self-referential master or a sub-1KiB mpegurl decoy is rejected
+         *  and poisoned so no cache can replay it. Direct media paths skip
+         *  the network check entirely (zero extra cost on the common path). */
+        suspend fun acceptEvidence(out: String?, entryUrl: String): String? {
+            if (!acceptShape(out)) return null
+            val candidate = UrlClassifier.repairConcatenatedUrl(out!!.trim())
+            if (candidate == entryUrl) return null
+            if (UrlClassifier.isDirectMediaPath(candidate) && !UrlClassifier.isStreamingLink(candidate)) {
+                return candidate
+            }
+            if (!UrlClassifier.isManifestShaped(candidate) && !candidate.contains("proxy", ignoreCase = true)) {
+                return candidate
+            }
+            val evidence = UrlClassifier.inspectTerminal(
+                candidate,
+                referer = com.anonrode.downloader.data.rules.DynamicRulesManager.resolveReferer(candidate),
+                tag = "resolve-evidence"
+            )
+            return when (evidence.kind) {
+                UrlClassifier.TerminalKind.SELF_REFERENTIAL,
+                UrlClassifier.TerminalKind.STUB -> {
+                    ResolveCache.poison(candidate)
+                    com.anonrode.downloader.util.DebugLog.resolve(
+                        "resolve evidence: rejected ${evidence.kind} terminal (${evidence.reason}) ${candidate.take(140)}"
+                    )
+                    null
+                }
+                else -> candidate
+            }
         }
 
         // 1. Try direct resolution via ResolverRegistry.
@@ -218,26 +252,26 @@ object LinkResolver {
         var resolved = ResolverRegistry.resolve(
             permUrl, defaultQual, bypassHealth = bypassHealth, recordHealth = recordHealth, memoTaskId = memoTaskId
         )
-        if (accept(resolved)) {
-            return resolved
-        }
+        acceptEvidence(resolved, permUrl)?.let { return it }
 
         // 2. Try ProviderRegistry
         if (site.isNotBlank()) {
             try {
                 val recipe = ProviderRegistry.resolveEpisode(site, permUrl, defaultQual)
                 if (recipe.directUrl.isNotBlank() && recipe.directUrl != permUrl) {
+                    ResolvedHints.remember(permUrl, recipe)
                     resolved = recipe.directUrl
                 }
             } catch (_: Exception) {}
         }
 
-        if (!accept(resolved)) {
-            for (provider in ProviderRegistry.allProviders) {
+        if (!acceptShape(resolved)) {
+            for (provider in ProviderRegistry.enabledProviders) {
                 if (provider.canHandle(permUrl)) {
                     try {
                         val recipe = provider.resolveEpisode(permUrl, defaultQual)
                         if (recipe.directUrl.isNotBlank() && recipe.directUrl != permUrl) {
+                            ResolvedHints.remember(permUrl, recipe)
                             resolved = recipe.directUrl
                             break
                         }
@@ -250,16 +284,16 @@ object LinkResolver {
         // lockers are embed/watch pages (e.g. vidsrc.mov): the registry can't crack
         // their token-gated chains, so don't waste fetches — startTask routes them
         // straight to yt-dlp.
-        if (!accept(resolved) && !resolved.isNullOrBlank() && isKnownLockerHost(resolved)) {
+        if (!acceptShape(resolved) && !resolved.isNullOrBlank() && isKnownLockerHost(resolved)) {
             try {
                 val inner = ResolverRegistry.resolve(resolved, defaultQual, memoTaskId = memoTaskId)
-                if (accept(inner)) {
+                if (acceptShape(inner)) {
                     resolved = inner
                 }
             } catch (_: Exception) {}
         }
 
-        return if (accept(resolved)) resolved else null
+        return acceptEvidence(resolved, permUrl)
     }
 
     /** The oracle's terminal check: one no-redirect Range: bytes=0-1024 request
@@ -283,4 +317,85 @@ object LinkResolver {
         val low = url.substringBefore('?').lowercase()
         return low.contains("m3u8") || low.contains("mpegurl")
     }
+}
+
+/**
+ * Bounded in-memory memory of the non-URL payload a provider's recipe
+ * returned for an episode: the CDN Referer it requires (e.g. nsrplay's
+ * `data.referer` -> vimeos) and its subtitle tracks.
+ *
+ * The download path re-resolves from the episode page inside
+ * DownloadEngine.startTask, but LinkResolver's contract only returns a
+ * String. This cache carries the recipe's headers/subtitles across that
+ * boundary without changing every caller's signature. Entries are keyed by
+ * BOTH the episode URL and the resolved direct URL, expire with the token TTL
+ * window, and are bounded so a long browsing session cannot grow them.
+ *
+ * Memory-only by design, like ResolveCache: nothing is persisted.
+ */
+object ResolvedHints {
+
+    data class Hints(
+        val referer: String = "",
+        val subtitles: List<SubtitleTrack> = emptyList(),
+        val expiresAtMs: Long
+    )
+
+    private const val TTL_MS = 30 * 60_000L
+    private const val MAX_ENTRIES = 128
+
+    private val map = java.util.concurrent.ConcurrentHashMap<String, Hints>()
+
+    private fun key(url: String): String = url.trim()
+
+    fun remember(episodeUrl: String, recipe: com.anonrode.downloader.data.models.DownloadRecipe) {
+        if (episodeUrl.isBlank()) return
+        val referer = recipe.headers.entries
+            .firstOrNull { it.key.equals("referer", ignoreCase = true) }
+            ?.value?.takeIf { it.isNotBlank() }
+            .orEmpty()
+        val sub = recipe.subtitles
+        if (referer.isBlank() && sub.isEmpty()) return
+        val hints = Hints(referer, sub, System.currentTimeMillis() + TTL_MS)
+        put(episodeUrl, hints)
+        if (recipe.directUrl.isNotBlank()) put(recipe.directUrl, hints)
+    }
+
+    fun remember(episodeUrl: String, directUrl: String, referer: String?, subtitles: List<SubtitleTrack>) {
+        if (episodeUrl.isBlank() && directUrl.isBlank()) return
+        if (referer.isNullOrBlank() && subtitles.isEmpty()) return
+        val hints = Hints(referer.orEmpty(), subtitles, System.currentTimeMillis() + TTL_MS)
+        if (episodeUrl.isNotBlank()) put(episodeUrl, hints)
+        if (directUrl.isNotBlank()) put(directUrl, hints)
+    }
+
+    private fun put(url: String, hints: Hints) {
+        if (map.size >= MAX_ENTRIES) {
+            val now = System.currentTimeMillis()
+            map.entries.removeIf { now >= it.value.expiresAtMs }
+            if (map.size >= MAX_ENTRIES) {
+                map.keys.take(map.size / 2).forEach { map.remove(it) }
+            }
+        }
+        map[key(url)] = hints
+    }
+
+    private fun live(url: String): Hints? {
+        if (url.isBlank()) return null
+        val h = map[key(url)] ?: return null
+        if (System.currentTimeMillis() >= h.expiresAtMs) {
+            map.remove(key(url), h)
+            return null
+        }
+        return h
+    }
+
+    /** CDN referer the provider recipe declared for this episode/stream. */
+    fun refererFor(url: String): String? = live(url)?.referer?.takeIf { it.isNotBlank() }
+
+    /** Subtitle tracks proved for this episode (empty = none known). */
+    fun subtitlesFor(url: String): List<SubtitleTrack> = live(url)?.subtitles.orEmpty()
+
+    /** Tests only. */
+    internal fun clearForTests() = map.clear()
 }

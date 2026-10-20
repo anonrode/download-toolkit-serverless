@@ -25,6 +25,28 @@ data class DynamicSiteConfig(
     val episodeLinkSelector: String = "a[href*='download'], a[href*='episode']"
 )
 
+/**
+ * OTA site kill-switch consumer (rev 4 payload `disabledSites`).
+ *
+ * The engine's rules layer owns the policy; providers must SKIP a disabled
+ * site so a disabled entry never appears in search/feed fan-out. Default is
+ * enabled, so an absent, old (rev 2/3) or malformed payload changes nothing.
+ *
+ * The two-argument overload is the pure filter used by feed/site-list code
+ * and unit tests; production callers use the DynamicRulesManager-backed one.
+ */
+object SiteGate {
+
+    fun isEnabled(site: String): Boolean =
+        com.anonrode.downloader.data.rules.DynamicRulesManager.isSiteEnabled(site)
+
+    fun filterEnabled(sites: List<String>): List<String> = sites.filter { isEnabled(it) }
+
+    /** Pure form: caller supplies the enabled predicate (JVM-testable). */
+    fun filterEnabled(sites: List<String>, enabled: (String) -> Boolean): List<String> =
+        sites.filter(enabled)
+}
+
 class GenericDeclarativeProvider(
     private val config: DynamicSiteConfig
 ) : SiteProvider {
@@ -33,11 +55,30 @@ class GenericDeclarativeProvider(
     override val mainUrl: String get() = config.baseUrl
 
     override suspend fun search(query: String): List<ShowCard> {
+        if (!SiteGate.isEnabled(name)) return emptyList()
         val pipeline = com.anonrode.downloader.data.rules.DynamicRulesManager.getPipeline(name)
         if (pipeline?.search != null) {
             val cards = RulesPipeline.runSearch(name, pipeline.search, query)
-            if (cards.isNotEmpty()) return cards
+            if (cards.isNotEmpty()) {
+                return PosterBackfill.backfill(PosterBackfill.sanitize(cards)) { missing ->
+                    compiledPosterMap(query, missing)
+                }
+            }
         }
+        return PosterBackfill.sanitize(compiledSearch(query))
+    }
+
+    /** One compiled search request, reduced to the URL-keyed poster join the
+     *  pipeline result backfills from. */
+    private suspend fun compiledPosterMap(query: String, missing: List<ShowCard>): Map<String, String> {
+        if (missing.isEmpty()) return emptyMap()
+        val compiled = compiledSearch(query)
+        return compiled.mapNotNull { card ->
+            if (card.posterUrl.isBlank()) null else PosterBackfill.normalizeKey(card.url) to card.posterUrl
+        }.toMap()
+    }
+
+    private suspend fun compiledSearch(query: String): List<ShowCard> {
         val results = mutableListOf<ShowCard>()
         try {
             val encoded = URLEncoder.encode(query, "UTF-8")
@@ -117,6 +158,7 @@ class GenericDeclarativeProvider(
     }
 
     override suspend fun loadEpisodes(showUrl: String): ShowDetails {
+        if (!SiteGate.isEnabled(name)) return ShowDetails(show = ShowCard(title = config.displayName, url = showUrl, site = name))
         val pipeline = com.anonrode.downloader.data.rules.DynamicRulesManager.getPipeline(name)
         if (pipeline?.episodes != null) {
             val res = RulesPipeline.runEpisodes(name, pipeline.episodes, showUrl)
@@ -127,7 +169,7 @@ class GenericDeclarativeProvider(
                     posterUrl = res.posterUrl,
                     site = name
                 )
-                return ShowDetails(show = card, synopsis = res.synopsis, episodes = res.episodes)
+                return ShowDetails(show = card, synopsis = res.synopsis, episodes = stampSeasons(res.episodes))
             }
         }
         val show = ShowCard(title = config.displayName, url = showUrl, site = name)
@@ -158,19 +200,40 @@ class GenericDeclarativeProvider(
                                 else DownloadLinkLabels.serverOrPart(text, href.substringAfterLast('/'))
                                     ?: "Episode $count",
                             url = href,
-                            episodeNum = count++,
-                            site = name
+                            episodeNum = count,
+                            site = name,
+                            // Unknown site: flat single-season numbering. Long
+                            // runs stay flat (unique episodeNum) instead of
+                            // overflowing a 100-base season key.
+                            season = 1,
+                            episode = count
                         )
                     )
+                    count++
                 }
             }
 
-            val card = ShowCard(title = title, url = showUrl, posterUrl = poster, site = name)
+            val card = ShowCard(
+                title = title,
+                url = showUrl,
+                posterUrl = if (PosterBackfill.isUsablePoster(poster)) poster else "",
+                site = name
+            )
             return ShowDetails(show = card, synopsis = synopsis, episodes = episodes)
         } catch (_: Exception) {
             return ShowDetails(show = show)
         }
     }
+
+    /** Stamps explicit season/episode on pipeline rows that carry none. */
+    private fun stampSeasons(episodes: List<EpisodeItem>): List<EpisodeItem> =
+        episodes.map { ep ->
+            if (ep.season > 0 && ep.episode > 0) ep
+            else {
+                val (s, e) = com.anonrode.downloader.util.SeasonEpisode.of(ep)
+                ep.copy(season = s, episode = e, episodeNum = com.anonrode.downloader.util.SeasonEpisode.encode(s, e))
+            }
+        }
 
     override suspend fun resolveEpisode(episodeUrl: String, quality: String): DownloadRecipe {
         val pipeline = com.anonrode.downloader.data.rules.DynamicRulesManager.getPipeline(name)

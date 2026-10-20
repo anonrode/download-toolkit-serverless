@@ -73,7 +73,10 @@ object CategoryFeed {
         // is the list itself (it used to be a list of pairs, and the leftover
         // `.map { it.first }` made `it` a String — that is a compile error, not
         // a silent reordering).
-        fun candidateSites(): List<String> = sites.ifEmpty { SITE_FEEDS }
+        // OTA kill-switch: a disabled site never enters the fan-out (and its
+        // chip/tile slot is dropped), while an absent/old payload keeps every
+        // site enabled.
+        fun candidateSites(): List<String> = SiteGate.filterEnabled(sites.ifEmpty { SITE_FEEDS })
     }
 
     /** Probe-verified 2026-09-15: nepu leads the movie genres, asianc the
@@ -202,6 +205,7 @@ object CategoryFeed {
 
     /** One site's confirmed cards for a genre, by its feed kind. */
     private suspend fun fetchSite(site: String, category: Category, page: Int = 1, filterExplicit: Boolean = true): List<ShowCard> {
+        if (!SiteGate.isEnabled(site)) return emptyList()
         val (kind, template) = FEED_SOURCES[site] ?: return emptyList()
         val term = category.termFor(site)
         return when (kind) {

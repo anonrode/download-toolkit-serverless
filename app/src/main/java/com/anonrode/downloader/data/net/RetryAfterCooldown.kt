@@ -27,6 +27,14 @@ import java.util.concurrent.atomic.AtomicLong
  *  - The clock is injected so expiry/origin-isolation/invalid-date behavior
  *    is fully JVM-testable without real time.
  *
+ * REQUEST-CLASS SCOPING (2026-10-20, NEPU regression): a 429 answered to a
+ * download/resolver fan-out must never park SEARCH on the same origin. Each
+ * record is stored under `origin|scope`, where scope is the request class
+ * that actually received the 429 ("search", "verify", "download"). Search
+ * consults only its own scope; a download cooldown therefore cannot block a
+ * user's search (AGENTS rule 13). The default scope is "download", so every
+ * pre-existing caller keeps its exact behavior.
+ *
  * Pure JVM class (no Android imports).
  */
 internal class RetryAfterCooldown(
@@ -40,40 +48,47 @@ internal class RetryAfterCooldown(
     private val evictions = AtomicLong(0)
 
     /**
-     * True when [url]'s origin is inside its cooldown window. Fail-open on
-     * any parsing trouble: a cooldown must never block traffic by accident.
+     * True when [url]'s origin is inside its cooldown window for [scope].
+     * Fail-open on any parsing trouble: a cooldown must never block traffic
+     * by accident.
      */
-    fun isCoolingDown(url: String, nowMs: Long = clock()): Boolean {
-        val origin = originOf(url) ?: return false
-        val e = byOrigin[origin] ?: return false
+    fun isCoolingDown(url: String, nowMs: Long = clock(), scope: String = SCOPE_DOWNLOAD): Boolean {
+        val key = scopedOrigin(url, scope) ?: return false
+        val e = byOrigin[key] ?: return false
         if (nowMs >= e.untilMs) {
             // Expired: opportunistic removal (benign if another thread replaced it).
-            byOrigin.remove(origin, e)
+            byOrigin.remove(key, e)
             return false
         }
         return true
     }
 
-    /** Remaining cooldown ms for [url]'s origin (0 when usable). */
-    fun remainingMs(url: String, nowMs: Long = clock()): Long {
-        val origin = originOf(url) ?: return 0L
-        val e = byOrigin[origin] ?: return 0L
+    /** Remaining cooldown ms for [url]'s origin in [scope] (0 when usable). */
+    fun remainingMs(url: String, nowMs: Long = clock(), scope: String = SCOPE_DOWNLOAD): Long {
+        val key = scopedOrigin(url, scope) ?: return 0L
+        val e = byOrigin[key] ?: return 0L
         return maxOf(0L, e.untilMs - nowMs)
     }
 
     /**
-     * Record a cooldown for [url]'s origin from an actual 429/503 response.
-     * [retryAfterHeader] is the raw `Retry-After` value (seconds form or
-     * HTTP-date form). Unparseable header -> [defaultCooldownMs]; value/clip
-     * above [maxCooldownMs] -> clamped; absent -> [defaultCooldownMs].
-     * Keeps the later expiry when concurrent responses disagree. Waiters
-     * have their own total time budget even if fresh responses extend it.
+     * Record a cooldown for [url]'s origin from an actual 429/503 response in
+     * [scope] (the request class that received it). [retryAfterHeader] is the
+     * raw `Retry-After` value (seconds form or HTTP-date form). Unparseable
+     * header -> [defaultCooldownMs]; value/clip above [maxCooldownMs] ->
+     * clamped; absent -> [defaultCooldownMs]. Keeps the later expiry when
+     * concurrent responses disagree. Waiters have their own total time budget
+     * even if fresh responses extend it.
      */
-    fun record(url: String, retryAfterHeader: String? = null, nowMs: Long = clock()) {
-        val origin = originOf(url) ?: return
+    fun record(
+        url: String,
+        retryAfterHeader: String? = null,
+        nowMs: Long = clock(),
+        scope: String = SCOPE_DOWNLOAD
+    ) {
+        val key = scopedOrigin(url, scope) ?: return
         val requested = parseRetryAfterMs(retryAfterHeader, nowMs) ?: defaultCooldownMs
         val until = nowMs + requested.coerceIn(0L, maxCooldownMs)
-        byOrigin.merge(origin, Entry(until)) { old, new ->
+        byOrigin.merge(key, Entry(until)) { old, new ->
             if (old.untilMs >= new.untilMs) old else new
         }
         evictIfNeeded(nowMs)
@@ -88,10 +103,10 @@ internal class RetryAfterCooldown(
      * coroutine callers may await instead of burning a request. Cancellation
      * propagates through [kotlinx.coroutines.delay] immediately.
      */
-    suspend fun waitUntilUsable(url: String) {
+    suspend fun waitUntilUsable(url: String, scope: String = SCOPE_DOWNLOAD) {
         kotlinx.coroutines.withTimeoutOrNull(maxCooldownMs) {
             while (true) {
-                val ms = remainingMs(url)
+                val ms = remainingMs(url, scope = scope)
                 if (ms <= 0L) return@withTimeoutOrNull
                 kotlinx.coroutines.delay(ms.coerceAtMost(maxCooldownMs))
             }
@@ -151,6 +166,17 @@ internal class RetryAfterCooldown(
         const val MAX_COOLDOWN_MS = 120_000L
         /** Storage bound for tracked origins. */
         const val MAX_ENTRIES = 64
+
+        /** Request classes; `download` is the historical default scope. */
+        const val SCOPE_SEARCH = "search"
+        const val SCOPE_VERIFY = "verify"
+        const val SCOPE_DOWNLOAD = "download"
+
+        private fun scopedOrigin(url: String, scope: String): String? {
+            val origin = originOf(url) ?: return null
+            val clean = scope.trim().lowercase().ifBlank { SCOPE_DOWNLOAD }
+            return "$origin|$clean"
+        }
 
         /**
          * Canonical origin extraction for cooldown keys. Uses the same

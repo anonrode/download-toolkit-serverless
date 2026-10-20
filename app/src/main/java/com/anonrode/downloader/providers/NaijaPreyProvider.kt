@@ -17,10 +17,23 @@ object NaijaPreyProvider : SiteProvider {
     override val mainUrl: String get() = DynamicRulesManager.getBaseUrl(name)
 
     override suspend fun search(query: String): List<ShowCard> {
+        if (!SiteGate.isEnabled(name)) return emptyList()
         DynamicRulesManager.getPipeline(name)?.search?.let { pl ->
-            val results = RulesPipeline.runSearch(name, pl, query)
-            if (results.isNotEmpty()) return results
+            val results = PosterBackfill.sanitize(RulesPipeline.runSearch(name, pl, query))
+            if (results.isNotEmpty()) {
+                return PosterBackfill.backfill(results) { missing ->
+                    if (missing.isEmpty()) emptyMap()
+                    else searchCompiled(query).mapNotNull { card ->
+                        if (card.posterUrl.isBlank()) null
+                        else PosterBackfill.normalizeKey(card.url) to card.posterUrl
+                    }.toMap()
+                }
+            }
         }
+        return searchCompiled(query)
+    }
+
+    private suspend fun searchCompiled(query: String): List<ShowCard> {
         val results = mutableListOf<ShowCard>()
         val noLinks = mutableListOf<ShowCard>()
         try {
@@ -66,10 +79,13 @@ object NaijaPreyProvider : SiteProvider {
         }
         // All-dropped (a locker family the gate doesn't know yet) -> keep the
         // ungated list: an empty result row is worse than a few stub cards.
-        return if (results.isEmpty()) noLinks else results
+        return PosterBackfill.sanitize(if (results.isEmpty()) noLinks else results)
     }
 
     override suspend fun loadEpisodes(showUrl: String): ShowDetails {
+        if (!SiteGate.isEnabled(name)) {
+            return ShowDetails(show = ShowCard(title = "NaijaPrey Media", url = showUrl, site = name))
+        }
         val show = ShowCard(title = "NaijaPrey Media", url = showUrl, site = name)
         DynamicRulesManager.getPipeline(name)?.episodes?.let { pl ->
             val res = RulesPipeline.runEpisodes(name, pl, showUrl)
@@ -77,7 +93,7 @@ object NaijaPreyProvider : SiteProvider {
                 val card = ShowCard(
                     title = res.title.ifBlank { show.title },
                     url = showUrl,
-                    posterUrl = res.posterUrl.ifBlank { show.posterUrl },
+                    posterUrl = if (PosterBackfill.isUsablePoster(res.posterUrl)) res.posterUrl else "",
                     site = name
                 )
                 return ShowDetails(show = card, synopsis = res.synopsis, episodes = res.episodes)
@@ -97,7 +113,21 @@ object NaijaPreyProvider : SiteProvider {
             val seen = mutableSetOf<String>()
             val articleRoot = doc.selectFirst("article") ?: doc.body() ?: doc
             PostContentSanitizer.clean(articleRoot)
-            val links = articleRoot.select("a[href*='download'], a.elementor-button, .entry-content a, a.button")
+            // Charter rule 3: never constrain the episode sweep to one
+            // container. Live 2026-10-20: the avatar-aang movie page carries
+            // its single vdl.np-downloader gateway outside the first
+            // <article>, so the old article-scoped sweep returned 0 items
+            // ("no episode found") while the page HAS a download.
+            val links = doc.select(
+                "a[href*='download'], a[href*='sdm_downloads/'], a[href*='sdm_process_download'], " +
+                    "a#download-button, a.elementor-button, .entry-content a, a.button"
+            )
+
+            // Site-side subtitle surfaces (link sidecars surfaced by the
+            // theme): recorded for the engine's sidecar step, never listed
+            // as episodes. The loop below still rejects them.
+            val subtitleTracks = SubtitleSurfaces.parsePageTracks(doc, showUrl)
+            if (subtitleTracks.isNotEmpty()) SubtitleSurfaces.record(showUrl, subtitleTracks)
 
             // Nav garbage the a[href*='download'] selector keeps catching:
             // "Download Movies" (/download-movies-xxx/), "Series Download"
@@ -156,23 +186,31 @@ object NaijaPreyProvider : SiteProvider {
                     seen.add(href)
                     val parsedNum = Regex("""(?i)\b(?:Episode|Ep|E)[- ]*(\d{1,4})\b""").find(text)?.groupValues?.get(1)?.toIntOrNull()
                         ?: Regex("""(?i)\b(?:Episode|Ep|E)[- ]*(\d{1,4})\b""").find(href)?.groupValues?.get(1)?.toIntOrNull()
-                    val seasonNum = slugSeason?.takeIf { it >= 2 && parsedNum != null && parsedNum in 1..99 }
-                    val epNum = if (seasonNum != null) parsedNum else null
-                    val cleanTitle = if (seasonNum != null && epNum != null) {
-                        "S%02dE%02d".format(seasonNum, epNum)
-                    } else if (text.isNotBlank() && !text.equals("Download", ignoreCase = true) && !text.startsWith("http", ignoreCase = true)) text else "Download $count"
+                    val rowSeason = if (slugSeason != null && slugSeason >= 2) slugSeason else 1
+                    val rowEpisode = parsedNum ?: count
+                    if (parsedNum == null) count++
+                    val cleanTitle = if (rowSeason >= 2 && parsedNum != null) {
+                        "S%02dE%02d".format(rowSeason, parsedNum)
+                    } else if (text.isNotBlank() && !text.equals("Download", ignoreCase = true) && !text.startsWith("http", ignoreCase = true)) text else "Download $rowEpisode"
                     episodes.add(
                         EpisodeItem(
                             title = cleanTitle,
                             url = href,
-                            episodeNum = if (seasonNum != null && epNum != null) seasonNum * 100 + epNum else (parsedNum ?: count++),
-                            site = name
+                            episodeNum = com.anonrode.downloader.util.SeasonEpisode.encode(rowSeason, rowEpisode),
+                            site = name,
+                            season = rowSeason,
+                            episode = rowEpisode
                         )
                     )
                 }
             }
 
-            val card = ShowCard(title = title, url = showUrl, posterUrl = poster, site = name)
+            val card = ShowCard(
+                title = title,
+                url = showUrl,
+                posterUrl = if (PosterBackfill.isUsablePoster(poster)) poster else "",
+                site = name
+            )
             return ShowDetails(show = card, synopsis = synopsis, episodes = episodes)
         } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) throw e

@@ -135,6 +135,7 @@ import androidx.media3.ui.CaptionStyleCompat
 import androidx.media3.ui.PlayerView
 import androidx.media3.ui.SubtitleView
 import com.anonrode.downloader.R
+import com.anonrode.downloader.providers.SubtitleSurfaces
 import com.anonrode.downloader.ui.theme.Motion
 import com.anonrode.downloader.ui.theme.Spacing
 import com.anonrode.downloader.ui.util.tick
@@ -252,15 +253,60 @@ private val PlayerTextSecondary = Color(0xFF94A3B8)
 private val PlayerSurface = Color(0xFF101216)
 private val PlayerSurfaceElevated = Color(0xFF181B22)
 
-/** "movie.en.srt" next to "movie.mkv" -> "en"; "movie.final.srt" -> "und".
- *  Region tags are dropped ("pt-BR" -> "pt") because Format.language wants
- *  a bare 639 code, not an IETF tag. Pure so the tag rule is JVM-testable. */
+/** Full language names some sidecar writers use ("movie.english.srt"). */
+private val SIDECAR_LANGUAGE_NAMES = mapOf(
+    "english" to "en", "spanish" to "es", "french" to "fr", "portuguese" to "pt",
+    "arabic" to "ar", "hindi" to "hi", "chinese" to "zh", "japanese" to "ja",
+    "korean" to "ko", "german" to "de", "italian" to "it", "russian" to "ru",
+    "turkish" to "tr", "indonesian" to "id", "vietnamese" to "vi", "thai" to "th"
+)
+
+/** "movie.en.srt" next to "movie.mkv" -> "en"; "movie.english.srt" -> "en";
+ *  "movie.final.srt" -> "und". Region tags are dropped ("pt-BR" -> "pt")
+ *  because Format.language wants a bare 639 code, not an IETF tag. Pure so
+ *  the tag rule is JVM-testable. */
 internal fun sidecarLanguageHint(fileName: String, videoStem: String): String {
     val stem = fileName.substringAfterLast('/').substringBeforeLast('.')
     if (videoStem.isEmpty() || !stem.startsWith(videoStem)) return "und"
     val tag = stem.removePrefix(videoStem).trim('.', '_', '-', ' ')
         .substringBefore('-')
-    return if (Regex("^[a-zA-Z]{2,3}$").matches(tag)) tag.lowercase() else "und"
+        .lowercase()
+    if (Regex("^[a-zA-Z]{2,3}$").matches(tag)) return tag
+    return SIDECAR_LANGUAGE_NAMES[tag] ?: "und"
+}
+
+/**
+ * How a sidecar should be attached. Engines write `<stem>.<lang>.srt/.vtt/…`
+ * but mirrors occasionally mislabel the container: a `.vtt` that is really
+ * SRT (no WEBVTT header) and an `.srt` that is really WebVTT. ExoPlayer's
+ * parsers are strict about the header, so:
+ *  - `.vtt` without WEBVTT -> attach as SubRip (content is SRT);
+ *  - `.srt` with WEBVTT   -> convert to SRT text and attach the conversion.
+ */
+internal data class SidecarSpec(val mimeType: String, val convertVttToSrt: Boolean)
+
+internal fun sidecarSpec(fileExtension: String, head: String): SidecarSpec {
+    val ext = fileExtension.lowercase()
+    val vtt = SubtitleSurfaces.looksLikeVtt(head)
+    return when {
+        ext == "vtt" && !vtt -> SidecarSpec("application/x-subrip", false)
+        ext == "vtt" -> SidecarSpec("text/vtt", false)
+        ext == "srt" && vtt -> SidecarSpec("application/x-subrip", true)
+        ext == "ass" || ext == "ssa" -> SidecarSpec("application/x-ssa", false)
+        ext == "srt" -> SidecarSpec("application/x-subrip", false)
+        else -> SidecarSpec("application/x-subrip", false)
+    }
+}
+
+/** First bytes of a sidecar, BOM tolerated by the callers. */
+internal fun readSubtitleHead(file: File, maxBytes: Int = 512): String = try {
+    file.inputStream().use { input ->
+        val buffer = ByteArray(maxBytes)
+        val n = input.read(buffer)
+        if (n <= 0) "" else String(buffer, 0, n, Charsets.UTF_8)
+    }
+} catch (_: Throwable) {
+    ""
 }
 
 /**
@@ -558,14 +604,24 @@ private fun MediaPlayerModalImpl(
         }?.sortedBy { it.name } ?: emptyList()
         val sidecars = sidecarFiles.mapNotNull { sibling ->
             val extName = sibling.extension.lowercase()
-            MediaItem.SubtitleConfiguration.Builder(Uri.fromFile(sibling))
-                .setMimeType(
-                    when (extName) {
-                        "vtt" -> "text/vtt"
-                        "ass", "ssa" -> "application/x-ssa"
-                        else -> "application/x-subrip"
+            val head = readSubtitleHead(sibling)
+            val spec = sidecarSpec(extName, head)
+            // Mislabeled container: an .srt that is really WebVTT is
+            // converted (headered VTT is rejected by the SubRip parser);
+            // an .vtt that is really SRT is attached as SubRip as-is.
+            val attachedFile = if (spec.convertVttToSrt) {
+                try {
+                    val converted = SubtitleSurfaces.vttToSrt(sibling.readText())
+                    val outDir = File(context.cacheDir, "player_subs").apply { mkdirs() }
+                    File(outDir, sibling.name.substringBeforeLast('.') + ".converted.srt").apply {
+                        writeText(converted)
                     }
-                )
+                } catch (_: Throwable) {
+                    sibling
+                }
+            } else sibling
+            MediaItem.SubtitleConfiguration.Builder(Uri.fromFile(attachedFile))
+                .setMimeType(spec.mimeType)
                 // "movie.en.srt" carries a real language tag: feeding it
                 // lets the auto-pick rule below treat a sidecar exactly
                 // like an embedded EN track instead of "und".

@@ -108,11 +108,263 @@ object UrlClassifier {
             return true
         }
         if (low.contains("kickassanime") || low.contains("playlist.php") ||
-            low.contains("/api/orion/") || low.contains("stream-proxy")
+            low.contains("/api/orion/")
         ) {
             return true
         }
+        // `stream-proxy` was hardcoded here (HLS) AND in LinkResolver
+        // (provably-direct) until 2026-10-20. The two contradicted each other
+        // and both were wrong: nsrplay's proxy is an opaque endpoint whose
+        // BODY decides (a self-referential manifest when it is the decoy, a
+        // direct MP4 byte-range when it is the real stream). Classification
+        // is evidence-based now — see inspectTerminal() — so no URL-name
+        // heuristic for it remains.
         val query = low.substringAfter('?', "")
         return STREAMING_QUERY_REGEX.containsMatchIn(query)
     }
+
+    // ---------------------------------------------------------------- evidence
+    //
+    // Terminal classification for the download router (2026-10-20). One
+    // bounded probe decides what a URL actually IS:
+    //   DIRECT_MEDIA     -> TurboDownloader / aria2c (byte-range file)
+    //   HLS_PLAYLIST     -> yt-dlp (genuine multi-variant m3u8 / media playlist)
+    //   SELF_REFERENTIAL -> reject + poison (a "master" whose every variant is
+    //                       itself with a rotated token; nsrplay stream-proxy)
+    //   STUB             -> reject + poison (1-byte / sub-1KiB mpegurl decoy)
+    //   UNKNOWN          -> no structural verdict; caller keeps its fallback
+    //
+    // The body check runs ONLY for manifest-shaped responses (mpegurl
+    // content-type or .m3u8/.mpd URL or no media extension), so a direct MP4
+    // costs exactly the existing 1 KiB probe. Results are cached by
+    // host+path (query/token rotates per request; the SHAPE does not), which
+    // keeps RulesPipeline validation, LinkResolver acceptance and the
+    // DownloadEngine backend decision from re-fetching the same terminal.
+
+    enum class TerminalKind { DIRECT_MEDIA, HLS_PLAYLIST, SELF_REFERENTIAL, STUB, UNKNOWN }
+
+    data class TerminalEvidence(
+        val kind: TerminalKind,
+        val code: Int = 0,
+        val contentType: String = "",
+        val totalBytes: Long? = null,
+        val reason: String = ""
+    ) {
+        /** True only for a terminal that a downloader can actually consume. */
+        val playable: Boolean
+            get() = kind == TerminalKind.DIRECT_MEDIA || kind == TerminalKind.HLS_PLAYLIST
+    }
+
+    private const val EVIDENCE_TTL_MS = 5 * 60_000L
+    private const val EVIDENCE_MAX_ENTRIES = 128
+    private const val MANIFEST_BODY_MAX_BYTES = 32L * 1024L
+
+    private data class EvidenceEntry(val evidence: TerminalEvidence, val expiresAtMs: Long)
+
+    private val evidenceCache = java.util.concurrent.ConcurrentHashMap<String, EvidenceEntry>()
+
+    /** Cache key: origin + path, query deliberately excluded (tokens rotate). */
+    internal fun evidenceKey(rawUrl: String): String {
+        val parsed = rawUrl.trim().toHttpUrlOrNull() ?: return rawUrl.substringBefore('?').lowercase()
+        return "${parsed.scheme}://${parsed.host}${parsed.port.let { if (it == 80 || it == 443) "" else ":$it" }}${parsed.encodedPath}"
+    }
+
+    fun cachedTerminalEvidence(rawUrl: String): TerminalEvidence? {
+        val key = evidenceKey(rawUrl)
+        val e = evidenceCache[key] ?: return null
+        if (System.currentTimeMillis() >= e.expiresAtMs) {
+            evidenceCache.remove(key, e)
+            return null
+        }
+        return e.evidence
+    }
+
+    internal fun rememberTerminalEvidence(rawUrl: String, evidence: TerminalEvidence) {
+        if (evidence.kind == TerminalKind.UNKNOWN) return
+        if (evidenceCache.size >= EVIDENCE_MAX_ENTRIES) {
+            val now = System.currentTimeMillis()
+            evidenceCache.entries.removeIf { now >= it.value.expiresAtMs }
+            if (evidenceCache.size >= EVIDENCE_MAX_ENTRIES) {
+                evidenceCache.keys.take(evidenceCache.size / 2).forEach { evidenceCache.remove(it) }
+            }
+        }
+        evidenceCache[evidenceKey(rawUrl)] = EvidenceEntry(
+            evidence,
+            System.currentTimeMillis() + EVIDENCE_TTL_MS
+        )
+    }
+
+    /** Tests only. */
+    internal fun clearEvidenceCacheForTests() = evidenceCache.clear()
+
+    fun isManifestShaped(rawUrl: String, contentType: String = ""): Boolean {
+        val ct = contentType.lowercase()
+        if (ct.contains("mpegurl") || ct.contains("dash+xml")) return true
+        val path = rawUrl.substringBefore('?').substringBefore('#').lowercase()
+        if (path.endsWith(".m3u8") || path.endsWith(".m3u") || path.endsWith(".mpd") || path.endsWith(".f4m")) return true
+        return path.contains("/manifest") || path.contains("playlist")
+    }
+
+    fun isDirectByContentType(contentType: String): Boolean {
+        val ct = contentType.lowercase()
+        return ct.startsWith("video/") || ct.startsWith("audio/") ||
+            ct.contains("application/octet-stream") || ct.contains("application/mp4")
+    }
+
+    /** True when the URL path itself proves a direct media file. */
+    fun isDirectMediaPath(rawUrl: String): Boolean {
+        val path = rawUrl.substringBefore('?').substringBefore('#').lowercase()
+        val last = path.substringAfterLast('/')
+        val ext = last.substringAfterLast('.', "")
+        return ext in setOf("mp4", "mkv", "webm", "avi", "mov", "flv", "m4v", "mp3", "m4a", "aac", "flac", "opus", "ogg", "wav")
+    }
+
+    /**
+     * Structural self-loop detector for a manifest body. Every variant /
+     * segment URI that points back to the SAME host+path as the manifest
+     * (query-only difference — the rotated token) proves the playlist can
+     * never reach media. Comparison ignores the query because that is exactly
+     * how the nsrplay proxy loops.
+     */
+    fun isSelfReferentialManifest(body: String, manifestUrl: String): Boolean {
+        if (body.isBlank()) return false
+        val uris = mutableListOf<String>()
+        for (rawLine in body.lineSequence()) {
+            val line = rawLine.trim()
+            if (line.isBlank()) continue
+            if (!line.startsWith("#")) {
+                uris.add(line)
+                continue
+            }
+            URI_VALUE.findAll(line).forEach { m ->
+                val v = m.groupValues.getOrNull(1)?.trim().orEmpty()
+                if (v.isNotBlank()) uris.add(v)
+            }
+        }
+        if (uris.isEmpty()) return false
+        val self = canonicalMediaPath(manifestUrl) ?: return false
+        return uris.all { uri ->
+            val resolved = HttpClient.safeResolveUri(manifestUrl, uri)
+            canonicalMediaPath(resolved) == self
+        }
+    }
+
+    /** host+path canonical form; null when unparseable. Query/hash dropped. */
+    internal fun canonicalMediaPath(rawUrl: String): String? {
+        val parsed = rawUrl.trim().toHttpUrlOrNull() ?: return null
+        val port = if (parsed.port == 80 || parsed.port == 443) "" else ":${parsed.port}"
+        return "${parsed.host.lowercase()}$port${parsed.encodedPath}"
+    }
+
+    /**
+     * Tiny mpegurl gate: a manifest under [HLS_STUB_MIN_BYTES] that carries
+     * neither a variant tag nor a media segment is a decoy, never a playlist.
+     */
+    fun isTinyManifest(body: String, contentType: String, totalBytes: Long?): Boolean {
+        val bytes = totalBytes ?: body.toByteArray(Charsets.UTF_8).size.toLong()
+        if (bytes >= LinkResolver.HLS_STUB_MIN_BYTES) return false
+        val ct = contentType.lowercase()
+        val looksManifest = ct.contains("mpegurl") || body.trimStart().startsWith("#EXTM3U")
+        if (!looksManifest) return false
+        val hasVariant = body.contains("#EXT-X-STREAM-INF", ignoreCase = true)
+        val hasSegment = body.contains("#EXTINF", ignoreCase = true)
+        return !hasVariant && !hasSegment
+    }
+
+    /**
+     * Bounded evidence probe. [referer] is attached to the body fetch (a
+     * token-gated CDN may require it; classification must see the real body).
+     * Never throws: any transport failure yields UNKNOWN.
+     */
+    suspend fun inspectTerminal(
+        rawUrl: String,
+        referer: String? = null,
+        tag: String? = "terminal-evidence"
+    ): TerminalEvidence {
+        if (rawUrl.isBlank()) return TerminalEvidence(TerminalKind.UNKNOWN, reason = "blank")
+        // Direct media path is proof enough; no network at all.
+        if (isDirectMediaPath(rawUrl) && !isStreamingLink(rawUrl)) {
+            return TerminalEvidence(TerminalKind.DIRECT_MEDIA, reason = "media path extension")
+        }
+        cachedTerminalEvidence(rawUrl)?.let { return it }
+        val probe = try {
+            com.anonrode.downloader.data.net.HttpClient.probeTerminal(
+                rawUrl, referer = referer, timeoutMs = 6_000L, tag = tag
+            )
+        } catch (_: Exception) {
+            null
+        } ?: return TerminalEvidence(TerminalKind.UNKNOWN, reason = "probe failed")
+
+        val ct = probe.contentType
+        val total = probe.totalBytes
+        if (total == null) {
+            val ev = TerminalEvidence(TerminalKind.UNKNOWN, probe.code, ct, null, "no size proof")
+            return ev
+        }
+        val manifestShaped = isManifestShaped(rawUrl, ct)
+        if (!manifestShaped) {
+            val kind = when {
+                isDirectByContentType(ct) -> TerminalKind.DIRECT_MEDIA
+                isDirectMediaPath(rawUrl) -> TerminalKind.DIRECT_MEDIA
+                else -> TerminalKind.UNKNOWN
+            }
+            val ev = TerminalEvidence(kind, probe.code, ct, total, "non-manifest ${ct.ifBlank { "unknown ct" }}")
+            rememberTerminalEvidence(rawUrl, ev)
+            return ev
+        }
+        // Manifest: read a bounded head. getText uses the shared client
+        // (redirects followed) but the URL was just probe-validated and is
+        // host-gated by the caller.
+        val body = try {
+            com.anonrode.downloader.data.net.HttpClient.getText(
+                rawUrl, referer = referer, tag = tag, maxBytes = MANIFEST_BODY_MAX_BYTES
+            ).orEmpty()
+        } catch (_: Exception) {
+            ""
+        }
+        val trimmed = body.trimStart('\uFEFF', ' ', '\r', '\n', '\t')
+        val ev = when {
+            trimmed.isBlank() ->
+                TerminalEvidence(TerminalKind.UNKNOWN, probe.code, ct, total, "manifest body unreadable")
+            !trimmed.startsWith("#EXTM3U") ->
+                TerminalEvidence(TerminalKind.STUB, probe.code, ct, total, "mpegurl body is not an M3U document")
+            isTinyManifest(trimmed, ct, total) ->
+                TerminalEvidence(TerminalKind.STUB, probe.code, ct, total, "tiny mpegurl (${total}B) with no variants/segments")
+            isSelfReferentialManifest(trimmed, rawUrl) ->
+                TerminalEvidence(TerminalKind.SELF_REFERENTIAL, probe.code, ct, total, "every playlist URI points back to the playlist itself")
+            else ->
+                TerminalEvidence(TerminalKind.HLS_PLAYLIST, probe.code, ct, total, "genuine playlist")
+        }
+        rememberTerminalEvidence(rawUrl, ev)
+        return ev
+    }
+
+    /**
+     * Generic repair for a doubled scheme produced by a payload template
+     * ("https://vidsrc.buzz" + a bound url that already starts with
+     * "https://vidsrc.buzz" -> "https://vidsrc.buzzhttps://vidsrc.buzz/...").
+     * Only repairs when the text before the second scheme is a BARE ORIGIN of
+     * the same host — a legitimate `?url=https://...` parameter carries a
+     * path/query before the embedded scheme and is left untouched.
+     */
+    fun repairConcatenatedUrl(rawUrl: String): String {
+        val value = rawUrl.trim()
+        val firstScheme = value.indexOf("://")
+        if (firstScheme < 0) return value
+        val second = value.indexOf("://", firstScheme + 3)
+        if (second < 0) return value
+        val start = value.lastIndexOf("http", second)
+        if (start <= 0) return value
+        val prefix = value.substring(0, start)
+        val rest = value.substring(start)
+        if (!rest.startsWith("http://", true) && !rest.startsWith("https://", true)) return value
+        val bareOrigin = prefix.trimEnd('/').lowercase()
+        val originOk = bareOrigin.matches(Regex("""https?://[a-z0-9.-]+"""))
+        if (!originOk) return value
+        val prefixHost = bareOrigin.substringAfter("://").removePrefix("www.")
+        val restHost = extractHost(rest).removePrefix("www.")
+        return if (prefixHost.isNotBlank() && prefixHost == restHost) rest else value
+    }
 }
+
+private val URI_VALUE = Regex("URI=\"([^\"]+)\"")

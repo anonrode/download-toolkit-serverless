@@ -52,7 +52,18 @@ data class ContentPolicy(
     val suppressNollywood: Boolean = false,
     val nollywoodOnlySites: List<String> = emptyList(),
     val nollywoodSites: List<String> = emptyList(),
-    val nollywoodTerms: List<String> = emptyList()
+    val nollywoodTerms: List<String> = emptyList(),
+    /**
+     * Per-site kill switch (2026-10-20, OTA-controllable): provider ids the
+     * operator has turned OFF without an app update. EMPTY (the default, and
+     * the state of every payload that omits the field) means every site is
+     * enabled. Values are lowercased/trimmed; non-string entries are ignored
+     * (lenient parse — a malformed switch can never hide every site).
+     *
+     * Semantics: no NEW work starts for a disabled site (search, feeds,
+     * failover, drawer). Work already running is allowed to finish.
+     */
+    val disabledSites: List<String> = emptyList()
 )
 
 /**
@@ -408,8 +419,29 @@ object DynamicRulesManager {
             suppressNollywood = cp.optBoolean("suppressNollywood", false),
             nollywoodOnlySites = lowerTrimmedList(cp.optJSONArray("nollywoodOnlySites"), 64),
             nollywoodSites = lowerTrimmedList(cp.optJSONArray("nollywoodSites"), 64),
-            nollywoodTerms = lowerTrimmedList(cp.optJSONArray("nollywoodTerms"), 128)
+            nollywoodTerms = lowerTrimmedList(cp.optJSONArray("nollywoodTerms"), 128),
+            disabledSites = lenientSiteList(cp.opt("disabledSites"), 64)
         )
+    }
+
+    /**
+     * Lenient `contentPolicy.disabledSites` parse. Only actual JSON strings
+     * are accepted (numbers/objects/null entries are skipped), each trimmed
+     * and lowercased so " Nepu " and "nepu" are the same switch. A missing
+     * field, a non-array value, or an array with no usable strings all yield
+     * an EMPTY list = "every site enabled" — the fail-open direction. The
+     * only state that disables anything is an explicit well-formed string.
+     */
+    private fun lenientSiteList(value: Any?, max: Int): List<String> {
+        val arr = value as? org.json.JSONArray ?: return emptyList()
+        val out = LinkedHashSet<String>()
+        for (i in 0 until minOf(arr.length(), max)) {
+            val raw = arr.opt(i)
+            if (raw !is String) continue
+            val site = raw.trim().lowercase()
+            if (site.isNotBlank()) out.add(site)
+        }
+        return out.toList()
     }
 
     private fun lowerTrimmedList(arr: org.json.JSONArray?, max: Int): List<String> =
@@ -859,6 +891,35 @@ object DynamicRulesManager {
      *  fields. Never throws; an absent section returns compiled defaults. */
     fun getContentPolicy(): ContentPolicy =
         try { activeContentPolicy } catch (_: Exception) { ContentPolicy() }
+
+    /**
+     * OTA-controlled per-site on/off switch (contentPolicy.disabledSites).
+     *
+     * TRUE (enabled) is the default for every site: an absent section, an
+     * absent field, a blank array, a malformed non-array value, or an array
+     * whose entries are not strings all mean "everything enabled". A site is
+     * disabled only by an explicit string match (case/whitespace insensitive).
+     * The lookup is deliberately data-driven — there is no compiled per-site
+     * allow/deny list anywhere in the engine.
+     *
+     * Consumers: ProviderRegistry (search / provider lists / drawer loads) and
+     * DownloadEngine failover. Running downloads may finish; new work for a
+     * disabled site must not start.
+     */
+    fun isSiteEnabled(site: String): Boolean {
+        val key = site.trim().lowercase()
+        if (key.isBlank()) return true
+        val disabled = try { activeContentPolicy.disabledSites } catch (_: Exception) { emptyList() }
+        return disabled.none { it == key }
+    }
+
+    /** Snapshot of the active disabled-site list (lowercased, payload order). */
+    fun getDisabledSites(): List<String> =
+        try { activeContentPolicy.disabledSites.toList() } catch (_: Exception) { emptyList() }
+
+    /** Immutable (site -> enabled) snapshot for UI chip lists / diagnostics. */
+    fun siteEnabledSnapshot(siteNames: Collection<String>): Map<String, Boolean> =
+        siteNames.distinct().associateWith { isSiteEnabled(it) }
 
     /** Active OTA announcements in payload order. Never throws; an absent
      *  section (or a family held back by its flag) yields an empty list. */
@@ -1918,7 +1979,8 @@ object DynamicRulesManager {
                     "searchStrategies" to searchStrategies.size,
                     "pipelines" to pipelines.size,
                     "pipelines_shadow_armed" to pipelinesShadowArmed,
-                    "dynamic_providers" to dynProviders.size
+                    "dynamic_providers" to dynProviders.size,
+                    "disabled_sites" to contentPolicy.disabledSites.size
                 ),
                 skippedEntries = skippedPipelines + skippedDynProviders
             )

@@ -5,10 +5,14 @@ import com.anonrode.downloader.pipeline.LinkResolver
 import com.anonrode.downloader.pipeline.PipelineError
 import com.anonrode.downloader.pipeline.PipelineJournal
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.selects.select
+import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.coroutines.AbstractCoroutineContextElement
@@ -301,15 +305,29 @@ object ResolverRegistry {
         withContext(lineage) {
             val outcome = resolveInternal(url, quality, lineage.depth, lineage.visitedSites, memoTaskId)
             currentCoroutineContext().ensureActive()
-            val result = (outcome as? ResolverOutcome.Success)?.url
+            val rawResult = (outcome as? ResolverOutcome.Success)?.url
+                ?.let { com.anonrode.downloader.pipeline.UrlClassifier.repairConcatenatedUrl(it) }
+            // Evidence gate (2026-10-20): a resolver output that is a
+            // self-referential manifest or a tiny mpegurl decoy is NOT a
+            // success. Screen it before caching/health so the stream-proxy
+            // class can never enter ResolveCache and be replayed.
+            val evidenceRejected = rawResult != null && !screenTerminalEvidence(rawResult)
+            val result = if (evidenceRejected) null else rawResult
+            if (evidenceRejected) {
+                com.anonrode.downloader.pipeline.ResolveCache.poison(rawResult!!)
+                com.anonrode.downloader.pipeline.PipelineJournal.hop(
+                    site = "", stage = "terminal-evidence", url = url, ok = false, ms = 0,
+                    detail = "self-referential/stub terminal from resolver — rejected and poisoned"
+                )
+            }
             if (memoTaskId != null) {
                 // Success here PROVES the host can still crack — a dead mark for
                 // this url (e.g. left from a gateway handoff) must not survive it.
                 if (result != null) ResolveBudget.markAlive(memoTaskId, url)
-                else if (outcome is ResolverOutcome.Failure &&
-                    // Same content-vs-transport rule as the registry loop-end mark:
-                    // a transport-sick pass re-walks next pass; a proven-dead page skips.
-                    !ResolveBudget.isTransportLevelFailure(outcome.reason)
+                else if ((outcome is ResolverOutcome.Failure &&
+                        // Same content-vs-transport rule as the registry loop-end mark:
+                        // a transport-sick pass re-walks next pass; a proven-dead page skips.
+                        !ResolveBudget.isTransportLevelFailure(outcome.reason)) || evidenceRejected
                 ) ResolveBudget.markDead(memoTaskId, url)
             }
             if (lineage.depth == 0 && recordHealth) {
@@ -322,8 +340,9 @@ object ResolverRegistry {
                 if (result != null) {
                     com.anonrode.downloader.pipeline.ResolveCache.put(cacheKey, result)
                     com.anonrode.downloader.pipeline.HostHealth.recordOk(host)
-                } else if (outcome is ResolverOutcome.Failure) {
-                    val reason = outcome.reason
+                } else if (outcome is ResolverOutcome.Failure || evidenceRejected) {
+                    val reason = if (evidenceRejected) "terminal evidence: self-referential/stub manifest"
+                        else (outcome as? ResolverOutcome.Failure)?.reason
                     com.anonrode.downloader.pipeline.HostHealth.recordFail(
                         host,
                         rateLimited = reason?.contains("429") == true || HttpClient.remainingCooldownMs(url) > 0L,
@@ -341,15 +360,25 @@ object ResolverRegistry {
         return RESOLVERS.any { it.canResolve(trimmed) }
     }
 
-    /** Try all usable candidates in a bounded window; first success cancels losers. */
+    /** Try all usable candidates in a bounded window; settle briefly and pick
+     *  the best PROVEN terminal instead of the first one to answer. */
     suspend fun resolveAny(
         urls: List<String>,
         quality: String = "720p",
         maxConcurrency: Int = 3,
-        bypassHealth: Boolean = false
+        bypassHealth: Boolean = false,
+        episode: EpisodeRef? = null,
+        settleMs: Long = 1_200L
     ): String? {
         val candidates = urls.asSequence()
             .filter { it.isNotBlank() }
+            // Episode pinning (2026-10-20): a mirror whose URL names a
+            // DIFFERENT season/episode/tmdb can never be a candidate for this
+            // task. This is the Servamp S01E01==S01E02 class (an ep-1 mirror
+            // entered every episode's list through srvMap) and the general
+            // cross-episode ResolveCache replay.
+            .filter { episodeCandidateAllowed(it, episode) }
+            .map { com.anonrode.downloader.pipeline.UrlClassifier.repairConcatenatedUrl(it) }
             .distinct()
             // OTA knownDead is a CONTENT/ownership verdict, not a transient
             // health backoff: bypassHealth may lift stale cooldowns, but never
@@ -390,7 +419,9 @@ object ResolverRegistry {
                 }
             }
         }
-        return boundedFirstSuccess(candidates, maxConcurrency) { resolve(it, quality, bypassHealth = bypassHealth) }
+        return settleAndScore(candidates, maxConcurrency, episode, settleMs) {
+            resolve(it, quality, bypassHealth = bypassHealth)
+        }
     }
 
     /** User-facing reason for an OTA knownDead host, or null when live. */
@@ -588,6 +619,206 @@ object ResolverRegistry {
             retryable = false
         )
     }
+
+    /**
+     * Settle-and-score mirror race (replaces first-success-wins for
+     * provider-issued fan-outs).
+     *
+     * The 2026-10-20 NEPU timeline: the stream-proxy leg validated a
+     * 390-byte self-loop at 11:26:11.296 and the genuine 3,347-byte HLS
+     * master from the vidbolt leg validated at 11:26:15.401 — already
+     * cancelled, because the old race returned the FIRST success. Here the
+     * first validated result opens a short [settleMs] window: in-flight legs
+     * may finish, no NEW leg is launched, and the winner is selected by
+     * structural score (self-referential/stub rejected outright, genuine
+     * playlists and direct media outrank opaque endpoints, candidate order
+     * breaks ties).
+     */
+    internal suspend fun settleAndScore(
+        candidates: List<String>,
+        maxConcurrency: Int,
+        episode: EpisodeRef?,
+        settleMs: Long = 1_200L,
+        attempt: suspend (String) -> String?
+    ): String? = supervisorScope {
+        currentCoroutineContext().ensureActive()
+        if (candidates.isEmpty()) return@supervisorScope null
+        val pending = mutableListOf<Deferred<Pair<Int, String?>>>()
+        val collected = mutableListOf<Pair<Int, String>>()
+        var nextIndex = 0
+        val window = maxConcurrency.coerceIn(1, 6)
+        fun launchNext() {
+            if (nextIndex >= candidates.size) return
+            val idx = nextIndex
+            val candidate = candidates[idx]
+            nextIndex++
+            pending += async {
+                currentCoroutineContext().ensureActive()
+                val result = try {
+                    attempt(candidate)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    null
+                }
+                currentCoroutineContext().ensureActive()
+                idx to result
+            }
+        }
+        var settleDeadline = 0L
+        try {
+            repeat(minOf(candidates.size, window)) { launchNext() }
+            while (pending.isNotEmpty()) {
+                val pair: Pair<Int, String?>? = if (settleDeadline > 0L) {
+                    val remaining = settleDeadline - System.currentTimeMillis()
+                    if (remaining <= 0L) break
+                    withTimeoutOrNull(remaining) {
+                        select<Pair<Int, String?>> {
+                            pending.forEach { work -> work.onAwait { it } }
+                        }
+                    }
+                } else {
+                    select<Pair<Int, String?>> {
+                        pending.forEach { work -> work.onAwait { it } }
+                    }
+                } ?: break
+                val done = pending.firstOrNull { it.isCompleted && it.getCompleted() == pair }
+                if (done != null) pending.remove(done)
+                val result = pair.second
+                if (!result.isNullOrBlank()) {
+                    val repaired = com.anonrode.downloader.pipeline.UrlClassifier.repairConcatenatedUrl(result)
+                    if (episodeResultAllowed(repaired, episode)) {
+                        collected.add(pair.first to repaired)
+                        if (settleDeadline == 0L) {
+                            settleDeadline = System.currentTimeMillis() + settleMs.coerceIn(0L, 10_000L)
+                        }
+                    } else {
+                        com.anonrode.downloader.util.DebugLog.resolve(
+                            "resolveAny: rejected cross-episode terminal ${repaired.take(120)}"
+                        )
+                    }
+                }
+                if (settleDeadline == 0L) launchNext()
+            }
+        } finally {
+            pending.forEach { it.cancel() }
+        }
+        if (collected.isEmpty()) return@supervisorScope null
+        var best: String? = null
+        var bestScore = Int.MIN_VALUE
+        for ((idx, url) in collected) {
+            if (!screenTerminalEvidence(url)) continue
+            val evidence = com.anonrode.downloader.pipeline.UrlClassifier.cachedTerminalEvidence(url)
+            val score = terminalScore(url, evidence, idx)
+            com.anonrode.downloader.util.DebugLog.resolve(
+                "resolveAny: candidate #$idx score=$score ${url.take(120)}"
+            )
+            if (score > bestScore) {
+                bestScore = score
+                best = url
+            }
+        }
+        best
+    }
+}
+
+/**
+ * Explicit episode identity for mirror pinning. [season]/[episode] come from
+ * the task or the episode URL; [tmdbId] is optional (URL-level checks only
+ * when present).
+ */
+data class EpisodeRef(val season: Int, val episode: Int, val tmdbId: String = "")
+
+private val TV_PATH_REF = Regex("""/(?:watch/)?tv/(\d+)/(\d+)/(\d+)(?:\b|/)""", RegexOption.IGNORE_CASE)
+private val QUERY_SEASON = Regex("""[?&](?:season|s)=(\d{1,3})""", RegexOption.IGNORE_CASE)
+private val QUERY_EPISODE = Regex("""[?&](?:episode|ep|e)=(\d{1,4})""", RegexOption.IGNORE_CASE)
+private val TOKEN_REF = Regex("""(?i)(?:^|[^a-z0-9])s(\d{1,2})[._-]?e(\d{1,4})(?:[^a-z0-9]|$)""")
+
+/** Parsed (tmdb?, season, episode) from a mirror/terminal URL, or null. */
+internal fun parseEpisodeFromUrl(url: String): Triple<String, Int, Int>? {
+    TV_PATH_REF.find(url)?.let { m ->
+        val s = m.groupValues[2].toIntOrNull()
+        val e = m.groupValues[3].toIntOrNull()
+        if (s != null && e != null && s in 1..99 && e in 1..999) {
+            return Triple(m.groupValues[1], s, e)
+        }
+    }
+    TOKEN_REF.find(url)?.let { m ->
+        val s = m.groupValues[1].toIntOrNull()
+        val e = m.groupValues[2].toIntOrNull()
+        if (s != null && e != null && s in 1..99 && e in 1..999) return Triple("", s, e)
+    }
+    val s = QUERY_SEASON.find(url)?.groupValues?.get(1)?.toIntOrNull()
+    val e = QUERY_EPISODE.find(url)?.groupValues?.get(1)?.toIntOrNull()
+    if (s != null && e != null && s in 1..99 && e in 1..999) return Triple("", s, e)
+    return null
+}
+
+/** True when the URL can name this task's episode (unparseable = unknown, allowed). */
+internal fun episodeCandidateAllowed(url: String, ref: EpisodeRef?): Boolean {
+    if (ref == null || ref.season <= 0 || ref.episode <= 0) return true
+    val parsed = parseEpisodeFromUrl(url) ?: return true
+    if (parsed.first.isNotBlank() && ref.tmdbId.isNotBlank() && parsed.first != ref.tmdbId) return false
+    return parsed.second == ref.season && parsed.third == ref.episode
+}
+
+/** True when a RESOLVED terminal names this episode (CDN URLs carry no identity). */
+internal fun episodeResultAllowed(url: String, ref: EpisodeRef?): Boolean = episodeCandidateAllowed(url, ref)
+
+/**
+ * One evidence check for a resolver's output. Only manifest-shaped or
+ * proxy-shaped URLs are inspected (a direct .mp4/.mkv costs nothing). A
+ * self-referential playlist or a sub-1KiB mpegurl decoy is poisoned so no
+ * later cache lookup can replay it.
+ */
+internal suspend fun screenTerminalEvidence(url: String): Boolean {
+    if (url.isBlank()) return false
+    val classifier = com.anonrode.downloader.pipeline.UrlClassifier
+    if (classifier.isDirectMediaPath(url) && !classifier.isStreamingLink(url)) return true
+    if (!classifier.isManifestShaped(url) && !url.contains("proxy", ignoreCase = true)) return true
+    val evidence = classifier.inspectTerminal(
+        url,
+        referer = DynamicRulesManager.resolveReferer(url),
+        tag = "resolve-evidence"
+    )
+    return when (evidence.kind) {
+        com.anonrode.downloader.pipeline.UrlClassifier.TerminalKind.SELF_REFERENTIAL,
+        com.anonrode.downloader.pipeline.UrlClassifier.TerminalKind.STUB -> {
+            com.anonrode.downloader.pipeline.ResolveCache.poison(url)
+            com.anonrode.downloader.util.DebugLog.resolve(
+                "terminal evidence: rejected ${evidence.kind} (${evidence.reason}) ${url.take(140)}"
+            )
+            false
+        }
+        else -> true
+    }
+}
+
+/** Structural score; candidate order is the final tiebreak (earlier = better). */
+internal fun terminalScore(
+    url: String,
+    evidence: com.anonrode.downloader.pipeline.UrlClassifier.TerminalEvidence?,
+    candidateIndex: Int
+): Int {
+    val classifier = com.anonrode.downloader.pipeline.UrlClassifier
+    var score = when (evidence?.kind) {
+        com.anonrode.downloader.pipeline.UrlClassifier.TerminalKind.DIRECT_MEDIA -> 100
+        com.anonrode.downloader.pipeline.UrlClassifier.TerminalKind.HLS_PLAYLIST -> 90
+        com.anonrode.downloader.pipeline.UrlClassifier.TerminalKind.UNKNOWN -> 20
+        com.anonrode.downloader.pipeline.UrlClassifier.TerminalKind.SELF_REFERENTIAL -> -1000
+        com.anonrode.downloader.pipeline.UrlClassifier.TerminalKind.STUB -> -1000
+        null -> if (classifier.isDirectMediaPath(url)) 100 else if (classifier.isStreamingLink(url)) 80 else 30
+    }
+    // A resolved .mp4/.mkv URL is structurally better than an opaque endpoint
+    // even when its probe provided no content-type.
+    if (classifier.isDirectMediaPath(url)) score += 10
+    if (url.startsWith("https://", ignoreCase = true)) score += 2
+    // Playlist width: a master that declares variants is worth more than a
+    // media playlist (the probe's size is a weak but real structural signal).
+    val bytes = evidence?.totalBytes ?: 0L
+    if (bytes >= 1024L) score += 3
+    if (bytes >= 250_000L) score += 2
+    return score - candidateIndex
 }
 
 // -------------------------------------------------------------
@@ -1633,6 +1864,18 @@ object VidsrcResolver : BaseResolver {
         lastFailure = null
         try {
             var embedUrl = url.replace("nepu.to/", "nepu.gd/")
+            // Garbage-TMDB guard (2026-10-20): a player MINT/PROXY endpoint is
+            // not an embed page and carries no TMDB id. Parsing digits out of
+            // `_stream?id=<opaque>` (or a stream-proxy token) fabricated
+            // requests like embed/movie/97, /0, /1, id=0905801 — 12s of
+            // attempt budget per junk id. Refuse before any regex runs.
+            val inputPath = embedUrl.substringBefore('?').substringBefore('#').lowercase()
+            if (inputPath.contains("/_stream") || inputPath.contains("/pl/api.php") ||
+                embedUrl.contains("stream-proxy", ignoreCase = true)
+            ) {
+                lastFailure = "Vidsrc: input is a player mint/proxy endpoint, not an embed page — refusing to extract a TMDB id"
+                return null
+            }
             if (embedUrl.contains("nepu.gd/watch")) {
                 // Watch pages require Cookie: hv=1 to bypass JS gate and hide
                 // the player in iframe#playerFrame (or vidsrc/vsembed iframe).
@@ -1719,6 +1962,17 @@ object VidsrcResolver : BaseResolver {
                 lastFailure = "Vidsrc: no TMDB id pattern matched in $embedUrl"
                 return null
             }
+            // TMDB ids are positive decimal, no leading zero. A matched token
+            // failing this is an opaque id/token, not a title — refuse instead
+            // of minting a nonsense embed request.
+            val cleanTmdb = tmdb.trim()
+            if (cleanTmdb.isEmpty() || cleanTmdb.length > 9 || !cleanTmdb.all { it in '0'..'9' } ||
+                cleanTmdb == "0" || (cleanTmdb.length > 1 && cleanTmdb.startsWith("0"))
+            ) {
+                lastFailure = "Vidsrc: implausible TMDB id '$cleanTmdb' in $embedUrl — refusing"
+                return null
+            }
+            tmdb = cleanTmdb
             val mediaType = if (embedUrl.contains("/tv/") || embedUrl.contains("/serie/") || embedUrl.contains("embedtv") || season != null) "tv" else "movie"
             val cacheKey = "$mediaType:$tmdb:${season.orEmpty()}:${episode.orEmpty()}"
             val mirrorHost = HttpClient.parsedHost(embedUrl) ?: ""
