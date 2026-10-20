@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  DEBUG-ONLY verification scaffolding. This manifest is merged into the debug
+  variant only; release builds never see these receivers. They exist so the
+  ops run-matrix and the log-upload failure proof can drive the app from
+  adb without UI automation and without any test-only branches in release
+  code paths (LogUploader/HLS test hooks are internal and only called here).
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <receiver
+            android:name=".debug.LogUploadDebugReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.anonrode.downloader.debug.LOG_UPLOAD" />
+            </intent-filter>
+        </receiver>
+
+        <receiver
+            android:name=".debug.HlsTestDebugReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.anonrode.downloader.debug.HLS_TEST" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

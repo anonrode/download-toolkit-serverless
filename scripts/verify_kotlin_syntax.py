@@ -200,7 +200,7 @@ if __name__ == "__main__":
     # file is gated the moment it lands; the gate can never silently lag the
     # tree the way a hardcoded list did.
     target_files = []
-    for src_dir in ("app/src/main", "app/src/test"):
+    for src_dir in ("app/src/main", "app/src/test", "app/src/debug"):
         base = os.path.join(repo, *src_dir.split("/"))
         for dirpath, _dirnames, filenames in os.walk(base):
             for fn in filenames:
@@ -221,7 +221,7 @@ if __name__ == "__main__":
         else:
             print(f"PASS: {rel}")
 
-    print(f"\nchecked {len(target_files)} Kotlin files under app/src/main + app/src/test")
+    print(f"\nchecked {len(target_files)} Kotlin files under app/src/main + app/src/test + app/src/debug")
     if has_error:
         sys.exit(1)
     print("ALL TARGET KOTLIN FILES VERIFIED CLEAN WITH ZERO SYNTAX/BRACE ERRORS!")

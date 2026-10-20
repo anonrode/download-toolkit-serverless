@@ -158,7 +158,12 @@
 # narrowest possible dontwarn/keep for exactly that class (never `**`).
 -keep class com.unity3d.ads.** { *; }
 
-# All five SDKs are INERT unless the OTA payload enables them (Runtime gate:
-# ads/Ads.kt, update/FcmRegistrar.kt, update/IntegrityAttestor.kt), so keep
-# rules here only need to satisfy R8's static analysis, never runtime paths
-# that do not run.
+# FCM service (2026-10-19 un-park): manifest-referenced component; keep the
+# class + its overridden callbacks even under full-mode R8 so token refresh
+# and MESSAGING_EVENT delivery cannot be renamed out of the manifest contract.
+-keep class com.anonrode.downloader.update.AnonFirebaseMessagingService { *; }
+
+# The ads/integrity SDKs are INERT unless the OTA payload enables them. FCM
+# now has BuildConfig client defaults (manual runtime FirebaseOptions), so its
+# service keep above is a real shipping path; ads/Integrity keep rules only
+# need to satisfy R8's static analysis.

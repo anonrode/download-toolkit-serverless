@@ -64,6 +64,17 @@
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 
+        <!-- FCM (manual-runtime FirebaseOptions; no google-services.json).
+             exported=false: only Firebase's own binding can reach it. -->
+        <service
+            android:name=".update.AnonFirebaseMessagingService"
+            android:enabled="true"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
+
         <!-- Retry action on Download Failed notifications -->
         <receiver
             android:name=".service.RetryReceiver"
@@ -101,6 +112,16 @@
         <meta-data
             android:name="com.google.android.gms.ads.APPLICATION_ID"
             android:value="ca-app-pub-3940256099942544~3347511713" />
+
+        <!-- FCM fallback presentation when a notification payload arrives
+             while the app is backgrounded (foreground messages are handled
+             in AnonFirebaseMessagingService). -->
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_channel_id"
+            android:value="anon_announcements" />
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_icon"
+            android:resource="@drawable/ic_notification" />
 
         <provider
             android:name="androidx.core.content.FileProvider"

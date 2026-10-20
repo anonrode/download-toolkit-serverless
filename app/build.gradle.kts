@@ -18,6 +18,17 @@ android {
         versionCode = 331
         versionName = "3.3.0"
 
+        // Manual-runtime FCM defaults (2026-10-19 un-park). These are the
+        // NON-SECRET Firebase Android client identifiers; there is deliberately
+        // no google-services plugin and no google-services.json. The signed
+        // OTA `fcm` block remains the override/rotation path (FcmRegistrar
+        // re-inits when the OTA appId differs). A service-account key must
+        // never appear here or anywhere in the repo.
+        buildConfigField("String", "FCM_PROJECT_ID", "\"anonrode-d591f\"")
+        buildConfigField("String", "FCM_APP_ID", "\"1:93321768940:android:6ef4186eb2157d72ce5ac9\"")
+        buildConfigField("String", "FCM_SENDER_ID", "\"93321768940\"")
+        buildConfigField("String", "FCM_API_KEY", "\"AIzaSyBI7T92Ey_WqLKf-JXjEV7utQS94EZRZx8\"")
+
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
             useSupportLibrary = true
