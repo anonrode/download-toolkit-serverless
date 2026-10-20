@@ -1222,34 +1222,50 @@ object HttpClient {
                 .header("Accept", "*/*")
                 .header("Range", "bytes=0-1024")
             if (!referer.isNullOrBlank()) reqBuilder.header("Referer", referer)
-            val call = shared.newCall(reqBuilder.build())
-            call.timeout().timeout(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
-            inFlightCalls.add(call)
-            if (tag != null) {
-                taggedCalls.computeIfAbsent(tag) { java.util.concurrent.CopyOnWriteArrayList() }.add(call)
-            }
-            return try {
-                val res = try {
-                    call.execute()
-                } catch (e: Exception) {
-                    if (call.isCanceled()) {
-                        throw kotlinx.coroutines.CancellationException("HTTP call canceled").apply { initCause(e) }
-                    }
-                    throw e
-                }
-                // 2xx proves the host serves; 416 (range not satisfiable for a
-                // bounded probe) still proves it is reachable and alive.
-                val ok = res.code in 200..299 || res.code == 416
-                // Headers-only check: close the body without reading it, so a
-                // server that ignores Range cannot stream data past us.
-                try { res.body?.close() } catch (_: Exception) {}
-                com.anonrode.downloader.util.DebugLog.net("PROBE ${safeUrl(url)} -> ${res.code} (timeout=${timeoutMs}ms)")
-                ok
-            } finally {
-                inFlightCalls.remove(call)
+            var attempt = 0
+            while (true) {
+                val call = shared.newCall(reqBuilder.build())
+                call.timeout().timeout(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+                inFlightCalls.add(call)
                 if (tag != null) {
-                    taggedCalls[tag]?.remove(call)
+                    taggedCalls.computeIfAbsent(tag) { java.util.concurrent.CopyOnWriteArrayList() }.add(call)
                 }
+                var retry = false
+                try {
+                    val res = try {
+                        call.execute()
+                    } catch (e: Exception) {
+                        if (call.isCanceled()) {
+                            throw kotlinx.coroutines.CancellationException("HTTP call canceled").apply { initCause(e) }
+                        }
+                        throw e
+                    }
+                    if (res.code == 451 && attempt == 0) {
+                        // One same-request retry: a legal-block page served by
+                        // one anycast edge must not mask the healthy sibling
+                        // address (the NEPU 451 pattern).
+                        noteHttp451(url, res)
+                        try { res.body?.close() } catch (_: Exception) {}
+                        try { shared.connectionPool.evictAll() } catch (_: Exception) {}
+                        attempt++
+                        retry = true
+                    } else {
+                        // 2xx proves the host serves; 416 (range not satisfiable
+                        // for a bounded probe) still proves it is alive.
+                        val ok = res.code in 200..299 || res.code == 416
+                        // Headers-only check: close the body without reading it,
+                        // so a server that ignores Range cannot stream past us.
+                        try { res.body?.close() } catch (_: Exception) {}
+                        com.anonrode.downloader.util.DebugLog.net("PROBE ${safeUrl(url)} -> ${res.code} (timeout=${timeoutMs}ms)")
+                        return ok
+                    }
+                } finally {
+                    inFlightCalls.remove(call)
+                    if (tag != null) {
+                        taggedCalls[tag]?.remove(call)
+                    }
+                }
+                if (!retry) return false // defensive; the branch above returns
             }
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
             throw cancelled

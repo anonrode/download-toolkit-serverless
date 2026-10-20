@@ -110,18 +110,24 @@ object RulesPipeline {
         )
 
         var cards = emptyList<ShowCard>()
+        var bestScore = -1.0
         for (step in pipeline.steps) {
             val items = runStep(site, "search", step, vars, tag = "search") { outcome ->
                 if (step.items != null) extractSearchCards(site, step, outcome, vars) else emptyList()
             }
-            // Ordered search strategies: the FIRST step that yields cards wins;
-            // an empty strategy falls through to the next one. Before this,
-            // every item-bearing step overwrote `cards`, so a fallback could
-            // silently erase a successful primary (and a primary that answered
-            // with junk card-shaped HTML made the good later source invisible).
+            // Ordered search strategies, but relevance-ranked: a non-empty
+            // strategy is not automatically authoritative (9jaRocks' HTML
+            // search can return five unrelated cards, and a first non-empty
+            // break let that mask the RSS strategy that actually had the
+            // show). Score each strategy against the query and keep the best;
+            // a confident match stops the fan-out.
             if (step.items != null && items.isNotEmpty()) {
-                cards = items
-                break
+                val score = items.maxOf { RelevanceScorer.score(effectiveQuery, it.title) }
+                if (score > bestScore) {
+                    bestScore = score
+                    cards = items
+                }
+                if (bestScore >= 0.8) break
             }
         }
         if (cards.isNotEmpty()) {

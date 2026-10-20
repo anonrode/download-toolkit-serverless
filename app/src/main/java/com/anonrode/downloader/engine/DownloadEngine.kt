@@ -153,6 +153,16 @@ internal object HlsPlaylist {
      * decrypted byte plan.
      */
     fun fingerprint(playlists: List<String>): String {
+        // Live media playlists have a sliding window: MEDIA-SEQUENCE and the
+        // segment set legitimately change on every fetch. Mark them
+        // indeterminate so the caller never purges banked bytes.
+        val hasLiveMedia = playlists.any { p ->
+            val lines = p.lineSequence().map { it.trim() }.toList()
+            lines.isNotEmpty() &&
+                lines.none { it.startsWith("#EXT-X-STREAM-INF") } &&
+                lines.none { it.startsWith("#EXT-X-ENDLIST") }
+        }
+        if (hasLiveMedia) return "live"
         val md = MessageDigest.getInstance("SHA-256")
         for (playlist in playlists) {
             for (raw in playlist.lineSequence()) {
@@ -1827,7 +1837,7 @@ class DownloadEngine(
      * partials. The final artifact is never deleted here.
      */
     private fun applyHlsPlanFingerprint(task: DownloadTask, fingerprint: String?): Boolean {
-        if (fingerprint.isNullOrBlank()) return false
+        if (fingerprint.isNullOrBlank() || fingerprint == "live") return false
         val fpFile = File(task.filePath + ".hlsfp")
         val previous = try {
             if (fpFile.exists()) fpFile.readText().trim() else null
@@ -2349,6 +2359,7 @@ class DownloadEngine(
             .toList()
         var probeUrl: String? = null
         val planTexts = mutableListOf<String>()
+        var variantsComplete = true
         if (mediaLines.isNotEmpty()) {
             var firstResolved = resolveSegmentUrl(currentUrl, mediaLines[0])
             if (firstResolved != null && firstResolved.contains(".m3u8")) {
@@ -2356,11 +2367,18 @@ class DownloadEngine(
                 // loop let one slow variant stall the whole preflight. Each
                 // result keeps its original index so the first-variant probe /
                 // size-estimate logic still runs in stream order afterwards.
+                // Bound the variant fan-out: 20-variant masters × 4 tasks
+                // would otherwise recreate the connection storm the lane
+                // controller exists to prevent. Preflight probes are not
+                // counted against LaneBudget, so cap them here.
+                val variantGate = kotlinx.coroutines.sync.Semaphore(4)
                 val variantResults = coroutineScope {
                     mediaLines.mapIndexedNotNull { idx, line ->
                         val vUrl = resolveSegmentUrl(currentUrl, line) ?: return@mapIndexedNotNull null
                         if (!vUrl.contains(".m3u8")) return@mapIndexedNotNull null
                         async {
+                            variantGate.acquire()
+                            try {
                             var variant: String? = null
                             var variantStale = false
                             try {
@@ -2372,6 +2390,9 @@ class DownloadEngine(
                                 }
                             } catch (_: Exception) {}
                             idx to Triple(vUrl, variant, variantStale)
+                            } finally {
+                                variantGate.release()
+                            }
                         }
                     }
                 }.awaitAll()
@@ -2380,7 +2401,10 @@ class DownloadEngine(
                 for ((idx, res) in variantResults) {
                     val (vUrl, variant, variantStale) = res
                     if (variantStale) throw StaleStreamLinkException("Stream link expired — fetching a fresh one")
-                    if (variant == null) continue
+                    if (variant == null) {
+                        variantsComplete = false
+                        continue
+                    }
                     planTexts.add(variant)
                     // Per-variant upgrade decision: a variant can carry http
                     // segments even when the master is fully https.
@@ -2449,12 +2473,16 @@ class DownloadEngine(
             probeUrl = "https://" + probeUrl.removePrefix("http://")
         }
         segmentUrlOut[0] = probeUrl
-        fingerprintOut[0] = HlsPlaylist.fingerprint(
-            buildList {
-                add(playlistText)
-                addAll(planTexts)
-            }
-        )
+        // A partial variant set (one fetch failed) must NOT be hashed: that
+        // would look like a plan change and purge a healthy .part.
+        fingerprintOut[0] = if (variantsComplete) {
+            HlsPlaylist.fingerprint(
+                buildList {
+                    add(playlistText)
+                    addAll(planTexts)
+                }
+            )
+        } else null
 
         // Probe the segment host exactly as yt-dlp will reach it after the
         // rewrite — https first, http only as a fallback for https-dead CDNs.
@@ -3010,7 +3038,7 @@ class DownloadEngine(
                 // structural media-plan fingerprint.
                 val hlsSegmentUrl = arrayOfNulls<String>(1)
                 val hlsFingerprint = arrayOfNulls<String>(1)
-                if (finalBackend == "yt-dlp" && isHlsStream) {
+                if (finalBackend == "yt-dlp" && com.anonrode.downloader.pipeline.UrlClassifier.isStreamingLink(streamUrl)) {
                     try {
                         hlsMasterFile = preflightHls(
                             context, task.id, streamUrl, refererToPass, hlsSizeEstimate,
@@ -3031,19 +3059,22 @@ class DownloadEngine(
                         refererToPass = taskReferer ?: getRefererForUrl(streamUrl)
                         uaToPass = taskUa ?: getUserAgentForUrl(streamUrl)
                         hdrs = buildHeaders(refererToPass, uaToPass)
+                        val freshIsHls = com.anonrode.downloader.pipeline.UrlClassifier.isStreamingLink(streamUrl)
                         repository.update(task.id) { t ->
                             t.copy(
-                                directUrl = if (isDirectMediaUrl(streamUrl) || isProvablyDirectFile(streamUrl) || isHlsStream) streamUrl else t.directUrl
+                                directUrl = if (isDirectMediaUrl(streamUrl) || isProvablyDirectFile(streamUrl) || freshIsHls) streamUrl else t.directUrl
                             )
                         }
-                        hlsMasterFile = preflightHls(
-                            context, task.id, streamUrl, refererToPass,
-                            hlsSizeEstimate, task.quality ?: defaultQuality, hlsResolution,
-                            hlsSegmentUrl, hlsFingerprint
-                        )
+                        hlsMasterFile = if (freshIsHls) {
+                            preflightHls(
+                                context, task.id, streamUrl, refererToPass,
+                                hlsSizeEstimate, task.quality ?: defaultQuality, hlsResolution,
+                                hlsSegmentUrl, hlsFingerprint
+                            )
+                        } else null
                     }
                 }
-                if (finalBackend == "yt-dlp" && isHlsStream) {
+                if (finalBackend == "yt-dlp" && com.anonrode.downloader.pipeline.UrlClassifier.isStreamingLink(streamUrl)) {
                     // Purge ONLY on a real plan change; a matching fingerprint
                     // keeps the banked .part untouched (2026-10-19: 89 MB of
                     // progress must survive a token-refresh retry).
@@ -3495,7 +3526,7 @@ class DownloadEngine(
                             android.util.Log.w("AnonDownload", "yt-dlp failed, re-resolving for a fresh URL")
                             streamUrl = freshUrl
                             var freshMaster: File? = null
-                            if (isHlsStream) {
+                            if (com.anonrode.downloader.pipeline.UrlClassifier.isStreamingLink(streamUrl)) {
                                 try {
                                     val freshSegment = arrayOfNulls<String>(1)
                                     val freshFingerprint = arrayOfNulls<String>(1)
