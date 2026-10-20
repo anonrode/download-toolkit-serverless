@@ -19,9 +19,190 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.StateFlow
 import java.io.File
 import java.io.RandomAccessFile
+import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import java.util.regex.Matcher
 import java.util.regex.Pattern
+
+/**
+ * Some providers encode SxxEyy as one integer (113 = S01E13): 9jarocks
+ * historically, and nepu's Avatar-style catalog (2026-10-19 failover evidence:
+ * episodeNum=113 against a 6-item season-1 list). Returns null when the number
+ * is not a plausible season-encoded value.
+ */
+internal fun normalizeSeasonEncodedEpisodeNumber(site: String, episodeNum: Int): Pair<Int, Int>? {
+    if (episodeNum < 100) return null
+    val season = episodeNum / 100
+    val episode = episodeNum % 100
+    if (season !in 1..30 || episode !in 1..99) return null
+    // site is part of the contract for logging/telemetry call sites.
+    if (site.length > 512) return null
+    return Pair(season, episode)
+}
+
+/**
+ * Pure HLS playlist transformations + plan fingerprint (JVM-testable).
+ *
+ * Live-by-default policy (2026-10-19): a playlist whose URIs are ordinary
+ * relative paths is fed to yt-dlp as the LIVE URL. Only a scheme-relative
+ * `//host/...` URI (yt-dlp joins it to http:// port 80) or an explicitly
+ * approved http->https upgrade forces a local rewritten copy. When a local
+ * copy IS needed, every relative URI in it must be absolutized or it would
+ * resolve against file://.
+ */
+internal object HlsPlaylist {
+
+    private val URI_VALUE = Pattern.compile("URI=\"([^\"]+)\"")
+
+    private val IV_ATTRIBUTE = Regex("""\s+IV=0x[0-9A-Fa-f]+""")
+
+    fun resolveSegmentUrl(base: String, uri: String): String? {
+        if (uri.startsWith("http://") || uri.startsWith("https://")) return uri
+        if (uri.startsWith("//")) return "https:$uri"
+        return try {
+            val b = java.net.URI(base)
+            val qIdx = uri.indexOf('?')
+            val pathPart = if (qIdx >= 0) uri.substring(0, qIdx) else uri
+            val queryPart = if (qIdx >= 0) uri.substring(qIdx + 1) else null
+            val joined = if (pathPart.startsWith("/")) {
+                pathPart
+            } else {
+                b.path.substringBeforeLast('/') + "/" + pathPart
+            }
+            java.net.URI(b.scheme, null, b.host, b.port, joined, queryPart, null).toString()
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /** True when the playlist contains a URI that a local rewrite must fix. */
+    fun needsLocalRewrite(playlist: String, upgradeInsecureHttp: Boolean): Boolean {
+        for (raw in playlist.lineSequence()) {
+            val line = raw.trim()
+            if (line.startsWith("//")) return true
+            if (upgradeInsecureHttp && line.startsWith("http://")) return true
+            if (line.startsWith("#")) {
+                val m = URI_VALUE.matcher(line)
+                while (m.find()) {
+                    val u = m.group(1) ?: ""
+                    if (u.startsWith("//") || (upgradeInsecureHttp && u.startsWith("http://"))) return true
+                }
+            }
+        }
+        return false
+    }
+
+    /** Rewritten playlist text, or null when the LIVE URL is safe to use. */
+    fun rewrite(
+        playlist: String,
+        baseUrl: String,
+        upgradeInsecureHttp: Boolean,
+        forceLocal: Boolean = false
+    ): String? {
+        if (!forceLocal && !needsLocalRewrite(playlist, upgradeInsecureHttp)) return null
+        val sb = StringBuilder()
+        for (rawLine in playlist.lineSequence()) {
+            val line = rawLine.trimEnd('\r')
+            when {
+                line.startsWith("//") -> sb.append("https:").append(line).append('\n')
+                line.startsWith("#") -> {
+                    var l = line
+                    val m = URI_VALUE.matcher(l)
+                    if (m.find()) {
+                        val out = StringBuffer()
+                        do {
+                            val u = m.group(1) ?: ""
+                            val repl = when {
+                                u.startsWith("//") -> "https:$u"
+                                u.startsWith("http://") && upgradeInsecureHttp ->
+                                    "https://" + u.removePrefix("http://")
+                                u.startsWith("http://") || u.startsWith("https://") -> u
+                                else -> maybeUpgrade(resolveSegmentUrl(baseUrl, u) ?: u, upgradeInsecureHttp)
+                            }
+                            m.appendReplacement(out, "URI=\"" + Matcher.quoteReplacement(repl) + "\"")
+                        } while (m.find())
+                        m.appendTail(out)
+                        l = out.toString()
+                    }
+                    sb.append(l).append('\n')
+                }
+                else -> {
+                    // A local master is consumed from file://, so every
+                    // relative URI must become absolute (http is upgraded
+                    // only when the caller proved https works).
+                    val resolved = when {
+                        line.startsWith("http://") -> maybeUpgrade(line, upgradeInsecureHttp)
+                        else -> maybeUpgrade(resolveSegmentUrl(baseUrl, line) ?: line, upgradeInsecureHttp)
+                    }
+                    sb.append(resolved).append('\n')
+                }
+            }
+        }
+        return sb.toString()
+    }
+
+    /**
+     * Structural plan fingerprint. Token/query rotation must NOT change it;
+     * a changed segment sequence, duration, key, map, rendition or variant
+     * set MUST. Hashed fields:
+     *  - segment/URI basenames (query and tokenized path prefixes dropped)
+     *  - #EXTINF durations, #EXT-X-BYTERANGE, discontinuity/media-sequence
+     *  - RESOLUTION/BANDWIDTH-bearing tags, key method, map/media type
+     * IV values are ignored: they may rotate per session without changing the
+     * decrypted byte plan.
+     */
+    fun fingerprint(playlists: List<String>): String {
+        val md = MessageDigest.getInstance("SHA-256")
+        for (playlist in playlists) {
+            for (raw in playlist.lineSequence()) {
+                val line = raw.trim()
+                if (line.isEmpty()) continue
+                val normalized: String? = when {
+                    line.startsWith("#EXTINF") ->
+                        "EXTINF:" + line.substringAfter(':', "").substringBefore(',')
+                    line.startsWith("#EXT-X-KEY") ||
+                        line.startsWith("#EXT-X-MAP") ||
+                        line.startsWith("#EXT-X-MEDIA") ||
+                        line.startsWith("#EXT-X-STREAM-INF") -> normalizeTagLine(line)
+                    line.startsWith("#EXT-X-BYTERANGE") ||
+                        line.startsWith("#EXT-X-DISCONTINUITY") ||
+                        line.startsWith("#EXT-X-TARGETDURATION") ||
+                        line.startsWith("#EXT-X-MEDIA-SEQUENCE") ||
+                        line.startsWith("#EXT-X-PLAYLIST-TYPE") ||
+                        line.startsWith("#EXT-X-ENDLIST") -> line
+                    line.startsWith("#") -> null
+                    else -> "URI:" + uriBasename(line)
+                }
+                if (normalized != null) {
+                    md.update(normalized.toByteArray(Charsets.UTF_8))
+                    md.update('\n'.code.toByte())
+                }
+            }
+        }
+        return md.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    private fun maybeUpgrade(url: String, upgradeInsecureHttp: Boolean): String =
+        if (upgradeInsecureHttp && url.startsWith("http://")) {
+            "https://" + url.removePrefix("http://")
+        } else url
+
+    private fun uriBasename(uri: String): String =
+        uri.substringBefore('?').substringBefore('#').substringAfterLast('/')
+
+    private fun normalizeTagLine(line: String): String {
+        val cleaned = line.replace(IV_ATTRIBUTE, "")
+        val m = URI_VALUE.matcher(cleaned)
+        val out = StringBuffer()
+        while (m.find()) {
+            val u = m.group(1) ?: ""
+            m.appendReplacement(out, "URI=\"" + Matcher.quoteReplacement(uriBasename(u)) + "\"")
+        }
+        m.appendTail(out)
+        return out.toString().replace(Regex("\\s+"), " ").trim()
+    }
+}
 
 enum class DramaCountry {
     KOREAN,
@@ -116,6 +297,17 @@ class DownloadEngine(
 
     init {
         loadPreferences()
+        // Global concurrency controller: every ~5s water-fill the 24-lane
+        // budget from measured per-task throughput. Turbo applies a new
+        // grant at its next piece claim (boundary, never mid-piece); HLS
+        // grants are fixed for the run.
+        engineScope.launch {
+            while (isActive) {
+                delay(5_000L)
+                com.anonrode.downloader.pipeline.HostPolicyRegistry.LaneBudget.rebalance()
+                    .forEach { com.anonrode.downloader.util.DebugLog.engine(it) }
+            }
+        }
         engineScope.launch {
             // Park tasks interrupted by app kill/crash — never re-queue them.
             // The repository restore (initPersistence) already mapped
@@ -789,6 +981,10 @@ class DownloadEngine(
                 File(base.absolutePath + ".ytdl").delete()
                 File(base.absolutePath + ".aria2").delete()
                 File(base.absolutePath + ".turbo").delete()
+                File(base.absolutePath + ".hlsfp").delete()
+                base.parentFile?.let {
+                    deletePartFragFiles(it, base.nameWithoutExtension, privateWorkdir = false)
+                }
             }
             target.parentFile?.let { parent ->
                 File(parent, ".work-${task.id}").deleteRecursively()
@@ -894,9 +1090,31 @@ class DownloadEngine(
      * this job); false means "no alternative found", and the caller proceeds
      * with the normal park/fail path.
      */
-    private suspend fun attemptCrossProviderFailover(task: DownloadTask): Boolean {
-        // Progress Banking Guard: failover MUST only run if task.downloadedBytes == 0L && bytesLanded(task) == 0L
-        if (task.downloadedBytes > 0L || bytesLanded(task) > 0L) {
+    private suspend fun attemptCrossProviderFailover(task: DownloadTask, garbageFile: File? = null): Boolean {
+        // Progress Banking Guard. A GARBAGE artifact (HTML/tiny/bad
+        // signature) is not banked progress, so it must not veto failover —
+        // but real partials still do. Never fail over when:
+        //  - the backend actually reported bytes,
+        //  - a real .part / .aria2 partial exists,
+        //  - a >1 MB artifact exists (a plausible real download).
+        val garbage = garbageFile != null && isGarbageArtifact(garbageFile)
+        if (garbage) {
+            val partFile = File(task.filePath + ".part")
+            val ariaControl = File(task.filePath + ".aria2")
+            val realPartial = (partFile.exists() && partFile.length() > 0L) ||
+                (ariaControl.exists() && ariaControl.length() > 0L)
+            val largeArtifact = listOfNotNull(garbageFile, File(task.filePath))
+                .any { it.exists() && it.isFile && it.length() > 1024L * 1024L }
+            if (task.downloadedBytes > 0L || realPartial || largeArtifact) {
+                com.anonrode.downloader.util.DebugLog.resolve(
+                    "task=${task.id} failover: garbage output but real partial/large artifact exists — not failing over"
+                )
+                return false
+            }
+            // Proven garbage is deleted BEFORE the requeue so the new source
+            // never resumes onto it or treats it as a completed artifact.
+            try { garbageFile?.delete() } catch (_: Exception) {}
+        } else if (task.downloadedBytes > 0L || bytesLanded(task) > 0L) {
             com.anonrode.downloader.util.DebugLog.resolve(
                 "task=${task.id} failover: skipped because task already banked ${bytesLanded(task)} bytes"
             )
@@ -933,29 +1151,64 @@ class DownloadEngine(
 
         // Search eligible providers in parallel, each bounded; skip hosts
         // currently in backoff so a failover never lands on another dead site.
-        val candidates = kotlinx.coroutines.withTimeoutOrNull(25_000L) {
-            coroutineScope {
-                ProviderRegistry.allProviders
-                    .filter { provider ->
-                        val pName = provider.name.lowercase()
-                        provider.searchEnabled &&
-                            pName in allowedCluster &&
-                            (isAsian || pName !in DEDICATED_ASIAN_SITES) &&
-                            tried.none { it.equals(provider.name, ignoreCase = true) }
-                    }
-                    .map { provider ->
+        //
+        // Completion accounting: NoSourceLedger may only record "no source"
+        // when EVERY eligible search actually finished. A 451/transport
+        // failure or a timeout is absence of evidence, not evidence of
+        // absence (the ledger hides titles for 48h).
+        val searchAttempted = java.util.concurrent.atomic.AtomicInteger(0)
+        val searchCompleted = java.util.concurrent.atomic.AtomicInteger(0)
+        var allBatchesCompleted = true
+
+        suspend fun searchBatch(providers: List<com.anonrode.downloader.providers.SiteProvider>): List<com.anonrode.downloader.data.models.ShowCard> {
+            if (providers.isEmpty()) return emptyList()
+            val batch = kotlinx.coroutines.withTimeoutOrNull(25_000L) {
+                coroutineScope {
+                    providers.map { provider ->
+                        searchAttempted.incrementAndGet()
                         async(Dispatchers.IO) {
                             try {
-                                withTimeoutOrNull(20_000L) { provider.search(query) } ?: emptyList()
+                                val result = withTimeoutOrNull(20_000L) { provider.search(query) }
+                                if (result != null) searchCompleted.incrementAndGet()
+                                result ?: emptyList()
                             } catch (_: Exception) {
                                 emptyList()
                             }
                         }
-                    }
-                    .awaitAll()
-                    .flatten()
+                    }.awaitAll().flatten()
+                }
             }
-        } ?: emptyList()
+            if (batch == null) allBatchesCompleted = false
+            return batch ?: emptyList()
+        }
+
+        val firstProviders = ProviderRegistry.allProviders.filter { provider ->
+            val pName = provider.name.lowercase()
+            provider.searchEnabled &&
+                pName in allowedCluster &&
+                (isAsian || pName !in DEDICATED_ASIAN_SITES) &&
+                tried.none { it.equals(provider.name, ignoreCase = true) }
+        }
+        val candidates = searchBatch(firstProviders).toMutableList()
+
+        // Anitaku/anime second pass: the anime catalog is intentionally
+        // outside ASIAN_DRAMA_CLUSTER, so a nepu Servamp failover never saw
+        // it. When the first pass has no plausible title match, ask the
+        // anime provider once and let its cards through Layer 1.
+        var secondPassSites = emptySet<String>()
+        if (isAsian && candidates.none { card ->
+                titleMatches(query, card.title) && card.site.lowercase() in allowedCluster
+            }) {
+            val animeProviders = ProviderRegistry.allProviders.filter { provider ->
+                provider.name.lowercase() in ANIME_SECOND_PASS_SITES &&
+                    provider.searchEnabled &&
+                    tried.none { it.equals(provider.name, ignoreCase = true) }
+            }
+            if (animeProviders.isNotEmpty()) {
+                secondPassSites = animeProviders.map { it.name.lowercase() }.toSet()
+                candidates.addAll(searchBatch(animeProviders))
+            }
+        }
 
         val normQuery = normalizeTitleQuery(query)
         val ranked = candidates
@@ -963,7 +1216,9 @@ class DownloadEngine(
             .filter { card ->
                 val candSite = card.site.lowercase()
                 // Layer 1: Genre / Cluster Boundary Guard on candidate card
-                val clusterMatch = if (isAsian) {
+                val clusterMatch = if (candSite in secondPassSites) {
+                    true
+                } else if (isAsian) {
                     candSite in ASIAN_DRAMA_CLUSTER || candSite in SECONDARY_ASIAN_FALLBACK
                 } else {
                     candSite in WESTERN_CLUSTER && candSite !in DEDICATED_ASIAN_SITES
@@ -1013,13 +1268,11 @@ class DownloadEngine(
                     return@filter false
                 }
 
-                // Layer 4 pre-check: if candidate specifies totalEpisodes, reject if less than origEpNum
-                if (origEpNum > 0 && card.totalEpisodes > 0 && card.totalEpisodes < origEpNum) {
-                    com.anonrode.downloader.util.DebugLog.resolve(
-                        "task=${task.id} failover: rejected card \"${card.title}\" totalEpisodes (${card.totalEpisodes}) < origEpNum ($origEpNum)"
-                    )
-                    return@filter false
-                }
+                // Episode-COUNT pre-check deliberately removed (2026-10-19):
+                // providers report partial/paginated counts and season-encoded
+                // numbering (nepu 113 = S01E13) made "6 episodes < 113" reject
+                // a provider that DID have the exact episode. Exact
+                // (season, episode) matching below is the real guard.
 
                 true
             }
@@ -1052,13 +1305,9 @@ class DownloadEngine(
                         ProviderRegistry.loadEpisodes(card)
                     } ?: continue
 
-                    // Total episodes check: candidate with fewer episodes than origEpNum is rejected
-                    if (details.episodes.size < origEpNum) {
-                        com.anonrode.downloader.util.DebugLog.resolve(
-                            "task=${task.id} failover: rejected \"${card.title}\" loaded episodes (${details.episodes.size}) < origEpNum ($origEpNum)"
-                        )
-                        continue
-                    }
+                    // No episode-COUNT gate: a partial/paginated list is not
+                    // proof of absence (the nepu Avatar case compared a 6-item
+                    // list against 113). Exact SxxEyy matching below decides.
 
                     // Candidate must have matching (origSeason, origEpNum)
                     val origIsExplicitSeries = origEpNum > 0 && (task.episodeTitle.contains("Episode", ignoreCase = true) ||
@@ -1144,7 +1393,9 @@ class DownloadEngine(
                 File(task.filePath + ".ytdl").delete()
                 File(task.filePath + ".aria2").delete()
                 File(task.filePath + ".turbo").delete()
+                File(task.filePath + ".hlsfp").delete()
                 File(task.filePath).parentFile?.let {
+                    deletePartFragFiles(it, File(task.filePath).nameWithoutExtension, privateWorkdir = false)
                     File(it, ".work-" + task.id).deleteRecursively()
                 }
             } catch (_: Throwable) {}
@@ -1162,7 +1413,18 @@ class DownloadEngine(
         // provider was searched and none carried the title. Recorded ONCE per
         // attempt-cycle here — after the candidate loop, never inside it —
         // and the ledger TTLs it (48h) + clears on rules activation.
-        com.anonrode.downloader.pipeline.NoSourceLedger.recordUnresolved(query)
+        // Only COMPLETED searches count: a 451/transport exception or a
+        // timeout is not proof the title is absent.
+        val searched = searchAttempted.get()
+        val completed = searchCompleted.get()
+        val allProvidersAnswered = allBatchesCompleted && searched > 0 && completed == searched
+        if (allProvidersAnswered) {
+            com.anonrode.downloader.pipeline.NoSourceLedger.recordUnresolved(query)
+        } else {
+            com.anonrode.downloader.util.DebugLog.resolve(
+                "task=${task.id} failover: ledger NOT recorded — only $completed/$searched provider searches completed (batchCompleted=$allBatchesCompleted)"
+            )
+        }
         return false
     }
 
@@ -1225,12 +1487,25 @@ class DownloadEngine(
         return false
     }
 
+    /**
+     * Some providers encode SxxEyy as a single integer (113 = S01E13).
+     * 9jarocks did this historically; nepu's Avatar-style catalog does the
+     * same (live failover evidence 2026-10-19: episodeNum=113, a 6-item
+     * season-1 list, and the old count pre-check rejected every candidate
+     * before the exact S01E13 match could run). Returns null when the number
+     * is not a plausible season-encoded value.
+     */
+    internal fun normalizeSeasonEncodedEpisode(site: String, episodeNum: Int): Pair<Int, Int>? =
+        normalizeSeasonEncodedEpisodeNumber(site, episodeNum)
+
     internal fun parseSeasonAndEpisode(task: DownloadTask): Pair<Int, Int> {
-        if (task.site.equals("9jarocks", ignoreCase = true) && task.episodeNum >= 100) {
-            return Pair(task.episodeNum / 100, task.episodeNum % 100)
-        }
-        if (task.episodeNum >= 100 && !isAsianDramaContext(task)) {
-            return Pair(task.episodeNum / 100, task.episodeNum % 100)
+        if (task.episodeNum >= 100) {
+            val normalized = normalizeSeasonEncodedEpisode(task.site, task.episodeNum)
+            val seasonEncodedSite = task.site.equals("9jarocks", ignoreCase = true) ||
+                task.site.equals("nepu", ignoreCase = true)
+            if (normalized != null && (seasonEncodedSite || !isAsianDramaContext(task))) {
+                return normalized
+            }
         }
         val text = "${task.showTitle} ${task.episodeTitle} ${task.sourceUrl}".lowercase()
         val season = Regex("""(?:s|season)[\s._-]?0*(\d{1,2})\b""")
@@ -1245,8 +1520,13 @@ class DownloadEngine(
     }
 
     internal fun parseCandidateSeasonAndEpisode(card: com.anonrode.downloader.data.models.ShowCard, ep: com.anonrode.downloader.data.models.EpisodeItem): Pair<Int, Int> {
-        if (card.site.equals("9jarocks", ignoreCase = true) && ep.episodeNum >= 100) {
-            return Pair(ep.episodeNum / 100, ep.episodeNum % 100)
+        if (ep.episodeNum >= 100) {
+            val normalized = normalizeSeasonEncodedEpisode(card.site, ep.episodeNum)
+            val seasonEncodedSite = card.site.equals("9jarocks", ignoreCase = true) ||
+                card.site.equals("nepu", ignoreCase = true)
+            if (normalized != null && (seasonEncodedSite || card.site.lowercase() !in ASIAN_DRAMA_CLUSTER)) {
+                return normalized
+            }
         }
         val text = "${card.title} ${ep.title} ${ep.url}".lowercase()
         val season = Regex("""(?:s|season)[\s._-]?0*(\d{1,2})\b""")
@@ -1424,6 +1704,26 @@ class DownloadEngine(
         }
 
     /**
+     * A produced artifact that is provably NOT media: a <1 KiB non-image
+     * stub, an HTML decoy, a corrupt image, or a file that neither the
+     * container signature nor the platform decoder accepts. Used only on the
+     * zero-banked-bytes failover path — never to delete a plausible download.
+     */
+    private fun isGarbageArtifact(file: File): Boolean {
+        if (!file.exists() || !file.isFile) return false
+        if (file.length() < 1024L) return true
+        if (looksLikeHtml(file)) return true
+        if (isImageFile(file)) return !isImageValid(file)
+        val parent = file.parentFile ?: return true
+        val structural = try {
+            TorrentSecurityShield.validateDownloadedFile(file, parent).first
+        } catch (_: Exception) {
+            false
+        }
+        return !structural && !decodeCheck(file)
+    }
+
+    /**
      * Actual bytes this task has written to disk: the final file, its .part /
      * .ytdl partials, and yt-dlp's concurrent fragment files. The UI progress
      * watchdog uses this as the source of truth when backend output parsing
@@ -1448,6 +1748,13 @@ class DownloadEngine(
             val dir = targetDir
             dir.listFiles() ?: return 0L
             val base = File(task.filePath).name
+            // yt-dlp's HLS native downloader stages fragments in
+            // `<output>.part-Frag<N>` and only concatenates them into `.part`
+            // in batches. While a batch is in flight those bytes are real
+            // progress but were invisible to the watchdog (2026-10-19 task
+            // c6710cfb). They are transient scratch: the concatenated prefix
+            // lives in `.part`, so summing both never double-counts.
+            val fragBytes = partFragBytes(dir, base.substringBeforeLast('.', base))
             // Segmented Turbo downloads pre-allocate the .part file to its full
             // size before a single byte is written, so file.length() is not a
             // trustworthy progress source while a download is in flight.
@@ -1485,10 +1792,11 @@ class DownloadEngine(
                 if (task.status == TaskStatus.DOWNLOADING && task.totalBytes > 0L && len >= task.totalBytes && task.downloadedBytes < task.totalBytes) {
                     return task.downloadedBytes
                 }
-                return len
+                return len + fragBytes
             }
             val ytdlFile = File(dir, "$base.ytdl")
-            if (ytdlFile.exists()) return ytdlFile.length()
+            if (ytdlFile.exists()) return ytdlFile.length() + fragBytes
+            if (fragBytes > 0L) return fragBytes
             val destFile = File(dir, base)
             if (destFile.exists()) {
                 val len = destFile.length()
@@ -1509,6 +1817,48 @@ class DownloadEngine(
      */
     private fun bytesLanded(task: DownloadTask): Long =
         maxOf(task.downloadedBytes, computeDiskBytes(task))
+
+    /**
+     * Plan fingerprint gate (2026-10-19). Banked `.part` bytes survive a
+     * retry ONLY when the freshly fetched playlist still describes the same
+     * media plan. A missing sidecar (first run after upgrade) is treated as a
+     * match so an existing 90 MB partial is never destroyed speculatively.
+     * On a real mismatch the media plan changed (different episode/quality/
+     * edge manifest), so resuming would splice incompatible bytes: purge the
+     * partials. The final artifact is never deleted here.
+     */
+    private fun applyHlsPlanFingerprint(task: DownloadTask, fingerprint: String?): Boolean {
+        if (fingerprint.isNullOrBlank()) return false
+        val fpFile = File(task.filePath + ".hlsfp")
+        val previous = try {
+            if (fpFile.exists()) fpFile.readText().trim() else null
+        } catch (_: Exception) {
+            null
+        }
+        var purged = false
+        if (previous != null && previous != fingerprint) {
+            purgeHlsPartialArtifacts(File(task.filePath))
+            purged = true
+            com.anonrode.downloader.util.DebugLog.resolve(
+                "task=${task.id} hls plan mismatch — purged .part/.ytdl/.part-Frag before retry"
+            )
+        }
+        try {
+            fpFile.parentFile?.mkdirs()
+            fpFile.writeText(fingerprint)
+        } catch (_: Exception) {}
+        return purged
+    }
+
+    private fun purgeHlsPartialArtifacts(base: File) {
+        try { File(base.absolutePath + ".part").delete() } catch (_: Exception) {}
+        try { File(base.absolutePath + ".ytdl").delete() } catch (_: Exception) {}
+        try {
+            base.parentFile?.let {
+                deletePartFragFiles(it, base.nameWithoutExtension, privateWorkdir = false)
+            }
+        } catch (_: Exception) {}
+    }
 
     /**
      * A 429 is an explicit "come back later" — never a reason to destroy a
@@ -1626,6 +1976,12 @@ class DownloadEngine(
         com.anonrode.downloader.pipeline.UrlClassifier.isStreamingLink(url)
 
     companion object {
+        // Anime providers consulted by the failover SECOND pass when the
+        // regular Asian cluster produced no plausible title match (Servamp on
+        // nepu, 2026-10-19). Their cards bypass the Layer-1 cluster filter
+        // only for that pass.
+        private val ANIME_SECOND_PASS_SITES = setOf("anitaku")
+
         // URI="..." inside HLS tags (EXT-X-KEY, EXT-X-MAP, EXT-X-MEDIA) — the
         // URI value may be scheme-relative or relative and needs the same
         // absolute-https rewrite as segment URIs.
@@ -1703,6 +2059,15 @@ class DownloadEngine(
         }
     }
 
+    /** Transfers competing for the lane pool right now (this one included). */
+    private fun plannedTransferCount(): Int =
+        tasks.value.count {
+            it.status == TaskStatus.QUEUED ||
+                it.status == TaskStatus.RESOLVING ||
+                it.status == TaskStatus.DOWNLOADING ||
+                it.status == TaskStatus.VALIDATING
+        }.coerceAtLeast(1)
+
     @Synchronized
     private fun processQueue() {
         val net = networkObserver.getCurrentStatus()
@@ -1766,6 +2131,30 @@ class DownloadEngine(
                     repository.update(queued.id) { it.copy(status = TaskStatus.PAUSED, errorMessage = "Waiting for Wi-Fi (Wi-Fi Only enabled)") }
                 }
                 return
+            }
+
+            // Global admission control (2026-10-19): a new HTTP task may only
+            // start when the lane pool can guarantee its 4-lane minimum.
+            // Magnet/torrent tasks do not consume HTTP lanes. Admitted starts
+            // are staggered 1.5s so four tasks cannot mint 16 connections at
+            // the same instant.
+            if (!nextTask.directUrl.startsWith("magnet:", ignoreCase = true)) {
+                val laneBudget = com.anonrode.downloader.pipeline.HostPolicyRegistry.LaneBudget
+                if (!laneBudget.hasMinimumCapacity()) {
+                    com.anonrode.downloader.util.DebugLog.engine(
+                        "queue admission deferred task=${nextTask.id} — ${laneBudget.snapshot()}"
+                    )
+                    return
+                }
+                val since = laneBudget.msSinceAdmission()
+                if (since < 1_500L) {
+                    engineScope.launch {
+                        delay(1_500L - since)
+                        processQueue()
+                    }
+                    return
+                }
+                laneBudget.noteAdmission()
             }
 
             // Status may only be flipped once the start lock is held, so no queue
@@ -1865,7 +2254,9 @@ class DownloadEngine(
         referer: String?,
         estimatedTotalBytes: LongArray = LongArray(1),
         requestedQuality: String? = null,
-        resolutionOut: Array<String?> = arrayOfNulls(1)
+        resolutionOut: Array<String?> = arrayOfNulls(1),
+        segmentUrlOut: Array<String?> = arrayOfNulls(1),
+        fingerprintOut: Array<String?> = arrayOfNulls(1)
     ): File? {
         val cacheDir = File(context.cacheDir, "hls").apply { mkdirs() }
         val created = mutableListOf<File>()
@@ -1875,30 +2266,65 @@ class DownloadEngine(
         try {
             HttpClient.get(currentUrl, referer = referer, tag = "preflight").use { res ->
                 when {
-                    // 401/403 on the master means the token stamped into the
+                    // 401/403/451 on the master means the token stamped into the
                     // persisted URL is dead — a stale link, not a dead server.
                     // The engine re-resolves from the source page for a fresh one.
-                    res.code == 401 || res.code == 403 -> staleToken = true
+                    res.code == 401 || res.code == 403 || res.code == 451 -> staleToken = true
                     res.isSuccessful -> {
+                        val contentType = res.header("Content-Type").orEmpty().lowercase()
                         val text = HttpClient.cappedText(res)
-                        if (text != null) {
-                            if (text.startsWith("#EXTM3U") || text.contains("#EXT-X-STREAM-INF") || text.contains("#EXTINF")) {
-                                playlist = text
-                            } else if (looksLikeHtml(text) || text.contains("<!doctype", ignoreCase = true) || text.contains("<html", ignoreCase = true)) {
-                                staleToken = true
-                            } else {
-                                playlist = text
+                        if (text == null) {
+                            staleToken = true
+                        } else {
+                            val trimmed = text.trimStart('\uFEFF', ' ', '\r', '\n', '\t')
+                            // Display-ads playlist endpoint is handed to yt-dlp
+                            // verbatim (live-proven working, 2026-10-19): its body
+                            // is not a plain #EXTM3U document, so the HLS-shape
+                            // gate below must not reject it.
+                            val megaplaysPlaylist = currentUrl.contains(
+                                "megaplays.se/api/playlist.php", ignoreCase = true
+                            )
+                            val declaresHls = currentUrl.contains(".m3u8", true) ||
+                                currentUrl.contains(".m3u", true) ||
+                                currentUrl.contains(".mpegurl", true) ||
+                                contentType.contains("mpegurl")
+                            val html = looksLikeHtml(text) ||
+                                text.contains("<!doctype", ignoreCase = true) ||
+                                text.contains("<html", ignoreCase = true)
+                            when {
+                                megaplaysPlaylist -> playlist = text
+                                // A 1-byte (or near-empty) body is the known
+                                // vidrift/terminal stub, never a playlist.
+                                trimmed.length < 7 -> staleToken = true
+                                // mpegurl content MUST be an M3U document; a
+                                // JSON error body or anti-bot page is a stale
+                                // link, not a stream.
+                                declaresHls && !trimmed.startsWith("#EXTM3U") -> staleToken = true
+                                html -> staleToken = true
+                                else -> playlist = text
                             }
                         }
                     }
                 }
             }
         } catch (_: Exception) {}
-        when {
-            staleToken -> throw StaleStreamLinkException("Stream link expired — fetching a fresh one")
-            playlist == null -> throw Exception("Stream server unreachable — the playlist did not load. Try again later.")
+        if (staleToken) throw StaleStreamLinkException("Stream link expired — fetching a fresh one")
+        val playlistText: String = playlist
+            ?: throw Exception("Stream server unreachable — the playlist did not load. Try again later.")
+        // Live-by-default: only upgrade absolute http->https if the https
+        // twin actually answers. A blind upgrade breaks http-only CDNs.
+        // Find ANY absolute http URI (segment or tag attribute), not just the
+        // first media line: mixed playlists list an https variant first and
+        // still carry http segments.
+        val upgradeInsecureHttp = shouldUpgradeInsecureHttp(playlistText, currentUrl, referer)
+        if (upgradeInsecureHttp) {
+            com.anonrode.downloader.util.DebugLog.resolve(
+                "task=$taskId preflight: https twin answered, upgrading absolute http URIs"
+            )
         }
-        var masterFile = rewriteHlsMaster(playlist, currentUrl, "hls-$taskId.m3u8", cacheDir)
+        var masterFile = rewriteHlsMaster(
+            playlistText, currentUrl, "hls-$taskId.m3u8", cacheDir, upgradeInsecureHttp
+        )
         if (masterFile != null) {
             created.add(masterFile)
             // What yt-dlp is actually fed — the 0-byte HLS stall was
@@ -1913,16 +2339,17 @@ class DownloadEngine(
         // offers. Mirror yt-dlp's height-limited format selection: the
         // highest variant at or below the requested height (or the smallest
         // when nothing fits). Exposed for the download card's quality chip.
-        resolutionOut[0] = pickHlsResolution(playlist, requestedQuality)
+        resolutionOut[0] = pickHlsResolution(playlistText, requestedQuality)
 
         // Walk one variant level: rewrite referenced variant playlists to
         // local files too and repoint the master at them (relative name),
         // so their segments also go over https.
-        val mediaLines = playlist.lineSequence()
+        val mediaLines = playlistText.lineSequence()
             .map { it.trim() }
             .filter { it.isNotBlank() && !it.startsWith("#") }
             .toList()
         var probeUrl: String? = null
+        val planTexts = mutableListOf<String>()
         if (mediaLines.isNotEmpty()) {
             var firstResolved = resolveSegmentUrl(currentUrl, mediaLines[0])
             if (firstResolved != null && firstResolved.contains(".m3u8")) {
@@ -1940,7 +2367,7 @@ class DownloadEngine(
                             try {
                                 HttpClient.get(vUrl, referer = referer, tag = "preflight").use { res ->
                                     when {
-                                        res.code == 401 || res.code == 403 -> variantStale = true
+                                        res.code == 401 || res.code == 403 || res.code == 451 -> variantStale = true
                                         res.isSuccessful -> variant = HttpClient.cappedText(res)
                                     }
                                 }
@@ -1955,7 +2382,14 @@ class DownloadEngine(
                     val (vUrl, variant, variantStale) = res
                     if (variantStale) throw StaleStreamLinkException("Stream link expired — fetching a fresh one")
                     if (variant == null) continue
-                    val vFile = rewriteHlsMaster(variant, vUrl, "hls-$taskId-v$idx.m3u8", cacheDir)
+                    planTexts.add(variant)
+                    // Per-variant upgrade decision: a variant can carry http
+                    // segments even when the master is fully https.
+                    val variantUpgrade = upgradeInsecureHttp ||
+                        shouldUpgradeInsecureHttp(variant, vUrl, referer)
+                    val vFile = rewriteHlsMaster(
+                        variant, vUrl, "hls-$taskId-v$idx.m3u8", cacheDir, variantUpgrade
+                    )
                     if (vFile != null) created.add(vFile)
                     if (vFile != null && masterFile == null) {
                         // rewriteHlsMaster returns null when nothing needed
@@ -1967,7 +2401,15 @@ class DownloadEngine(
                         // remote master.
                         masterFile = try {
                             val f = File(cacheDir, "hls-$taskId.m3u8")
-                            f.writeText(playlist)
+                            // forceLocal: a local master resolves against
+                            // file://, so ordinary relative variant URIs must
+                            // be absolutized even though they alone did not
+                            // trigger the rewrite.
+                            f.writeText(
+                                HlsPlaylist.rewrite(
+                                    playlistText, currentUrl, upgradeInsecureHttp, forceLocal = true
+                                ) ?: playlistText
+                            )
                             f
                         } catch (_: Exception) {
                             null
@@ -1989,16 +2431,31 @@ class DownloadEngine(
                         if (vSeg != null) probeUrl = resolveSegmentUrl(vUrl, vSeg)
                         // Segment-Sampling Estimator: runs asynchronously in the
                         // background without blocking yt-dlp's launch.
-                        triggerAsyncHlsSizeEstimate(taskId, playlist, currentUrl, vUrl, referer)
+                        triggerAsyncHlsSizeEstimate(taskId, playlistText, currentUrl, vUrl, referer)
                     }
                 }
             } else {
                 probeUrl = firstResolved
                 // The URL is a media playlist itself (single-variant stream):
                 // estimate asynchronously in the background.
-                triggerAsyncHlsSizeEstimate(taskId, playlist, currentUrl, currentUrl, referer)
+                triggerAsyncHlsSizeEstimate(taskId, playlistText, currentUrl, currentUrl, referer)
             }
         }
+
+        // Fingerprint the media plan BEFORE any probe failure can throw: the
+        // caller uses it to decide whether the banked .part belongs to this
+        // plan. It is structural (basenames/durations), so rotating tokens do
+        // not look like a different plan.
+        if (upgradeInsecureHttp && probeUrl != null && probeUrl.startsWith("http://")) {
+            probeUrl = "https://" + probeUrl.removePrefix("http://")
+        }
+        segmentUrlOut[0] = probeUrl
+        fingerprintOut[0] = HlsPlaylist.fingerprint(
+            buildList {
+                add(playlistText)
+                addAll(planTexts)
+            }
+        )
 
         // Probe the segment host exactly as yt-dlp will reach it after the
         // rewrite — https first, http only as a fallback for https-dead CDNs.
@@ -2107,51 +2564,52 @@ class DownloadEngine(
      * URIs to absolute https. Returns the rewritten file, or null when the
      * playlist already uses absolute URLs (nothing to fix).
      */
-    private fun rewriteHlsMaster(playlist: String, baseUrl: String, outName: String, dir: File): File? {
-        val sb = StringBuilder()
-        var changed = false
-        for (rawLine in playlist.lineSequence()) {
-            val line = rawLine.trimEnd('\r')
-            when {
-                line.startsWith("//") -> {
-                    sb.append("https:").append(line).append('\n')
-                    changed = true
+    /** First absolute http URI in a playlist (segment line or tag URI="..."). */
+    private fun firstInsecureUri(text: String, baseUrl: String): String? {
+        for (rawLine in text.lineSequence()) {
+            val line = rawLine.trim()
+            if (line.isBlank()) continue
+            if (line.startsWith("#")) {
+                val m = URI_VALUE.matcher(line)
+                while (m.find()) {
+                    val u = m.group(1) ?: ""
+                    val resolved = resolveSegmentUrl(baseUrl, u) ?: u
+                    if (resolved.startsWith("http://")) return resolved
                 }
-                line.startsWith("#") -> {
-                    var l = line
-                    val m = URI_VALUE.matcher(l)
-                    if (m.find()) {
-                        val out = StringBuffer()
-                        do {
-                            val u = m.group(1) ?: ""
-                            val repl = when {
-                                u.startsWith("//") -> "https:$u"
-                                u.startsWith("http://") || u.startsWith("https://") -> u
-                                else -> resolveSegmentUrl(baseUrl, u) ?: u
-                            }
-                            m.appendReplacement(out, "URI=\"" + java.util.regex.Matcher.quoteReplacement(repl) + "\"")
-                        } while (m.find())
-                        m.appendTail(out)
-                        l = out.toString()
-                        if (l != line) changed = true
-                    }
-                    sb.append(l).append('\n')
-                }
-                else -> {
-                    val resolved = resolveSegmentUrl(baseUrl, line)
-                    if (resolved != null && resolved != line) {
-                        sb.append(resolved).append('\n')
-                        changed = true
-                    } else {
-                        sb.append(line).append('\n')
-                    }
-                }
+            } else {
+                val resolved = resolveSegmentUrl(baseUrl, line) ?: line
+                if (resolved.startsWith("http://")) return resolved
             }
         }
-        if (!changed) return null
+        return null
+    }
+
+    /** Upgrade http->https only when the https twin actually answers. */
+    private suspend fun shouldUpgradeInsecureHttp(
+        text: String,
+        baseUrl: String,
+        referer: String?
+    ): Boolean {
+        val insecure = firstInsecureUri(text, baseUrl) ?: return false
+        val httpsTwin = "https://" + insecure.removePrefix("http://")
+        return try {
+            HttpClient.probe(httpsTwin, referer, timeoutMs = 2_500L, tag = "preflight")
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun rewriteHlsMaster(
+        playlist: String,
+        baseUrl: String,
+        outName: String,
+        dir: File,
+        upgradeInsecureHttp: Boolean = true
+    ): File? {
+        val rewritten = HlsPlaylist.rewrite(playlist, baseUrl, upgradeInsecureHttp) ?: return null
         return try {
             val f = File(dir, outName)
-            f.writeText(sb.toString())
+            f.writeText(rewritten)
             f
         } catch (_: Exception) {
             null
@@ -2159,24 +2617,8 @@ class DownloadEngine(
     }
 
     /** Resolve a playlist-relative or protocol-relative URI against [base]. */
-    private fun resolveSegmentUrl(base: String, uri: String): String? {
-        if (uri.startsWith("http://") || uri.startsWith("https://")) return uri
-        if (uri.startsWith("//")) return "https:$uri"
-        return try {
-            val b = java.net.URI(base)
-            val qIdx = uri.indexOf('?')
-            val pathPart = if (qIdx >= 0) uri.substring(0, qIdx) else uri
-            val queryPart = if (qIdx >= 0) uri.substring(qIdx + 1) else null
-            val joined = if (pathPart.startsWith("/")) {
-                pathPart
-            } else {
-                b.path.substringBeforeLast('/') + "/" + pathPart
-            }
-            java.net.URI(b.scheme, null, b.host, b.port, joined, queryPart, null).toString()
-        } catch (_: Exception) {
-            null
-        }
-    }
+    private fun resolveSegmentUrl(base: String, uri: String): String? =
+        HlsPlaylist.resolveSegmentUrl(base, uri)
 
     /**
      * Size of the produced artifact. A single-file download is a plain File,
@@ -2309,6 +2751,8 @@ class DownloadEngine(
             // (dest name, rename guard, sidecar cleanup) must use the current row.
             var task = repository.find(initialTask.id) ?: initialTask
             val originalFilePath = initialTask.filePath
+            // Declared outside try so the finally can release the reservation.
+            var grantedLanes = 0
             try {
                 if (!isActive) return@launch
                 var streamUrl = com.anonrode.downloader.pipeline.UrlClassifier.stripPreviewParam(task.directUrl)
@@ -2321,10 +2765,19 @@ class DownloadEngine(
                 val bypassHealth = runtimeRegistry.consumeRetryBypass(task.id)
                 if (bypassHealth) ResolveBudget.forgetTask(task.id)
 
-                // Zero-Latency Resume: Check if streamUrl is already direct
-                val isAlreadyDirect = isDirectMediaUrl(streamUrl) && !isKnownLockerHost(streamUrl)
+                // Zero-Latency Resume: Check if streamUrl is already direct.
+                // Adaptive-stream manifests are NEVER "already direct": a
+                // persisted .m3u8 carries a token that dies within hours, and
+                // skipping the source-page re-resolve made retries/re-resumes
+                // loop on the dead token (2026-10-19 task c6710cfb). A
+                // site-less HLS URL has nothing to resolve FROM, so it keeps
+                // the direct path.
+                val isHlsNow = com.anonrode.downloader.pipeline.UrlClassifier.isStreamingLink(streamUrl)
+                val isAlreadyDirect = !isHlsNow &&
+                    isDirectMediaUrl(streamUrl) && !isKnownLockerHost(streamUrl)
+                val hlsResolveImpossible = isHlsNow && task.site.isBlank()
 
-                if (!isMagnet && !isSocial && !isAlreadyDirect) {
+                if (!isMagnet && !isSocial && !isAlreadyDirect && !hlsResolveImpossible) {
                     repository.update(task.id) { it.copy(status = TaskStatus.RESOLVING) }
                     updateServiceState(force = true)
 
@@ -2440,6 +2893,27 @@ class DownloadEngine(
                     streamUrl,
                     task.parallelSockets
                 )
+                // Global lane ledger (24 lanes): reserve once per task; the
+                // same grant feeds Turbo AND the aria2c fallback so a handoff
+                // never double-books. HLS reserves later, after preflight
+                // reveals the real segment host.
+                if (finalBackend != "yt-dlp" && !isMagnet) {
+                    grantedLanes = com.anonrode.downloader.pipeline.HostPolicyRegistry.LaneBudget
+                        .reserve(task.id, effectiveSockets, hls = false, plannedTasks = plannedTransferCount())
+                    if (grantedLanes == 0) {
+                        // Admission race: hand the slot back to the queue
+                        // instead of starting with a starved flow set.
+                        repository.update(task.id) {
+                            it.copy(status = TaskStatus.QUEUED, speedBytesPerSec = 0.0)
+                        }
+                        updateServiceState(force = true)
+                        processQueue()
+                        return@launch
+                    }
+                    com.anonrode.downloader.util.DebugLog.engine(
+                        "task=${task.id} lane budget: granted $grantedLanes/${effectiveSockets} (direct)"
+                    )
+                }
 
                 coroutineContext.ensureActive()
 
@@ -2525,11 +2999,15 @@ class DownloadEngine(
                 // Out-holder for the real stream resolution from the master
                 // playlist (e.g. "1080p"), shown on the download card.
                 val hlsResolution = arrayOfNulls<String>(1)
+                // Real segment host (for the HLS per-host lane cap) and the
+                // structural media-plan fingerprint.
+                val hlsSegmentUrl = arrayOfNulls<String>(1)
+                val hlsFingerprint = arrayOfNulls<String>(1)
                 if (finalBackend == "yt-dlp" && isHlsStream) {
                     try {
                         hlsMasterFile = preflightHls(
                             context, task.id, streamUrl, refererToPass, hlsSizeEstimate,
-                            task.quality ?: defaultQuality, hlsResolution
+                            task.quality ?: defaultQuality, hlsResolution, hlsSegmentUrl, hlsFingerprint
                         )
                     } catch (e: StaleStreamLinkException) {
                         // A persisted HLS URL carries a token that dies within
@@ -2553,8 +3031,61 @@ class DownloadEngine(
                         }
                         hlsMasterFile = preflightHls(
                             context, task.id, streamUrl, refererToPass,
-                            hlsSizeEstimate, task.quality ?: defaultQuality, hlsResolution
+                            hlsSizeEstimate, task.quality ?: defaultQuality, hlsResolution,
+                            hlsSegmentUrl, hlsFingerprint
                         )
+                    }
+                }
+                if (finalBackend == "yt-dlp" && isHlsStream) {
+                    // Purge ONLY on a real plan change; a matching fingerprint
+                    // keeps the banked .part untouched (2026-10-19: 89 MB of
+                    // progress must survive a token-refresh retry).
+                    if (applyHlsPlanFingerprint(task, hlsFingerprint[0])) {
+                        repository.update(task.id) {
+                            it.copy(downloadedBytes = 0L, speedBytesPerSec = 0.0, etaSeconds = 0L)
+                        }
+                    }
+                    // yt-dlp cannot resize its worker pool mid-run, so the
+                    // STARTING -N is chosen from live concurrency: 1 task → 8,
+                    // 2 → 6, 3+ → 5 (within the global budget and per-host
+                    // caps). This is the fragment-boundary-safe equivalent of
+                    // the Turbo ramp.
+                    val activeNow = runtimeRegistry.activeRunningTaskIds().size.coerceAtLeast(1)
+                    val desiredByConcurrency = when {
+                        activeNow <= 1 -> 8
+                        activeNow == 2 -> 6
+                        else -> 5
+                    }
+                    val wantedLanes = com.anonrode.downloader.pipeline.HostPolicyRegistry
+                        .effectiveHlsLanesForUrl(
+                            streamUrl,
+                            hlsSegmentUrl[0],
+                            minOf(hlsFragmentConcurrency, desiredByConcurrency)
+                        )
+                    grantedLanes = com.anonrode.downloader.pipeline.HostPolicyRegistry.LaneBudget
+                        .reserve(task.id, wantedLanes, hls = true, plannedTasks = plannedTransferCount())
+                    if (grantedLanes == 0) {
+                        repository.update(task.id) {
+                            it.copy(status = TaskStatus.QUEUED, speedBytesPerSec = 0.0)
+                        }
+                        updateServiceState(force = true)
+                        processQueue()
+                        return@launch
+                    }
+                    com.anonrode.downloader.util.DebugLog.engine(
+                        "task=${task.id} lane budget: granted $grantedLanes/$wantedLanes " +
+                            "(hls, active=$activeNow master=$streamUrl segment=${hlsSegmentUrl[0]})"
+                    )
+                } else if (finalBackend == "yt-dlp" && !isMagnet) {
+                    grantedLanes = com.anonrode.downloader.pipeline.HostPolicyRegistry.LaneBudget
+                        .reserve(task.id, effectiveSockets, hls = false, plannedTasks = plannedTransferCount())
+                    if (grantedLanes == 0) {
+                        repository.update(task.id) {
+                            it.copy(status = TaskStatus.QUEUED, speedBytesPerSec = 0.0)
+                        }
+                        updateServiceState(force = true)
+                        processQueue()
+                        return@launch
                     }
                 }
 
@@ -2575,6 +3106,9 @@ class DownloadEngine(
                 var turboFailure: TurboDownloader.TurboResult.Failure? = null
                 var turboResult: TurboDownloader.TurboResult? = null
                 var aria2Error: String? = null
+                // A Turbo "success" that was actually a stub: skip the aria2c
+                // step (the URL is poisoned) and go straight to failover.
+                var turboStubRecovered = false
 
                 if (finalBackend == "aria2c" && !isMagnet) {
                     var dest = File(targetFolder, File(task.filePath).name)
@@ -2666,6 +3200,8 @@ class DownloadEngine(
                     }
 
                     val progressCb: (Long, Long, Long) -> Unit = { got, tot, bps ->
+                        com.anonrode.downloader.pipeline.HostPolicyRegistry.LaneBudget
+                            .reportSpeed(task.id, bps.toDouble())
                         val eta = if (bps > 0 && tot > got) (tot - got) / bps else 0L
                         val liveTask = repository.find(task.id)
                         val safeEta = if (eta > 0L) eta else liveTask?.etaSeconds?.takeIf { it > 0L } ?: 0L
@@ -2682,13 +3218,13 @@ class DownloadEngine(
                     if (!alreadyCompleteOnDisk && !hasExistingAria2Partial) {
                         // Step 1: Primary execution via TurboDownloader
                         com.anonrode.downloader.util.DebugLog.engine(
-                            "task=${task.id} turbo primary start sockets=$effectiveSockets url=${streamUrl.take(110)}"
+                            "task=${task.id} turbo primary start sockets=${grantedLanes.coerceAtLeast(1)} url=${streamUrl.take(110)}"
                         )
                         turboResult = TurboDownloader.download(
                             url = streamUrl,
                             dest = dest,
                             headers = hdrs,
-                            configuredSockets = effectiveSockets,
+                            configuredSockets = grantedLanes.coerceAtLeast(1),
                             onProgress = progressCb,
                             taskId = task.id
                         )
@@ -2709,7 +3245,7 @@ class DownloadEngine(
                                         url = streamUrl,
                                         dest = dest,
                                         headers = hdrs,
-                                        configuredSockets = effectiveSockets,
+                                        configuredSockets = grantedLanes.coerceAtLeast(1),
                                         onProgress = progressCb,
                                         taskId = task.id
                                     )
@@ -2719,10 +3255,89 @@ class DownloadEngine(
 
                         when (turboResult) {
                             is TurboDownloader.TurboResult.Success -> {
-                                producedFile = turboResult.file
+                                val artifact = turboResult.file
+                                // A sub-1 KiB non-image "success" is a CDN
+                                // stub/decoy page, not media (the same floor
+                                // the final validator applies). Never let it
+                                // count as produced.
+                                if (artifact.exists() && artifact.length() < 1024L && !isImageFile(artifact)) {
+                                    com.anonrode.downloader.util.DebugLog.engine(
+                                        "task=${task.id} turbo returned a ${artifact.length()}B stub — discarding and re-resolving"
+                                    )
+                                    try { artifact.delete() } catch (_: Exception) {}
+                                    producedFile = null
+                                    turboStubRecovered = true
+                                } else {
+                                    producedFile = artifact
+                                }
                             }
                             is TurboDownloader.TurboResult.Failure -> {
                                 turboFailure = turboResult
+                            }
+                        }
+
+                        if (turboStubRecovered && coroutineContext.isActive) {
+                            // The URL that produced the stub is poison: make
+                            // sure no resolver hands it back, then mint a
+                            // FRESH link (allowCacheHit=false).
+                            com.anonrode.downloader.pipeline.ResolveCache.poison(streamUrl)
+                            val fresh = try {
+                                resolveStreamUrl(
+                                    permUrl, task.site, task.quality ?: defaultQuality,
+                                    allowCacheHit = false
+                                )
+                            } catch (e: kotlinx.coroutines.CancellationException) {
+                                throw e
+                            } catch (_: Exception) {
+                                null
+                            }
+                            if (!fresh.isNullOrBlank() && fresh != streamUrl &&
+                                (isDirectMediaUrl(fresh) || isProvablyDirectFile(fresh))) {
+                                streamUrl = com.anonrode.downloader.pipeline.UrlClassifier.stripPreviewParam(fresh)
+                                refererToPass = taskReferer ?: getRefererForUrl(streamUrl)
+                                uaToPass = taskUa ?: getUserAgentForUrl(streamUrl)
+                                hdrs = buildHeaders(refererToPass, uaToPass)
+                                repository.update(task.id) { it.copy(directUrl = streamUrl) }
+                            }
+                            // yt-dlp gets the next chance (its extractor can
+                            // sometimes read a page Turbo cannot); then the
+                            // terminal branch hands zero-banked garbage to
+                            // cross-provider failover.
+                            producedFile = try {
+                                YoutubeDlDownloader.download(
+                                    context = context,
+                                    taskId = task.id,
+                                    sourceUrl = streamUrl,
+                                    targetDir = targetFolder,
+                                    preferredFilename = dest.name,
+                                    backend = "yt-dlp",
+                                    referer = refererToPass,
+                                    origin = com.anonrode.downloader.pipeline.UrlClassifier.extractOrigin(refererToPass),
+                                    ua = uaToPass,
+                                    customHeaders = hdrs,
+                                    parallelSockets = grantedLanes.coerceIn(1, 16),
+                                    quality = task.quality ?: defaultQuality,
+                                    isExtractorTask = false,
+                                    audioOnly = task.audioOnly,
+                                    onProgress = { dl, tot, spd, eta ->
+                                        com.anonrode.downloader.pipeline.HostPolicyRegistry.LaneBudget
+                                            .reportSpeed(task.id, spd)
+                                        repository.updateProgress(task.id, dl, tot, spd, eta)
+                                        updateServiceState(force = false)
+                                    },
+                                    magnetMaxAttempts = magnetMaxAttempts,
+                                    ytdlpMaxAttempts = maxOf(ytdlpMaxAttempts, 3),
+                                    hlsFragments = hlsFragmentConcurrency,
+                                    speedLimitKbs = globalSpeedLimitKbs,
+                                    torrentPeers = torrentPeers,
+                                    privacyMode = torrentPrivacyMode,
+                                    estimatedTotal = repository.find(task.id)?.totalBytes ?: task.totalBytes
+                                )
+                            } catch (e: kotlinx.coroutines.CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                aria2Error = e.message
+                                null
                             }
                         }
                     }
@@ -2737,7 +3352,7 @@ class DownloadEngine(
                         turboFailure.htmlPage ||
                             turboFailure.httpStatus in listOf(401, 403, 404, 410, 429)
                         )
-                    if (producedFile == null && !unrecoverableHttpOrHtml && coroutineContext.isActive) {
+                    if (producedFile == null && !unrecoverableHttpOrHtml && !turboStubRecovered && coroutineContext.isActive) {
                         if (!hasExistingAria2Partial) {
                             handoffTurboPrefixToAria2c(dest)
                             com.anonrode.downloader.util.DebugLog.engine(
@@ -2760,11 +3375,13 @@ class DownloadEngine(
                                 origin = com.anonrode.downloader.pipeline.UrlClassifier.extractOrigin(refererToPass),
                                 customHeaders = hdrs,
                                 ua = uaToPass,
-                                parallelSockets = effectiveSockets,
+                                parallelSockets = grantedLanes.coerceAtLeast(1),
                                 quality = task.quality ?: defaultQuality,
                                 isExtractorTask = false,
                                 audioOnly = task.audioOnly,
                                 onProgress = { dl, tot, spd, eta ->
+                                    com.anonrode.downloader.pipeline.HostPolicyRegistry.LaneBudget
+                                        .reportSpeed(task.id, spd)
                                     repository.updateProgress(task.id, dl, tot, spd, eta)
                                     updateServiceState(force = false)
                                 },
@@ -2799,11 +3416,13 @@ class DownloadEngine(
                             origin = com.anonrode.downloader.pipeline.UrlClassifier.extractOrigin(runReferer),
                             ua = runUa,
                             customHeaders = runHdrs,
-                            parallelSockets = effectiveSockets.coerceIn(1, 16),
+                            parallelSockets = (if (grantedLanes > 0) grantedLanes else effectiveSockets).coerceIn(1, 16),
                             quality = task.quality ?: defaultQuality,
                             isExtractorTask = isExtractor,
                             audioOnly = task.audioOnly,
                             onProgress = { dl, tot, spd, eta ->
+                                com.anonrode.downloader.pipeline.HostPolicyRegistry.LaneBudget
+                                    .reportSpeed(task.id, spd)
                                 repository.updateProgress(
                                     taskId = task.id,
                                     downloaded = dl,
@@ -2815,8 +3434,13 @@ class DownloadEngine(
                             },
                             onTorrentFiles = onTorrentFileSelection,
                             magnetMaxAttempts = magnetMaxAttempts,
-                            ytdlpMaxAttempts = ytdlpMaxAttempts,
-                            hlsFragments = hlsFragmentConcurrency,
+                            // HLS never runs the retry ladder below 3: one
+                            // attempt turns a token/quota blip into a terminal
+                            // failure (device setting was 1 on 2026-10-19).
+                            ytdlpMaxAttempts = if (isHlsStream) maxOf(ytdlpMaxAttempts, 3) else ytdlpMaxAttempts,
+                            hlsFragments = if (isHlsStream) {
+                                (if (grantedLanes > 0) grantedLanes else hlsFragmentConcurrency).coerceIn(1, 16)
+                            } else hlsFragmentConcurrency,
                             speedLimitKbs = globalSpeedLimitKbs,
                             torrentPeers = torrentPeers,
                             privacyMode = torrentPrivacyMode,
@@ -2855,7 +3479,30 @@ class DownloadEngine(
                             var freshMaster: File? = null
                             if (isHlsStream) {
                                 try {
-                                    freshMaster = preflightHls(context, task.id, freshUrl, taskReferer ?: getRefererForUrl(freshUrl), hlsSizeEstimate, task.quality ?: defaultQuality, hlsResolution)
+                                    val freshSegment = arrayOfNulls<String>(1)
+                                    val freshFingerprint = arrayOfNulls<String>(1)
+                                    freshMaster = preflightHls(
+                                        context, task.id, freshUrl,
+                                        taskReferer ?: getRefererForUrl(freshUrl),
+                                        hlsSizeEstimate, task.quality ?: defaultQuality,
+                                        hlsResolution, freshSegment, freshFingerprint
+                                    )
+                                    // Second preflight = second chance to notice a
+                                    // plan change; a match still preserves bytes.
+                                    if (applyHlsPlanFingerprint(task, freshFingerprint[0])) {
+                                        repository.update(task.id) {
+                                            it.copy(downloadedBytes = 0L, speedBytesPerSec = 0.0, etaSeconds = 0L)
+                                        }
+                                    }
+                                    val wanted = com.anonrode.downloader.pipeline.HostPolicyRegistry
+                                        .effectiveHlsLanesForUrl(
+                                            freshUrl, freshSegment[0], hlsFragmentConcurrency
+                                        )
+                                    grantedLanes = com.anonrode.downloader.pipeline.HostPolicyRegistry
+                                        .LaneBudget.reserve(
+                                            task.id, wanted, hls = true,
+                                            plannedTasks = plannedTransferCount()
+                                        )
                                 } catch (e: kotlinx.coroutines.CancellationException) {
                                     throw e
                                 } catch (e: Exception) {
@@ -3010,6 +3657,12 @@ class DownloadEngine(
                         File(producedFile.absolutePath + ".turbo").delete()
                         File(producedFile.absolutePath + ".part").delete()
                         File(producedFile.absolutePath + ".aria2").delete()
+                        File(producedFile.absolutePath + ".hlsfp").delete()
+                        deletePartFragFiles(
+                            producedFile.parentFile ?: File("."),
+                            producedFile.nameWithoutExtension,
+                            privateWorkdir = false
+                        )
                         // Backends can produce a file whose name differs from the
                         // task's target (aria2c writes the URL's extension, e.g.
                         // .mp4, while the task targets .mkv) — without this the
@@ -3027,6 +3680,7 @@ class DownloadEngine(
                             File(targetPathBeforeCompletion + ".part").delete()
                             File(targetPathBeforeCompletion + ".aria2").delete()
                             File(targetPathBeforeCompletion + ".ytdl").delete()
+                            File(targetPathBeforeCompletion + ".hlsfp").delete()
                         }
                         // The extension sync may have renamed the task's target
                         // (.mp4 → .mkv) before download start: the ORIGINAL path's
@@ -3038,6 +3692,7 @@ class DownloadEngine(
                             File(originalFilePath + ".part").delete()
                             File(originalFilePath + ".aria2").delete()
                             File(originalFilePath + ".ytdl").delete()
+                            File(originalFilePath + ".hlsfp").delete()
                         }
                         // O3: bounded stem-family sweep — one directory listing
                         // clears every abandoned sidecar generation (a task whose
@@ -3050,9 +3705,16 @@ class DownloadEngine(
                             File(targetPathBeforeCompletion).nameWithoutExtension,
                             File(originalFilePath).nameWithoutExtension
                         )
-                        val sidecarExts = setOf("part", "turbo", "aria2", "ytdl")
+                        val sidecarExts = setOf("part", "turbo", "aria2", "ytdl", "hlsfp")
                         producedFile.parentFile?.listFiles()?.forEach { f ->
                             if (!f.isFile) return@forEach
+                            // `.part-Frag<N>` has no fixed extension to match
+                            // in sidecarExts; resolve its stem explicitly.
+                            if (f.name.contains(".part-Frag", ignoreCase = true)) {
+                                val fragStem = f.name.substringBefore(".part-Frag").substringBeforeLast('.')
+                                if (fragStem in familyStems && f.absolutePath !in otherTaskPaths) f.delete()
+                                return@forEach
+                            }
                             val scExt = f.name.substringAfterLast('.', "")
                             if (scExt !in sidecarExts) return@forEach
                             val baseName = f.name.removeSuffix(".$scExt")
@@ -3165,8 +3827,14 @@ class DownloadEngine(
                     // lands HERE (the aria2c try/catch stores into aria2Error),
                     // and this branch previously went straight to park/fail —
                     // silently disabling failover on broken direct downloads.
-                    if (producedFile == null && live.downloadedBytes == 0L && bytesLanded(live) == 0L &&
-                        attemptCrossProviderFailover(live)) {
+                    // Garbage output (HTML/tiny/bad signature) with zero
+                    // backend-reported bytes is NOT banked progress: fire the
+                    // same failover a missing file gets. The guard inside also
+                    // refuses when a real .part/.aria2 or >1 MB artifact exists.
+                    val garbageOutput = producedFile != null && producedFile.exists() &&
+                        isGarbageArtifact(producedFile)
+                    if ((producedFile == null || garbageOutput) && live.downloadedBytes == 0L &&
+                        attemptCrossProviderFailover(live, producedFile)) {
                         return@launch
                     }
                     val parked = producedFile == null &&
@@ -3178,6 +3846,12 @@ class DownloadEngine(
                                 File(producedFile.absolutePath + ".part").delete()
                                 File(producedFile.absolutePath + ".turbo").delete()
                                 File(producedFile.absolutePath + ".aria2").delete()
+                                File(producedFile.absolutePath + ".hlsfp").delete()
+                                deletePartFragFiles(
+                                    producedFile.parentFile ?: File("."),
+                                    producedFile.nameWithoutExtension,
+                                    privateWorkdir = false
+                                )
                             } catch (_: Throwable) {}
                         }
                         repository.update(task.id) { it.copy(status = TaskStatus.FAILED, errorMessage = errReason) }
@@ -3269,6 +3943,13 @@ class DownloadEngine(
                 val thisJob = coroutineContext[Job]
                 val entry = runtimeRegistry.get(task.id)
                 val ownedByThisJob = entry != null && thisJob != null && entry.activeJob === thisJob
+                // Release only when no newer job has taken the task over; a
+                // retry may already have re-reserved the same task id.
+                if (grantedLanes > 0 &&
+                    (entry == null || ownedByThisJob || entry.activeJob == null)
+                ) {
+                    com.anonrode.downloader.pipeline.HostPolicyRegistry.LaneBudget.release(task.id)
+                }
                 if (ownedByThisJob && entry != null) {
                     entry.activeJob = null
                 }

@@ -186,6 +186,41 @@ class TurboDownloaderTest {
         assertTrue(File(dir, "video.mp4").readBytes().contentEquals(payload))
     }
 
+    @Test
+    fun uniformlySlowSegmentedLinkDoesNotChurnLanesDuringWarmup() {
+        // Field regression (2026-10-19): 16 lanes at 4-35 KB/s each were all
+        // dropped inside ~7s. The retuned policy keeps a 15s warm-up and a
+        // 14 KiB/s floor, so a uniformly slow link (all lanes equal) must
+        // produce ZERO drops. MockWebServer throttles each body to 256 KiB/s;
+        // the 4 MiB payload finishes inside the warm-up window.
+        com.anonrode.downloader.pipeline.HostPolicyRegistry.LaneBudget.clearForTest()
+        val taskId = "slow-warmup"
+        com.anonrode.downloader.pipeline.HostPolicyRegistry.LaneBudget
+            .reserve(taskId, 4, hls = false, plannedTasks = 1)
+        val payload = payload(4 * 1024 * 1024)
+        server.dispatcher = ThrottledRangeServer(payload)
+        val result = runBlocking {
+            TurboDownloader.download(
+                url = server.url("/video.mp4").toString(),
+                dest = File(dir, "video.mp4"),
+                configuredSockets = 4,
+                client = client,
+                taskId = taskId
+            )
+        }
+        try {
+            assertTrue("expected Success, got $result", result is TurboDownloader.TurboResult.Success)
+            assertEquals(
+                "uniformly slow lanes must not be dropped during warm-up",
+                0,
+                TurboDownloader.dropEventCounts[taskId]?.get() ?: 0
+            )
+        } finally {
+            com.anonrode.downloader.pipeline.HostPolicyRegistry.LaneBudget.release(taskId)
+            com.anonrode.downloader.pipeline.HostPolicyRegistry.LaneBudget.clearForTest()
+        }
+    }
+
     private fun downloadTo(destName: String): TurboDownloader.TurboResult = runBlocking {
         TurboDownloader.download(
             url = server.url("/video.mp4").toString(),
@@ -254,6 +289,37 @@ private class FlakyRangeServer(
  * serves like FlakyRangeServer. HEAD always succeeds so the probe never
  * burns the rejection budget.
  */
+/**
+ * Mock server that serves the full range but throttles every body to
+ * 256 KiB/s, modelling a uniformly shaped mobile link.
+ */
+private class ThrottledRangeServer(private val content: ByteArray) : Dispatcher() {
+    override fun dispatch(request: RecordedRequest): MockResponse {
+        if (request.method == "HEAD") {
+            return MockResponse()
+                .setHeader("Content-Length", content.size)
+                .setHeader("Accept-Ranges", "bytes")
+        }
+        val range = request.getHeader("Range")
+        if (range == null) {
+            return MockResponse()
+                .setHeader("Content-Type", "application/octet-stream")
+                .setBody(Buffer().write(content))
+                .throttleBody(64 * 1024, 250, TimeUnit.MILLISECONDS)
+        }
+        val spec = range.removePrefix("bytes=")
+        val parts = spec.split('-')
+        val start = parts[0].toInt()
+        val end = parts.getOrNull(1)?.takeIf { it.isNotBlank() }?.toInt() ?: (content.size - 1)
+        return MockResponse()
+            .setResponseCode(206)
+            .setHeader("Content-Range", "bytes $start-$end/${content.size}")
+            .setHeader("Content-Length", end - start + 1)
+            .setBody(Buffer().write(content, start, end - start + 1))
+            .throttleBody(64 * 1024, 250, TimeUnit.MILLISECONDS)
+    }
+}
+
 private class RateLimitedRangeServer(
     private val content: ByteArray,
     private val rejectFirstRanges: Int = 0,

@@ -7,6 +7,8 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.File
+import java.nio.file.Files
 
 /**
  * IG-1 unit tests — the PURE half of InstagramPhotoMuxer (everything that
@@ -338,5 +340,32 @@ class InstagramPhotoMuxerTest {
         assertTrue(x264.containsAll(listOf("-loop", "1", "-t", "5")))
         assertFalse(x264.contains("-shortest"))
         assertEquals("/out/final.mp4", x264.last())
+    }
+
+    @Test
+    fun ffmpegBinaryPrefersExtractedRuntimeWithVersionedLibs() {
+        // The AAR extracts the complete runtime (versioned libav*.so.61) from
+        // libffmpeg.zip.so into noBackupFilesDir/youtubedl-android/packages/
+        // ffmpeg; the bare jniLib executable has no sibling libraries and
+        // dies with "libavdevice.so.61 not found" on device (2026-10-19).
+        val extracted = Files.createTempDirectory("ffmpeg-extracted").toFile()
+        val native = Files.createTempDirectory("ffmpeg-native").toFile()
+        try {
+            val real = File(extracted, "libffmpeg.so").apply { writeBytes(ByteArray(8)) }
+            File(extracted, "libavdevice.so.61").writeBytes(ByteArray(8))
+            val nativeLib = File(native, "libffmpeg.so").apply { writeBytes(ByteArray(8)) }
+
+            assertEquals(real.absolutePath, InstagramPhotoMuxer.pickFfmpegBinary(extracted, native)?.absolutePath)
+            // Old layout name is still accepted.
+            real.delete()
+            val legacy = File(extracted, "libffmpeg.bin.so").apply { writeBytes(ByteArray(4)) }
+            assertEquals(legacy.absolutePath, InstagramPhotoMuxer.pickFfmpegBinary(extracted, native)?.absolutePath)
+            // Nothing extracted -> preserve the historical fallback.
+            legacy.delete()
+            assertEquals(nativeLib.absolutePath, InstagramPhotoMuxer.pickFfmpegBinary(extracted, native)?.absolutePath)
+        } finally {
+            extracted.deleteRecursively()
+            native.deleteRecursively()
+        }
     }
 }

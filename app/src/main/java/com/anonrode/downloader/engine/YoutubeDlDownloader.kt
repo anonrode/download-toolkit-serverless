@@ -17,6 +17,40 @@ import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.coroutines.coroutineContext
 import java.io.File
 
+/**
+ * yt-dlp's native HLS downloader stages each fragment in
+ * `<output>.part-Frag<N>` and deletes them only after concatenation. After a
+ * killed/403-aborted run those files are stale resume state: a retry that
+ * expects `Frag263` to exist dies with "No such file or directory:
+ * ...part-Frag263" before downloading anything (live 2026-10-19). They are
+ * scratch, never banked media, so a pre-attempt sweep is always safe.
+ *
+ * [privateWorkdir] is the per-task `.work-<taskId>` directory: everything
+ * there belongs to this task. Otherwise the shared target folder is scanned
+ * and only files belonging to [stem] are touched.
+ */
+internal fun partFragFiles(outDir: File, stem: String, privateWorkdir: Boolean): List<File> {
+    val files = outDir.listFiles() ?: return emptyList()
+    return files.filter { f ->
+        f.isFile &&
+            f.name.contains(".part-Frag", ignoreCase = true) &&
+            (privateWorkdir || stem.isBlank() || f.name.startsWith("$stem."))
+    }
+}
+
+internal fun partFragBytes(outDir: File, stem: String, privateWorkdir: Boolean = false): Long =
+    partFragFiles(outDir, stem, privateWorkdir).sumOf { it.length() }
+
+internal fun deletePartFragFiles(outDir: File, stem: String, privateWorkdir: Boolean): Int {
+    var removed = 0
+    for (f in partFragFiles(outDir, stem, privateWorkdir)) {
+        try {
+            if (f.delete()) removed++
+        } catch (_: Exception) {}
+    }
+    return removed
+}
+
 object YoutubeDlDownloader {
 
     /** Native yt-dlp teardown, not a user cancellation or a media verdict. */
@@ -180,7 +214,12 @@ object YoutubeDlDownloader {
         // anitaku CDNs (cdn.watching.onl / fntb0.anivideo.sbs) which are the
         // inverse: they 403 every request that does NOT carry exactly
         // https://megaplay.buzz/ (live-verified 2026-08-22).
-        val effReferer = if (hlsMasterFile != null && !requiresExplicitReferer(referer)) "" else referer
+        // Live-by-default HLS (2026-10-19) means the rewritten-master flag is
+        // no longer the proxy for "token-locked CDN": the same referer policy
+        // must apply to a LIVE m3u8 too. Hosts on the explicit allowlist keep
+        // their referer; every other HLS referer is stripped exactly as the
+        // rewritten-master path always did.
+        val effReferer = if ((hlsMasterFile != null || isM3u8) && !requiresExplicitReferer(referer)) "" else referer
 
         val height = quality.filter { it.isDigit() }.toIntOrNull() ?: when (quality.lowercase()) {
             "4k" -> 2160
@@ -373,12 +412,18 @@ object YoutubeDlDownloader {
                 addOption("-N", "$frags")
                 addOption("--concurrent-fragments", "$frags")
                 addOption("--buffer-size", "1M")
-                addOption("--http-chunk-size", "2M")
+                // No --http-chunk-size here: FragmentFD already issues one
+                // request per fragment, so a 2M chunk was inert at best and
+                // an extra range-split at worst. Kept on the direct-HTTP
+                // branch below where HttpFD actually consumes it.
                 addOption("--socket-timeout", "15")
                 addOption("--retries", "5")
                 addOption("--fragment-retries", "5")
                 addOption("--retry-sleep", "3")
-                addOption("--retry-sleep", "fragment:3")
+                // 1s between fragment retries: a token/quota 403 either clears
+                // immediately on a fresh attempt or not at all; 3s only stalls
+                // the whole lane.
+                addOption("--retry-sleep", "fragment:1")
                 // Fail loudly instead of letting yt-dlp skip missing fragments
                 // and silently produce a video with gaps in it.
                 addOption("--abort-on-unavailable-fragments")
@@ -412,12 +457,18 @@ object YoutubeDlDownloader {
                 addOption("-N", "$frags")
                 addOption("--concurrent-fragments", "$frags")
                 addOption("--buffer-size", "1M")
-                addOption("--http-chunk-size", "2M")
+                // No --http-chunk-size here: FragmentFD already issues one
+                // request per fragment, so a 2M chunk was inert at best and
+                // an extra range-split at worst. Kept on the direct-HTTP
+                // branch below where HttpFD actually consumes it.
                 addOption("--socket-timeout", "15")
                 addOption("--retries", "5")
                 addOption("--fragment-retries", "5")
                 addOption("--retry-sleep", "3")
-                addOption("--retry-sleep", "fragment:3")
+                // 1s between fragment retries: a token/quota 403 either clears
+                // immediately on a fresh attempt or not at all; 3s only stalls
+                // the whole lane.
+                addOption("--retry-sleep", "fragment:1")
                 addOption("--abort-on-unavailable-fragments")
                 if (speedLimitKbs > 0) addOption("--limit-rate", "${speedLimitKbs}K")
             } else {
@@ -538,6 +589,10 @@ object YoutubeDlDownloader {
         var terminalErrorHit = false
 
         suspend fun attemptOnce(): File? {
+            val attemptStartedAt = System.currentTimeMillis()
+            var ttfbLogged = false
+            var firstMegabyteLogged = false
+            val configuredLanes = if (hlsFragments > 0) hlsFragments else parallelSockets
             var lastDl = 0L
             var lastTot = estimatedTotal
             var currentStreamDl = 0L
@@ -605,6 +660,18 @@ object YoutubeDlDownloader {
                             etaInSeconds > 0 -> etaInSeconds
                             else -> etaCalc.update(lastDl, lastTot, tick.speedBytesPerSec)
                         }
+                        if (!ttfbLogged && lastDl > 0L) {
+                            ttfbLogged = true
+                            com.anonrode.downloader.util.DebugLog.backend(
+                                "task=$taskId startup ttfb=${System.currentTimeMillis() - attemptStartedAt}ms lanes=$configuredLanes"
+                            )
+                        }
+                        if (!firstMegabyteLogged && lastDl >= 1024L * 1024L) {
+                            firstMegabyteLogged = true
+                            com.anonrode.downloader.util.DebugLog.backend(
+                                "task=$taskId startup first-1MB=${System.currentTimeMillis() - attemptStartedAt}ms lanes=$configuredLanes"
+                            )
+                        }
                         onProgress(lastDl, lastTot, tick.speedBytesPerSec, eta)
                     }
                 }
@@ -667,6 +734,18 @@ object YoutubeDlDownloader {
         // job was paused or cancelled.
         while (attempts < ytdlpMaxAttempts && produced == null) {
             attempts++
+            if (isM3u8) {
+                // Stale fragment staging files from an aborted run make the
+                // NEXT run fail before its first byte ("part-Frag263 missing").
+                // Sweep before every HLS attempt; the .part itself is banked
+                // progress and is deliberately untouched.
+                val removed = deletePartFragFiles(outDir, stem, privateWorkdir = outDir != targetDir)
+                if (removed > 0) {
+                    com.anonrode.downloader.util.DebugLog.backend(
+                        "task=$taskId yt-dlp: removed $removed stale .part-Frag file(s) before attempt $attempts"
+                    )
+                }
+            }
             if (!coroutineContext.isActive) throw CancellationException("Task was cancelled before yt-dlp retry")
             com.anonrode.downloader.util.DebugLog.backend("task=$taskId yt-dlp attempt $attempts/$ytdlpMaxAttempts url=${inputUrl.take(110)}")
             produced = attemptOnce()

@@ -43,6 +43,241 @@ object HostPolicyRegistry {
         "mixdrop.co"
     )
 
+    /**
+     * HLS-specific per-host lane caps. A master playlist and its segment CDN
+     * can be different hosts; the effective cap is the MINIMUM over both, so
+     * one hot CDN cannot inherit the other's allowance. OTA socketCaps still
+     * win when lower. Global sizing lives in [LaneBudget].
+     */
+    private val HLS_HOST_CAP_RULES = listOf(
+        "nexabloom.top" to 6,
+        "vidsrc" to 6,          // vidsrc.* family
+        "watching.onl" to 6,    // anitaku CDN family
+        "anivideo.sbs" to 6     // anitaku CDN family
+    )
+
+    /**
+     * Global concurrency controller. Without it, maxConcurrentDownloads(4) ×
+     * 16 sockets is 64 flows; three real tasks observed 48 and the CDN
+     * answered with per-IP throttling/403s.
+     *
+     * Contract:
+     *  - ONE budget for all network transfers (direct Turbo + HLS).
+     *  - water-filling fair share with MIN_LANES_PER_TASK; a task whose cap
+     *    is lower (HLS/host cap) returns the surplus to the pool.
+     *  - admission needs the minimum grant; callers that get 0 must requeue.
+     *  - grants are advisory while a piece/fragment is in flight; Turbo reads
+     *    the grant at its next CLAIM, so a shrink is a boundary event.
+     *  - AIMD rebalancing every ~5s: grow +1..2 lanes while throughput
+     *    improves, surrender a lane on a plateau (>10% test).
+     */
+    object LaneBudget {
+        @Volatile var globalLanes: Int = 24
+        const val MIN_LANES_PER_TASK = 4
+        const val HLS_MAX_LANES = 8
+        const val DIRECT_MAX_LANES = 16
+
+        private data class Grant(
+            var lanes: Int,
+            val hls: Boolean,
+            val cap: Int,
+            var speedBps: Double = 0.0,
+            var prevSpeedBps: Double = 0.0
+        )
+
+        private val grants = LinkedHashMap<String, Grant>()
+        private var lastAdmissionAt = 0L
+
+        @Synchronized
+        fun hasMinimumCapacity(): Boolean =
+            globalLanes - grants.values.sumOf { it.lanes } >= MIN_LANES_PER_TASK
+
+        @Synchronized
+        fun noteAdmission() {
+            lastAdmissionAt = System.currentTimeMillis()
+        }
+
+        @Synchronized
+        fun msSinceAdmission(): Long =
+            if (lastAdmissionAt == 0L) Long.MAX_VALUE
+            else System.currentTimeMillis() - lastAdmissionAt
+
+        /**
+         * Admit a task with a fair-share grant. Returns 0 when the free pool
+         * cannot cover the minimum — the caller must queue, never start.
+         */
+        @Synchronized
+        fun reserve(taskId: String, requested: Int, hls: Boolean, plannedTasks: Int = 1): Int {
+            val cap = if (hls) HLS_MAX_LANES else DIRECT_MAX_LANES
+            val want = requested.coerceIn(1, cap)
+            if (taskId.isBlank()) return want
+            grants[taskId]?.let { return it.lanes }
+            val used = grants.values.sumOf { it.lanes }
+            val free = globalLanes - used
+            if (free < MIN_LANES_PER_TASK) {
+                com.anonrode.downloader.util.DebugLog.engine(
+                    "lane admission deferred: free=$free < min=$MIN_LANES_PER_TASK active=${grants.size} used=$used"
+                )
+                return 0
+            }
+            // Water-filling admission: the free pool is divided by the number
+            // of transfers still waiting for a share, so the FIRST of three
+            // tasks takes ~8 (not all 24) and the rest can still be admitted.
+            val divisor = maxOf(1, plannedTasks.coerceAtLeast(1) - grants.size)
+            val share = maxOf(MIN_LANES_PER_TASK, free / divisor)
+            val floor = minOf(MIN_LANES_PER_TASK, want)
+            val grant = minOf(want, share, free).coerceAtLeast(floor)
+            grants[taskId] = Grant(lanes = grant, hls = hls, cap = cap)
+            com.anonrode.downloader.util.DebugLog.engine(
+                "lane admission task=$taskId kind=${if (hls) "hls" else "direct"} grant=$grant " +
+                    "active=${grants.size} used=${grants.values.sumOf { it.lanes }} free=${globalLanes - grants.values.sumOf { it.lanes }}"
+            )
+            return grant
+        }
+
+        @Synchronized
+        fun release(taskId: String): Int {
+            val g = grants.remove(taskId) ?: return 0
+            com.anonrode.downloader.util.DebugLog.engine(
+                "lane release task=$taskId lanes=${g.lanes} active=${grants.size} " +
+                    "used=${grants.values.sumOf { it.lanes }}"
+            )
+            return g.lanes
+        }
+
+        @Synchronized
+        fun grantFor(taskId: String): Int = grants[taskId]?.lanes ?: 0
+
+        @Synchronized
+        fun reportSpeed(taskId: String, bps: Double) {
+            val g = grants[taskId] ?: return
+            if (bps > 0.0) g.speedBps = bps
+        }
+
+        /**
+         * AIMD rebalance. HLS grants are fixed for the whole run (yt-dlp
+         * cannot resize workers); direct grants move at most 2 lanes per
+         * cycle and never below the minimum. Returns decision log lines.
+         */
+        @Synchronized
+        fun rebalance(): List<String> {
+            val active = grants.entries.toList()
+            if (active.isEmpty()) return emptyList()
+            val fair = fairAllocation(active)
+            val messages = mutableListOf<String>()
+            for ((id, g) in active) {
+                if (g.hls) continue
+                val target = fair[id] ?: g.lanes
+                var next = g.lanes
+                if (target > g.lanes) {
+                    // AIMD growth only if the last speed sample improved.
+                    if (g.prevSpeedBps <= 0.0 || g.speedBps >= g.prevSpeedBps * 1.10) {
+                        next = minOf(target, g.lanes + 2)
+                    }
+                } else if (target < g.lanes) {
+                    // Surplus lanes go back to the pool, at most one step and
+                    // never below the guaranteed minimum.
+                    next = maxOf(MIN_LANES_PER_TASK, g.lanes - 1)
+                } else if (g.lanes > MIN_LANES_PER_TASK &&
+                    g.prevSpeedBps > 0.0 &&
+                    g.speedBps <= g.prevSpeedBps * 1.10
+                ) {
+                    // Plateau: the marginal lane is not paying for itself.
+                    next = maxOf(MIN_LANES_PER_TASK, g.lanes - 1)
+                }
+                if (next != g.lanes) {
+                    messages.add(
+                        "lane rebalance task=$id ${g.lanes}->$next " +
+                            "speed=${(g.speedBps / 1024).toInt()}KB/s target=$target"
+                    )
+                    g.lanes = next
+                }
+                g.prevSpeedBps = g.speedBps
+            }
+            // Always emit the controller state (evidence for the synthetic
+            // matrix): active count, granted/used/free lanes and per-task
+            // speed, plus any decision lines above.
+            messages.add(
+                "lane state active=${grants.size} used=${grants.values.sumOf { it.lanes }} " +
+                    "free=${globalLanes - grants.values.sumOf { it.lanes }} " +
+                    "perTask=" + grants.entries.joinToString(",") {
+                        "${it.key.take(8)}:${it.value.lanes}:${(it.value.speedBps / 1024).toInt()}KB/s"
+                    }
+            )
+            return messages
+        }
+
+        private fun fairAllocation(entries: List<Map.Entry<String, Grant>>): Map<String, Int> {
+            val alloc = LinkedHashMap<String, Int>()
+            var remaining = globalLanes
+            // Guarantee the minimum first (HLS grants are fixed for the run).
+            for ((id, g) in entries) {
+                val cap = if (g.hls) g.lanes else g.cap
+                val min = minOf(MIN_LANES_PER_TASK, cap, remaining)
+                alloc[id] = min
+                remaining -= min
+            }
+            // Water-fill the surplus in rounds.
+            while (remaining > 0) {
+                val eligible = entries.filter { (id, g) ->
+                    val cap = if (g.hls) g.lanes else g.cap
+                    (alloc[id] ?: 0) < cap
+                }
+                if (eligible.isEmpty()) break
+                val share = maxOf(1, remaining / eligible.size)
+                var added = false
+                for ((id, g) in eligible) {
+                    if (remaining <= 0) break
+                    val cap = if (g.hls) g.lanes else g.cap
+                    val room = cap - (alloc[id] ?: 0)
+                    val add = minOf(share, room, remaining)
+                    if (add > 0) {
+                        alloc[id] = (alloc[id] ?: 0) + add
+                        remaining -= add
+                        added = true
+                    }
+                }
+                if (!added) break
+            }
+            return alloc
+        }
+
+        @Synchronized
+        fun reservedLanes(): Int = grants.values.sumOf { it.lanes }
+
+        @Synchronized
+        fun activeTasks(): Int = grants.size
+
+        @Synchronized
+        fun snapshot(): String =
+            "lane state active=${grants.size} used=${grants.values.sumOf { it.lanes }} " +
+                "free=${globalLanes - grants.values.sumOf { it.lanes }} perTask=" +
+                grants.entries.joinToString(",") { "${it.key.take(8)}:${it.value.lanes}" }
+
+        @Synchronized
+        fun clearForTest() {
+            grants.clear()
+            lastAdmissionAt = 0L
+            globalLanes = 24
+        }
+    }
+
+    fun effectiveHlsLanesForUrl(masterUrl: String, segmentUrl: String?, requested: Int): Int {
+        val want = requested.coerceIn(1, LaneBudget.HLS_MAX_LANES)
+        fun capFor(url: String): Int {
+            if (url.isBlank()) return LaneBudget.HLS_MAX_LANES
+            val host = UrlClassifier.extractHost(url)
+            // Reuse the OTA overlay + built-in locker caps, then apply the
+            // HLS-specific CDN rules (which may be lower).
+            val socketCap = effectiveSocketsForUrl(url, LaneBudget.HLS_MAX_LANES)
+            val builtIn = HLS_HOST_CAP_RULES.firstOrNull { (domain, _) ->
+                host == domain || host.endsWith(".$domain") || host.contains(domain)
+            }?.second ?: LaneBudget.HLS_MAX_LANES
+            return minOf(socketCap, builtIn).coerceIn(1, LaneBudget.HLS_MAX_LANES)
+        }
+        return minOf(want, capFor(masterUrl), capFor(segmentUrl ?: masterUrl))
+    }
+
     fun effectiveSocketsForUrl(url: String, requestedSockets: Int): Int {
         val clampedRequest = requestedSockets.coerceIn(1, 16)
         if (clampedRequest == 1) return 1

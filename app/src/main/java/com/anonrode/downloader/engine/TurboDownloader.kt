@@ -38,14 +38,20 @@ object TurboDownloader {
     private const val MAX_ATTEMPTS = 5 // retries per piece / per single-stream attempt
 
     // Drop-and-replace (1DM behavior): a lane that lags its siblings after
-    // warm-up gets replaced with a FRESH connection. Semantics validated in
-    // scratch/test_drop_replace.py before this port. NEVER consumes attempts.
-    // Directivete Fix 4: 4s windows/warm-up halve detection latency (first
-    // possible drop now t=8s, was t=16s).
-    private const val DROP_WINDOW_MS = 4_000L
-    private const val DROP_WARMUP_MS = 4_000L
-    private const val DROP_FLOOR_BPS = 40L * 1024
-    private const val MAX_DROPS_PER_PIECE = 4
+    // warm-up gets replaced with a FRESH connection. NEVER consumes attempts.
+    //
+    // Field retune (2026-10-19): on a shaped mobile link, 4s/4s windows with a
+    // 40 KiB/s floor and a 4-drop budget completed every lane's budget inside
+    // ~7s (28-38 handshakes/task), which is itself the request storm that
+    // provokes CDN 403s. 8s windows and 15s warm-up make handshakes amortise;
+    // the 14 KiB/s floor only catches lanes that are genuinely stuck; two
+    // drops per piece bound the damage. The shared best reference now decays
+    // (30s half-life) so one early 1 MB/s burst cannot mark every later
+    // 20-40 KiB/s window as "severely lagging" for the rest of the download.
+    private const val DROP_WINDOW_MS = 8_000L
+    private const val DROP_WARMUP_MS = 15_000L
+    private const val DROP_FLOOR_BPS = 14L * 1024
+    private const val MAX_DROPS_PER_PIECE = 2
     private const val DROP_STRIKE_LIMIT = 2
     private const val DROP_RELATIVE_FRACTION = 0.3
     private const val DROP_RETRY_DELAY_MS = 250L
@@ -55,12 +61,66 @@ object TurboDownloader {
     private const val SEVERE_LAG_MIN_BEST_BPS = 512L * 1024
     private const val SEVERE_LAG_FRACTION = 0.12
 
+    /** Decaying shared best-window reference (30s half-life). */
+    private const val BEST_HALF_LIFE_MS = 30_000L
+
+    internal data class BestSample(val bps: Long, val atMs: Long)
+
+    /**
+     * Pure drop-decision helpers, extracted so JVM tests can exercise the
+     * retuned policy without sockets. Mirrors the inline logic in
+     * [segmented] byte-for-byte: absolute floor AND relative lag, a warm-up
+     * gate, and a hard per-piece budget.
+     */
+    internal object DropPolicy {
+        fun decayedBestBps(sample: BestSample, nowMs: Long): Double {
+            if (sample.bps <= 0L) return 0.0
+            val ageMs = (nowMs - sample.atMs).coerceAtLeast(0L)
+            return sample.bps * Math.pow(0.5, ageMs.toDouble() / BEST_HALF_LIFE_MS)
+        }
+
+        fun observeBest(
+            ref: AtomicReference<BestSample>,
+            bps: Double,
+            nowMs: Long
+        ) {
+            if (bps <= 0.0) return
+            while (true) {
+                val cur = ref.get()
+                if (bps <= decayedBestBps(cur, nowMs)) return
+                if (ref.compareAndSet(cur, BestSample(bps.toLong(), nowMs))) return
+            }
+        }
+
+        fun isSlowAbsolute(bps: Double, bestBps: Double): Boolean =
+            bps < DROP_FLOOR_BPS && bps < bestBps * DROP_RELATIVE_FRACTION
+
+        fun isSeverelyLagging(bps: Double, bestBps: Double): Boolean =
+            bestBps >= SEVERE_LAG_MIN_BEST_BPS && bps < bestBps * SEVERE_LAG_FRACTION
+
+        fun warmupElapsed(connAgeMs: Long): Boolean = connAgeMs > DROP_WARMUP_MS
+
+        fun budgetAllows(drops: Int, noMoreDrops: Boolean): Boolean =
+            !noMoreDrops && drops < MAX_DROPS_PER_PIECE
+    }
+
     // Read coalescing (directive Fix 5): Okio returns at most one 8 KiB segment
     // per read(), so a naive loop causes one pwrite64 syscall + atomic update
     // per 8 KiB (131k syscalls/GiB). Coalesce up to 64 KiB per write, stopping
     // early on a short read so we never block for network when data is ready.
     private const val COALESCE_TARGET_BYTES = 64 * 1024
     private const val OKIO_SEGMENT_SIZE = 8192
+
+    // Adaptive startup ramp (2026-10-19): a fresh task opens 4 lanes, measures
+    // aggregate throughput for ~3.5s, then steps up only while the aggregate
+    // improves. Jumping straight to 16 was part of the connection storm that
+    // triggered CDN throttling; the ramp is additive-only (no mid-ramp drops,
+    // so no churn) and is capped by the lane grant passed in as `sockets`.
+    private val RAMP_STEPS = intArrayOf(4, 6, 8, 12, 16)
+    private const val RAMP_MEASURE_MS = 3_500L
+    private const val RAMP_INTERVAL_MS = 3_000L
+    private const val RAMP_IMPROVE_RATIO = 1.05
+    private const val RAMP_REGRESSION_RATIO = 0.90
 
     // Work-stealing (directive Fix 3, corrected design D2a/D2b): when all
     // initial pieces are claimed, a free worker splits the ACTIVE piece with
@@ -101,6 +161,9 @@ object TurboDownloader {
      */
     private val activeCalls = ConcurrentHashMap<String, CopyOnWriteArrayList<Call>>()
     private val fullyCancelledTaskIds = ConcurrentHashMap.newKeySet<String>()
+
+    /** Test/observability hook: drop-and-replace events per task id. */
+    internal val dropEventCounts = ConcurrentHashMap<String, AtomicInteger>()
 
     /**
      * Interrupt every in-flight transfer of a task. The affected pieces fail,
@@ -289,6 +352,7 @@ object TurboDownloader {
         // Clear any stale cancellation flag from a prior run of this taskId
         if (taskId.isNotBlank()) {
             fullyCancelledTaskIds.remove(taskId)
+            dropEventCounts.remove(taskId)
         }
 
         try {
@@ -600,7 +664,7 @@ object TurboDownloader {
             // total on the maintainer connection) never churns lanes and never
             // wastes multi-second handshakes. Shared-best scenarios validated
             // in scratch/test_drop_replace.py.
-            val bestWindowBps = AtomicLong(0L)
+            val bestWindowBps = AtomicReference(BestSample(0L, 0L))
         // Rate-limit coordination: one shared cooldown deadline every socket
         // sits out (the limiter is per-IP — only a PAUSE heals it; retrying
         // now deepens it), a cycle counter driving the escalating ladder, and
@@ -609,6 +673,26 @@ object TurboDownloader {
         val throttleUntil = AtomicLong(0L)
         val throttleCycles = AtomicInteger(0)
         val maxWorkers = AtomicInteger(sockets)
+        // Startup ramp state (fresh tasks only). `sockets` is already capped
+        // by the global LaneBudget grant and per-host policy.
+        fun laneGrant(): Int {
+            if (taskId.isBlank()) return sockets
+            val grant = HostPolicyRegistry.LaneBudget.grantFor(taskId)
+            return if (grant > 0) minOf(grant, sockets) else sockets
+        }
+        val freshStart = initialBytes == 0L
+        // The controller's admission grant is the ceiling; the ramp is the
+        // additive-only startup curve inside it.
+        val rampStart = if (freshStart) minOf(RAMP_STEPS.first(), sockets, laneGrant()) else sockets
+        val activeWorkers = AtomicInteger(rampStart)
+        val rampStartedAt = System.currentTimeMillis()
+        val sawFirstByte = AtomicBoolean(false)
+        val sawFirstMegabyte = AtomicBoolean(false)
+        if (freshStart && taskId.isNotEmpty()) {
+            com.anonrode.downloader.util.DebugLog.backend(
+                "task=$taskId lane ramp start=$rampStart cap=$sockets total=0KB/s"
+            )
+        }
         fun enterRateLimit() {
             val cycle = throttleCycles.incrementAndGet()
             val waitMs = (throttleBaseDelayMs shl (cycle - 1).coerceAtMost(5)).coerceAtMost(THROTTLE_MAX_MS)
@@ -644,6 +728,9 @@ object TurboDownloader {
                 delay(250)
                 val currentDone = done.get()
                 val currentSpeed = speed.sample(currentDone)
+                if (taskId.isNotEmpty()) {
+                    HostPolicyRegistry.LaneBudget.reportSpeed(taskId, currentSpeed.toDouble())
+                }
                 onProgress(committed(), total, currentSpeed)
             }
         }
@@ -805,7 +892,20 @@ object TurboDownloader {
                                             }
                                             pos += writeLen
                                             chunk.current = pos
-                                            done.addAndGet(writeLen.toLong())
+                                            val nowDone = done.addAndGet(writeLen.toLong())
+                                            if (sawFirstByte.compareAndSet(false, true) && taskId.isNotEmpty()) {
+                                                com.anonrode.downloader.util.DebugLog.backend(
+                                                    "task=$taskId startup ttfb=${System.currentTimeMillis() - rampStartedAt}ms lanes=${activeWorkers.get()}"
+                                                )
+                                            }
+                                            if (nowDone >= 1024L * 1024L &&
+                                                sawFirstMegabyte.compareAndSet(false, true) &&
+                                                taskId.isNotEmpty()
+                                            ) {
+                                                com.anonrode.downloader.util.DebugLog.backend(
+                                                    "task=$taskId startup first-1MB=${System.currentTimeMillis() - rampStartedAt}ms lanes=${activeWorkers.get()}"
+                                                )
+                                            }
                                         }
                                         if (pos > chunk.end) {
                                             if (chunk.end < requestedRangeEnd) {
@@ -837,17 +937,17 @@ object TurboDownloader {
                                             // Shared best FIRST (cold start safe: the
                                             // first window seeds it with its own bps,
                                             // so a uniformly slow link never drops).
-                                            if (bps > 0.0) bestWindowBps.accumulateAndGet(bps.toLong()) { a, b ->
-                                                if (a > b) a else b
-                                            }
-                                            val bestBps = bestWindowBps.get()
-                                            val isSlowAbsolute = bps < DROP_FLOOR_BPS &&
-                                                bps < bestBps * DROP_RELATIVE_FRACTION
-                                            // Fix 4: above-floor but far below the sibling
-                                            // field (55KB/s among 1.5MB/s lanes) is still
-                                            // a drop candidate.
-                                            val isSeverelyLagging = bestBps >= SEVERE_LAG_MIN_BEST_BPS &&
-                                                bps < bestBps * SEVERE_LAG_FRACTION
+                                            // The reference decays with a 30s half-life:
+                                            // a transient burst must not veto every
+                                            // later window for the rest of the run.
+                                            DropPolicy.observeBest(bestWindowBps, bps, nowMs)
+                                            val bestBps = DropPolicy.decayedBestBps(bestWindowBps.get(), nowMs)
+                                            // Retuned: absolute floor AND relative lag.
+                                            val isSlowAbsolute = DropPolicy.isSlowAbsolute(bps, bestBps)
+                                            // Above-floor but far below the sibling field
+                                            // (55KB/s among 1.5MB/s lanes) is still a
+                                            // drop candidate — against the DECAYED best.
+                                            val isSeverelyLagging = DropPolicy.isSeverelyLagging(bps, bestBps)
                                             if (isSlowAbsolute || isSeverelyLagging) {
                                                 val eligible = nowMs - connStartedAt > DROP_WARMUP_MS
                                                 if (eligible && lastConnWasPostDrop) {
@@ -863,6 +963,11 @@ object TurboDownloader {
                                                     drops++
                                                     lastConnWasPostDrop = true
                                                     dropped = true
+                                                    if (taskId.isNotBlank()) {
+                                                        dropEventCounts
+                                                            .getOrPut(taskId) { AtomicInteger(0) }
+                                                            .incrementAndGet()
+                                                    }
                                                     com.anonrode.downloader.util.DebugLog.backend(
                                                         "task=$taskId drop slow socket piece=${chunk.start}-${chunk.end} rate=${(bps / 1024).toInt()}kB/s drops=$drops/$MAX_DROPS_PER_PIECE"
                                                     )
@@ -953,6 +1058,61 @@ object TurboDownloader {
                 }
 
                 coroutineScope {
+                    fun workRemains(): Boolean = plan.any { it.current <= it.end }
+                    suspend fun rampWait(ms: Long) {
+                        var left = ms
+                        while (left > 0 && isActive && !failed.get() && workRemains()) {
+                            val slice = minOf(100L, left)
+                            delay(slice)
+                            left -= slice
+                        }
+                    }
+                    // Startup ramp controller: additive-only, 3.5s measurement,
+                    // then a step every 3s while aggregate throughput improves
+                    // by >5%. A regression ends the ramp (lanes are never
+                    // dropped mid-run; the global controller owns shrink).
+                    launch(Dispatchers.Default) {
+                        if (!freshStart || sockets <= rampStart) return@launch
+                        var stepIdx = RAMP_STEPS.indexOfFirst { it >= rampStart }.coerceAtLeast(0)
+                        var lastDone = done.get()
+                        var lastMs = System.currentTimeMillis()
+                        var lastBps = 0.0
+                        rampWait(RAMP_MEASURE_MS)
+                        while (isActive && !failed.get() && workRemains()) {
+                            val grant = laneGrant()
+                            val now = System.currentTimeMillis()
+                            val cur = done.get()
+                            val bps = (cur - lastDone) * 1000.0 /
+                                (now - lastMs).coerceAtLeast(1L)
+                            if (lastBps > 0.0 && bps < lastBps * RAMP_REGRESSION_RATIO) {
+                                if (taskId.isNotEmpty()) {
+                                    com.anonrode.downloader.util.DebugLog.backend(
+                                        "task=$taskId lane ramp hold ${activeWorkers.get()} " +
+                                            "total=${(bps / 1024).toInt()}KB/s regression"
+                                    )
+                                }
+                                break
+                            }
+                            val improved = lastBps == 0.0 || bps > lastBps * RAMP_IMPROVE_RATIO
+                            if (!improved) break
+                            stepIdx = (stepIdx + 1).coerceAtMost(RAMP_STEPS.lastIndex)
+                            val target = minOf(RAMP_STEPS[stepIdx], sockets, grant)
+                            if (target > activeWorkers.get()) {
+                                val prev = activeWorkers.getAndSet(target)
+                                if (taskId.isNotEmpty()) {
+                                    com.anonrode.downloader.util.DebugLog.backend(
+                                        "task=$taskId lane ramp $prev->$target " +
+                                            "total=${(bps / 1024).toInt()}KB/s"
+                                    )
+                                }
+                            }
+                            lastBps = bps
+                            lastDone = cur
+                            lastMs = now
+                            if (activeWorkers.get() >= minOf(sockets, grant)) break
+                            rampWait(RAMP_INTERVAL_MS)
+                        }
+                    }
                     repeat(minOf(sockets, plan.size)) { i ->
                         launch {
                             try {
@@ -962,6 +1122,14 @@ object TurboDownloader {
                                     // keep claiming; the shared queue routes the
                                     // rest of the pieces to the survivors.
                                     if (i >= maxWorkers.get()) break
+                                    // Controller grant: a shrink takes effect
+                                    // HERE, at the next piece boundary — an
+                                    // in-flight piece is never revoked.
+                                    if (i >= activeWorkers.get() || i >= laneGrant()) {
+                                        if (plan.none { it.current <= it.end }) break
+                                        delay(100L)
+                                        continue
+                                    }
                                     val chunk = claimOrStealNext() ?: break
                                     if (!downloadPiece(chunk)) break
                                 }

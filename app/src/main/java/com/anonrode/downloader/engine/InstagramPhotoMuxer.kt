@@ -720,9 +720,9 @@ object InstagramPhotoMuxer {
         val produced = File(outDir, buildFilename(shortcode, parts))
         var delivered = false
         try {
-            val lib = File(context.applicationInfo.nativeLibraryDir, "libffmpeg.so")
-            if (!lib.exists()) {
-                DebugLog.backend("task=$taskId ig-mux: bundled ffmpeg not found at ${lib.name}, falling back to still photos")
+            val lib = resolveFfmpegBinary(context)
+            if (lib == null) {
+                DebugLog.backend("task=$taskId ig-mux: bundled ffmpeg not found, falling back to still photos")
                 return deliverStillPhotos(outDir, shortcode, parts)
             }
             try { lib.setExecutable(true) } catch (_: Exception) {}
@@ -870,6 +870,40 @@ object InstagramPhotoMuxer {
                     if (f.length() > 0) f else null
                 }
         } catch (_: Exception) { null }
+    }
+
+    /**
+     * Pick the runnable ffmpeg binary.
+     *
+     * The youtubedl-android:ffmpeg AAR packages the executable AND its
+     * versioned shared libraries inside `libffmpeg.zip.so`; `FFmpeg.init`
+     * extracts that archive to
+     * `<noBackupFilesDir>/youtubedl-android/packages/ffmpeg`. The bare
+     * `nativeLibraryDir/libffmpeg.so` is only the executable half — executing
+     * it fails with `library "libavdevice.so.61" not found` because the
+     * versioned `libav*.so.61` files were never in jniLibs (on-device log
+     * 2026-10-19). Prefer the extracted copy (its siblings are complete),
+     * keep the old path as a last-resort fallback.
+     */
+    internal fun pickFfmpegBinary(extractedDir: File, nativeDir: File): File? {
+        val names = setOf("libffmpeg.so", "libffmpeg.bin.so", "ffmpeg")
+        if (extractedDir.isDirectory) {
+            extractedDir.walkTopDown()
+                .firstOrNull { it.isFile && it.name in names }
+                ?.let { return it }
+        }
+        return File(nativeDir, "libffmpeg.so").takeIf { it.isFile }
+    }
+
+    private fun resolveFfmpegBinary(context: android.content.Context): File? {
+        // Idempotent: extracts libffmpeg.zip.so on first use (and re-extracts
+        // when the bundled version changes). Never let a failure here mask
+        // the filesystem fallback.
+        try {
+            com.yausername.ffmpeg.FFmpeg.getInstance().init(context)
+        } catch (_: Throwable) {}
+        val extracted = File(context.noBackupFilesDir, "youtubedl-android/packages/ffmpeg")
+        return pickFfmpegBinary(extracted, File(context.applicationInfo.nativeLibraryDir))
     }
 
     private fun runFffmpeg(cmd: List<String>, workDir: File?, isCancelled: () -> Boolean): Boolean {
