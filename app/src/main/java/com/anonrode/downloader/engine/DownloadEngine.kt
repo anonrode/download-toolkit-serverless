@@ -2929,7 +2929,15 @@ class DownloadEngine(
                     }
                 }
                 val finalBackend = if (isSocial || isHlsStream || isEmbedOrPage || task.audioOnly) "yt-dlp" else "aria2c"
-                val isExtractor = isSocial || task.audioOnly || isEmbedOrPage
+                var isExtractor = isSocial || task.audioOnly || isEmbedOrPage
+                // A stale-link re-resolve can change the stream type (HLS ->
+                // direct MP4). Keep the extractor flag honest for subtitles
+                // and the private workdir; the backend can still be yt-dlp.
+                fun recomputeExtractor() {
+                    isExtractor = isSocial || task.audioOnly ||
+                        !(isDirectMediaUrl(streamUrl) || isProvablyDirectFile(streamUrl) ||
+                            com.anonrode.downloader.pipeline.UrlClassifier.isStreamingLink(streamUrl))
+                }
                 val effectiveSockets = com.anonrode.downloader.pipeline.HostPolicyRegistry.effectiveSocketsForUrl(
                     streamUrl,
                     task.parallelSockets
@@ -3056,6 +3064,7 @@ class DownloadEngine(
                             throw Exception("Stream link expired and no fresh link could be fetched — try again later.")
                         }
                         streamUrl = fresh
+                        recomputeExtractor()
                         refererToPass = taskReferer ?: getRefererForUrl(streamUrl)
                         uaToPass = taskUa ?: getUserAgentForUrl(streamUrl)
                         hdrs = buildHeaders(refererToPass, uaToPass)
@@ -3525,6 +3534,7 @@ class DownloadEngine(
                         if (!freshUrl.isNullOrBlank() && freshUrl != streamUrl) {
                             android.util.Log.w("AnonDownload", "yt-dlp failed, re-resolving for a fresh URL")
                             streamUrl = freshUrl
+                            recomputeExtractor()
                             var freshMaster: File? = null
                             if (com.anonrode.downloader.pipeline.UrlClassifier.isStreamingLink(streamUrl)) {
                                 try {

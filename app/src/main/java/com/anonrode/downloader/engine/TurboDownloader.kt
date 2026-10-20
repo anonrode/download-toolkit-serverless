@@ -408,6 +408,9 @@ object TurboDownloader {
             }
 
             val sockets = HostPolicyRegistry.effectiveSocketsForUrl(safe, configuredSockets)
+            // Hard ceiling for post-admission growth: the global controller can
+            // raise this task's grant, but never past the per-host policy.
+            val hostCeiling = HostPolicyRegistry.effectiveSocketsForUrl(safe, 16)
             val useSegmented = acceptsRanges && total > MIN_SEGMENTED_SIZE && sockets > 1
 
             val partFile = File(dest.absolutePath + ".part")
@@ -673,12 +676,13 @@ object TurboDownloader {
         val throttleUntil = AtomicLong(0L)
         val throttleCycles = AtomicInteger(0)
         val maxWorkers = AtomicInteger(sockets)
-        // Startup ramp state (fresh tasks only). `sockets` is already capped
-        // by the global LaneBudget grant and per-host policy.
+        // Startup ramp state (fresh tasks only). `sockets` is the admission
+        // grant; the ramp may grow to the per-host ceiling as the global
+        // controller rebalances (growth is consumed at piece boundaries).
         fun laneGrant(): Int {
             if (taskId.isBlank()) return sockets
             val grant = HostPolicyRegistry.LaneBudget.grantFor(taskId)
-            return if (grant > 0) minOf(grant, sockets) else sockets
+            return if (grant > 0) minOf(grant, hostCeiling) else sockets
         }
         val freshStart = initialBytes == 0L
         // The controller's admission grant is the ceiling; the ramp is the
@@ -690,7 +694,7 @@ object TurboDownloader {
         val sawFirstMegabyte = AtomicBoolean(false)
         if (freshStart && taskId.isNotEmpty()) {
             com.anonrode.downloader.util.DebugLog.backend(
-                "task=$taskId lane ramp start=$rampStart cap=$sockets total=0KB/s"
+                "task=$taskId lane ramp start=$rampStart cap=$hostCeiling total=0KB/s"
             )
         }
         fun enterRateLimit() {
@@ -1072,7 +1076,7 @@ object TurboDownloader {
                     // by >5%. A regression ends the ramp (lanes are never
                     // dropped mid-run; the global controller owns shrink).
                     launch(Dispatchers.Default) {
-                        if (!freshStart || sockets <= rampStart) return@launch
+                        if (!freshStart || hostCeiling <= rampStart) return@launch
                         var stepIdx = RAMP_STEPS.indexOfFirst { it >= rampStart }.coerceAtLeast(0)
                         var lastDone = done.get()
                         var lastMs = System.currentTimeMillis()
@@ -1096,7 +1100,7 @@ object TurboDownloader {
                             val improved = lastBps == 0.0 || bps > lastBps * RAMP_IMPROVE_RATIO
                             if (!improved) break
                             stepIdx = (stepIdx + 1).coerceAtMost(RAMP_STEPS.lastIndex)
-                            val target = minOf(RAMP_STEPS[stepIdx], sockets, grant)
+                            val target = minOf(RAMP_STEPS[stepIdx], hostCeiling, grant)
                             if (target > activeWorkers.get()) {
                                 val prev = activeWorkers.getAndSet(target)
                                 if (taskId.isNotEmpty()) {
@@ -1113,7 +1117,7 @@ object TurboDownloader {
                             rampWait(RAMP_INTERVAL_MS)
                         }
                     }
-                    repeat(minOf(sockets, plan.size)) { i ->
+                    repeat(minOf(hostCeiling, plan.size)) { i ->
                         launch {
                             try {
                                 while (isActive && !failed.get()) {
