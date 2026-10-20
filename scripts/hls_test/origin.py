@@ -51,7 +51,7 @@ from tokenlib import load_or_create_secret, verify_token
 
 CHUNK_BYTES = 32 * 1024
 SEGMENT_RE = re.compile(r"^seg_(\d{3})\.ts$")
-RUN_RE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
+RUN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 RANGE_RE = re.compile(r"^bytes=(\d*)-(\d*)$")
 
 
@@ -154,20 +154,34 @@ class Origin:
             for p in sorted((self.media_dir / "v0").glob("seg_*.ts"))
         }
 
+    def _safe_run_dir(self, run: str) -> tuple[str, Path]:
+        # Reject traversal even if a caller bypasses run_state_and_claims:
+        # RUN_RE forbids a leading dot, and the resolved parent must stay in
+        # state_dir. "."/".." used to let an unauthenticated request append
+        # outside its run directory.
+        if not RUN_RE.match(run) or ".." in run:
+            run = "_invalid"
+        root = self.state_dir.resolve()
+        run_dir = (root / run).resolve()
+        if run_dir.parent != root:
+            run = "_invalid"
+            run_dir = root / "_invalid"
+        return run, run_dir
+
     def state(self, run: str) -> RunState:
+        run, run_dir = self._safe_run_dir(run)
         with self.states_lock:
             st = self.states.get(run)
             if st is None:
-                run_dir = self.state_dir / run
                 run_dir.mkdir(parents=True, exist_ok=True)
                 st = RunState(run, run_dir)
                 self.states[run] = st
             return st
 
     def reset(self, run: str) -> None:
+        run, run_dir = self._safe_run_dir(run)
         with self.states_lock:
-            st = self.states.pop(run, None)
-        run_dir = self.state_dir / run
+            self.states.pop(run, None)
         run_dir.mkdir(parents=True, exist_ok=True)
         log = run_dir / "requests.jsonl"
         if log.exists():

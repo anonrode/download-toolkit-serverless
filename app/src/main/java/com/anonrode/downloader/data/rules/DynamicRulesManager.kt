@@ -570,7 +570,10 @@ object DynamicRulesManager {
     private fun buildFcmConfig(obj: JSONObject): FcmConfig? {
         val f = obj.optJSONObject("fcm") ?: return null
         return FcmConfig(
-            enabled = f.optBoolean("enabled", false),
+            // A complete OTA block without an explicit switch is ENABLED;
+            // explicit enabled=false is the kill switch. Omission used to
+            // silently disable FCM, which made a typo look like an outage.
+            enabled = f.optBoolean("enabled", true),
             apiKey = f.optString("apiKey").trim(),
             appId = f.optString("appId").trim(),
             senderId = f.optString("senderId").trim(),

@@ -81,6 +81,18 @@ object FcmRegistrar {
     fun onNewToken(context: Context, token: String) {
         @Suppress("UNUSED_PARAMETER")
         val unused = token
+        // Re-read the active policy: an explicit enabled=false must stay
+        // silent even if the SDK emits a refreshed token later.
+        val ota = try {
+            DynamicRulesManager.getFcmConfig()
+        } catch (_: Exception) {
+            null
+        }
+        if (ota != null && !ota.enabled) {
+            disable(context)
+            return
+        }
+        lastModeWasDisabled = false
         try {
             FirebaseApp.getInstance()
         } catch (_: Throwable) {
@@ -118,7 +130,13 @@ object FcmRegistrar {
         } catch (_: Throwable) {
             null
         }
-        if (existing != null && existing.options.applicationId == cfg.appId) {
+        // Compare the full credential set: a key/sender/project rotation that
+        // keeps the same appId is common and must still re-initialize.
+        if (existing != null &&
+            existing.options.applicationId == cfg.appId &&
+            existing.options.apiKey == cfg.apiKey &&
+            existing.options.gcmSenderId == cfg.senderId &&
+            existing.options.projectId == cfg.projectId) {
             return existing
         }
         if (existing != null) {

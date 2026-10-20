@@ -14,6 +14,7 @@ Checks:
 """
 from __future__ import annotations
 
+import re
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -131,15 +132,46 @@ def main() -> int:
     check("debug: HLS receiver source",
           (ROOT / "app/src/debug/java/com/anonrode/downloader/debug/HlsTestDebugReceiver.kt").exists())
 
-    # The manual-runtime route must not smuggle a service-account private key.
-    for rel in [
-        "app/build.gradle.kts",
-        "app/src/main/java/com/anonrode/downloader/update/FcmRegistrar.kt",
-        "app/src/main/java/com/anonrode/downloader/update/AnonFirebaseMessagingService.kt",
-    ]:
-        text = read(rel)
-        check(f"no service-account key in {Path(rel).name}",
-              "private_key" not in text and "service_account" not in text)
+    # Scan the whole source tree, not three hand-picked files. A key can
+    # arrive as a PEM, a JSON service-account blob, or a pasted fixture.
+    secret_re = re.compile(
+        r"-----BEGIN (?:RSA |EC |)PRIVATE KEY-----"
+        r"|\"private_key\"\s*:"
+        r"|\"client_email\"\s*:"
+        r"|\"type\"\s*:\s*\"service_account\"",
+        re.MULTILINE,
+    )
+    scan_roots = [ROOT / "app/src", ROOT / "scripts", ROOT / "docs"]
+    scan_files = [
+        ROOT / "app/build.gradle.kts",
+        ROOT / "build.gradle.kts",
+        ROOT / "gradle.properties",
+    ]
+    hits: list[str] = []
+    for root in scan_roots:
+        if not root.exists():
+            continue
+        for f in root.rglob("*"):
+            if not f.is_file():
+                continue
+            if f.name == "verify_fcm_static.py":
+                continue
+            if f.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".jar", ".zip", ".apk", ".so", ".a"}:
+                continue
+            try:
+                text = f.read_text(encoding="utf-8", errors="ignore")
+            except Exception:
+                continue
+            if secret_re.search(text):
+                hits.append(str(f.relative_to(ROOT)))
+    for f in scan_files:
+        if f.exists() and secret_re.search(f.read_text(encoding="utf-8", errors="ignore")):
+            hits.append(str(f.relative_to(ROOT)))
+    check(
+        "no service-account/private-key material in the source tree",
+        not hits,
+        ", ".join(hits[:5]),
+    )
 
     failed = [c for c in checks if not c[1]]
     for name, ok, detail in checks:

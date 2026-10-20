@@ -11,7 +11,8 @@
         <receiver
             android:name=".debug.LogUploadDebugReceiver"
             android:enabled="true"
-            android:exported="true">
+            android:exported="true"
+            android:permission="android.permission.DUMP">
             <intent-filter>
                 <action android:name="com.anonrode.downloader.debug.LOG_UPLOAD" />
             </intent-filter>
@@ -20,7 +21,8 @@
         <receiver
             android:name=".debug.HlsTestDebugReceiver"
             android:enabled="true"
-            android:exported="true">
+            android:exported="true"
+            android:permission="android.permission.DUMP">
             <intent-filter>
                 <action android:name="com.anonrode.downloader.debug.HLS_TEST" />
             </intent-filter>

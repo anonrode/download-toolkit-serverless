@@ -312,15 +312,20 @@ object LogUploader {
             cancelScheduledRetry()
             DebugLog.applyWatermark(journal)
             CrashHandler.applyCrashWatermark(crashes)
+            // Safe to prune only after the watermark and the 2xx: no pending
+            // seq is alive now, so no retry can overwrite a server artifact.
+            if (DebugLog.totalJournalBytes() > MAX_RETAINED_BYTES) {
+                DebugLog.pruneOldest(PRUNE_TO_BYTES)
+            }
             DebugLog.user("activity log sent and cleared (seq=$seq, ${gz.size / 1024} KB gz)")
         } else {
             DebugLog.error(
                 "log upload failed — nothing cleared (seq=$seq, status=${result.status ?: "none"}, " +
                     "err=${result.error ?: "-"}); retrying"
             )
-            if (DebugLog.totalJournalBytes() > MAX_RETAINED_BYTES) {
-                DebugLog.pruneOldest(PRUNE_TO_BYTES)
-            }
+            // Do NOT prune while this seq is pending: the retry reuses the
+            // same seq, and a shorter snapshot under the same id would
+            // overwrite evidence the server may already hold.
             if (!crashBounded) scheduleRetry(context, prefs, result.retryAfterMs ?: 0L)
         }
         return result.ok
