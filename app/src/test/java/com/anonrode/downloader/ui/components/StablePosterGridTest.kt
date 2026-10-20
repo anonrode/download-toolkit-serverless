@@ -17,6 +17,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import org.robolectric.junit.rules.TimeoutRule
 
 /**
  * Regression repro for:
@@ -36,13 +37,19 @@ class StablePosterGridTest {
     @get:Rule
     val composeRule = createComposeRule()
 
+    // Robolectric's rule interrupts on the current thread; JUnit's timeout
+    // would move the body to a side thread, where PAUSED-looper control is
+    // rejected ("main looper can only be controlled from main thread").
+    @get:Rule
+    val timeout = TimeoutRule.seconds(45)
+
     private fun card(i: Int) = ShowCard(
         title = "Card $i",
         url = "https://example.com/show/$i",
         site = "test"
     )
 
-    @Test(timeout = 45_000)
+    @Test
     fun appendAndLoadMoreDuringFlingDoesNotCrash() {
         val items = mutableStateOf((0 until 60).map(::card))
         val loadingMore = mutableStateOf(false)
@@ -78,7 +85,7 @@ class StablePosterGridTest {
         composeRule.onNodeWithText("Card 89").assertExists()
     }
 
-    @Test(timeout = 45_000)
+    @Test
     fun filterShrinkWhileScrolledDoesNotCrash() {
         val items = mutableStateOf((0 until 60).map(::card))
         composeRule.setContent {

@@ -14,7 +14,9 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
+import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.Timeout
 import java.io.File
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
@@ -26,6 +28,12 @@ import kotlin.io.path.createTempDirectory
  * telemetry ticker makes 1 MiB+ pieces fast even with a 1 ms retry backoff.
  */
 class TurboDownloaderTest {
+
+    // Hard stop per test: a stalled MockWebServer response or a leaked
+    // coroutine must name the test instead of consuming the job's 20-minute
+    // step budget. The slowest case throttles 4 MiB at 256 KiB/s (~16 s).
+    @get:Rule
+    val timeout: Timeout = Timeout.seconds(180)
 
     private lateinit var server: MockWebServer
     private lateinit var client: OkHttpClient

@@ -195,6 +195,10 @@ dependencies {
     testImplementation("org.json:json:20240303")
     // MockWebServer for engine tests: flaky-connection, retry, and resume scenarios.
     testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
+    // Lets Robolectric tests replace Dispatchers.Main. Coil's execute() always
+    // hops to Main; the paused Robolectric looper would otherwise deadlock a
+    // runBlocking test that blocks the main thread.
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
 
     // Robolectric Compose UI tests (phase 2 test pyramid): shadows the Android
     // framework so DownloadCard renders on the JVM. 4.16.x is the newest stable

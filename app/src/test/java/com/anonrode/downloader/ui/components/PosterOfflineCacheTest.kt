@@ -8,7 +8,11 @@ import coil.disk.DiskCache
 import coil.request.SuccessResult
 import com.anonrode.downloader.PosterImages
 import com.anonrode.downloader.providers.PosterNetwork
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.resetMain
+import kotlinx.coroutines.test.setMain
 import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
@@ -16,10 +20,13 @@ import okio.Buffer
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.Before
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import org.robolectric.junit.rules.TimeoutRule
 import java.io.File
 import java.nio.file.Files
 
@@ -31,14 +38,30 @@ import java.nio.file.Files
  * disk (the request factory switches to CachePolicy.DISABLED for the
  * network plane).
  */
+@OptIn(ExperimentalCoroutinesApi::class)
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = Application::class)
 class PosterOfflineCacheTest {
 
     private val context = ApplicationProvider.getApplicationContext<Application>()
 
+    // Interrupts on the test thread; JUnit's timeout would run the body off
+    // the main thread and break Robolectric's paused-looper control.
+    @get:Rule
+    val timeout = TimeoutRule.seconds(90)
+
+    @Before
+    fun installMainDispatcher() {
+        // Coil's execute() always wraps work in Dispatchers.Main.immediate.
+        // Robolectric's main looper is paused and runBlocking blocks the test
+        // thread, so a posted continuation would never be pumped. Unconfined
+        // runs that hop inline instead.
+        Dispatchers.setMain(Dispatchers.Unconfined)
+    }
+
     @After
-    fun resetNetworkFlag() {
+    fun resetMainDispatcherAndNetworkFlag() {
+        Dispatchers.resetMain()
         PosterNetwork.isOnline = true
     }
 
@@ -55,39 +78,52 @@ class PosterOfflineCacheTest {
         server.start()
 
         val cacheDir = Files.createTempDirectory("coil-offline-test").toFile()
-        val loader = ImageLoader.Builder(context)
-            .okHttpClient(PosterImages.configure(OkHttpClient()))
-            .diskCache {
-                DiskCache.Builder()
-                    .directory(cacheDir)
-                    .maxSizeBytes(10L * 1024 * 1024)
-                    .build()
-            }
-            .respectCacheHeaders(false)
-            .allowHardware(false)
-            .build()
 
         try {
             val url = server.url("/poster.png").toString()
-            val warm = loader.execute(PosterRequests.request(context, url))
-            assertTrue("warm load failed: $warm", warm is SuccessResult)
-            assertEquals(1, server.requestCount)
+
+            // Warm a real Coil disk cache, then drop this loader entirely: the
+            // cold read below must come from disk, not from a warm memory
+            // cache that a real process restart would not have.
+            val warmLoader = buildLoader(cacheDir)
+            try {
+                val warm = warmLoader.execute(PosterRequests.request(context, url))
+                assertTrue("warm load failed: $warm", warm is SuccessResult)
+                assertEquals(1, server.requestCount)
+            } finally {
+                warmLoader.shutdown()
+            }
 
             server.shutdown()
             PosterNetwork.isOnline = false
 
-            val cold = loader.execute(PosterRequests.request(context, url))
-            assertTrue("offline cold load was not served from disk: $cold", cold is SuccessResult)
-            // No server is running; a network attempt cannot succeed. The
-            // disk-backed result above plus the disabled network policy is
-            // the zero-byte proof.
-            assertEquals(1, server.requestCount)
+            val coldLoader = buildLoader(cacheDir)
+            try {
+                val cold = coldLoader.execute(PosterRequests.request(context, url))
+                assertTrue("offline cold load was not served from disk: $cold", cold is SuccessResult)
+                // Fresh loader (empty memory cache), server down, network
+                // policy disabled: Success can only be the disk entry.
+                assertEquals(1, server.requestCount)
+            } finally {
+                coldLoader.shutdown()
+            }
         } finally {
             runCatching { server.shutdown() }
-            loader.shutdown()
             cacheDir.deleteRecursively()
         }
     }
+
+    private fun buildLoader(cacheDir: File): ImageLoader = ImageLoader.Builder(context)
+        .okHttpClient(PosterImages.configure(OkHttpClient()))
+        .diskCache {
+            DiskCache.Builder()
+                .directory(cacheDir)
+                .maxSizeBytes(10L * 1024 * 1024)
+                .build()
+        }
+        .respectCacheHeaders(false)
+        .allowHardware(false)
+        .build()
 
     private companion object {
         /** 1x1 transparent PNG. */
