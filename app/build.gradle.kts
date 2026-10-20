@@ -213,3 +213,12 @@ dependencies {
     androidTestImplementation("androidx.test:runner:1.6.2")
     androidTestImplementation("androidx.test:rules:1.6.1")
 }
+
+// CI diagnostics: print every test lifecycle event so a hang names the test
+// instead of timing out with no evidence in the runner log.
+tasks.withType<org.gradle.api.tasks.testing.Test>().configureEach {
+    testLogging {
+        events("started", "passed", "failed", "skipped")
+        showStandardStreams = true
+    }
+}
