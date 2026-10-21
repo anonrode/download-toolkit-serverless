@@ -53,8 +53,12 @@ class DownloadRepositoryRecoveryTest {
         repo.initPersistence(dir, context = null)
 
         assertEquals(1, repo.tasks.value.size)
-        // parkForRestore: a mid-flight status must come back PAUSED — reopen
-        // never auto-resumes (a hard product guarantee).
+        // parkForRestore: a mid-flight status must come back PAUSED — but as
+        // a SYSTEM pause (userPaused=false, network marker) that the network
+        // observer requeues after the boot backoff floor, not a stranded
+        // manual pause (owner directive 2026-10-21: every error ends in a
+        // download or a proven no-source). Never RUNNING on reopen; the
+        // 60s floor preserves the v3.0.4 no-instant-drain guarantee.
         assertEquals(TaskStatus.PAUSED, repo.tasks.value[0].status)
     }
 

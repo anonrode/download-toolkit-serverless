@@ -385,13 +385,18 @@ class DownloadEngine(
             }
         }
         engineScope.launch {
-            // Park tasks interrupted by app kill/crash — never re-queue them.
-            // The repository restore (initPersistence) already mapped
-            // mid-flight statuses to PAUSED before the engine was built, so
-            // this is defense in depth for any future init reordering: a
-            // reopen must never auto-resume anything, including a task caught
-            // mid-VALIDATING (a pause there is a real user pause too, and the
-            // file on disk means a manual resume re-validates in seconds).
+            // OWNER DIRECTIVE 2026-10-21 ("every error ends in a download"):
+            // tasks interrupted by app kill/crash requeue automatically. The
+            // repository restore (initPersistence) already mapped mid-flight
+            // statuses to a system network pause before the engine was built,
+            // so this is defense in depth for any future init reordering —
+            // but now it parks as a SYSTEM pause (userPaused=false, network
+            // marker) instead of a stranded manual pause, and every restored
+            // task gets a one-shot RESTORED_REQUEUE_FLOOR_MS backoff below so
+            // boot never silently drains data on open (v3.0.4) while still
+            // guaranteeing the retry (the observer's requeue sweep honors the
+            // floor). A caught-mid-VALIDATING task re-validates in seconds.
+            val restoredFloor = System.currentTimeMillis() + RESTORED_REQUEUE_FLOOR_MS
             val currentTasks = repository.tasks.value
             currentTasks.forEach { t ->
                 // QUEUED included: the repository restore parks it too, but a
@@ -401,8 +406,19 @@ class DownloadEngine(
                 // moment the app opens.
                 if (t.status == TaskStatus.DOWNLOADING || t.status == TaskStatus.RESOLVING ||
                     t.status == TaskStatus.VALIDATING || t.status == TaskStatus.QUEUED) {
-                    repository.update(t.id) { it.copy(status = TaskStatus.PAUSED, speedBytesPerSec = 0.0, errorMessage = null, userPaused = true) }
+                    repository.update(t.id) { cur ->
+                        if (cur.status != TaskStatus.DOWNLOADING && cur.status != TaskStatus.RESOLVING &&
+                            cur.status != TaskStatus.VALIDATING && cur.status != TaskStatus.QUEUED
+                        ) cur
+                        else cur.copy(
+                            status = TaskStatus.PAUSED,
+                            speedBytesPerSec = 0.0,
+                            errorMessage = NETWORK_PAUSE_MESSAGE,
+                            userPaused = false
+                        )
+                    }
                 }
+                runtimeRegistry.getOrCreate(t.id).requeueNotBeforeMs.compareAndSet(0L, restoredFloor)
             }
             networkObserver.status.collect { net ->
                 if (net.isConnected) {
@@ -413,33 +429,27 @@ class DownloadEngine(
                         runtimeRegistry.activeRunningTaskIds().forEach { id -> pauseForNetwork(id) }
                     }
                     lastNetworkTag = net.networkTag
-                    // Auto-resume tasks parked by a connectivity drop.
-                    // userPaused tasks are excluded everywhere in this
-                    // collector: a pause the user asked for must never be
-                    // undone by a network event.
-                    repository.tasks.value
-                        .filter { it.status == TaskStatus.PAUSED && !it.userPaused && it.errorMessage == NETWORK_PAUSE_MESSAGE }
-                        .forEach { repository.update(it.id) { t ->
-                            // Re-check INSIDE the transform (engine-audit P1): the
-                            // filter above froze userPaused at snapshot time, so a
-                            // pause landing between snapshot and write would be
-                            // overwritten and the download would resume anyway.
-                            if (t.userPaused || t.status != TaskStatus.PAUSED) t
-                            else t.copy(status = TaskStatus.QUEUED, errorMessage = null)
-                        } }
-                    // Wi-Fi-gated torrents resume only once an actual Wi-Fi network is back
-                    repository.tasks.value
-                        .filter { it.status == TaskStatus.PAUSED && !it.userPaused && it.errorMessage?.startsWith("Waiting for Wi-Fi") == true && net.isWifi }
-                        .forEach { repository.update(it.id) { t ->
-                            if (t.userPaused || t.status != TaskStatus.PAUSED) t
-                            else t.copy(status = TaskStatus.QUEUED, errorMessage = null)
-                        } }
+                    requeueNetworkParkedTasks(isWifi = net.isWifi)
                     processQueue()
                 } else {
                     // Park active jobs so a reconnect resumes them instead of failing them
                     lastNetworkTag = null
                     runtimeRegistry.activeRunningTaskIds().forEach { id -> pauseForNetwork(id) }
                 }
+            }
+        }
+        // Boot-retry pass (owner directive 2026-10-21): the observer above
+        // emits on network CHANGES, so a floor-stamped restored task could
+        // otherwise sit the entire session behind its 60s boot floor on a
+        // stable network. One delayed pass replays the requeue sweep exactly
+        // like a reconnect; only the restored tasks' one-shot boot floor (and
+        // any live escalation floor) still gates the outcome.
+        engineScope.launch {
+            delay(RESTORED_REQUEUE_FLOOR_MS + 250L)
+            val net = networkObserver.status.value
+            if (net.isConnected) {
+                requeueNetworkParkedTasks(isWifi = net.isWifi)
+                processQueue()
             }
         }
         // Storage-guard self-heal: tasks parked by the storage limit have no
@@ -467,17 +477,17 @@ class DownloadEngine(
         // Cooldown-parked auto-retry: a task parked because its locker host
         // is in HostHealth backoff re-queues itself once the host recovers —
         // nothing else resumes it (the network collector only matches network
-        // messages). In-memory only: an app restart leaves it PAUSED for a
-        // manual resume (DownloadRepository restore), which is intended.
+        // messages). Restore-safe: parkForRestore keeps the marker and
+        // userPaused=false for system parks, so a restart re-enters this loop
+        // cleanly (pre-fix, restore crushed these to stranded manual pauses).
         //
-        // Give-up cap: a task parked for longer than PARKED_LIFETIME_MS total
-        // (measured from its parkedAt timestamp) is FAILED instead of bounced
-        // forever — the Suits batch spent 90 minutes orbiting a host that was
-        // never coming back. Manual retry always restarts it cleanly.
-        // EXEMPTION (user rule 2026-09-14, "if a download ever starts there is
-        // no reason to cancel it"): the cap only applies to tasks that NEVER
-        // landed a byte. A parked task with bytes on disk is saved progress —
-        // it waits out the host instead of being failed and forgotten.
+        // OWNER DIRECTIVE 2026-10-21 ("every error ends in a download or a
+        // proven no-source"): the old PARKED_LIFETIME_MS give-up that wrote
+        // FAILED for 0-byte tasks is REMOVED — a parked download re-checks on
+        // PARKED_RECHECK_FLOOR_MS cadence until the host returns. FAILED is
+        // reserved for the proven no-source verdict (failover exhausted every
+        // provider; NoSourceLedger), and manual retry always restarts cleanly.
+        // Banked-byte tasks were already exempt from the cap and stay exempt.
         //
         // Trickle requeue: when MANY tasks are parked on the same host, requeue
         // at most a few per tick. Releasing all 18 at once recreates the exact
@@ -494,30 +504,44 @@ class DownloadEngine(
                 parked.forEach { t ->
                     val entry = runtimeRegistry.get(t.id)
                     val parkedAt = entry?.firstParkedAtMs?.get() ?: 0L
-                    if (parkedAt > 0L && System.currentTimeMillis() - parkedAt > PARKED_LIFETIME_MS &&
-                        maxOf(t.downloadedBytes, computeDiskBytes(t)) == 0L
-                    ) {
-                        entry?.resetParkingAndFailoverState()
-                        val msg = "Download server stayed unreachable for 30+ minutes — gave up. Tap retry once the site is back."
-                        repository.update(t.id) { it.copy(status = TaskStatus.FAILED, errorMessage = msg, speedBytesPerSec = 0.0) }
-                        com.anonrode.downloader.util.DebugLog.user("park give-up task=${t.id}")
-                        // Terminal FAILED rows drop their registry entry too
-                        // (same leak class the COMPLETED path already cleans).
-                        // Guarded so an entry a live job still owns (a retry
-                        // racing this tick) is never clobbered.
-                        if (runtimeRegistry.get(t.id)?.activeJob?.isActive != true) runtimeRegistry.forget(t.id)
-                        try {
-                            com.anonrode.downloader.service.DownloadService.notifyFailed(
-                                context, t.id, t.episodeTitle, msg
+                    val now = System.currentTimeMillis()
+                    val floor = entry?.requeueNotBeforeMs?.get() ?: 0L
+                    val banked = maxOf(t.downloadedBytes, computeDiskBytes(t))
+                    val longDead = parkedAt > 0L && now - parkedAt > PARKED_LIFETIME_MS && banked == 0L
+                    val hostUsable = com.anonrode.downloader.pipeline.HostHealth.isUsable(t.directUrl)
+                    // OWNER DIRECTIVE 2026-10-21 ("every error ends in a
+                    // download or a proven no-source"): a park NEVER fails the
+                    // task and never strands it. The old 30-minute give-up
+                    // wrote FAILED for 0-byte tasks — under the invariant that
+                    // end state is illegal unless the title is PROVEN
+                    // no-source, which only the failover-exhausted
+                    // NoSourceLedger path may claim. A long-dead host instead
+                    // re-checks on a long floor while HostHealth stays steep;
+                    // the moment the host is usable again the requeue below
+                    // fires regardless of that floor.
+                    if (longDead && !hostUsable) {
+                        if (now >= floor) {
+                            // One honest card update per re-check window — not
+                            // every 10s tick (persist() writes each update).
+                            repository.update(t.id) { cur ->
+                                if (cur.userPaused || cur.status != TaskStatus.PAUSED) cur
+                                else cur.copy(
+                                    errorMessage = "$PARKED_HOST_MESSAGE — server unreachable 30+ min, still retrying every ~30 min. Tap retry to try now."
+                                )
+                            }
+                            entry?.requeueNotBeforeMs?.set(now + PARKED_RECHECK_FLOOR_MS)
+                            com.anonrode.downloader.util.DebugLog.user(
+                                "park long-dead re-check task=${t.id} (retries every ~30m until the host returns)"
                             )
-                        } catch (_: Exception) {}
+                        }
                         return@forEach
                     }
                     // Re-queue floor: parks escalate their wait (see parkFloorMs)
                     // so a repeatedly-rejected host is probed at most once per
-                    // window instead of every tick.
-                    if (System.currentTimeMillis() < (entry?.requeueNotBeforeMs?.get() ?: 0L)) return@forEach
-                    if (com.anonrode.downloader.pipeline.HostHealth.isUsable(t.directUrl)) {
+                    // window instead of every tick. A long-dead host that just
+                    // became usable bypasses the floor: recovery must win.
+                    if (!longDead && now < floor) return@forEach
+                    if (hostUsable) {
                         // Max 2 requeues per 10s tick: a 18-task batch comes
                         // back over ~90s instead of one thundering herd.
                         if (requeued >= 2) return@forEach
@@ -534,6 +558,40 @@ class DownloadEngine(
                 if (anyRequeued) processQueue()
             }
         }
+    }
+
+    /**
+     * The two network-family requeue sweeps, shared by the network observer's
+     * connect branch and the boot-retry pass. userPaused tasks are excluded
+     * everywhere: a pause the user asked for must never be undone by a
+     * network event. Each task's requeue-not-before floor gates the requeue:
+     * a one-shot boot backoff for restored tasks (RESTORED_REQUEUE_FLOOR_MS),
+     * escalation floors set by the park paths otherwise (0 in the common
+     * case — in-session network parks requeue on the first heartbeat).
+     * Atomic re-check inside the transform (engine-audit P1): the filter
+     * froze userPaused at snapshot time, so a pause landing between snapshot
+     * and write must not be overwritten — `cur` is authoritative.
+     */
+    private fun requeueNetworkParkedTasks(isWifi: Boolean) {
+        repository.tasks.value
+            .filter { it.status == TaskStatus.PAUSED && !it.userPaused && it.errorMessage == NETWORK_PAUSE_MESSAGE }
+            .forEach { t ->
+                if (System.currentTimeMillis() < (runtimeRegistry.get(t.id)?.requeueNotBeforeMs?.get() ?: 0L)) return@forEach
+                repository.update(t.id) { cur ->
+                    if (cur.userPaused || cur.status != TaskStatus.PAUSED) cur
+                    else cur.copy(status = TaskStatus.QUEUED, errorMessage = null)
+                }
+            }
+        // Wi-Fi-gated torrents resume only once an actual Wi-Fi network is back
+        repository.tasks.value
+            .filter { it.status == TaskStatus.PAUSED && !it.userPaused && it.errorMessage?.startsWith("Waiting for Wi-Fi") == true && isWifi }
+            .forEach { t ->
+                if (System.currentTimeMillis() < (runtimeRegistry.get(t.id)?.requeueNotBeforeMs?.get() ?: 0L)) return@forEach
+                repository.update(t.id) { cur ->
+                    if (cur.userPaused || cur.status != TaskStatus.PAUSED) cur
+                    else cur.copy(status = TaskStatus.QUEUED, errorMessage = null)
+                }
+            }
     }
 
     private fun loadPreferences() {
@@ -2223,7 +2281,16 @@ class DownloadEngine(
         // locker host is in HostHealth backoff ("cooling down"). The
         // auto-retry loop matches this prefix and re-queues the task once the
         // host is usable again.
-        private const val PARKED_HOST_MESSAGE = "Download server cooling down"
+        // internal (both markers were private): RestorePolicy must recognize
+        // them at app-restore time — crushing them to a manual pause used to
+        // strand every auto-parked download across a restart (share-43 §RC-1).
+        internal const val PARKED_HOST_MESSAGE = "Download server cooling down"
+
+        // errorMessage of a system network-flap park (silent: pauseForNetwork
+        // does not log). The network observer requeues tasks carrying it on
+        // the next connected emission; parkForRestore restores interrupted
+        // tasks with it so they requeue instead of stranding.
+        internal const val NETWORK_PAUSE_MESSAGE = "Waiting for network..."
 
         // A parked task may cycle QUEUED → RESOLVING → park at most this many
         // times before it is FAILED outright. Without a cap, a host that never
@@ -2234,11 +2301,29 @@ class DownloadEngine(
         private const val MAX_PARK_CYCLES = 6
 
         // How long ONE task may sit parked by the cooldown loop before the
-        // give-up fires it. Measured from the FIRST park (firstParkedAtMs uses
-        // compareAndSet), so repeated re-parks cannot reset the clock: a host
-        // that stays dead for 30 minutes of cycling loses the task with an
-        // honest error instead of holding the queue hostage all afternoon.
+        // loop stops probing it on the short escalating ladder and switches
+        // to the long re-check floor (PARKED_RECHECK_FLOOR_MS). Measured from
+        // the FIRST park (firstParkedAtMs uses compareAndSet), so repeated
+        // re-parks cannot reset the clock. OWNER DIRECTIVE 2026-10-21: this
+        // window no longer fails the task — a parked download retries until
+        // the host returns or the title is proven no-source; the window only
+        // stretches the probe cadence so a dead host cannot hold the queue.
         private const val PARKED_LIFETIME_MS = 30 * 60_000L
+
+        // Long re-check cadence after PARKED_LIFETIME_MS with the host still
+        // unreachable: the cooldown loop re-arms its floor to this so the
+        // parked task gets an honest ~30-minute retry cadence instead of
+        // every-10s persist churn, while the FIRST usable verdict requeues
+        // immediately (recovery must never wait out the floor).
+        private const val PARKED_RECHECK_FLOOR_MS = 30 * 60_000L
+
+        // One-shot backoff stamped at boot for tasks RESTORED by parkForRestore
+        // (interrupted by process death, or parked by a system family before
+        // the restart): the network observer's requeue sweep honors it, so a
+        // session opens without instantly re-consuming data (v3.0.4) but the
+        // retry is guaranteed, not stranded. In-session parks keep a 0 floor
+        // and recover on the first connect heartbeat as before.
+        private const val RESTORED_REQUEUE_FLOOR_MS = 60_000L
 
         // Re-queue floor per park cycle: the 1st park waits 60s, the 2nd 2m,
         // ... capped at 15m. Rate-limits on these lockers are minutes-long
@@ -2250,7 +2335,6 @@ class DownloadEngine(
     }
 
     private var lastNotificationTime: Long = 0L
-    private val NETWORK_PAUSE_MESSAGE = "Waiting for network..."
     private var lastNetworkTag: String? = null
 
     private fun updateServiceState(force: Boolean = false) {
