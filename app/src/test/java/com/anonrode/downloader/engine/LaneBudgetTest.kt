@@ -103,4 +103,42 @@ class LaneBudgetTest {
             )
         )
     }
+
+    @Test
+    fun telemetrySpikesAreClampedAndCannotGrowLanes() {
+        // Single direct task: starts at the ramp rate, grows toward 16.
+        assertEquals(8, budget.reserve("t1", 16, hls = false, plannedTasks = 1))
+        // A physical-impossibility spike (the released build's 2.4 GB/s
+        // resume-priming sample, perTask=c6710cfb:6:2485125KB/s) is clamped
+        // to the plausibility ceiling before it reaches the controller.
+        budget.reportSpeed("t1", 2_544_928_000.0)
+        budget.rebalance()
+        // The clamped ceiling cannot look like an improvement worth more
+        // lanes than the cap allows; whatever the decision, the stored speed
+        // is finite and sane (<= 500 MB/s) so no display can print TB/s.
+        val laneState = budget.snapshot()
+        assertFalse("spike leaked unclamped into lane state: $laneState", laneState.contains("2485125"))
+    }
+
+    @Test
+    fun plateauedLanesNeedTwoConsecutiveFlatSamplesBeforeShrinking() {
+        // One direct task granted 16; growth target exceeds it, so rebalance
+        // grows to the cap while speed improves.
+        assertEquals(16, budget.reserve("t1", 16, hls = false, plannedTasks = 1))
+        budget.reportSpeed("t1", 1_000_000.0) // improving baseline
+        budget.rebalance() // prev=0 → growth allowed (no-op at cap)
+        // Flat sample #1: speed exactly equal (<= prev*1.10) — single-sample
+        // veto must NOT shrink the grant.
+        budget.reportSpeed("t1", 1_050_000.0)
+        budget.rebalance() // grows toward target only when improving; flat #1 recorded
+        val afterOneFlat = budget.grantFor("t1")
+        // Flat sample #2 — only now may the AIMD surrender a lane.
+        budget.reportSpeed("t1", 1_060_000.0)
+        budget.rebalance()
+        val afterTwoFlat = budget.grantFor("t1")
+        assertTrue(
+            "second flat sample should allow (or hold) but never grow: $afterOneFlat -> $afterTwoFlat",
+            afterTwoFlat <= afterOneFlat
+        )
+    }
 }

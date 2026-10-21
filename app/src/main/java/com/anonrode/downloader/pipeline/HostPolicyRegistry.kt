@@ -77,12 +77,19 @@ object HostPolicyRegistry {
         const val HLS_MAX_LANES = 8
         const val DIRECT_MAX_LANES = 16
 
+        /** RC-7: no single task on a phone sustains more than this; anything
+         *  above is a telemetry spike (resume-priming double-count) and is
+         *  clamped before it can steer the controller or a display. */
+        const val MAX_PLAUSIBLE_BPS = 500.0 * 1024 * 1024
+
         private data class Grant(
             var lanes: Int,
             val hls: Boolean,
             val cap: Int,
             var speedBps: Double = 0.0,
-            var prevSpeedBps: Double = 0.0
+            var prevSpeedBps: Double = 0.0,
+            /** Consecutive non-improving samples (RC-7 plateau veto). */
+            var flatSamples: Int = 0
         )
 
         private val grants = LinkedHashMap<String, Grant>()
@@ -151,7 +158,15 @@ object HostPolicyRegistry {
         @Synchronized
         fun reportSpeed(taskId: String, bps: Double) {
             val g = grants[taskId] ?: return
-            if (bps > 0.0) g.speedBps = bps
+            if (bps <= 0.0) return
+            // RC-7 spike clamp (2026-10-21): the released build printed a
+            // 2.4 GB/s lane sample (perTask=c6710cfb:6:2485125KB/s) from a
+            // resume-priming telemetry tick. No single device pulls half a
+            // gigabyte per second; values above the physical ceiling are a
+            // telemetry defect and must neither steer the controller nor
+            // reach any display surface.
+            val clamped = minOf(bps, MAX_PLAUSIBLE_BPS)
+            g.speedBps = clamped
         }
 
         /**
@@ -182,9 +197,18 @@ object HostPolicyRegistry {
                     g.prevSpeedBps > 0.0 &&
                     g.speedBps <= g.prevSpeedBps * 1.10
                 ) {
-                    // Plateau: the marginal lane is not paying for itself.
-                    next = maxOf(MIN_LANES_PER_TASK, g.lanes - 1)
+                    // RC-7 plateau veto (2026-10-21): the marginal lane must be
+                    // idle across TWO consecutive samples before lanes move —
+                    // the 5 s samples swing 10-30x on real streams (41→1522→24
+                    // KB/s on the Servamp pair, share-43), and a single-sample
+                    // veto made the controller act on its own measurement
+                    // noise. An improvement resets the counter.
+                    g.flatSamples++
+                    if (g.flatSamples >= 2) {
+                        next = maxOf(MIN_LANES_PER_TASK, g.lanes - 1)
+                    }
                 }
+                if (g.speedBps > g.prevSpeedBps * 1.10) g.flatSamples = 0
                 if (next != g.lanes) {
                     messages.add(
                         "lane rebalance task=$id ${g.lanes}->$next " +
