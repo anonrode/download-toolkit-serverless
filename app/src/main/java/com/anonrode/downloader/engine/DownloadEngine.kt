@@ -2682,6 +2682,18 @@ class DownloadEngine(
         // when nothing fits). Exposed for the download card's quality chip.
         resolutionOut[0] = pickHlsResolution(playlistText, requestedQuality)
 
+        // RC-5 (honest subtitle verdict, 2026-10-21): every NEPU-family master
+        // so far carries NO subtitle media (nsrplay resolve JSON returns
+        // `subtitles: null`; 0 subtitle events across every capture). Log the
+        // verdict ONCE per preflight so "no subtitles" is diagnosable from the
+        // activity log instead of silent.
+        com.anonrode.downloader.util.DebugLog.resolve(
+            if (playlistText.contains("#EXT-X-MEDIA:TYPE=SUBTITLES", ignoreCase = true))
+                "task=$taskId hls master declares EXT-X-MEDIA:TYPE=SUBTITLES — subtitle track(s) will be fetched"
+            else
+                "task=$taskId hls master has no subtitle media — this source offers no subtitle track"
+        )
+
         // Walk one variant level: rewrite referenced variant playlists to
         // local files too and repoint the master at them (relative name),
         // so their segments also go over https.
@@ -3946,7 +3958,7 @@ class DownloadEngine(
                             speedLimitKbs = globalSpeedLimitKbs,
                             torrentPeers = torrentPeers,
                             privacyMode = torrentPrivacyMode,
-                            downloadSubs = downloadSubtitles && isExtractor,
+                            downloadSubs = downloadSubtitles && (isExtractor || isHlsStream),
                             subLang = subtitleLanguage,
                             hlsMasterFile = masterFile?.absolutePath,
                             estimatedTotal = if (hlsSizeEstimate[0] > 0L) hlsSizeEstimate[0] else task.totalBytes

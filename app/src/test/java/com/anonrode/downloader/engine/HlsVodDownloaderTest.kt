@@ -148,6 +148,20 @@ class HlsVodDownloaderTest {
     // ─────────────────────────── resume sidecar ───────────────────────────
 
     @Test
+    fun `subtitle media in a master is detected for the yt-dlp handoff`() {
+        val withSubs = """
+            #EXTM3U
+            #EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="English",LANGUAGE="en",URI="subs_en.m3u8"
+            #EXT-X-STREAM-INF:RESOLUTION=1920x1080,SUBTITLES="subs"
+            index-v1.m3u8
+        """.trimIndent()
+        assertTrue(HlsVodDownloader.hasSubtitleMedia(withSubs))
+        val clean = "#EXTM3U\n#EXT-X-STREAM-INF:RESOLUTION=1280x720\nindex-f2.m3u8\n"
+        assertFalse(HlsVodDownloader.hasSubtitleMedia(clean))
+    }
+
+
+    @Test
     fun `resume sidecar roundtrips and survives corruption`() {
         val f = File(tmp, "a.hlsrs")
         assertEquals(HlsVodDownloader.ResumeState(0, 0L), HlsVodDownloader.readResume(f))

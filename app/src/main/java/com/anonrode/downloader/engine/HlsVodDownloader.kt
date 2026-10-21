@@ -133,6 +133,10 @@ object HlsVodDownloader {
         return bestUrl
     }
 
+    /** RC-5: any subtitle WEBVTT/text track declared in EXT-X-MEDIA tags. */
+    internal fun hasSubtitleMedia(body: String): Boolean =
+        Regex("""#EXT-X-MEDIA:TYPE=SUBTITLES""", RegexOption.IGNORE_CASE).containsMatchIn(body)
+
     /** Single-variant media playlist → segments, metadata, support flags. */
     internal fun parseVariant(body: String, baseUrl: String): ParsedVariant {
         val raw = body.lineSequence().map { it.trim() }.filter { it.isNotEmpty() }.toList()
@@ -374,6 +378,15 @@ object HlsVodDownloader {
         val variantBody = if (variantUrl == masterUrl) masterBody
         else fetchText(client, variantUrl, headers) ?: return@withContext null
         val variant = parseVariant(variantBody, variantUrl)
+        // RC-5: a master/variant that DECLARES subtitle media must be served
+        // by the yt-dlp path (which requests --write-subs), never by this raw
+        // segment lane or the subtitle tracks would be silently dropped.
+        if (hasSubtitleMedia(masterBody) || hasSubtitleMedia(variantBody)) {
+            com.anonrode.downloader.util.DebugLog.resolve(
+                "paced HLS lane: master declares subtitle media — handing the job to yt-dlp so the tracks are fetched"
+            )
+            return@withContext null
+        }
         if (!variant.supported) return@withContext null
 
         com.anonrode.downloader.util.DebugLog.backend(
