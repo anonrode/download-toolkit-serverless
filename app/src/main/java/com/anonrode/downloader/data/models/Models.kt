@@ -134,5 +134,19 @@ data class DownloadTask(
     /** Authoritative season number; 0 = legacy task (derive from episodeNum). */
     val season: Int = 0,
     /** Authoritative episode number inside [season]; 0 = legacy task. */
-    val episode: Int = 0
+    val episode: Int = 0,
+    /** Display-only speed for card faces: bytes/s over a trailing ~4 s
+     *  window computed by DownloadRepository.updateProgress — the raw
+     *  backend value (250 ms EMA on Turbo, verbatim parsed line on yt-dlp/
+     *  aria) stays in [speedBytesPerSec] with UNCHANGED semantics because
+     *  the engine's progress watchdog reads it for stall detection.
+     *  Null while the window is still warming up (~3 s): a UI reading this
+     *  field renders "Starting…" instead of a ramping or poisoned first
+     *  sample (the aria/yt-dlp resume burst that once printed 2.4 TB/s
+     *  cannot reach any card through this field). */
+    val displaySpeedBytesPerSec: Double? = null,
+    /** Display-only ETA (seconds) derived from the same windowed speed;
+     *  null means "no window reading — show the raw sticky [etaSeconds]
+     *  fallback" (merges, unknown totals, stalls). */
+    val displayEtaSeconds: Long? = null
 )

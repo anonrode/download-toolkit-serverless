@@ -15,6 +15,8 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.File
+import java.util.concurrent.ConcurrentHashMap
+import kotlin.math.ceil
 
 class DownloadRepository {
 
@@ -27,6 +29,28 @@ class DownloadRepository {
 
     private val _tasks = MutableStateFlow<List<DownloadTask>>(emptyList())
     val tasks: StateFlow<List<DownloadTask>> = _tasks.asStateFlow()
+
+    /** Injectable wall clock for the display window (deterministic JVM
+     *  tests). Production keeps the system clock. */
+    internal var clockMs: () -> Long = { System.currentTimeMillis() }
+
+    // ── Display smoothing (speed readout fix) ────────────────────────────
+    // Every backend funnels its progress through updateProgress, so this is
+    // the ONE chokepoint where the DISPLAYED speed can be windowed. The raw
+    // task.speedBytesPerSec keeps its exact per-backend semantics (the
+    // engine's ProgressWatchdog reads it for stall detection); the stable
+    // value travels in the display-only fields. A finished/removed task's
+    // window is pruned lazily on the next drift check.
+    private val displayWindows = ConcurrentHashMap<String, TaskDisplayWindow>()
+
+    private fun pruneDisplayWindows(list: List<DownloadTask>) {
+        // Bounded churn check: only materialize the id set once the map has
+        // clearly outgrown the task list (RARE — task removals), keeping
+        // the 4 Hz hot path allocation-free.
+        if (displayWindows.size > list.size + 8) {
+            displayWindows.keys.retainAll(list.mapTo(mutableSetOf()) { it.id })
+        }
+    }
 
     fun initPersistence(dir: File, context: android.content.Context? = null) {
         if (stateFile != null) return
@@ -127,6 +151,37 @@ class DownloadRepository {
     }
 
     fun updateProgress(taskId: String, downloaded: Long, total: Long, speed: Double, eta: Long) {
+        val nowMs = clockMs()
+        // Cheap drift guard before touching the map (see pruneDisplayWindows).
+        pruneDisplayWindows(_tasks.value)
+        val window = displayWindows.computeIfAbsent(taskId) { TaskDisplayWindow() }
+        // Window record happens BEFORE the state write, from the row as it
+        // currently stands plus this tick's bytes: MutableStateFlow.update
+        // retries its lambda under contention (progress ticks arrive at
+        // 4 Hz per task, several tasks at once), so any side effect inside
+        // it would double-append samples. A racing tick self-corrects — the
+        // next 250 ms sample re-bases the window, and byte totals are
+        // monotonic at both the task level and inside the window.
+        var windowReading: Double? = null
+        var windowEta: Long? = null
+        val current = _tasks.value.firstOrNull { it.id == taskId }
+        // Sticky max total: once a size has been reported for this task, no
+        // later (reset-shaped) report can shrink the displayed denominator.
+        // Tracked on the same per-task window object, raised by the stored
+        // row AND this tick's total.
+        val stickyTotal = window.maxTotalOf(maxOf(current?.totalBytes ?: 0L, total))
+        if (current != null && current.status == TaskStatus.DOWNLOADING) {
+            val bytesNow = if (downloaded > 0) maxOf(current.downloadedBytes, downloaded)
+            else current.downloadedBytes
+            windowReading = window.record(nowMs, bytesNow)
+            // Display ETA from the SAME windowed speed: the raw per-backend
+            // eta (yt-dlp's literal per-line "ETA 00:05") keeps its raw
+            // field, but the card shows the stable value whenever the
+            // window knows both a rate and a remaining size.
+            if (windowReading != null && windowReading > 0.0 && stickyTotal > 0L && bytesNow < stickyTotal) {
+                windowEta = ceil((stickyTotal - bytesNow) / windowReading).toLong().coerceAtLeast(1L)
+            }
+        }
         _tasks.update { list ->
             list.map {
                 if (it.id == taskId) {
@@ -148,13 +203,16 @@ class DownloadRepository {
                     // terminal write must never re-stamp downloaded/total.
                     val finalDl = if (it.status == TaskStatus.COMPLETED) it.downloadedBytes
                     else if (downloaded > 0) maxOf(it.downloadedBytes, downloaded) else it.downloadedBytes
-                    val finalTot = if (it.status == TaskStatus.COMPLETED) it.totalBytes else when {
-                        total <= 0L -> it.totalBytes
-                        it.totalBytes <= 0L -> total
-                        it.totalBytes > 10_000_000_000L && total < 5_000_000_000L -> total
-                        total > it.totalBytes -> total
-                        else -> it.totalBytes
-                    }
+                    // Displayed totals cannot regress mid-download (speed readout
+                    // fix): the old ">10 GB rows may switch to a <5 GB total"
+                    // allowance let a banked-stream reset (yt-dlp's second
+                    // "Destination:" line) SHRINK the denominator between its
+                    // video and audio stream, so a huge file's percent crept
+                    // backwards. max against the sticky per-task maximum kept in
+                    // the same in-memory window map instead — refinements only
+                    // ever raise the known total; a COMPLETED row stays frozen.
+                    val finalTot = if (it.status == TaskStatus.COMPLETED) it.totalBytes
+                    else maxOf(it.totalBytes, stickyTotal)
                     val transferring = status == TaskStatus.DOWNLOADING
                     val finalEta = when {
                         !transferring -> 0L
@@ -167,10 +225,93 @@ class DownloadRepository {
                         downloadedBytes = finalDl,
                         totalBytes = finalTot,
                         speedBytesPerSec = if (transferring) speed else 0.0,
-                        etaSeconds = finalEta
+                        etaSeconds = finalEta,
+                        // Display smoothing: populated only while actually
+                        // transferring (null = "Starting…" until the window
+                        // has ~3 s of samples); paused/queued/validating rows
+                        // clear both so no windowed value can go stale.
+                        displaySpeedBytesPerSec = if (transferring) windowReading else null,
+                        displayEtaSeconds = if (transferring) windowEta else null
                     )
                 } else it
             }
         }
+    }
+}
+
+/**
+ * Per-task (time, bytes) ring for the DISPLAYED speed — the speed readout
+ * fix at the repository chokepoint (investigation/14_player_trace.md §B).
+ *
+ * Displayed rate = byte delta across the trailing [DISPLAY_WINDOW_MS],
+ * not the raw 250 ms EMA (Turbo) or the verbatim parsed yt-dlp/aria line.
+ * Until the window spans [DISPLAY_MIN_WINDOW_MS] the reading is null —
+ * the UI renders "Starting…" — which kills both the ramp flicker and the
+ * 2.4 TB/s resume-priming burst at every consumer of the display fields.
+ * ProgressWatchdog compatibility: the RAW task.speedBytesPerSec is written
+ * unchanged beside this; nothing here feeds back into it.
+ */
+internal const val DISPLAY_WINDOW_MS = 4_000L
+internal const val DISPLAY_MIN_WINDOW_MS = 3_000L
+
+/** Physical-cap sanity bound (~2 GB/s) for any displayed rate: impossible
+ *  bursts (aria/yt-dlp resume recount lines, parsed at face value with a
+ *  TB factor upstream) are clamped against the previous sample, and the
+ *  final reading is clamped again. */
+internal const val DISPLAY_SPEED_CEILING_BPS = 2_000_000_000.0
+
+internal class TaskDisplayWindow {
+    private class Sample(val atMs: Long, val bytes: Long)
+
+    private val lock = Any()
+    private val samples = ArrayDeque<Sample>()
+    private var stickyTotalBytes = 0L
+
+    /** Monotonic known total: refinements raise it, reset-shaped reports
+     *  never shrink it. */
+    fun maxTotalOf(total: Long): Long = synchronized(lock) {
+        if (total > stickyTotalBytes) stickyTotalBytes = total
+        stickyTotalBytes
+    }
+
+    /**
+     * Append a (time, monotonic-bytes) sample and return the windowed rate
+     * in bytes/s — null while the window is younger than
+     * [DISPLAY_MIN_WINDOW_MS].
+     *
+     * An impossible burst between two samples is CLAMPED (not dropped:
+     * real progress must still register, at the cap) so the whole window
+     * stays bounded; byte values never move backwards inside the window.
+     * Samples older than the window edge drop on every record, so a
+     * pause/resume gap (or a cold start) begins a fresh window that reads
+     * null until ~3 s of new samples exist again.
+     *
+     * Synchronized: the backend's progress coroutine and the watchdog's
+     * filesystem bridge can race into the same task's updateProgress —
+     * at 4 Hz the lock cost is nil and the window must stay coherent.
+     */
+    fun record(nowMs: Long, downloadedBytes: Long): Double? = synchronized(lock) {
+        val prev = samples.lastOrNull()
+        val bytes = if (prev == null) {
+            downloadedBytes.coerceAtLeast(0L)
+        } else {
+            val dtMs = (nowMs - prev.atMs).coerceAtLeast(0L)
+            val ceilingBytes = prev.bytes + (DISPLAY_SPEED_CEILING_BPS * dtMs / 1000.0).toLong()
+            downloadedBytes.coerceIn(prev.bytes, ceilingBytes)
+        }
+        samples.addLast(Sample(atMs = nowMs, bytes = bytes))
+        // Prune strictly-before the window edge: the survivor becomes the
+        // delta base, so the computed span never exceeds the window and a
+        // multi-second gap leaves nothing to dilute the rate with.
+        val cutoffMs = nowMs - DISPLAY_WINDOW_MS
+        while (samples.isNotEmpty() && samples.first().atMs < cutoffMs) {
+            samples.removeFirst()
+        }
+        val first = samples.first()
+        val last = samples.last()
+        val spanMs = last.atMs - first.atMs
+        if (spanMs < DISPLAY_MIN_WINDOW_MS) return@synchronized null
+        val rate = (last.bytes - first.bytes).toDouble() / spanMs * 1000.0
+        rate.coerceIn(0.0, DISPLAY_SPEED_CEILING_BPS)
     }
 }

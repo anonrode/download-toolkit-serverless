@@ -1630,6 +1630,34 @@ private fun rememberVideoThumbnail(task: DownloadTask): String? {
     return thumbPath
 }
 
+/**
+ * Stable DISPLAY speed for every card face (speed readout fix): reads the
+ * repository's windowed displaySpeedBytesPerSec instead of the raw 250 ms
+ * EMA (Turbo) or the verbatim parsed yt-dlp/aria line. A null window — the
+ * first ~3 s of a transfer — renders "Starting…" instead of a ramping or
+ * resume-poisoned first sample (the aria/yt-dlp burst that once printed
+ * 2.4 TB/s cannot reach a card through this field); a zero window rate
+ * (stalled stream / merge tail) hides the number. Gated on DOWNLOADING,
+ * so paused/queued rows never show any rate, stale or otherwise.
+ */
+internal fun displaySpeedTextForCards(task: DownloadTask): String? {
+    if (task.status != TaskStatus.DOWNLOADING) return null
+    val display = task.displaySpeedBytesPerSec ?: return "Starting…"
+    val mb = display / (1024.0 * 1024.0)
+    return when {
+        mb >= 0.1 -> "%.1f MB/s".format(java.util.Locale.US, mb)
+        display >= 1024.0 -> "%.0f KB/s".format(java.util.Locale.US, display / 1024.0)
+        display > 0.0 -> "%.0f B/s".format(java.util.Locale.US, display)
+        else -> null
+    }
+}
+
+/** ETA preference for every card face: the window-derived value whenever
+ *  the window knows a rate and a remaining size (it is only populated
+ *  then), else the raw sticky etaSeconds exactly as before. */
+internal fun displayEtaSecondsOf(task: DownloadTask): Long =
+    task.displayEtaSeconds ?: task.etaSeconds
+
 /** Full progress metrics string for Line 3 of download cards (zero truncation). */
 private fun cardProgressMetrics(task: DownloadTask): String {
     val totalKnown = task.totalBytes > 0
@@ -1638,15 +1666,10 @@ private fun cardProgressMetrics(task: DownloadTask): String {
         "${(((task.downloadedBytes.toFloat() / task.totalBytes.toFloat()).coerceIn(0f, 1f)) * 100).toInt()}%"
     } else null
 
-    val speedMb = task.speedBytesPerSec / (1024.0 * 1024.0)
-    val speedText = when {
-        !transferring -> null
-        speedMb >= 0.1 -> "%.1f MB/s".format(java.util.Locale.US, speedMb)
-        task.speedBytesPerSec >= 1024.0 -> "%.0f KB/s".format(java.util.Locale.US, task.speedBytesPerSec / 1024.0)
-        task.speedBytesPerSec > 0.0 -> "%.0f B/s".format(java.util.Locale.US, task.speedBytesPerSec)
-        else -> null
-    }
-    val etaText = if (transferring && task.etaSeconds > 0) "ETA " + formatEta(task.etaSeconds) else null
+    val speedText = displaySpeedTextForCards(task)
+    val etaText = if (transferring) {
+        displayEtaSecondsOf(task).takeIf { it > 0 }?.let { "ETA " + formatEta(it) }
+    } else null
 
     return when (task.status) {
         TaskStatus.DOWNLOADING -> {
@@ -2221,15 +2244,10 @@ internal fun statusDetailText(task: DownloadTask): String {
     else formatBytes(task.downloadedBytes)
 
     val transferring = task.status == TaskStatus.DOWNLOADING
-    val speedMb = task.speedBytesPerSec / (1024.0 * 1024.0)
-    val speedText = when {
-        !transferring -> null
-        speedMb >= 0.1 -> "%.1f MB/s".format(java.util.Locale.US, speedMb)
-        task.speedBytesPerSec >= 1024.0 -> "%.0f KB/s".format(java.util.Locale.US, task.speedBytesPerSec / 1024.0)
-        task.speedBytesPerSec > 0.0 -> "%.0f B/s".format(java.util.Locale.US, task.speedBytesPerSec)
-        else -> null
-    }
-    val etaText = if (transferring && task.etaSeconds > 0) formatEta(task.etaSeconds) else null
+    val speedText = displaySpeedTextForCards(task)
+    val etaText = if (transferring) {
+        displayEtaSecondsOf(task).takeIf { it > 0 }?.let { formatEta(it) }
+    } else null
 
     return when (task.status) {
         TaskStatus.PAUSED -> when {
@@ -2913,16 +2931,14 @@ fun DownloadCard(
                     ""
                 }
 
-                // Speed is only rendered while the task is actually transferring;
-                // paused/queued cards never show a stale "0.0 MB/s".
-                val speedMb = task.speedBytesPerSec / (1024.0 * 1024.0)
-                val speedStr = when {
-                    speedMb >= 0.1 -> "%.1f MB/s".format(java.util.Locale.US, speedMb)
-                    task.speedBytesPerSec >= 1024.0 -> "%.0f KB/s".format(java.util.Locale.US, task.speedBytesPerSec / 1024.0)
-                    task.speedBytesPerSec > 0.0 -> "%.0f B/s".format(java.util.Locale.US, task.speedBytesPerSec)
-                    else -> null
-                }
-                val etaStr = if (task.etaSeconds > 0) formatEta(task.etaSeconds) else null
+                // Speed reads the repository's windowed display value (speed
+                // readout fix): "Starting…" while the ~3 s window warms up,
+                // hidden on stalls/merge tails, never rendered on paused or
+                // queued rows. The raw parsed value (kept in
+                // speedBytesPerSec for the engine watchdog) could print a
+                // bogus 2.4 TB/s resume burst here before the fix.
+                val speedStr = displaySpeedTextForCards(task)
+                val etaStr = displayEtaSecondsOf(task).takeIf { it > 0 }?.let { formatEta(it) }
                 // "Estimating..." applies to any in-flight state where we
                 // have downloaded bytes but no total + no ETA.  Previously
                 // this was gated on (status==DOWNLOADING && speed<1024),
