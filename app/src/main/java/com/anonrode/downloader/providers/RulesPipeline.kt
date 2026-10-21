@@ -113,11 +113,23 @@ object RulesPipeline {
         page: Int = 1,
         pageSize: Int = 20
     ): List<ShowCard> {
+        // RC-4: a 451 legal block on a (site, query) pair short-circuits here —
+        // the ledger makes every keystroke of the same query skip the fan-out
+        // for its TTL instead of re-fanning the whole search+verify machinery
+        // into the same wall (share-43: 30 empty searches in 23 s).
+        if (page == 1 && com.anonrode.downloader.pipeline.SearchBlockLedger.isBlocked(site, query)) {
+            DebugLog.resolve("$site search: query is 451-blocked in the ledger — skipping fan-out")
+            return emptyList()
+        }
         return try {
             runSearchInner(site, pipeline, query, page, pageSize)
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (e: Exception) {
+            if (com.anonrode.downloader.pipeline.SearchBlockLedger.isLegalBlockMessage(e.message)) {
+                com.anonrode.downloader.pipeline.SearchBlockLedger.recordBlocked(site, query)
+                DebugLog.error("$site search: HTTP 451 legal block recorded for this query — ${e.message?.take(120)}")
+            }
             DebugLog.error("$site pipeline search: aborted (${e.javaClass.simpleName}: ${e.message})")
             emptyList()
         }

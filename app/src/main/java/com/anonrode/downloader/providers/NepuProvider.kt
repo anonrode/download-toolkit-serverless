@@ -50,6 +50,17 @@ object NepuProvider : SiteProvider {
     }
 
     override suspend fun search(query: String): List<ShowCard> {
+        // RC-4: nepu.gd 451-blocks specific title keywords at the search API
+        // (reproduced live 2026-10-21: servamp / the-promised-neverland /
+        // demons-ascension → 451 while generic words → 200). Once recorded,
+        // the same query skips the entire fan-out (OTA pipeline AND compiled
+        // fallback AND the filterAvailable+verify wave) until the TTL heals.
+        // The ledger is site-scoped and in-memory: other providers keep
+        // serving the title, and the block is never persisted.
+        if (com.anonrode.downloader.pipeline.SearchBlockLedger.isBlocked(name, query)) {
+            com.anonrode.downloader.util.DebugLog.resolve("nepu search: query 451-blocked in ledger — serving empty without fan-out")
+            return emptyList()
+        }
         // OTA pipeline first (JSON API + URL synthesis live in the playbook);
         // non-empty wins, else the compiled path below runs.
         val rawResults = DynamicRulesManager.getPipeline(name)?.search?.let { pl ->
@@ -60,7 +71,21 @@ object NepuProvider : SiteProvider {
             try {
                 val encoded = URLEncoder.encode(query, "UTF-8")
                 val url = "$mainUrl/api/search?q=$encoded"
-                val jsonStr = HttpClient.getText(url, tag = "search") ?: return emptyList()
+                val jsonStr = try {
+                    HttpClient.getText(url, tag = "search")
+                } catch (ce: CancellationException) {
+                    throw ce
+                } catch (e: Exception) {
+                    // The compiled path saw HITs of the same 451 keyword block
+                    // as the OTA path (share-43 10-19: "HTTP 451 for
+                    // .../api/search?q=the+promised+Neverland") — record it so
+                    // the ledger gates both shapes of the fan-out.
+                    if (com.anonrode.downloader.pipeline.SearchBlockLedger.isLegalBlockMessage(e.message)) {
+                        com.anonrode.downloader.pipeline.SearchBlockLedger.recordBlocked(name, query)
+                        com.anonrode.downloader.util.DebugLog.error("nepu search: HTTP 451 legal block recorded — ${e.message?.take(120)}")
+                    }
+                    null
+                } ?: return emptyList()
 
                 val obj = JSONObject(jsonStr)
                 val array = obj.optJSONArray("results") ?: return emptyList()
