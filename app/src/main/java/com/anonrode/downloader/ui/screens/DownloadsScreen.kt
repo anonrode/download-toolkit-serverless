@@ -325,6 +325,41 @@ internal suspend fun loadRemainingAcrossSources(
     )
 }
 
+/** One show's slice of a mixed non-library sort group. */
+internal data class ShowSlice(
+    val showTitle: String,
+    val tasks: List<DownloadTask>
+)
+
+/**
+ * FIX (mechanism 3 of the trace): in date/status/size sorts one group
+ * header mixes ALL shows — the TODAY bucket holds every show touched
+ * today — and the per-show "Download remaining" chip only rendered when
+ * the whole group belonged to a single show (singleOrNull gate), so a
+ * mixed bucket surfaced no shortcut at all.
+ *
+ * [mixedGroupShowSlices] decides when the group renders as per-show
+ * sub-rows instead: null keeps the exact previous rendering (single-show
+ * group, or no chip-eligible show inside); a mixed group WITH at least
+ * one chip-eligible show slices into one row-run per distinct show —
+ * first-seen order, each run keeping the group's display order — and the
+ * per-show chip lands on every sub-header whose show can act.
+ */
+internal fun mixedGroupShowSlices(
+    groupItems: List<DownloadTask>,
+    chipEligible: (String) -> Boolean
+): List<ShowSlice>? {
+    val shows = groupItems.map { it.showTitle }.distinct()
+    if (shows.size <= 1) return null
+    if (shows.none { chipEligible(it) }) return null
+    return shows.map { title ->
+        ShowSlice(
+            showTitle = title,
+            tasks = groupItems.filter { it.showTitle == title }
+        )
+    }
+}
+
 // ─── Downloads v6 status chroma (mock: ui-proposal-downloads-v6-drawer.html) ─────
 // The light paper theme stays; state colour is defined HERE (Theme.kt colors
 // untouched). State is ALWAYS colour + WORD + GLYPH — never colour alone
@@ -968,54 +1003,118 @@ fun DownloadsScreen(
                     }
                 } else {
                     filteredGroups.forEach { (header, groupItems) ->
-                        item(key = "h-$header") {
-                            // Track-4 inline action at group level: rendered only
-                            // when the group's remaining pickups belong to ONE
-                            // show — the chip opens a per-show drawer, so a
-                            // multi-show group has no single unambiguous target.
-                            // (Library mode keeps the per-show action on the
-                            // folder, so the shortcut never depends on the sort.)
-                            val remainingShow = groupItems.map { it.showTitle }
-                                .distinct()
-                                .filter { seriesInfo[it] != null }
-                                .singleOrNull()
-                            val info = remainingShow?.let { seriesInfo[it] }
-                            val liveCount = remainingShow
-                                ?.let { liveSeriesRemaining[it] }
-                                ?.takeIf { it.known }
-                                ?.count
-                            DownloadsGroupHeader(
-                                title = header,
-                                count = groupItems.size,
-                                remainingCount = liveCount
-                                    ?: remainingShow?.let { seriesRemaining[it] }
-                                    ?: 0,
-                                showRemainingAction = shouldShowRemainingAction(
-                                    hasSeriesUrl = info != null,
-                                    hasTasks = groupItems.isNotEmpty(),
-                                    liveRemaining = liveCount
-                                ),
-                                onDownloadRemaining = if (remainingShow != null && info != null) {
-                                    { viewModel.openRemainingEpisodes(remainingShow, info.first, info.second) }
-                                } else null
-                            )
+                        // FIX (mechanism 3): a mixed bucket now renders per
+                        // show with its own chip (mixedGroupShowSlices); the
+                        // old singleOrNull gate only survives as the
+                        // single-show rendering.
+                        val showSlices = mixedGroupShowSlices(groupItems) { title ->
+                            seriesInfo[title] != null
                         }
-                        items(groupItems, key = { it.id }) { task ->
-                            ActivityRow(
-                                task = task,
-                                onPlay = { onPlayTask(task) },
-                                onPause = { viewModel.engine.pause(task.id) },
-                                onRetry = { viewModel.engine.retry(task.id) },
-                                onCancel = { viewModel.engine.cancel(task.id) },
-                                onOpenActions = { pendingActionsTask = task },
-                                // List Item Enter/Move (same shared spec as
-                                // every Home list — was the only list without).
-                                modifier = Modifier.animateItem(
-                                    fadeInSpec = Motion.ItemFadeIn,
-                                    placementSpec = Motion.ItemPlacement,
-                                    fadeOutSpec = Motion.ItemFadeOut
+                        item(key = "h-$header") {
+                            if (showSlices == null) {
+                                // Track-4 inline action at group level: rendered only
+                                // when the group's remaining pickups belong to ONE
+                                // show — the chip opens a per-show drawer, so a
+                                // multi-show group has no single unambiguous target.
+                                // (Library mode keeps the per-show action on the
+                                // folder, so the shortcut never depends on the sort.)
+                                val remainingShow = groupItems.map { it.showTitle }
+                                    .distinct()
+                                    .filter { seriesInfo[it] != null }
+                                    .singleOrNull()
+                                val info = remainingShow?.let { seriesInfo[it] }
+                                val liveCount = remainingShow
+                                    ?.let { liveSeriesRemaining[it] }
+                                    ?.takeIf { it.known }
+                                    ?.count
+                                DownloadsGroupHeader(
+                                    title = header,
+                                    count = groupItems.size,
+                                    remainingCount = liveCount
+                                        ?: remainingShow?.let { seriesRemaining[it] }
+                                        ?: 0,
+                                    showRemainingAction = shouldShowRemainingAction(
+                                        hasSeriesUrl = info != null,
+                                        hasTasks = groupItems.isNotEmpty(),
+                                        liveRemaining = liveCount
+                                    ),
+                                    onDownloadRemaining = if (remainingShow != null && info != null) {
+                                        { viewModel.openRemainingEpisodes(remainingShow, info.first, info.second) }
+                                    } else null
                                 )
-                            )
+                            } else {
+                                // Per-show sub-headers own the action in a
+                                // mixed group; the bucket header stays
+                                // count-only so one show's chip never shows
+                                // twice.
+                                DownloadsGroupHeader(
+                                    title = header,
+                                    count = groupItems.size
+                                )
+                            }
+                        }
+                        if (showSlices == null) {
+                            items(groupItems, key = { it.id }) { task ->
+                                ActivityRow(
+                                    task = task,
+                                    onPlay = { onPlayTask(task) },
+                                    onPause = { viewModel.engine.pause(task.id) },
+                                    onRetry = { viewModel.engine.retry(task.id) },
+                                    onCancel = { viewModel.engine.cancel(task.id) },
+                                    onOpenActions = { pendingActionsTask = task },
+                                    // List Item Enter/Move (same shared spec as
+                                    // every Home list — was the only list without).
+                                    modifier = Modifier.animateItem(
+                                        fadeInSpec = Motion.ItemFadeIn,
+                                        placementSpec = Motion.ItemPlacement,
+                                        fadeOutSpec = Motion.ItemFadeOut
+                                    )
+                                )
+                            }
+                        } else {
+                            showSlices.forEach { slice ->
+                                item(key = "sh-$header-${slice.showTitle}") {
+                                    val sliceInfo = seriesInfo[slice.showTitle]
+                                    val sliceLiveCount = liveSeriesRemaining[slice.showTitle]
+                                        ?.takeIf { it.known }?.count
+                                    DownloadsGroupHeader(
+                                        title = slice.showTitle,
+                                        count = slice.tasks.size,
+                                        remainingCount = sliceLiveCount
+                                            ?: seriesRemaining[slice.showTitle]
+                                            ?: 0,
+                                        showRemainingAction = shouldShowRemainingAction(
+                                            hasSeriesUrl = sliceInfo != null,
+                                            hasTasks = slice.tasks.isNotEmpty(),
+                                            liveRemaining = sliceLiveCount
+                                        ),
+                                        onDownloadRemaining = if (sliceInfo != null) {
+                                            {
+                                                viewModel.openRemainingEpisodes(
+                                                    slice.showTitle,
+                                                    sliceInfo.first,
+                                                    sliceInfo.second
+                                                )
+                                            }
+                                        } else null
+                                    )
+                                }
+                                items(slice.tasks, key = { it.id }) { task ->
+                                    ActivityRow(
+                                        task = task,
+                                        onPlay = { onPlayTask(task) },
+                                        onPause = { viewModel.engine.pause(task.id) },
+                                        onRetry = { viewModel.engine.retry(task.id) },
+                                        onCancel = { viewModel.engine.cancel(task.id) },
+                                        onOpenActions = { pendingActionsTask = task },
+                                        modifier = Modifier.animateItem(
+                                            fadeInSpec = Motion.ItemFadeIn,
+                                            placementSpec = Motion.ItemPlacement,
+                                            fadeOutSpec = Motion.ItemFadeOut
+                                        )
+                                    )
+                                }
+                            }
                         }
                     }
                 }
