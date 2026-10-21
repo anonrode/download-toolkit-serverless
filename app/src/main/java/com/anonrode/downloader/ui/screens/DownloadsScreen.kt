@@ -129,8 +129,62 @@ private data class LiveSeriesRemaining(
  *  just the first. */
 internal data class SeriesSourceRef(
     val seriesUrl: String,
-    val site: String
+    val site: String,
+    /** True when seriesUrl is a GUESS — backfilled for legacy folders
+     *  whose tasks predate the drawer's seriesUrl stamp (the first task's
+     *  episode-page URL, not a drawer-stamped series page). A guessed
+     *  source's live zero must prove itself (see
+     *  remainingCountAcrossSources) before it may hide the action. Old
+     *  tasks are never MUTATED with the guess; no seriesUrl is written
+     *  back. */
+    val guessed: Boolean = false
 )
+
+/** Show-title folders the engine enqueues for non-series sources (social,
+ *  torrent, direct pastes). The pseudo-series backfill must never hand
+ *  these a "Download remaining" affordance — they never had one. */
+internal fun isNonSeriesFolderTitle(title: String): Boolean {
+    val clean = title.trim()
+    return clean.equals("Torrents", ignoreCase = true) ||
+        clean.equals("Direct Downloads", ignoreCase = true) ||
+        clean.startsWith("Social/", ignoreCase = true)
+}
+
+/**
+ * FIX (mechanism 1 of the trace): tasks enqueued before the drawer stamped
+ * seriesUrl carry a BLANK stamp, so their folder hid the whole action. For
+ * such folders (no stamp anywhere, a plain series title) fall back to a
+ * pseudo series source built from the tasks themselves: the first task's
+ * episode-page URL stands in as the series URL for the live check, with
+ * the first non-blank site. Deliberately guess-only: nothing is persisted,
+ * and the source is marked guessed so an unconvincing live zero cannot
+ * hide the action. Null when the folder has no usable URL/site (or is a
+ * non-series folder) — those keep today's no-chip behavior.
+ */
+internal fun pseudoSeriesSourceFor(
+    showTitle: String,
+    tasks: List<DownloadTask>
+): SeriesSourceRef? {
+    if (tasks.any { it.seriesUrl.isNotBlank() }) return null
+    if (isNonSeriesFolderTitle(showTitle)) return null
+    val site = tasks.firstOrNull { it.site.isNotBlank() }?.site ?: return null
+    val url = tasks.firstOrNull { it.sourceUrl.isNotBlank() }?.sourceUrl ?: return null
+    return SeriesSourceRef(seriesUrl = url, site = site, guessed = true)
+}
+
+/** The series sources behind one folder: every stamped seriesUrl first;
+ *  a folder with NO stamp at all gets the single pseudo source (mechanism
+ *  1 backfill above). Empty list = no chip (non-series folders, direct
+ *  media). */
+internal fun folderSeriesSources(
+    showTitle: String,
+    tasks: List<DownloadTask>
+): List<SeriesSourceRef> {
+    val stamped = seriesSourcesOf(tasks)
+    if (stamped.isNotEmpty()) return stamped
+    val guessed = pseudoSeriesSourceFor(showTitle, tasks) ?: return emptyList()
+    return listOf(guessed)
+}
 
 /** Max parallel provider scrapes when loading a multi-source folder's
  *  episode lists. A scrape is a multi-second network round-trip; 2 bounds
@@ -168,10 +222,18 @@ internal fun seriesSourcesOf(tasks: List<DownloadTask>): List<SeriesSourceRef> =
  * A failed check keeps the "Check remaining" path instead of hiding the
  * action — the exact contract shouldShowRemainingAction encodes for the
  * single-source case.
+ *
+ * [guessedSources] carries the seriesUrls that were GUESSED for legacy
+ * folders (pseudoSeriesSourceFor) rather than stamped by the drawer. A
+ * guessed source's zero is only believed when the loaded list covers every
+ * folder task's URL — a guessed episode page that lists just the one
+ * episode under a 20-episode folder stays "unknown", keeping the
+ * "Check remaining" path instead of trusting the guess.
  */
 internal fun remainingCountAcrossSources(
     liveBySource: Map<String, List<EpisodeItem>>,
-    tasks: List<DownloadTask>
+    tasks: List<DownloadTask>,
+    guessedSources: Set<String> = emptySet()
 ): Int? {
     if (liveBySource.isEmpty()) return null
     var recognized = 0
@@ -180,7 +242,6 @@ internal fun remainingCountAcrossSources(
         // An empty list is NOT a confident zero: dispatch miss, OTA-disabled
         // site or a failed fetch all surface as "no episodes" — unknown.
         if (episodes.isEmpty()) continue
-        recognized++
         val counted = tasks.filter { task ->
             // This source's own tasks plus legacy unstamped rows only.
             task.seriesUrl.isBlank() || task.seriesUrl == sourceUrl
@@ -191,7 +252,19 @@ internal fun remainingCountAcrossSources(
         val inFlight = counted
             .filter { isInFlightStatus(it.status) }
             .mapTo(mutableSetOf()) { it.sourceUrl }
-        remaining += remainingEpisodesOf(episodes, completed, inFlight).size
+        val sourceRemaining = remainingEpisodesOf(episodes, completed, inFlight).size
+        if (sourceUrl in guessedSources && sourceRemaining == 0) {
+            // A guessed source that reports zero must prove it knows the
+            // whole folder, or it is just an episode page — treat it as
+            // unknown so the action can never hide behind a guess.
+            val loadedUrls = episodes.mapTo(HashSet()) { it.url }
+            val confident = tasks.all { task ->
+                task.sourceUrl.isBlank() || task.sourceUrl in loadedUrls
+            }
+            if (!confident) continue
+        }
+        recognized++
+        remaining += sourceRemaining
     }
     if (recognized == 0) return null
     // Some source stayed unknown while everything known is downloaded:
@@ -245,7 +318,11 @@ internal suspend fun loadRemainingAcrossSources(
     val liveBySource = sources.zip(loaded) { source, details ->
         source.seriesUrl to details?.episodes.orEmpty()
     }.toMap()
-    return remainingCountAcrossSources(liveBySource, tasks)
+    return remainingCountAcrossSources(
+        liveBySource,
+        tasks,
+        guessedSources = sources.filter { it.guessed }.mapTo(mutableSetOf()) { it.seriesUrl }
+    )
 }
 
 // ─── Downloads v6 status chroma (mock: ui-proposal-downloads-v6-drawer.html) ─────
@@ -564,11 +641,25 @@ fun DownloadsScreen(
     // with SEVERAL seriesUrls (two sites, or per-season posts on one site).
     // info above is only the drawer TARGET (first source); the exact live
     // count must consult every distinct source the folder merges.
+    // FIX (legacy folders, mechanism 1): tasks enqueued before the drawer
+    // stamped seriesUrl carry a blank stamp and hid the whole action for
+    // their folder. folderSeries* add the guess-only pseudo source built
+    // from the tasks themselves (pseudoSeriesSourceFor) so those folders
+    // keep a "Check remaining" path. Stamped-only maps keep the group-
+    // header gate EXACTLY where it was — a new guess must never make an
+    // existing chip disappear from a mixed non-library group.
     val seriesSources = remember(structureSig) {
-        val byShow = viewModel.engine.tasks.value
-            .filter { it.seriesUrl.isNotBlank() }
-            .groupBy { it.showTitle }
-        byShow.mapValues { (_, items) -> seriesSourcesOf(items) }
+        val byShow = viewModel.engine.tasks.value.groupBy { it.showTitle }
+        byShow.mapNotNull { (title, items) ->
+            val sources = folderSeriesSources(title, items)
+            if (sources.isEmpty()) null else title to sources
+        }.toMap()
+    }
+    val folderSeriesInfo = remember(structureSig, seriesSources) {
+        seriesSources.mapValues { (_, sources) ->
+            val primary = sources.first()
+            primary.seriesUrl to primary.site
+        }
     }
 
     // Header summary line (v6 mock .dl-sub): "X GB of Y GB · N active · N done
@@ -813,7 +904,11 @@ fun DownloadsScreen(
                         val isExpanded = expandedShows[showTitle] ?: (showItems.size == 1 || showItems.any {
                             it.status == TaskStatus.DOWNLOADING || it.status == TaskStatus.RESOLVING
                         })
-                        val info = seriesInfo[showTitle]
+                        // Folder-card info includes the legacy pseudo source
+                        // (guessed=true) so pre-stamp folders keep a
+                        // "Check remaining" path; the group-header gate keeps
+                        // its stamped-only seriesInfo map.
+                        val info = folderSeriesInfo[showTitle]
                         val live = liveSeriesRemaining[showTitle]
                         val explicitlyExpanded = expandedShows[showTitle] == true
                         // Statuses for the live count must come from ALL tasks
