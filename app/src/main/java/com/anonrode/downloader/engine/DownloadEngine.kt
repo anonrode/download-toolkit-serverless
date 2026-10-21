@@ -1042,6 +1042,19 @@ class DownloadEngine(
             if (t.userPaused || (t.status != TaskStatus.DOWNLOADING && t.status != TaskStatus.RESOLVING)) t
             else t.copy(status = TaskStatus.PAUSED, speedBytesPerSec = 0.0, errorMessage = NETWORK_PAUSE_MESSAGE)
         }
+        // P3-14 (2026-10-21): the network park itself writes NO log line, so
+        // "it paused itself" was undiagnosable from every capture (0
+        // occurrences of the marker message across all logs). Log AFTER the
+        // CAS lands and only when it actually landed, so a racing user pause
+        // is never misreported as a network park.
+        val parkedRow = repository.find(taskId)
+        if (parkedRow != null && parkedRow.status == TaskStatus.PAUSED &&
+            parkedRow.errorMessage == NETWORK_PAUSE_MESSAGE && !parkedRow.userPaused
+        ) {
+            com.anonrode.downloader.util.DebugLog.engine(
+                "network park task=$taskId (landed=${parkedRow.downloadedBytes / 1024}KiB) — connectivity lost; the reconnect sweep requeues it"
+            )
+        }
         updateServiceState(force = true)
     }
 
@@ -2097,7 +2110,11 @@ class DownloadEngine(
                 errorMessage = "$PARKED_HOST_MESSAGE — will retry in ~${mins}m$saved"
             )
         }
-        com.anonrode.downloader.util.DebugLog.user(
+        // RC-6: this is an ENGINE decision, never a user action — the `[USER]`
+        // tag made every automatic park look like the owner tapped pause
+        // (06_phase3_issue_sheet: parks logged as user actions). The task
+        // state itself is authoritative; only the tag changes.
+        com.anonrode.downloader.util.DebugLog.engine(
             // 300 chars: the reason now carries the backend's real diagnostic
             // line + HTTP status (truth preservation, share-43 rows 8/32) —
             // the old 140-char cut truncated the status off the park line.
