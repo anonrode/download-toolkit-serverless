@@ -13,14 +13,19 @@ def section(start, end):
 
 class SourceContracts(unittest.TestCase):
     def test_admission_precedes_post_dispatch(self):
-        post = section('internal fun postFormWithClient(', ' * Reachability probe:')
-        self.assertLess(post.index('admitRequest(url)'), post.index('client.newCall('))
-        self.assertLess(post.index('admitRequest(url)'), post.index('call.execute()'))
-        self.assertIn('recordCooldown(res)', post)
+        # postFormWithClient owns scheduler admission; postFormInner owns the
+        # HTTP-plane admission + dispatch. Both live inside this section.
+        post = section('internal fun postFormWithClient(', 'internal fun postJsonWithClient(')
+        self.assertLess(post.index('admitRequest(url, tag)'), post.index('client.newCall('))
+        self.assertLess(post.index('admitRequest(url, tag)'), post.index('call.execute()'))
+        self.assertIn('recordCooldown(res, tag)', post)
         self.assertIn('throw OriginCooldownException(res.request.url.toString())', post)
 
     def test_get_consumption_inside_registered_scope(self):
-        get = section('private fun <T> executeGet(', ' * In-flight resolver/probe calls.')
+        # executeGet now owns admission/scheduler and delegates to
+        # executeGetInner, which registers the call and consumes the body
+        # before the finally that unregisters it.
+        get = section('private fun <T> executeGetInner(', ' * In-flight resolver/probe calls.')
         # executeGet registers through the local register(call) helper (which
         # adds to inFlightCalls) and unregisters in finally — including the
         # one-shot 451 retry's re-registration. Keep the contract on the helper.
@@ -31,6 +36,9 @@ class SourceContracts(unittest.TestCase):
         # string offsets (the helper definition comes first by design).
         _finally = get.index('finally {')
         self.assertIn('unregister(call)', get[_finally:_finally + 200])
+        # The outer executeGet must admit before delegating to the inner call.
+        outer = section('private fun <T> executeGet(', 'private fun <T> executeGetInner(')
+        self.assertLess(outer.index('admitRequest(url, tag)'), outer.index('executeGetInner('))
         text = section('internal fun getTextWithClient(', ' * POST with a form-urlencoded body')
         self.assertIn('executeGet(url, referer, headers, tag, false, client) { res ->', text)
         self.assertIn('res.use { r ->', text)
