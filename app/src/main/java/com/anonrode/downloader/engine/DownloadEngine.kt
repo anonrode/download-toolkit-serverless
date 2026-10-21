@@ -2007,6 +2007,11 @@ class DownloadEngine(
     private fun purgeHlsPartialArtifacts(base: File) {
         try { File(base.absolutePath + ".part").delete() } catch (_: Exception) {}
         try { File(base.absolutePath + ".ytdl").delete() } catch (_: Exception) {}
+        // RC-9: the paced-lane resume state is keyed to the media plan — a
+        // fingerprint change reallocates segments, so the sidecar (and the
+        // staged segment stream under it) can never survive a plan change.
+        try { File(base.absolutePath + ".hlsrs").delete() } catch (_: Exception) {}
+        try { File(base.absolutePath + ".hts").delete() } catch (_: Exception) {}
         try {
             base.parentFile?.let {
                 deletePartFragFiles(it, base.nameWithoutExtension, privateWorkdir = false)
@@ -3922,13 +3927,81 @@ class DownloadEngine(
                         )
                     }
 
+                    // RC-9 root fix (board row 35, 2026-10-21): PLAYER-LIKE
+                    // in-process HLS lane. The embed CDNs (fetch.nexabloom.top
+                    // manifests / mo6mo.stellarfrontier.space segments)
+                    // throttle BYTES PER WINDOW per IP — live evidence: 403 at
+                    // the identical ~87.7 MiB boundary on every resumed
+                    // attempt while a sequential single-connection read passes
+                    // — and the released `-N16` fragment ladder burned that
+                    // budget in seconds, then 403'd on every lane
+                    // (`--abort-on-unavailable-fragments` → blank ERROR →
+                    // park). This lane runs ONE keep-alive connection with the
+                    // task's persisted headers, appends segments at an exact
+                    // water mark, resumes AT the failed segment through a
+                    // `.hlsrs` sidecar, and remuxes with the bundled ffmpeg.
+                    // Unsupported shapes (AES, byterange, live windows)
+                    // return null here and the yt-dlp chain below runs
+                    // unchanged as the fallback.
+                    if (isHlsStream && producedFile == null && coroutineContext.isActive) {
+                        HlsVodDownloader.attachContext(context)
+                        val hlsSidecar = File(task.filePath + ".hlsrs")
+                        val paced = try {
+                            HlsVodDownloader.attempt(
+                                masterUrl = streamUrl,
+                                outPath = File(task.filePath),
+                                sidecar = hlsSidecar,
+                                headers = hdrs,
+                                maxHeight = (task.quality ?: defaultQuality).filter { it.isDigit() }.toIntOrNull() ?: 720,
+                                estimatedTotalBytes = if (hlsSizeEstimate[0] > 0L) hlsSizeEstimate[0] else 0L,
+                                onProgress = { dl, tot, spd, eta ->
+                                    com.anonrode.downloader.pipeline.HostPolicyRegistry.LaneBudget
+                                        .reportSpeed(task.id, spd)
+                                    repository.updateProgress(
+                                        taskId = task.id,
+                                        downloaded = dl,
+                                        total = tot,
+                                        speed = spd,
+                                        eta = eta
+                                    )
+                                    updateServiceState(force = false)
+                                },
+                                isCancelled = { !coroutineContext.isActive }
+                            )
+                        } catch (e: HlsVodDownloader.RateLimited) {
+                            // Byte-quota escape: park with the REAL boundary and
+                            // status (RC-8 charter — no empty error text), then
+                            // let the escalated requeue windows resume at the
+                            // exact failed segment when the host's window
+                            // resets. Never a terminal failure, never a
+                            // restart (owner invariant: every error ends in a
+                            // download or a proven no-source).
+                            com.anonrode.downloader.util.DebugLog.backend(
+                                "task=${task.id} paced HLS lane rate-limited: ${e.message}"
+                            )
+                            val liveNow = repository.find(task.id) ?: task
+                            parkInsteadOfFail(liveNow, e.message ?: "HLS rate limited", forcePark = true)
+                            return@launch
+                        } catch (ce: kotlinx.coroutines.CancellationException) {
+                            throw ce
+                        } catch (e: Exception) {
+                            com.anonrode.downloader.util.DebugLog.resolve(
+                                "task=${task.id} paced HLS lane unavailable (${e.message}) — falling back to yt-dlp"
+                            )
+                            null
+                        }
+                        if (paced != null) {
+                            producedFile = paced
+                        }
+                    }
+
                     // YoutubeDlDownloader.download throws on final failure (after
                     // ytdlpMaxAttempts), so the re-resolve below must catch it —
                     // otherwise a failed chain skips the fresh-token recovery and
                     // the task dies with the first URL's errors.
                     var firstError: Exception? = null
                     producedFile = try {
-                        runYtdlp(streamUrl, hlsMasterFile)
+                        if (producedFile != null) producedFile else runYtdlp(streamUrl, hlsMasterFile)
                     } catch (e: kotlinx.coroutines.CancellationException) {
                         throw e
                     } catch (e: Exception) {
