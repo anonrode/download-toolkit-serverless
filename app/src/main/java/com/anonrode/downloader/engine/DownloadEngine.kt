@@ -2103,6 +2103,32 @@ class DownloadEngine(
             // the old 140-char cut truncated the status off the park line.
             "park task=${task.id} (cycle=$cycles, landed=${landed / 1024}KiB, forced=$forcePark) reason=${err.take(300)}"
         )
+        // RC-1 (fresh-source per retry, 2026-10-21): the f8cf38d2 class — the
+        // Promised Neverland task parked on a dead stream-proxy URL, requeued,
+        // and the resolve layer replayed the IDENTICAL URL from cache
+        // ("stage=cache …/embed/tv/83097/1/1 result=OK ms=0"), re-parking on
+        // the same poisoned endpoint forever. Once the failing chain has
+        // thrown on the SAME directUrl twice, poison the URL (resolver-side
+        // skip list) and clear the task's directUrl so the requeued job runs a
+        // FRESH resolve instead of a cache replay. Banked bytes are untouched:
+        // they resume on whatever new source the fresh resolve mints (the
+        // failover-veto fingerprint already treats proven-unprogressable
+        // sources as failover-eligible). Rate-limited paced-lane parks (RC-9)
+        // intentionally bypass this: their whole design is resume on the SAME
+        // URL after the quota window, and they never increment the same-source
+        // failure count.
+        val failedUrl = backendFailures[task.id]
+        val currentUrl = task.directUrl.trim()
+        if (failedUrl != null && failedUrl.count >= 2 && currentUrl.isNotBlank() &&
+            failedUrl.url == currentUrl && !com.anonrode.downloader.pipeline.ResolveCache.isPoisoned(currentUrl)
+        ) {
+            com.anonrode.downloader.pipeline.ResolveCache.poison(currentUrl)
+            repository.update(task.id) { it.copy(directUrl = "") }
+            com.anonrode.downloader.util.DebugLog.resolve(
+                "task=${task.id} fresh-source retry: parked twice on the same URL — poisoning it and " +
+                    "clearing directUrl so the requeue performs a fresh resolve"
+            )
+        }
         updateServiceState(force = true)
         return true
     }
