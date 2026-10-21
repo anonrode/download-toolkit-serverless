@@ -212,7 +212,7 @@ object ProviderRegistry {
             .map { com.anonrode.downloader.util.NollywoodFilter.filterSafe(it) }
 
     suspend fun loadEpisodes(show: ShowCard): ShowDetails {
-        val provider = getProvider(show.site) ?: return ShowDetails(show = show)
+        val provider = loadEpisodesProviderForTest ?: getProvider(show.site) ?: return ShowDetails(show = show)
         // OTA kill switch: a disabled site accepts no NEW work. Returning the
         // empty drawer (instead of throwing) is the same shape a site with no
         // episodes produces, so the UI shows its normal "no episodes" state.
@@ -226,23 +226,63 @@ object ProviderRegistry {
         // still gets fresh data after the TTL or when the user pulls it again.
         val cacheKey = "${show.site}::${show.url}"
         val now = System.currentTimeMillis()
-        val cached = episodesCache[cacheKey]
-        if (cached != null && now - cached.first < 300_000L) {
-            return cached.second
-        }
-        // Force IO here, not just at the call site: loadEpisodes does blocking
-        // OkHttp, and a caller that forgets to switch off Main gets a
-        // NetworkOnMainThreadException that HttpClient's blanket catch swallows
-        // into an empty list ("No episodes found"). Guaranteeing it at the
-        // source makes that whole failure class impossible regardless of caller.
-        val details = withContext(Dispatchers.IO) { provider.loadEpisodes(show.url) }
-        if (details.episodes.isNotEmpty()) {
-            episodesCache[cacheKey] = Pair(now, details)
+        freshEpisodes(cacheKey, now)?.let { return it.details }
+        // Single-flight (activity-log share-43, 10-20 00:19): concurrent
+        // callers — drawer open + oracle verifier + prioritize re-wave — each
+        // raced the TTL check and fetched the same dead page 8x in 7.7s.
+        // One fetch per key; late arrivals re-check the cache the winner
+        // just filled. The negative-result cache below makes an empty drawer
+        // cacheable too: with only the positive branch cached, the SAME
+        // page re-fetched on every wave because empties never stuck.
+        val keyMutex = loadLocks.computeIfAbsent(cacheKey) { Mutex() }
+        val details: ShowDetails = keyMutex.withLock {
+            freshEpisodes(cacheKey, System.currentTimeMillis())?.let { return@withLock it.details }
+            // Force IO here, not just at the call site: loadEpisodes does blocking
+            // OkHttp, and a caller that forgets to switch off Main gets a
+            // NetworkOnMainThreadException that HttpClient's blanket catch swallows
+            // into an empty list ("No episodes found"). Guaranteeing it at the
+            // source makes that whole failure class impossible regardless of caller.
+            val fetched = withContext(Dispatchers.IO) { provider.loadEpisodes(show.url) }
+            val atMs = System.currentTimeMillis()
+            val ttl = if (fetched.episodes.isNotEmpty()) episodesTtlMs else emptyEpisodesTtlMs
+            episodesCache[cacheKey] = CacheEntry(atMs, fetched, ttl)
+            return@withLock fetched
         }
         return details
     }
 
-    private val episodesCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, ShowDetails>>()
+    /** Drawer-cache entry: positive results keep the historical 5-minute
+     *  TTL; empty drawers get [emptyEpisodesTtlMs] so a 0-episode page
+     *  (a-certain-dark-item-2026 class — site serves the post with an empty
+     *  list) stops being re-fetched on every drawer open and verify wave
+     *  while still healing itself within minutes when the site backfills. */
+    private class CacheEntry(val atMs: Long, val details: ShowDetails, val ttlMs: Long)
+    private val episodesCache = java.util.concurrent.ConcurrentHashMap<String, CacheEntry>()
+    private val loadLocks = java.util.concurrent.ConcurrentHashMap<String, Mutex>()
+    internal var episodesTtlMs = 300_000L
+    internal var emptyEpisodesTtlMs = 600_000L
+
+    /** Cache hit only when present and inside its own TTL. */
+    private fun freshEpisodes(cacheKey: String, now: Long): CacheEntry? {
+        val entry = episodesCache[cacheKey] ?: return null
+        if (now - entry.atMs >= entry.ttlMs) {
+            episodesCache.remove(cacheKey, entry)
+            return null
+        }
+        return entry
+    }
+
+    /** Seam over [getProvider] so [loadEpisodes]'s cache/single-flight is
+     *  JVM-testable (static dispatch by site name). Production = null; tests
+     *  inject a counting fake (ResultVerifier.chain pattern). */
+    internal var loadEpisodesProviderForTest: SiteProvider? = null
+
+    /** Resets all episode-cache state between tests
+     *  (SubtitleSurfaces.clearForTest pattern). */
+    internal fun clearEpisodeCachesForTest() {
+        episodesCache.clear()
+        loadLocks.clear()
+    }
 
     suspend fun resolveEpisode(site: String, episodeUrl: String, quality: String): DownloadRecipe {
         val provider = getProvider(site) ?: return DownloadRecipe(
