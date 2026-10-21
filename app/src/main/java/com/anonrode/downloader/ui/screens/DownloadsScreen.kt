@@ -70,6 +70,9 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.ui.graphics.StrokeCap
 import coil.compose.SubcomposeAsyncImage
 import com.anonrode.downloader.data.models.DownloadTask
+import com.anonrode.downloader.data.models.EpisodeItem
+import com.anonrode.downloader.data.models.ShowCard
+import com.anonrode.downloader.data.models.ShowDetails
 import com.anonrode.downloader.data.models.TaskStatus
 import com.anonrode.downloader.ui.components.DownloadsSorter
 import com.anonrode.downloader.ui.components.PosterImageOrFallback
@@ -81,6 +84,10 @@ import com.anonrode.downloader.ui.util.rejectHaptic
 import com.anonrode.downloader.viewmodel.MainViewModel
 import java.io.File
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 
 private const val PREF_SORT = "downloader_settings"
@@ -113,6 +120,133 @@ private data class LiveSeriesRemaining(
     val count: Int,
     val checkedAtMs: Long
 )
+
+/** One stamped series source behind a Downloads folder: the series page
+ *  URL the episode drawer stamped on a task's [DownloadTask.seriesUrl] at
+ *  enqueue time, with the site that owns it. One folder can merge several
+ *  sources — the same clean show title hits two sites (or per-season posts
+ *  on one site) — so the exact live count must consult EVERY source, not
+ *  just the first. */
+internal data class SeriesSourceRef(
+    val seriesUrl: String,
+    val site: String
+)
+
+/** Max parallel provider scrapes when loading a multi-source folder's
+ *  episode lists. A scrape is a multi-second network round-trip; 2 bounds
+ *  the burst without serializing a 3-source folder. */
+internal const val SOURCE_LOAD_PARALLELISM = 2
+
+/** Every distinct seriesUrl the folder's tasks carry, in first-seen order.
+ *  Empty when the folder holds no stamped task (the action stays hidden
+ *  for those — see shouldShowRemainingAction). */
+internal fun seriesSourcesOf(tasks: List<DownloadTask>): List<SeriesSourceRef> =
+    tasks.filter { it.seriesUrl.isNotBlank() }
+        .groupBy { it.seriesUrl }
+        .map { (url, items) ->
+            SeriesSourceRef(
+                seriesUrl = url,
+                site = items.firstOrNull { it.site.isNotBlank() }?.site.orEmpty()
+            )
+        }
+
+/**
+ * Exact remaining count behind a folder whose tasks may span MULTIPLE
+ * series sources, given the live episode list loaded from each source.
+ *
+ * Per source: an episode is remaining when its URL matches no task that
+ * counts as done-or-in-flight — folder-wide URL string equality, the same
+ * join the single-source path always used. A task stamped with a DIFFERENT
+ * seriesUrl is deliberately excluded from this source's subtraction sets:
+ * a pathological cross-source URL collision may then only ever INFLATE the
+ * count (action stays), never zero it. Tasks with a blank seriesUrl
+ * (legacy rows and non-drawer paths) are subtracted against every source —
+ * their URLs self-scope to whichever source they actually came from.
+ *
+ * Returns null when nothing is known: no source produced an episode list,
+ * or every loaded source says 0 while at least one source failed to load.
+ * A failed check keeps the "Check remaining" path instead of hiding the
+ * action — the exact contract shouldShowRemainingAction encodes for the
+ * single-source case.
+ */
+internal fun remainingCountAcrossSources(
+    liveBySource: Map<String, List<EpisodeItem>>,
+    tasks: List<DownloadTask>
+): Int? {
+    if (liveBySource.isEmpty()) return null
+    var recognized = 0
+    var remaining = 0
+    for ((sourceUrl, episodes) in liveBySource) {
+        // An empty list is NOT a confident zero: dispatch miss, OTA-disabled
+        // site or a failed fetch all surface as "no episodes" — unknown.
+        if (episodes.isEmpty()) continue
+        recognized++
+        val counted = tasks.filter { task ->
+            // This source's own tasks plus legacy unstamped rows only.
+            task.seriesUrl.isBlank() || task.seriesUrl == sourceUrl
+        }
+        val completed = counted
+            .filter { it.status == TaskStatus.COMPLETED }
+            .mapTo(mutableSetOf()) { it.sourceUrl }
+        val inFlight = counted
+            .filter { isInFlightStatus(it.status) }
+            .mapTo(mutableSetOf()) { it.sourceUrl }
+        remaining += remainingEpisodesOf(episodes, completed, inFlight).size
+    }
+    if (recognized == 0) return null
+    // Some source stayed unknown while everything known is downloaded:
+    // the folder may still hold remaining work that no live list saw.
+    if (remaining == 0 && recognized < liveBySource.size) return null
+    return remaining
+}
+
+/**
+ * Loads every distinct source behind a folder — [sources] may carry more
+ * than one entry once a folder merges shows across sites or per-season
+ * posts — with bounded concurrency ([SOURCE_LOAD_PARALLELISM] scrapes in
+ * flight at a time) and folds the episode lists into one aggregated
+ * remaining count via [remainingCountAcrossSources].
+ *
+ * A per-source failure degrades to an empty list — "unknown", never a
+ * fabricated zero — so the aggregation keeps the action visible. The
+ * [load] endpoint is injected so the JVM tests can pin the concurrency
+ * bound and the fold without a provider network.
+ */
+internal suspend fun loadRemainingAcrossSources(
+    sources: List<SeriesSourceRef>,
+    tasks: List<DownloadTask>,
+    showTitle: String,
+    parallelism: Int = SOURCE_LOAD_PARALLELISM,
+    load: suspend (ShowCard) -> ShowDetails?
+): Int? {
+    if (sources.isEmpty()) return null
+    val permits = Semaphore(parallelism.coerceIn(1, sources.size))
+    val loaded = coroutineScope {
+        sources.map { source ->
+            async {
+                permits.withPermit {
+                    try {
+                        load(
+                            ShowCard(
+                                title = showTitle,
+                                url = source.seriesUrl,
+                                site = source.site
+                            )
+                        )
+                    } catch (e: kotlinx.coroutines.CancellationException) {
+                        throw e
+                    } catch (_: Exception) {
+                        null
+                    }
+                }
+            }
+        }.map { deferred -> deferred.await() }
+    }
+    val liveBySource = sources.zip(loaded) { source, details ->
+        source.seriesUrl to details?.episodes.orEmpty()
+    }.toMap()
+    return remainingCountAcrossSources(liveBySource, tasks)
+}
 
 // ─── Downloads v6 status chroma (mock: ui-proposal-downloads-v6-drawer.html) ─────
 // The light paper theme stays; state colour is defined HERE (Theme.kt colors
@@ -426,6 +560,16 @@ fun DownloadsScreen(
             url to site
         }
     }
+    // FIX (multi-source folders): the same clean show title can be stamped
+    // with SEVERAL seriesUrls (two sites, or per-season posts on one site).
+    // info above is only the drawer TARGET (first source); the exact live
+    // count must consult every distinct source the folder merges.
+    val seriesSources = remember(structureSig) {
+        val byShow = viewModel.engine.tasks.value
+            .filter { it.seriesUrl.isNotBlank() }
+            .groupBy { it.showTitle }
+        byShow.mapValues { (_, items) -> seriesSourcesOf(items) }
+    }
 
     // Header summary line (v6 mock .dl-sub): "X GB of Y GB · N active · N done
     // · N failed" — each count (number AND word) in that state's colour; the
@@ -679,43 +823,27 @@ fun DownloadsScreen(
                         // its own 5-minute cache, so the local TTL is gone and
                         // a completion updates the count immediately.
                         val allShowItems = viewModel.engine.tasks.value.filter { it.showTitle == showTitle }
-                        LaunchedEffect(explicitlyExpanded, info?.first, structureSig) {
-                            if (!explicitlyExpanded || info == null) return@LaunchedEffect
-                            val details = try {
-                                com.anonrode.downloader.providers.ProviderRegistry.loadEpisodes(
-                                    com.anonrode.downloader.data.models.ShowCard(
-                                        title = showTitle,
-                                        url = info.first,
-                                        site = info.second
-                                    )
-                                )
-                            } catch (e: kotlinx.coroutines.CancellationException) {
-                                throw e
-                            } catch (_: Exception) {
-                                null
+                        // All distinct series sources behind the folder (>= 1
+                        // once any task is stamped). The live count aggregates
+                        // across all of them; info stays the first source,
+                        // which is where the drawer opens.
+                        val folderSources = seriesSources[showTitle].orEmpty()
+                        LaunchedEffect(explicitlyExpanded, info?.first, folderSources, structureSig) {
+                            if (!explicitlyExpanded || folderSources.isEmpty()) return@LaunchedEffect
+                            val count = loadRemainingAcrossSources(
+                                sources = folderSources,
+                                tasks = allShowItems,
+                                showTitle = showTitle
+                            ) { card ->
+                                com.anonrode.downloader.providers.ProviderRegistry.loadEpisodes(card)
                             }
-                            val episodes = details?.episodes.orEmpty()
-                            liveSeriesRemaining[showTitle] = if (episodes.isEmpty()) {
-                                // Check failed or provider returned nothing:
-                                // keep the "Check remaining" path, do not hide.
-                                LiveSeriesRemaining(
-                                    known = false,
-                                    count = 0,
-                                    checkedAtMs = System.currentTimeMillis()
-                                )
-                            } else {
-                                val completed = allShowItems
-                                    .filter { it.status == TaskStatus.COMPLETED }
-                                    .map { it.sourceUrl }.toSet()
-                                val inFlight = allShowItems
-                                    .filter { isInFlightStatus(it.status) }
-                                    .map { it.sourceUrl }.toSet()
-                                LiveSeriesRemaining(
-                                    known = true,
-                                    count = remainingEpisodesOf(episodes, completed, inFlight).size,
-                                    checkedAtMs = System.currentTimeMillis()
-                                )
-                            }
+                            liveSeriesRemaining[showTitle] = LiveSeriesRemaining(
+                                known = count != null,
+                                // count == null keeps the "Check remaining"
+                                // path — nothing known, never a fake zero.
+                                count = count ?: 0,
+                                checkedAtMs = System.currentTimeMillis()
+                            )
                         }
                         val liveCount = live?.takeIf { it.known }?.count
                         ShowFolderCard(
