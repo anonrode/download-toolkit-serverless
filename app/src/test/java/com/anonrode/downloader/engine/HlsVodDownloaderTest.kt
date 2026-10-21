@@ -36,12 +36,19 @@ class HlsVodDownloaderTest {
     private val segmentBodies: List<ByteArray> =
         (0 until 5).map { i -> ("SEGMENT-$i-").repeat(64).toByteArray() }
 
+    /** Global request counter (redial/dial assertions). */
+    private val reqSeq = java.util.concurrent.atomic.AtomicLong(0)
+    /** Per-fixture 403-serving-path counter. */
+    private val failHubRequests = java.util.concurrent.atomic.AtomicLong(0)
+
     @Before
     fun setUp() {
         server = MockWebServer()
         server.start()
         client = OkHttpClient.Builder().build()
         tmp = createTempDir("hlsrs")
+        reqSeq.set(0)
+        failHubRequests.set(0)
     }
 
     @After
@@ -143,6 +150,70 @@ class HlsVodDownloaderTest {
         // METHOD=NONE is genuinely unencrypted.
         val none = "#EXTM3U\n#EXT-X-KEY:METHOD=NONE\n#EXTINF:9,\ns.ts\n#EXT-X-ENDLIST\n"
         assertFalse(HlsVodDownloader.parseVariant(none, "https://x/v.m3u8").encrypted)
+    }
+
+    // ─────────────────────────── P-1 fresh-dial ───────────────────────────
+
+    @Test
+    fun `403 drops the connection and redials fresh before escaping`() = runBlocking {
+        // Segment 0: first request 403 (the throttled pooled connection),
+        // every later request fine (the fresh dial proves the budget is
+        // per-connection). Exactly ONE redial must recover the stream inside
+        // the same attempt, with the resume boundary untouched.
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(req: RecordedRequest): MockResponse {
+                val idx = index(req.path)
+                return if (idx == 0 && reqSeq.getAndIncrement() == 0L)
+                    MockResponse().setResponseCode(403)
+                else MockResponse().setBody(okio.Buffer().write(segmentBodies[idx]))
+            }
+        }
+        val segs = (0 until 2).map { server.url("/seg$it.ts").toString() }
+        val dest = File(tmp, "freshdial.hts")
+        val sidecar = File(tmp, "freshdial.hlsrs")
+        HlsVodDownloader.downloadSegments(
+            client, segs, mapOf("Referer" to "https://megaplay.example/"), dest, sidecar,
+            estimatedTotalBytes = 0L, onProgress = { _, _, _, _ -> }, isCancelled = { false }
+        )
+        // The completed file is exact (byte order preserved redial-or-not).
+        assertTrue(dest.readBytes().contentEquals(concat(segmentBodies.take(2))))
+        assertEquals(HlsVodDownloader.ResumeState(2, concat(segmentBodies.take(2)).size.toLong()),
+            HlsVodDownloader.readResume(sidecar))
+        // seg0 was requested twice: the throttled dial + the fresh one; seg1 once.
+        assertEquals(3, reqSeq.get())
+    }
+
+    @Test
+    fun `persistent 403 across three fresh dials escapes as RateLimited with boundary held`() = runBlocking {
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(req: RecordedRequest): MockResponse =
+                if (index(req.path) == 1) {
+                    failHubRequests.incrementAndGet()
+                    MockResponse().setResponseCode(403)
+                } else MockResponse().setBody(okio.Buffer().write(segmentBodies[0]))
+        }
+        val segs = (0 until 3).map { server.url("/seg$it.ts").toString() }
+        val dest = File(tmp, "persist.hts")
+        val sidecar = File(tmp, "persist.hlsrs")
+        var caught: HlsVodDownloader.RateLimited? = null
+        try {
+            HlsVodDownloader.downloadSegments(
+                client, segs, emptyMap(), dest, sidecar,
+                estimatedTotalBytes = 0L, onProgress = { _, _, _, _ -> }, isCancelled = { false }
+            )
+        } catch (e: HlsVodDownloader.RateLimited) {
+            caught = e
+        }
+        assertNotNull(caught)
+        assertEquals(403, caught!!.lastStatus)
+        assertEquals(1, caught.segmentsDone)
+        // Boundary = exactly segment 0's bytes; sidecar resumes there.
+        assertTrue(dest.readBytes().contentEquals(segmentBodies[0]))
+        assertEquals(HlsVodDownloader.ResumeState(1, segmentBodies[0].size.toLong()),
+            HlsVodDownloader.readResume(sidecar))
+        // Three dials for the 403ing segment: original + two fresh redials of
+        // the pool before the typed escape.
+        assertEquals(3, failHubRequests.get())
     }
 
     // ─────────────────────────── resume sidecar ───────────────────────────

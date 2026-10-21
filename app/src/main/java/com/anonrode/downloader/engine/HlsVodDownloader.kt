@@ -263,9 +263,22 @@ object HlsVodDownloader {
                     client.newCall(buildRequest(url, headers)).execute().use { res ->
                         lastStatus = res.code
                         if (res.code == 403 || res.code == 429) {
-                            // Quota family: stop cleanly. Every committed
-                            // segment is already in the sidecar, so the
-                            // resumed attempt continues at THIS boundary.
+                            // P-1 (rows 35/8, owner directive): drop the
+                            // throttled connection and pick up a NEW one
+                            // BEFORE the typed escape — pooled connections may
+                            // carry per-connection limiter state, and a redial
+                            // is free under every limiter model (it only
+                            // matters if the budget is per-connection). The
+                            // park/resume boundary semantics are unchanged:
+                            // once the fresh dials are exhausted the escape
+                            // below still parks at the committed boundary.
+                            runCatching { client.connectionPool.evictAll() }
+                            if (attemptNo < 3) {
+                                throw java.io.IOException("redial after HTTP ${res.code} (fresh connection)")
+                            }
+                            // Quota family after a fresh dial also failed:
+                            // every committed segment is in the sidecar, so
+                            // the resumed attempt continues at THIS boundary.
                             throw RateLimited(cumulative, idx, res.code)
                         }
                         if (!res.isSuccessful) {
