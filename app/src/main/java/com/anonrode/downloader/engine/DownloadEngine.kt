@@ -2042,7 +2042,12 @@ class DownloadEngine(
                 "Tap retry to fetch a fresh link, or choose another server/episode."
         }
         if (lower == "error:" || lower == "error" || lower.endsWith(": error:")) {
-            return "The source server returned an empty response instead of a video. Tap retry to fetch a fresh link."
+            // Truth preservation (charter 12.6, share-43 rows 8/32): show the
+            // actual aggregate the backend printed instead of asserting
+            // "empty response" — a blank yt-dlp ERROR is a missing-reason
+            // symptom, and the wording must not mask a status-bearing fail.
+            return "The source server returned a blank failure line (${rawErr.trim().take(120)}) instead of a video. " +
+                "Tap retry to fetch a fresh link."
         }
         if (lower.contains("origincooldown") || lower.contains("cooling down")) {
             return "The source server is rate-limiting downloads right now — it will retry automatically."
@@ -2088,7 +2093,10 @@ class DownloadEngine(
             )
         }
         com.anonrode.downloader.util.DebugLog.user(
-            "park task=${task.id} (cycle=$cycles, landed=${landed / 1024}KiB, forced=$forcePark) reason=${err.take(140)}"
+            // 300 chars: the reason now carries the backend's real diagnostic
+            // line + HTTP status (truth preservation, share-43 rows 8/32) —
+            // the old 140-char cut truncated the status off the park line.
+            "park task=${task.id} (cycle=$cycles, landed=${landed / 1024}KiB, forced=$forcePark) reason=${err.take(300)}"
         )
         updateServiceState(force = true)
         return true

@@ -89,6 +89,46 @@ object YoutubeDlDownloader {
         }
     }
 
+    /** Progress/decoration lines are never diagnostics. */
+    internal fun isYtDlpDiagnosticLine(line: String): Boolean {
+        val t = line.trim()
+        if (t.isBlank()) return false
+        if (t.startsWith("[download]") || t.startsWith("[hlsnative]") || t.startsWith("[info]") ||
+            t.contains("@@DLP@@") || t.contains("% of") || t.contains("Destination:")
+        ) return false
+        return t.startsWith("ERROR") || t.startsWith("WARNING") ||
+            t.contains("HTTP Error ") || t.contains("Unable to download") ||
+            Regex("""\b4\d\d\b[^\r\n]{0,40}(Forbidden|Unauthorized|Not Found)""").containsMatchIn(t)
+    }
+
+    /** Last HTTP status evidencing WHY the transfer died — "HTTP Error 403"
+     *  (yt-dlp native), then a "<code> <reason>" fallback. Null when the
+     *  output never surfaced one (charter: never fabricate a status). */
+    internal fun lastHttpStatus(text: String): Int? {
+        val httpError = Regex("""HTTP Error (\d{3})""").findAll(text).toList()
+        httpError.lastOrNull()?.let { return it.groupValues[1].toIntOrNull() }
+        val alt = Regex("""\b(4\d\d|5\d\d)\b[^\r\n]{0,40}(?:Forbidden|Unauthorized|Not Found|Too Many Requests|Bad Gateway)""")
+            .findAll(text).toList()
+        return alt.lastOrNull()?.groupValues?.get(1)?.toIntOrNull()
+    }
+
+    /**
+     * Honest replacement for the old blank-ERROR message ("The source server
+     * returned an empty response instead of a video"), which discarded the
+     * backend's evidence and left the owner unable to tell a referer-gated
+     * 403 from a dead origin (share-43 rows 8/32: 8 blank "yt-dlp failed:
+     * ERROR:" parks held 89,794 KiB while the source answered 200 WITH
+     * Referer / 403 WITHOUT — the failure line existed in the process output
+     * and was thrown away). Carries the last diagnostic stderr line verbatim
+     * and the last HTTP status the backend reported.
+     */
+    internal fun buildEmptyYtDlpErrorResponse(diagnostic: String?, status: Int?): String {
+        val d = diagnostic?.trim()?.take(200) ?: "yt-dlp printed no diagnostic line"
+        val s = status?.let { "last HTTP status $it" } ?: "no HTTP status reported"
+        return "The source server refused or returned nothing usable ($d; $s). " +
+            "Tap retry to fetch a fresh link, or choose another server/episode."
+    }
+
     /**
      * Terminal yt-dlp errors: the extractor answered with a condition that
      * retrying IDENTICAL arguments cannot change. Substring matches, all
@@ -615,6 +655,9 @@ object YoutubeDlDownloader {
         var attempts = 0
         // Last attempt's raw error text, for the terminal-error fail-fast below.
         var lastErrorMessage: String? = null
+        // Last diagnostic (ERROR/HTTP-status) line the process printed, for the
+        // blank-ERROR truth report — the aggregate used to discard it.
+        var lastDiagnosticLine: String? = null
         var terminalErrorHit = false
 
         suspend fun attemptOnce(): File? {
@@ -635,6 +678,9 @@ object YoutubeDlDownloader {
                 YoutubeDL.getInstance().execute(request, taskId) { progress, etaInSeconds, line ->
                     if (line != null) {
                         val trimmedLine = line.trim()
+                        if (isYtDlpDiagnosticLine(trimmedLine)) {
+                            lastDiagnosticLine = trimmedLine
+                        }
                         // Detect format/stream transition (e.g. video finished, audio starting)
                         if (trimmedLine.startsWith("[download] Destination:") || trimmedLine.startsWith("[download] Downloading item")) {
                             if (currentStreamDl > 0L) {
@@ -893,7 +939,10 @@ object YoutubeDlDownloader {
                 // wrapper class.
                 "The source server stopped sending video data (the stream stalled) and the link was killed. Tap retry to fetch a fresh link."
             } else if (produced == null && isEmptyYtDlpError(errors.toString())) {
-                "The source server returned an empty response instead of a video. Tap retry to fetch a fresh link."
+                // Truth preservation (charter 12.6): never surface a blank
+                // aggregate — carry the last diagnostic line and HTTP status
+                // the process actually printed (see buildEmptyYtDlpErrorResponse).
+                buildEmptyYtDlpErrorResponse(lastDiagnosticLine, lastHttpStatus(errors.toString()))
             } else {
                 "yt-dlp failed after $attempts attempt(s): ${errors.toString().trim()}"
             }

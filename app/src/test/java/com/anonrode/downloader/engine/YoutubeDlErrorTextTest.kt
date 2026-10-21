@@ -1,6 +1,8 @@
 package com.anonrode.downloader.engine
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -34,5 +36,57 @@ class YoutubeDlErrorTextTest {
         assertTrue(YoutubeDlDownloader.isEmptyYtDlpError(""))
         assertTrue(YoutubeDlDownloader.isEmptyYtDlpError("run 1: ERROR: \nrun 2: ERROR: "))
         assertFalse(YoutubeDlDownloader.isEmptyYtDlpError("run 1: ERROR: HTTP Error 403"))
+    }
+
+    // ---- truth preservation (charter 12.6, share-43 rows 8/32): the blank
+    // `ERROR: ` aggregate must not discard the backend's diagnostic line and
+    // HTTP status — 8 parks held 89,794 KiB with blank reasons while the
+    // source answered 200 WITH Referer / 403 WITHOUT.
+
+    @Test
+    fun `diagnostic line filter rejects progress and accepts error evidence`() {
+        assertFalse(YoutubeDlDownloader.isYtDlpDiagnosticLine("[download]  42.3% of  300.00MiB at  2.10MiB/s"))
+        assertFalse(YoutubeDlDownloader.isYtDlpDiagnosticLine("[download] Destination: out.mp4"))
+        assertFalse(YoutubeDlDownloader.isYtDlpDiagnosticLine("progress:@@DLP@@12|300|2100"))
+        assertTrue(YoutubeDlDownloader.isYtDlpDiagnosticLine("ERROR: Unable to download webpage: HTTP Error 403: Forbidden"))
+        assertTrue(YoutubeDlDownloader.isYtDlpDiagnosticLine("ERROR: unable to download video data: HTTP Error 403: Forbidden"))
+        assertTrue(YoutubeDlDownloader.isYtDlpDiagnosticLine("WARNING: unable to download video data"))
+    }
+
+    @Test
+    fun `last http status is extracted from the real stderr shapes`() {
+        assertEquals(
+            403,
+            YoutubeDlDownloader.lastHttpStatus(
+                "run 1: ERROR: Unable to download webpage: HTTP Error 403: Forbidden"
+            )
+        )
+        assertEquals(
+            401,
+            YoutubeDlDownloader.lastHttpStatus(
+                "run 2: ERROR: unable to download video data: HTTP Error 401: Unauthorized"
+            )
+        )
+        assertEquals(
+            403,
+            YoutubeDlDownloader.lastHttpStatus("[generic] 403 Forbidden for https://x")
+        )
+        assertNull(YoutubeDlDownloader.lastHttpStatus("run 1: ERROR: "))
+    }
+
+    @Test
+    fun `empty aggregate error carries the diagnostic verbatim plus the http status`() {
+        val diagnostic = "ERROR: Unable to download webpage: HTTP Error 403: Forbidden"
+        val msg = YoutubeDlDownloader.buildEmptyYtDlpErrorResponse(diagnostic, 403)
+        assertTrue("diagnostic line must be verbatim", msg.contains(diagnostic))
+        assertTrue("status must be named", msg.contains("last HTTP status 403"))
+        assertFalse("no blank aggregate claims", msg.contains("returned an empty response"))
+    }
+
+    @Test
+    fun `empty aggregate error says so honestly when nothing was captured`() {
+        val msg = YoutubeDlDownloader.buildEmptyYtDlpErrorResponse(null, null)
+        assertTrue(msg.contains("no diagnostic line"))
+        assertTrue(msg.contains("no HTTP status reported"))
     }
 }
