@@ -310,6 +310,35 @@ internal fun readSubtitleHead(file: File, maxBytes: Int = 512): String = try {
 }
 
 /**
+ * Sibling-sidecar discovery rule (pure, JVM-tested). Accepts every shape
+ * written next to `<stem>.<video-ext>`:
+ *  - exact name, no language segment: "Show.srt" (VLC-style manual copies,
+ *    third-party downloads — invisible to the old filter, which required a
+ *    dot AFTER the stem);
+ *  - one dotted tag segment: "Show.en.srt", "Show.pt-BR.srt" (engine +
+ *    yt-dlp shape), "Show.en-2.srt" (collision rename);
+ *  - ANY letter case in stem/tag/extension ("SHOW.EN.SRT", "Show.VTT") —
+ *    FAT/FUSE case-preserving volumes mix case freely and the old
+ *    case-sensitive endsWith hid those files.
+ * The match stays anchored: everything after the stem must be at most
+ * [stem].[one tag].[subtitle ext] — "Showtime.en.srt" never matches stem
+ * "Show" (the old prefix filter did match it, a false positive this rule
+ * also removes).
+ */
+internal fun isSidecarSubtitleSibling(name: String, videoStem: String): Boolean {
+    if (videoStem.isEmpty() || !name.startsWith(videoStem, ignoreCase = true)) return false
+    // Everything after the stem must start with the first dot separator —
+    // "Showcase.srt" starts with "Show" but is a different word, not a
+    // "<stem>.<...>" sibling.
+    val tail = name.substring(videoStem.length)
+    if (!tail.startsWith(".")) return false
+    val segments = tail.split('.').filter { it.isNotEmpty() }
+    val ext = segments.lastOrNull()?.lowercase() ?: return false
+    if (ext !in SIDECAR_SUBTITLE_EXTS) return false
+    return segments.size == 1 || (segments.size == 2 && segments[0].isNotEmpty())
+}
+
+/**
  * Full-screen in-app player, rebuilt around one rule: ONE ExoPlayer instance
  * for the whole modal lifetime. Switching files (Next/Previous/auto-advance)
  * calls setMediaItem() on the same player instead of recreating it — the
@@ -592,15 +621,16 @@ private fun MediaPlayerModalImpl(
                     .setArtist(file.parentFile?.name ?: "")
                     .build()
             )
-        // Subtitle sidecars found by PREFIX match, not exact: yt-dlp writes
-        // "Name.en.srt" (language-tagged) and the engine's move-along renames
-        // them to the sanitized video stem + lang — exact "Name.srt" matching
-        // silently missed both shapes. Discovery widened, language via
-        // sidecarLanguageHint.
+        // Subtitle sidecars found by [isSidecarSubtitleSibling]: yt-dlp writes
+        // "Name.en.srt" (language-tagged), the engine's move-along renames
+        // them to the sanitized video stem + lang, and third-party writers
+        // (manual VLC-style copies) use exact "Name.srt" — all three shapes
+        // plus any letter case in stem/tag/ext now discover. A stem-anchored
+        // rule (not plain prefix) so "Showtime.en.srt" is never a sidecar of
+        // "Show.mkv". Language still via sidecarLanguageHint.
         val videoStem = file.nameWithoutExtension
         val sidecarFiles = file.parentFile?.listFiles { s ->
-            s.isFile && s.canRead() &&
-                SIDECAR_SUBTITLE_EXTS.any { s.name.startsWith("$videoStem.") && s.name.endsWith(".$it") }
+            s.isFile && s.canRead() && isSidecarSubtitleSibling(s.name, videoStem)
         }?.sortedBy { it.name } ?: emptyList()
         val sidecars = sidecarFiles.mapNotNull { sibling ->
             val extName = sibling.extension.lowercase()
