@@ -988,12 +988,30 @@ object HttpClient {
                         if (r.code == 429 || r.code == 503) {
                             throw OriginCooldownException(r.request.url.toString())
                         }
-                        throw java.io.IOException("HTTP ${r.code} for ${r.request.url.toString().take(120)}")
+                        throw HttpStatusCodeException(r.code, r.request.url.toString())
                     }
                 }
             }
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
+        } catch (e: HttpStatusCodeException) {
+            // The edge NAMED its rejection: keep the exact historical lastFailure
+            // shape AND prove the host hostile for a session window. Share-43 /
+            // investigation 11 R1: 2anime.xyz 436s were re-fetched five times
+            // inside one resolve because the status died in a bare IOException
+            // string nobody classified. 403 + 436 are the observed edge-rejection
+            // class (Cloudflare bot walls); 404 stays a dead-link signal, 429/503
+            // ride OriginCooldownException, 451 has its own edge-route failover.
+            lastFailure = e.message
+            Log.w("HttpClient", e.message ?: "HTTP ${e.code}")
+            if (e.code == 403 || e.code == 436) {
+                com.anonrode.downloader.pipeline.HostHealth.recordFail(
+                    url,
+                    reason = "HTTP ${e.code} ${HttpClient.parsedHost(url) ?: ""}".trim()
+                )
+            }
+            onFailure?.onFailure(url, e)
+            null
         } catch (e: Exception) {
             val message = if (e is OriginCooldownException) {
                 "OriginCooldownException: HTTP 429/503 cooldown active for ${url.take(120)}"

@@ -393,7 +393,7 @@ object ResolverRegistry {
                     false
                 } else true
             }
-            .let { seq -> if (bypassHealth) seq else seq.filter { com.anonrode.downloader.pipeline.HostHealth.isUsable(it) } }
+            .let { seq -> seq.filter { candidateAllowedByHealth(it, bypassHealth) } }
             .toList()
         // Provider-issued mirror fan-outs (nepu resolveEpisode — share-31 log,
         // 2026-10-16 12:05, Servamp): the candidate list was handed to us by
@@ -425,9 +425,26 @@ object ResolverRegistry {
         }
     }
 
+    /**
+     * Candidate gate for resolveAny (investigation 11 R1 / fix row 10). A
+     * FRESH named edge rejection — HostHealth.hardBlockActive: the last
+     * recorded verdict was an HTTP 403/436 within its session TTL — skips
+     * the host EVEN under bypassHealth. bypassHealth exists to lift STALE
+     * cross-session backoffs on provider-endorsed fan-outs (share-31), never
+     * to re-fetch a host this session just proved hostile: the mayonaka-punch
+     * resolve 436'd the same 2anime.xyz embed five times and died "chain
+     * EMPTY" because every hop re-learned the rejection from scratch. The
+     * candidate list then FALLS THROUGH to the remaining lanes.
+     * Pure decision surface so JVM tests can pin the contract without
+     * network.
+     */
+    internal fun candidateAllowedByHealth(url: String, bypassHealth: Boolean): Boolean {
+        if (com.anonrode.downloader.pipeline.HostHealth.hardBlockActive(url)) return false
+        return bypassHealth || com.anonrode.downloader.pipeline.HostHealth.isUsable(url)
+    }
+
     /** User-facing reason for an OTA knownDead host, or null when live. */
-    internal fun knownDeadReason(url: String): String? {
-        if (!DynamicRulesManager.isKnownDead(url)) return null
+    internal fun knownDeadReason(url: String): String? {        if (!DynamicRulesManager.isKnownDead(url)) return null
         val low = url.lowercase()
         return if (low.contains("zippyshare")) {
             "Zippyshare shut down in 2023 — this link cannot be downloaded"

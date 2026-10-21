@@ -322,6 +322,37 @@ object HostHealth {
     fun hasProvenLocker(hostOrUrl: String): Boolean =
         (records[hostOf(hostOrUrl)]?.ok ?: 0L) >= 1L
 
+    /**
+     * Session hard block (investigation 11 R1 / fix row 10): the host's most
+     * recent transport verdict was a NAMED edge rejection — HTTP 403 or 436
+     * (Cloudflare-style bot walls; recorded by HttpClient's
+     * HttpStatusCodeException branch as reason "HTTP <code> ...", and equally
+     * by resolvers whose failure text embeds the code). Distinct from
+     * [isUsable]'s consecutive-fails backoff (which a single failure cannot
+     * trigger): one 436 must skip the host for the session window NOW, or the
+     * resolver chain re-fights the same rejection until the task dies
+     * ("resolver chain EMPTY", mayonaka-punch 5× 436 in one resolve).
+     *
+     * TTL-bounded (15 min, persisted via the same lastFailMs field so the
+     * ledger needs no new schema) and overruled by any later success:
+     * recordOk/clearIfAlive move lastOkMs past lastFailMs. Exempt hosts
+     * (social/video app hosts) never block.
+     */
+    fun hardBlockActive(hostOrUrl: String): Boolean {
+        val h = hostOf(hostOrUrl)
+        if (h.isBlank() || isExemptHost(h)) return false
+        val r = records[h] ?: return false
+        val reason = r.lastReason?.lowercase() ?: return false
+        if (HARD_BLOCK_REASONS.none { reason.contains(it) }) return false
+        val sinceFail = System.currentTimeMillis() - r.lastFailMs
+        if (sinceFail < 0L || sinceFail >= HARD_BLOCK_TTL_MS) return false
+        // A proven sign of life AFTER the rejection lifts the block.
+        return r.lastOkMs <= r.lastFailMs
+    }
+
+    private const val HARD_BLOCK_TTL_MS = 15 * 60_000L
+    private val HARD_BLOCK_REASONS = listOf("http 403", "http 436")
+
     /** Debug summary for the activity log (bounded to the hottest entries). */
     fun snapshotForLog(limit: Int = 12): String {
         return records.entries.take(limit).joinToString(", ") { (k, v) ->
