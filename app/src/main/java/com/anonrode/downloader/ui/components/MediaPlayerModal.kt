@@ -298,6 +298,19 @@ internal fun sidecarSpec(fileExtension: String, head: String): SidecarSpec {
     }
 }
 
+/**
+ * Attach policy when the `.srt`-named WebVTT sidecar fails its vttToSrt
+ * conversion (trace 2026-10-21 d3). The old fallback attached the ORIGINAL
+ * file under the guessed SubRip mime — but the head IS a WEBVTT header, the
+ * SubRip parser rejects it unconditionally, and the track shipped as a
+ * silent zero-cue entry (listed, selectable, never a cue). Re-sniff instead:
+ * the head is the truth-resolver — return the real WebVTT mime to attach the
+ * original under, or null to DROP the track (an unreadable/garbage body
+ * would only re-produce the dead track at parse time). Never x-subrip.
+ */
+internal fun failedConversionMime(head: String): String? =
+    if (SubtitleSurfaces.looksLikeVtt(head)) "text/vtt" else null
+
 /** First bytes of a sidecar, BOM tolerated by the callers. */
 internal fun readSubtitleHead(file: File, maxBytes: Int = 512): String = try {
     file.inputStream().use { input ->
@@ -639,19 +652,41 @@ private fun MediaPlayerModalImpl(
             // Mislabeled container: an .srt that is really WebVTT is
             // converted (headered VTT is rejected by the SubRip parser);
             // an .vtt that is really SRT is attached as SubRip as-is.
-            val attachedFile = if (spec.convertVttToSrt) {
+            // Conversion failure never falls back to the original under the
+            // guessed SubRip mime — that head is WebVTT, the SubRip parser
+            // rejects it, and the track ships as a silent zero-cue entry.
+            // [failedConversionMime] re-sniffs: attach the original as real
+            // WebVTT when it still reads as one (e.g. the cache write was
+            // the failing step — the original itself is fine), else drop
+            // the track entirely; the drop is logged.
+            val attach: Pair<File, String> = if (spec.convertVttToSrt) {
                 try {
                     val converted = SubtitleSurfaces.vttToSrt(sibling.readText())
                     val outDir = File(context.cacheDir, "player_subs").apply { mkdirs() }
-                    File(outDir, sibling.name.substringBeforeLast('.') + ".converted.srt").apply {
+                    val convertedFile = File(outDir, sibling.name.substringBeforeLast('.') + ".converted.srt").apply {
                         writeText(converted)
                     }
-                } catch (_: Throwable) {
-                    sibling
+                    convertedFile to spec.mimeType
+                } catch (t: Throwable) {
+                    android.util.Log.w(
+                        "MediaPlayerModal",
+                        "sidecar vtt->srt conversion failed for " +
+                            "${sibling.name} (${t.javaClass.simpleName}: ${t.message}) — re-sniffing"
+                    )
+                    val rescueMime = failedConversionMime(head)
+                    if (rescueMime == null) {
+                        android.util.Log.w(
+                            "MediaPlayerModal",
+                            "sidecar ${sibling.name} dropped: unreadable body would present a dead track"
+                        )
+                        return@mapNotNull null
+                    }
+                    sibling to rescueMime
                 }
-            } else sibling
+            } else sibling to spec.mimeType
+            val (attachedFile, attachMime) = attach
             MediaItem.SubtitleConfiguration.Builder(Uri.fromFile(attachedFile))
-                .setMimeType(spec.mimeType)
+                .setMimeType(attachMime)
                 // "movie.en.srt" carries a real language tag: feeding it
                 // lets the auto-pick rule below treat a sidecar exactly
                 // like an embedded EN track instead of "und".
