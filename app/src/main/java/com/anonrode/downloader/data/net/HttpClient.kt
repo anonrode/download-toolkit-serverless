@@ -944,6 +944,26 @@ object HttpClient {
     fun getText(url: String, referer: String? = null, headers: Map<String, String> = emptyMap(), acceptStatus: Set<Int> = emptySet(), tag: String? = null, permissive: Boolean = false, maxBytes: Long = MAX_TEXT_BYTES, onFailure: FailureListener?): String? =
         getTextWithClient(if (permissive) permissiveClient else shared, url, referer, headers, acceptStatus, tag, maxBytes, onFailure)
 
+    /**
+     * getText with a HARD per-call budget (connect + read). The default
+     * client's 30s read timeout lets a wedged HTTP/2 edge hold the calling
+     * thread for the full half-minute while delivering nothing — asianc's
+     * api/a=search stalled exactly this way twice on 2026-10-20 ("Required
+     * SETTINGS preface not received after 30978ms" / "Read timed out after
+     * 30529ms"), and the day's FIRST search call shadows the cold-start
+     * UI. Search/category callers pass ~10s and may retry once on a fresh
+     * connection: a wedged pooled edge is bypassed, a slow origin is
+     * answered within budget, and the failure journaling/probe semantics
+     * are identical to [getTextWithClient].
+     */
+    fun getTextWithTimeout(url: String, timeoutMs: Long, referer: String? = null, headers: Map<String, String> = emptyMap(), acceptStatus: Set<Int> = emptySet(), tag: String? = null, maxBytes: Long = MAX_TEXT_BYTES): String? {
+        val bounded = shared.newBuilder()
+            .connectTimeout(timeoutMs.coerceIn(1_000L, 30_000L), java.util.concurrent.TimeUnit.MILLISECONDS)
+            .readTimeout(timeoutMs.coerceIn(1_000L, 30_000L), java.util.concurrent.TimeUnit.MILLISECONDS)
+            .build()
+        return getTextWithClient(bounded, url, referer, headers, acceptStatus, tag, maxBytes, null)
+    }
+
     // Injected client keeps regression tests socket-free without mutating shared state.
     internal fun getTextWithClient(client: OkHttpClient, url: String, referer: String? = null, headers: Map<String, String> = emptyMap(), acceptStatus: Set<Int> = emptySet(), tag: String? = null, maxBytes: Long = MAX_TEXT_BYTES, onFailure: FailureListener? = null): String? {
         return try {

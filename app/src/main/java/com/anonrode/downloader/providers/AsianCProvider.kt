@@ -38,12 +38,22 @@ object AsianCProvider : SiteProvider {
         return searchCompiled(query)
     }
 
+    /** Cold-start budget for the search API (share-43 §RC-2): the endpoint is
+     *  0.2-0.5s warm, but twice on 2026-10-20 the day's FIRST call wedged its
+     *  HTTP/2 preface to the full 30s read timeout, holding the search
+     *  thread (00:08:09 and 00:42:12). Bound each attempt to 10s and retry
+     *  once — getTextWithTimeout derives a fresh client per call, so the
+     *  retry lands on a new connection instead of the wedged pooled edge. */
+    private const val SEARCH_TIMEOUT_MS = 10_000L
+
     private suspend fun searchCompiled(query: String): List<ShowCard> {
         val results = mutableListOf<ShowCard>()
         try {
             val encoded = URLEncoder.encode(query, "UTF-8")
             val url = "$mainUrl/api?a=search&keyword=$encoded"
-            val jsonStr = HttpClient.getText(url, referer = "$mainUrl/", tag = "search") ?: return emptyList()
+            val jsonStr = HttpClient.getTextWithTimeout(url, SEARCH_TIMEOUT_MS, referer = "$mainUrl/", tag = "search")
+                ?: HttpClient.getTextWithTimeout(url, SEARCH_TIMEOUT_MS, referer = "$mainUrl/", tag = "search")
+                ?: return emptyList()
 
             val array = JSONArray(jsonStr)
             for (i in 0 until array.length()) {
