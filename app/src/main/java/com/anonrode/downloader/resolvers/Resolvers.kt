@@ -1291,11 +1291,18 @@ object KisskhMegaplayResolver : BaseResolver {
                     if (!apiJson.isNullOrBlank()) {
                         val data = JSONObject(apiJson)
                         val fileUrl = data.optJSONObject("sources")?.optString("file")
-                        if (!fileUrl.isNullOrBlank()) return fileUrl
-                        val enc = data.optString("enc")
-                        if (enc.isNotBlank()) {
-                            val decrypted = decryptMegaplayEnc(enc)
-                            if (!decrypted.isNullOrBlank()) return decrypted
+                            ?.takeIf { it.isNotBlank() }
+                        val resolved = fileUrl ?: decryptMegaplayEnc(data.optString("enc"))
+                        if (!resolved.isNullOrBlank()) {
+                            // Captions surface BEFORE the return: the getSources
+                            // payload carries `tracks[]` alongside sources/enc and
+                            // it was silently dropped since the lane existed
+                            // (share-43 / investigation 11 — Demon's Ascension and
+                            // every Anitaku download shipped without subtitles).
+                            // Best-effort: a subtitle loss must never fail the
+                            // stream (recipe contract).
+                            recordMegaplayCaptions(resolved, apiJson, url)
+                            return resolved
                         }
                     }
                 }
@@ -1325,6 +1332,104 @@ object KisskhMegaplayResolver : BaseResolver {
         }
         return null
     }
+
+    /**
+     * megaplay getSources `tracks[]` → caption surfaces (investigation 11,
+     * live 2026-10-21). The JSON shape is:
+     *   {"tracks":[{"file":"https://<cdn>/....vtt","label":"English",
+     *               "kind":"captions","default":true},
+     *              {"file":".../preview/thumbnails.vtt","kind":"thumbnails"}],
+     *    "enc":"<AES blob whose plaintext is {\"file\":\"<master.m3u8>\"}>"}
+     * Only `kind == "captions"` entries are subtitles — the thumbnails
+     * preview is a scrubber sprite sheet and must NOT leak into sidecars.
+     * Pure (no I/O), JVM-tested against the captured payload.
+     */
+    internal fun parseMegaplayCaptions(apiJson: String): List<com.anonrode.downloader.providers.SiteSubtitleTrack> {
+        if (apiJson.isBlank()) return emptyList()
+        val root = try {
+            JSONObject(apiJson)
+        } catch (_: Exception) {
+            return emptyList()
+        }
+        val tracks = root.optJSONArray("tracks") ?: return emptyList()
+        val out = mutableListOf<com.anonrode.downloader.providers.SiteSubtitleTrack>()
+        for (i in 0 until tracks.length()) {
+            val item = tracks.optJSONObject(i) ?: continue
+            if (!item.optString("kind").trim().equals("captions", ignoreCase = true)) continue
+            val file = item.optString("file").trim()
+            if (file.isBlank() || !file.startsWith("http", ignoreCase = true)) continue
+            val label = item.optString("label").trim()
+            val format = com.anonrode.downloader.providers.SubtitleSurfaces.formatOf(file)
+                .ifBlank { "vtt" } // megaplay captions are always WebVTT on the wire
+            out.add(
+                com.anonrode.downloader.providers.SiteSubtitleTrack(
+                    url = file,
+                    language = megaplayLangFromLabel(label),
+                    label = label,
+                    format = format
+                )
+            )
+        }
+        return out.distinctBy { it.url.lowercase() }
+    }
+
+    /**
+     * Record the captions for the stream we are about to return, under every
+     * key the engine's sidecar pass queries:
+     *  - SubtitleSurfaces: the RETURNED master URL (task.directUrl — the key
+     *    the engine guarantees) plus the cracked source page as a secondary;
+     *  - ResolvedHints: [com.anonrode.downloader.data.models.SubtitleTrack]s
+     *    for the same directUrl, so downloadSubtitleSidecars' lookup
+     *    (ResolvedHints.subtitlesFor(task.directUrl)) sees them even if the
+     *    SubtitleSurfaces entry aged out (30 min merged TTL there vs 6 h).
+     * The Referer contract is pinned with the record (live referer flip,
+     * 2026-10-21: the VTT host 403s without `Referer: https://megaplay.buzz/`,
+     * and rotating CDN hosts like j1i9s.embermeadow.world match NO referer
+     * host-policy, so the sidecar fetch must take it from the hint, not the
+     * policy fallback). Never throws, never influences the returned URL.
+     * internal: JVM tests must exercise the REAL key set.
+     */
+    internal fun recordMegaplayCaptions(masterUrl: String, apiJson: String, sourcePageUrl: String = "") {
+        val tracks = parseMegaplayCaptions(apiJson)
+        if (tracks.isEmpty()) return
+        for (key in LinkedHashSet(listOf(masterUrl, sourcePageUrl))) {
+            if (key.isNotBlank()) {
+                com.anonrode.downloader.providers.SubtitleSurfaces.record(key, tracks)
+            }
+        }
+        com.anonrode.downloader.pipeline.ResolvedHints.remember(
+            episodeUrl = "",
+            directUrl = masterUrl,
+            referer = "https://megaplay.buzz/",
+            subtitles = tracks.map {
+                com.anonrode.downloader.data.models.SubtitleTrack(
+                    url = it.url,
+                    lang = it.language,
+                    kind = it.format
+                )
+            }
+        )
+    }
+
+    /** megaplay labels captions ("English") instead of sending an ISO code;
+     *  translate the common labels, pass through real codes, else "und". */
+    internal fun megaplayLangFromLabel(label: String): String {
+        val mapped = MEGAPLAY_LABEL_TO_LANG[label.trim().lowercase()]
+        if (mapped != null) return mapped
+        val cleaned = label.trim().lowercase().replace(' ', '-')
+        return if (Regex("""^[a-z]{2,3}(-[a-z0-9]{2,8})*$""").matches(cleaned)) cleaned else "und"
+    }
+
+    private val MEGAPLAY_LABEL_TO_LANG = mapOf(
+        "english" to "en", "spanish" to "es", "español" to "es",
+        "portuguese" to "pt", "português" to "pt", "brazilian portuguese" to "pt-BR",
+        "french" to "fr", "français" to "fr", "german" to "de", "deutsch" to "de",
+        "italian" to "it", "italiano" to "it", "japanese" to "ja", "日本語" to "ja",
+        "korean" to "ko", "한국어" to "ko", "chinese" to "zh", "中文" to "zh",
+        "arabic" to "ar", "hindi" to "hi", "russian" to "ru", "turkish" to "tr",
+        "thai" to "th", "vietnamese" to "vi", "indonesian" to "id",
+        "malay" to "ms", "polish" to "pl", "ukrainian" to "uk", "filipino" to "fil"
+    )
 }
 
 // -------------------------------------------------------------
