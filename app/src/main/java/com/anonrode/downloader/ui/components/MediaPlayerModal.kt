@@ -179,6 +179,24 @@ private val IMAGE_EXTS = listOf("jpg", "jpeg", "png", "webp", "gif")
 private val PLAYBACK_SPEEDS = listOf(0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 1.75f, 2.0f)
 
 /**
+ * Persisted value of an explicit sheet "Off" (trace 2026-10-21 d6 / matrix
+ * row 13). Stored verbatim under MediaPlayerPrefs' subtitle-track string
+ * key, it is distinguishable from a MISSING key: null/absent = "never
+ * chose" (auto-pick allowed to enable a preferred-language track), the
+ * sentinel = "the user turned subs OFF" (a decision that must survive
+ * modal reopen — auto-pick never re-enables while it is stored; a later
+ * user pick overwrites it with the real label). No parser or library ever
+ * emits this string as a format label, so it cannot collide.
+ */
+internal const val SUBTITLE_PREF_OFF = "__subtitles_off__"
+
+/** Pure derivation of the stored subtitle pref: does it hold the user's
+ *  explicit OFF decision (true) or a real label / nothing (false)? Kept
+ *  off Compose so the persistence contract is JVM-testable. */
+internal fun subtitlePrefHoldsUserOff(stored: String?): Boolean =
+    stored == SUBTITLE_PREF_OFF
+
+/**
  * One candidate embedded/sidecar subtitle track, flattened to the fields
  * the auto-pick rule needs (kept away from Media3 types so the rule is
  * JVM-testable without Robolectric).
@@ -500,8 +518,11 @@ private fun MediaPlayerModalImpl(
     }
 
     // ---- Persisted prefs ----
+    val storedSubtitlePref = remember { MediaPlayerPrefs.getSubtitleTrack(context) }
     val initialSpeed = remember { MediaPlayerPrefs.getPlaybackSpeed(context) }
-    val initialSubtitle = remember { MediaPlayerPrefs.getSubtitleTrack(context) }
+    // The sentinel is a decision ("user chose Off"), shown as no selection —
+    // never as a literal label in the sheet or chip.
+    val initialSubtitle = storedSubtitlePref?.takeUnless { subtitlePrefHoldsUserOff(it) }
     val initialSavedVolume = remember {
         (MediaPlayerPrefs.getMediaVolume(context) * 100).toInt().coerceIn(0, 100)
     }
@@ -541,8 +562,10 @@ private fun MediaPlayerModalImpl(
     // Auto-pick (2026-09-14): embedded MKV subs must APPEAR without the
     // user hunting the sheet — the first file with a preferred-language
     // track switches it on. Once the user has driven the sheet in this
-    // session (including "Off"), we never auto-touch again.
-    var subtitleUserDecided by remember { mutableStateOf(false) }
+    // session (including "Off"), we never auto-touch again. A persisted
+    // Off (sentinel) IS such a decision: it opens the modal pre-decided
+    // so auto-pick cannot silently re-enable across sessions (d6).
+    var subtitleUserDecided by remember { mutableStateOf(subtitlePrefHoldsUserOff(storedSubtitlePref)) }
     // Direct pref read via AppSettings.subtitleLanguage(context) (F-08
     // consolidation): the full AppSettings.load() snapshot was only ever
     // consulted for this single field here — same pref key, same "en" default.
@@ -610,6 +633,17 @@ private fun MediaPlayerModalImpl(
                 playWhenReady = true
                 playbackParameters = PlaybackParameters(initialSpeed)
                 volume = (initialSavedVolume / 100f).coerceIn(0f, 1f)
+                // Persisted explicit Off must hold on a FRESH player too: the
+                // library's own default-track rules would light a default-
+                // flagged embedded text track the moment tracks resolve, so
+                // the text renderer starts disabled (tracksLoaded handler
+                // then never re-enables — subtitleUserDecided opens true).
+                if (subtitlePrefHoldsUserOff(storedSubtitlePref)) {
+                    trackSelectionParameters = trackSelectionParameters
+                        .buildUpon()
+                        .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+                        .build()
+                }
             }
     }
     val mediaSession = remember {
@@ -1652,7 +1686,15 @@ private fun MediaPlayerModalImpl(
                 subtitleUserDecided = true
                 currentSubtitleLabel = if (off) null else label
                 applySubtitleByLabel(exoPlayer, exoPlayer.currentTracks, label, enable = !off)
-                MediaPlayerPrefs.setSubtitleTrack(context, if (off) null else label)
+                // Off persists as the DECISION sentinel (d6): null once meant
+                // "never chose", so the next session re-ran auto-pick and
+                // silently re-enabled subs the user had turned off. Any real
+                // pick overwrites the sentinel with its label — re-picking a
+                // track restores auto-pick trust exactly as before.
+                MediaPlayerPrefs.setSubtitleTrack(
+                    context,
+                    if (off) SUBTITLE_PREF_OFF else label
+                )
                 showSubtitleSheet = false
             },
             onDismiss = { showSubtitleSheet = false }
