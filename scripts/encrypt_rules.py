@@ -215,6 +215,11 @@ def _check_field_spec(spec, where, problems, prefixes=None, allow_self=True):
         if not isinstance(s, str) or not s or len(s) > MAX_SELECTOR_LEN:
             problems.append(
                 f"{where}: field spec must be a non-empty string <= {MAX_SELECTOR_LEN}")
+        elif s == "desc-img" or s.startswith("desc-img:"):
+            # Description-image primitive: first real <img> from an RSS item's
+            # content/description (9jaRocks inline poster). Optional ":<css>"
+            # narrows the selector.
+            pass
         elif (s != "self" if allow_self else True) and not s.startswith(prefixes):
             problems.append(
                 f"{where}: unknown field spec {s[:40]!r} (closed vocabulary)")
@@ -1326,9 +1331,23 @@ def validate_schema(plain: bytes) -> list:
                                                for x in arr)):
                     problems.append(
                         f"contentPolicy.{arr_name}: list of <= {cap} non-empty strings")
+            # Per-site OTA switch (2026-10-20): sites listed here are disabled
+            # for NEW work; absent/blank/malformed on-device parses as all-on.
+            ds = cp.get("disabledSites")
+            if ds is not None:
+                if not isinstance(ds, list) or len(ds) > 64:
+                    problems.append(
+                        "contentPolicy.disabledSites: array of <= 64 strings")
+                else:
+                    for site in ds:
+                        if not isinstance(site, str) or not site.strip() or len(site) > 64:
+                            problems.append(
+                                "contentPolicy.disabledSites: entries must be "
+                                "non-empty strings <= 64 chars")
             for key in cp:
                 if key not in ("socketCaps", "suppressNollywood",
-                               "nollywoodSites", "nollywoodOnlySites", "nollywoodTerms"):
+                               "nollywoodSites", "nollywoodOnlySites",
+                               "nollywoodTerms", "disabledSites"):
                     problems.append(f"contentPolicy.{key}: unknown field")
 
     # v3.3.0 platform surfaces (plan §4.1) — announcements / update / ads /
