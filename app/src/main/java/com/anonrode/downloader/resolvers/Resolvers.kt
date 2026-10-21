@@ -850,7 +850,10 @@ object VidbasicResolver : BaseResolver {
 
             // 1) this page already carries the encrypted payload (3rdplayer.html)
             val direct = decryptPayload(html)
-            if (!direct.isNullOrBlank()) return direct
+            if (!direct.isNullOrBlank()) {
+                recordCaptions(direct, url)
+                return direct
+            }
 
             // 1a) fast-path for 3rdplayer: if page contains data-video or iframe src pointing to 3rdplayer,
             // fetch and decrypt directly
@@ -861,7 +864,10 @@ object VidbasicResolver : BaseResolver {
                     val playerHtml = HttpClient.getText(playerUrl, referer = url)
                     if (!playerHtml.isNullOrBlank()) {
                         val pDirect = decryptPayload(playerHtml)
-                        if (!pDirect.isNullOrBlank()) return pDirect
+                        if (!pDirect.isNullOrBlank()) {
+                            recordCaptions(pDirect, url, playerUrl)
+                            return pDirect
+                        }
                     }
                 }
             }
@@ -886,7 +892,10 @@ object VidbasicResolver : BaseResolver {
                     val playerHtml = HttpClient.getText(cand, referer = url)
                     if (!playerHtml.isNullOrBlank()) {
                         val pDirect = decryptPayload(playerHtml)
-                        if (!pDirect.isNullOrBlank()) return pDirect
+                        if (!pDirect.isNullOrBlank()) {
+                            recordCaptions(pDirect, url, cand)
+                            return pDirect
+                        }
                     }
                     continue
                 }
@@ -919,12 +928,88 @@ object VidbasicResolver : BaseResolver {
                 }
             }
             lastFailure = "Vidbasic: no crypto payload, mirror candidates, or 3rdplayer found in HTML (len=${html.length})"
+            // Last-chance captions recording: the stream crack failed, but the
+            // player URL's sub= captions track may still be valid — record it
+            // anyway (a subtitle failure never fails the video).
+            recordCaptions(null, url)
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (e: Exception) {
             lastFailure = "Vidbasic: ${e.javaClass.simpleName}: ${e.message}"
         }
         return null
+    }
+
+    /**
+     * Owner subtitle directive (2026-10-21): the 3rdplayer player URL carries
+     * an AES-encrypted sub= parameter that the page's player JS decrypts with
+     * the same CryptoJS.AES.decrypt(payload, key, {iv}) family as the stream
+     * payload — live-verified 2026-10-21 on
+     * vidbasic.top/embed/gq18kua9je3: the jwplayer setup() call passes
+     * tracks=[{'kind':'captions','file': CryptoJS.AES.decrypt(sub, key,
+     * {'iv':iv})…}] (investigation/live/thirdplayer_e9.html). Decrypt it with
+     * the resolver's secret (AES/CBC/PKCS5, same KEY/IV) and extract the
+     * captions URL. Pure and side-effect-free: production callers hand the
+     * result to [recordCaptions]; JVM tests exercise it with synthetic
+     * ciphertext (no file-local state is read, only the hard-coded KEY/IV the
+     * reference resolvers.py already carries).
+     */
+    internal fun decryptCaptionsUrl(playerUrl: String): String? {
+        val raw = playerUrl.substringAfter("sub=", "").substringBefore('&').trim()
+        if (raw.isBlank()) return null
+        // Sub is base64: a literal '+' is base64's plus, not a form-space.
+        // Re-escape it before URLDecoder so BOTH shapes on the wire (%2B from
+        // the encoded player URL and a bare + from a sloppy emitter) decode to
+        // the same 64-char ciphertext (live sub was %2B-encoded).
+        val b64 = try {
+            URLDecoder.decode(raw.replace("+", "%2B"), "UTF-8")
+        } catch (_: Exception) {
+            return null
+        }
+        if (b64.isBlank()) return null
+        return try {
+            // android.util.Base64 on device; java.util fallback keeps the
+            // decrypt JVM-testable (decryptMegaplayEnc pattern).
+            val cipherBytes = try {
+                android.util.Base64.decode(b64, android.util.Base64.DEFAULT)
+            } catch (_: Exception) {
+                java.util.Base64.getDecoder().decode(b64)
+            }
+            val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
+            cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(KEY, "AES"), IvParameterSpec(IV))
+            val decrypted = String(cipher.doFinal(cipherBytes), Charsets.UTF_8).trim()
+            if (decrypted.startsWith("http") && !decrypted.contains(" ")) decrypted else null
+        } catch (_: Exception) {
+            // Wrong key/payload shape → no captions for this episode. A
+            // subtitle loss must never fail the stream (recipe contract).
+            null
+        }
+    }
+
+    /**
+     * Record the sub= captions track under every key the engine's
+     * downloadSubtitleSidecars pass will query — task.sourceUrl and
+     * task.directUrl (engine keys: SubtitleSurfaces.tracksFor(sourceUrl) and
+     * .tracksFor(directUrl)). The direct stream URL is known only on the
+     * success paths, candidate player URLs on all paths. Best-effort: never
+     * throws, never influences the returned stream URL.
+     * internal: JVM tests must exercise the REAL key set (task.sourceUrl +
+     * task.directUrl), not a mirrored copy of it.
+     */
+    internal fun recordCaptions(streamDirect: String?, vararg candidateUrls: String) {
+        val captionUrl = candidateUrls.mapNotNull { decryptCaptionsUrl(it) }.firstOrNull() ?: return
+        val track = com.anonrode.downloader.providers.SiteSubtitleTrack(
+            url = captionUrl,
+            language = "und",
+            label = "",
+            format = com.anonrode.downloader.providers.SubtitleSurfaces.formatOf(captionUrl)
+        )
+        val keys = LinkedHashSet<String>()
+        candidateUrls.forEach { if (it.isNotBlank()) keys.add(it) }
+        if (!streamDirect.isNullOrBlank()) keys.add(streamDirect)
+        for (key in keys) {
+            com.anonrode.downloader.providers.SubtitleSurfaces.record(key, listOf(track))
+        }
     }
 
     private fun decryptPayload(html: String): String? {
