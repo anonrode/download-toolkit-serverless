@@ -3411,6 +3411,31 @@ class DownloadEngine(
                     return m
                 }
                 var hdrs = buildHeaders(refererToPass, uaToPass)
+                // Header/truth preservation (lead directive 2026-10-21): persist the
+                // VALIDATED headers onto the task immediately. ResolvedHints die at
+                // their 30-min TTL and a fresh resolve may return no headers, so a
+                // retry — watchdog re-run, park→requeue, network repark, app
+                // restart — used to re-enter with NO Referer and loop 403s forever
+                // (nexabloom answers 200 WITH Referer / 403 WITHOUT; c6710cfb held
+                // 89,794 KiB through 8 such parks). task.headers is a persisted
+                // DownloadTask field, so every requeue/restart path re-enters with
+                // the same Referer/UA. Mid-file 403/401 then resumes from the
+                // banked .part with the exact plan the bytes were fetched under
+                // (applyHlsPlanFingerprint keeps the partial when the plan matches).
+                var persistedHdrs: Map<String, String> = task.headers
+                fun persistHeadersIfChanged(h: Map<String, String>) {
+                    // `task` is a boot-time snapshot; track what THIS run last
+                    // persisted so re-resolved (but identical) header sets do
+                    // not re-write the store on every recompute.
+                    if (persistedHdrs.keys != h.keys || persistedHdrs.values.toSet() != h.values.toSet()) {
+                        persistedHdrs = h
+                        repository.update(task.id) { cur ->
+                            if (cur.status == TaskStatus.COMPLETED || cur.status == TaskStatus.FAILED) cur
+                            else cur.copy(headers = h)
+                        }
+                    }
+                }
+                persistHeadersIfChanged(hdrs)
 
                 // HLS pre-flight: probe the segment CDN before yt-dlp so a dead
                 // stream host fails cleanly in seconds instead of pinning the
@@ -3451,6 +3476,7 @@ class DownloadEngine(
                         refererToPass = taskReferer ?: com.anonrode.downloader.pipeline.ResolvedHints.refererFor(streamUrl) ?: getRefererForUrl(streamUrl)
                         uaToPass = taskUa ?: getUserAgentForUrl(streamUrl)
                         hdrs = buildHeaders(refererToPass, uaToPass)
+                        persistHeadersIfChanged(hdrs)
                         val freshIsHls = com.anonrode.downloader.pipeline.UrlClassifier.isStreamingLink(streamUrl)
                         repository.update(task.id) { t ->
                             t.copy(
@@ -3543,6 +3569,7 @@ class DownloadEngine(
                 if (finalBackend == "aria2c" && !isMagnet) {
                     var dest = File(targetFolder, File(task.filePath).name)
                     var hdrs = buildHeaders(refererToPass, uaToPass)
+                        persistHeadersIfChanged(hdrs)
 
                     // Sidecar state is needed BEFORE the pre-flight: a 100%
                     // complete file (paused during VALIDATING after Turbo moved
@@ -3616,6 +3643,7 @@ class DownloadEngine(
                                     refererToPass = taskReferer ?: com.anonrode.downloader.pipeline.ResolvedHints.refererFor(streamUrl) ?: getRefererForUrl(streamUrl)
                                     uaToPass = taskUa ?: getUserAgentForUrl(streamUrl)
                                     hdrs = buildHeaders(refererToPass, uaToPass)
+                        persistHeadersIfChanged(hdrs)
                                     rejection = StreamValidator.validateResult(streamUrl, hdrs)
                                     coroutineContext.ensureActive()
                                     repository.update(task.id) { it.copy(directUrl = streamUrl) }
@@ -3669,6 +3697,7 @@ class DownloadEngine(
                                     refererToPass = taskReferer ?: com.anonrode.downloader.pipeline.ResolvedHints.refererFor(streamUrl) ?: getRefererForUrl(streamUrl)
                                     uaToPass = taskUa ?: getUserAgentForUrl(streamUrl)
                                     hdrs = buildHeaders(refererToPass, uaToPass)
+                        persistHeadersIfChanged(hdrs)
                                     repository.update(task.id) { it.copy(directUrl = streamUrl) }
 
                                     turboResult = TurboDownloader.download(
@@ -3738,6 +3767,7 @@ class DownloadEngine(
                                 refererToPass = taskReferer ?: com.anonrode.downloader.pipeline.ResolvedHints.refererFor(streamUrl) ?: getRefererForUrl(streamUrl)
                                 uaToPass = taskUa ?: getUserAgentForUrl(streamUrl)
                                 hdrs = buildHeaders(refererToPass, uaToPass)
+                        persistHeadersIfChanged(hdrs)
                                 repository.update(task.id) { it.copy(directUrl = streamUrl) }
                             }
                             // yt-dlp gets the next chance (its extractor can

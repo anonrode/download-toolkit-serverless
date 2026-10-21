@@ -63,6 +63,35 @@ class DownloadRepositoryRecoveryTest {
     }
 
     @Test
+    fun persistedTaskKeepsValidatedHeadersAcrossRestore() {
+        // Header/truth preservation (lead directive 2026-10-21): the engine
+        // persists the validated headers onto the task the moment it computes
+        // them, so a park→requeue→RESTART retry re-enters with the SAME
+        // Referer/UA — a referer-gated CDN (nexabloom: 200 WITH Referer, 403
+        // WITHOUT) must never fail only because the retry dropped the header.
+        val dir = tmp.newFolder("files-h")
+        File(dir, "download_tasks.json").writeText(
+            """[{"id":"h1","showTitle":"Show","episodeNum":1,"episodeTitle":"Ep 1",
+                 "directUrl":"https://fetch.nexabloom.top/a/master.m3u8",
+                 "status":"PAUSED","userPaused":false,
+                 "errorMessage":"Download server cooling down — will retry in ~1m",
+                 "headers":{"Referer":"https://megaplay.buzz/","User-Agent":"Mozilla/5.0 (Windows NT 10.0)"}}]"""
+        )
+        val repo = DownloadRepository()
+        repo.initPersistence(dir, context = null)
+        val t = repo.tasks.value.single()
+        // The retry path's first lookup (engine: taskReferer/taskUa) must see
+        // the validated headers after a full restore — this is what keeps the
+        // retried yt-dlp/ Turbo request referer-carrying.
+        assertEquals("https://megaplay.buzz/", t.headers["Referer"])
+        assertEquals("Mozilla/5.0 (Windows NT 10.0)", t.headers["User-Agent"])
+        // And the restore must NOT have stripped them (system park keeps its
+        // marker; a persisted headers map is never touched by parkForRestore).
+        assertEquals("Download server cooling down — will retry in ~1m", t.errorMessage)
+        assertFalse(t.userPaused)
+    }
+
+    @Test
     fun corruptThenValid_writePathKeepsNewestState() {
         val dir = tmp.newFolder("files3")
         File(dir, "download_tasks.json").writeText("not json at all")
