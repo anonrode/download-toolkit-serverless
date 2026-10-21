@@ -329,6 +329,54 @@ internal fun sidecarSpec(fileExtension: String, head: String): SidecarSpec {
 internal fun failedConversionMime(head: String): String? =
     if (SubtitleSurfaces.looksLikeVtt(head)) "text/vtt" else null
 
+/**
+ * Quality/release tokens that distinguish sibling downloads of the SAME
+ * content. Deliberately conservative: everything here is unambiguous
+ * release jargon never carried by a real show title, so a stripped token
+ * can never merge two different episodes/shows. ("hd"/"web" style tokens
+ * are NOT stripped — they occur inside genuine titles.)
+ */
+private val QUALITY_VARIANT_TOKENS = setOf(
+    "480p", "540p", "576p", "720p", "900p", "1080p", "1440p", "2160p", "4320p",
+    "4k", "8k", "uhd", "hdr", "hdr10", "hdr10plus",
+    "x264", "x265", "h264", "h265", "hevc", "avc",
+    "aac", "ac3", "eac3", "flac", "webrip",
+    "60fps", "30fps", "25fps", "50fps"
+)
+
+/**
+ * Content identity of a playable file for cross-variant position migration
+ * (trace 2026-10-21 C6 / d5): the file stem tokenized on non-alphanumerics,
+ * lowercased, with quality/codec/release tokens dropped. Two paths with
+ * equal keys are quality variants of the same episode ("Show S01E05" vs
+ * "Show S01E05 1080p", "Show.S01E05.x265" vs "Show.S01E05.720p") and may
+ * share a playback position; different episodes or shows never collide
+ * (S01E05 vs S01E06 differ, "Web Therapy S01E05" keeps its "web"). Season
+ * and episode markers are KEPT — this is not DownloadsSorter's
+ * normalizeShowKey, which deliberately erases them for show grouping.
+ * Pure, JVM-testable.
+ */
+internal fun playbackContentKey(filePath: String): String {
+    val name = filePath.substringAfterLast('/')
+    val stem = if (name.contains('.')) name.substringBeforeLast('.') else name
+    val out = StringBuilder()
+    var cur = StringBuilder()
+    fun flush() {
+        if (cur.isEmpty()) return
+        val token = cur.toString()
+        cur = StringBuilder()
+        if (token !in QUALITY_VARIANT_TOKENS) {
+            if (out.isNotEmpty()) out.append(' ')
+            out.append(token)
+        }
+    }
+    for (ch in stem.lowercase()) {
+        if (Character.isLetterOrDigit(ch)) cur.append(ch) else flush()
+    }
+    flush()
+    return out.toString()
+}
+
 /** First bytes of a sidecar, BOM tolerated by the callers. */
 internal fun readSubtitleHead(file: File, maxBytes: Int = 512): String = try {
     file.inputStream().use { input ->
@@ -756,7 +804,22 @@ private fun MediaPlayerModalImpl(
         }
         // Resume where the user left off the last time this file was open;
         // 0 = start fresh (no saved position, or watched to the end).
-        val resumeMs = PlaybackPositions.get(context, ctx.filePath)?.positionMs ?: 0L
+        // Quality-variant caveat (trace C6): a quality switch of the SAME
+        // episode re-points to a different FILE (the variant tag changes the
+        // stem), so this file's own lookup misses and playback used to
+        // restart at 0:00 while the leaving position was saved under the old
+        // path. When only quality/codec tokens separate the two names, the
+        // leaving position migrates; the 5s persistence poll then records it
+        // under the new path like any normal watch. Nothing here removes the
+        // old entry — reopening either variant later still resumes sensibly.
+        val savedForNew = PlaybackPositions.get(context, ctx.filePath)
+        val resumeMs = when {
+            savedForNew != null -> savedForNew.positionMs
+            leaving != null && leaving != ctx.filePath &&
+                playbackContentKey(leaving) == playbackContentKey(ctx.filePath) ->
+                PlaybackPositions.get(context, leaving)?.positionMs ?: 0L
+            else -> 0L
+        }
         if (resumeMs > 0) exoPlayer.setMediaItem(mediaItem, resumeMs) else exoPlayer.setMediaItem(mediaItem)
         exoPlayer.prepare()
         lastLoadedPath = ctx.filePath
