@@ -169,6 +169,30 @@ object CategoryFeed {
     )
 
     /**
+     * Disjoint page window over a source's single-shot (page-parameter-less)
+     * answer. Page 1 = the first [perPage] cards exactly as the historical
+     * `.take(PER_ROW_LIMIT)`; page N = cards [(N-1)*perPage, N*perPage)
+     * sliced BEFORE any caller-side per-card filtering, so page-1 output is
+     * byte-identical to the old filter-after-trim behavior and windows never
+     * overlap (the VM dedupes across pages by url/title). An empty window is
+     * a proven end-of-feed — the honest signal that stops load-more — never
+     * an error. For sources whose fetch limit can grow with the page (nepu:
+     * `take(window + perPage)` upstream), windowing a superset bounded at
+     * exactly [start + perPage] equals `drop(start)` on that fetch.
+     * Pure, JVM-tested.
+     */
+    internal fun pageWindow(
+        cards: List<ShowCard>,
+        page: Int,
+        perPage: Int = PER_ROW_LIMIT
+    ): List<ShowCard> {
+        if (page <= 1) return cards.take(perPage)
+        val start = (page - 1) * perPage
+        if (start <= 0 || start >= cards.size) return emptyList()
+        return cards.drop(start).take(perPage)
+    }
+
+    /**
      * Fetch a genre page: ONE mixed card list. Sites race concurrently with
      * individual timeouts, and every arrival re-publishes the growing mixed
      * list through [onPartial] (same streaming contract as TrendingFeed —
@@ -240,9 +264,20 @@ object CategoryFeed {
                         if (filterExplicit) com.anonrode.downloader.util.ExplicitContentFilter.filterSafe(rawCards) else rawCards
                     }
                 } else {
-                    // Nepu TMDB proxy does not paginate; returns on page 1, empty on page > 1
-                    if (page > 1) return emptyList()
-                    val rawCards = TrendingFeed.fetchApiSearch(site, term, PER_ROW_LIMIT)
+                    // Nepu TMDB proxy has no page parameter: /api/search
+                    // answers the WHOLE title-match set in one response, and
+                    // the old page>1 hard-empty threw that surplus away so
+                    // genre rows beyond page 1 never grew (trace row 33).
+                    // Pages are disjoint windows over the same stable list
+                    // ([pageWindow]); the fetch limit grows with the page so
+                    // window N sees a monotone superset, page 1 keeps its
+                    // exact historical output (fetch-12, take-12, filter),
+                    // and an exhausted window is an honest end-of-feed.
+                    val window = (page - 1).coerceAtLeast(0) * PER_ROW_LIMIT
+                    val rawCards = pageWindow(
+                        TrendingFeed.fetchApiSearch(site, term, window + PER_ROW_LIMIT),
+                        page
+                    )
                     val safeCards = if (filterExplicit) com.anonrode.downloader.util.ExplicitContentFilter.filterSafe(rawCards) else rawCards
                     if (category.aliases.isNotEmpty()) {
                         safeCards.filter { TrendingFeed.genreConfirmed(it.title, it.genres.ifEmpty { it.tags }, category.aliases) }
@@ -252,8 +287,17 @@ object CategoryFeed {
                 }
             }
             FeedKind.ANIME_PROVIDER -> {
-                if (page > 1) return emptyList()
-                val animeCards = AnitakuProvider.search(term).take(PER_ROW_LIMIT)
+                // Anitaku search answers the full match set of ONE term
+                // (admin-ajax batches, provider-cached ~5 min) — it has no
+                // page parameter, and the old page>1 hard-empty capped the
+                // Anime row at the same first 12 cards forever (trace row
+                // 33). Pages are disjoint windows over the same stable list
+                // ([pageWindow]; page 1 byte-identical to the old
+                // .take(PER_ROW_LIMIT)); a window past the answer's end is
+                // empty = honest end-of-feed. Deep pagination beyond the
+                // search answer itself needs a page parameter inside
+                // AnitakuProvider — deferred, not this file's to give.
+                val animeCards = pageWindow(AnitakuProvider.search(term), page)
                 if (filterExplicit) com.anonrode.downloader.util.ExplicitContentFilter.filterSafe(animeCards) else animeCards
             }
         }
