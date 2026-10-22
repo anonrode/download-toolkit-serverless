@@ -4037,6 +4037,19 @@ class DownloadEngine(
                             val liveNow = repository.find(task.id) ?: task
                             parkInsteadOfFail(liveNow, e.message ?: "HLS rate limited", forcePark = true)
                             return@launch
+                        } catch (e: HlsVodDownloader.DecoyResponse) {
+                            // P-2 (vidbasic decoy-node class, measured live):
+                            // three fresh dials all contradicted the playlist's
+                            // byte math. Same park/resume family — the boundary
+                            // holds, the requeue redials from scratch at the
+                            // failed segment, and the banner carries the real
+                            // expected/got math instead of a blank error.
+                            com.anonrode.downloader.util.DebugLog.backend(
+                                "task=${task.id} paced HLS lane decoy nodes: ${e.message}"
+                            )
+                            val liveNow = repository.find(task.id) ?: task
+                            parkInsteadOfFail(liveNow, e.message ?: "HLS decoy response", forcePark = true)
+                            return@launch
                         } catch (ce: kotlinx.coroutines.CancellationException) {
                             throw ce
                         } catch (e: Exception) {

@@ -131,16 +131,11 @@ class HlsVodDownloaderTest {
     }
 
     @Test
-    fun `encrypted byterange and live playlists are unsupported`() {
+    fun `encrypted and live playlists are unsupported - byterange is now SUPPORTED`() {
         val enc = "#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=\"k\"\n#EXTINF:9,\ns.ts\n#EXT-X-ENDLIST\n"
         val vEnc = HlsVodDownloader.parseVariant(enc, "https://x/v.m3u8")
         assertTrue(vEnc.encrypted)
         assertFalse(vEnc.supported)
-
-        val br = "#EXTM3U\n#EXTINF:9,\ns.ts\n#EXT-X-BYTERANGE:1000@0\n#EXT-X-ENDLIST\n"
-        val vBr = HlsVodDownloader.parseVariant(br, "https://x/v.m3u8")
-        assertTrue(vBr.byterange)
-        assertFalse(vBr.supported)
 
         val live = "#EXTM3U\n#EXTINF:9,\ns.ts\n"
         val vLive = HlsVodDownloader.parseVariant(live, "https://x/v.m3u8")
@@ -150,6 +145,143 @@ class HlsVodDownloaderTest {
         // METHOD=NONE is genuinely unencrypted.
         val none = "#EXTM3U\n#EXT-X-KEY:METHOD=NONE\n#EXTINF:9,\ns.ts\n#EXT-X-ENDLIST\n"
         assertFalse(HlsVodDownloader.parseVariant(none, "https://x/v.m3u8").encrypted)
+    }
+
+    @Test
+    fun `byterange playlists parse into ranged segment specs with RFC continuation`() {
+        // The live vidbasic shape: one big file, absolute URIs, byterange
+        // slices — first explicit offset, then omitted (continuation).
+        val body = """
+            #EXTM3U
+            #EXT-X-VERSION:5
+            #EXTINF:8.000000,
+            #EXT-X-BYTERANGE:906348@0
+            https://node.example/run/0.html
+            #EXTINF:3.800000,
+            #EXT-X-BYTERANGE:1250000
+            https://node.example/run/0.html
+            #EXTINF:9.900000,
+            #EXT-X-BYTERANGE:1000@5000000
+            https://node.example/run/1.html
+            #EXT-X-ENDLIST
+        """.trimIndent()
+        val v = HlsVodDownloader.parseVariant(body, "https://x/master.m3u8")
+        assertTrue(v.byterange)
+        assertTrue(v.supported)
+        assertEquals(3, v.segments.size)
+        val r = v.ranges.map { it!! }
+        assertEquals(0L, r[0].start); assertEquals(906348L, r[0].len)
+        // Omitted offset continues after the previous sub-range: 0+906348.
+        assertEquals(906348L, r[1].start); assertEquals(1250000L, r[1].len)
+        assertEquals(5000000L, r[2].start); assertEquals(1000L, r[2].len)
+    }
+
+    @Test
+    fun `ranged segments fetch the declared windows`() = runBlocking {
+        // One 375KB-style resource sliced into two byte ranges; the server
+        // must see precisely those Range headers, and the lane must deliver
+        // the exact concatenation.
+        val resource = ("R" + "x").let { (0 until 3000).map { 'A' + (it % 26) }.joinToString("").toByteArray() }
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(req: RecordedRequest): MockResponse {
+                val rng = req.getHeader("Range") ?: return MockResponse().setResponseCode(400)
+                val m = Regex("bytes=(\\d+)-(\\d+)").find(rng)!!
+                val s = m.groupValues[1].toInt(); val e = m.groupValues[2].toInt()
+                val body = resource.copyOfRange(s, e + 1)
+                return MockResponse()
+                    .setResponseCode(206)
+                    .setHeader("Content-Range", "bytes $s-$e/${resource.size}")
+                    .setBody(okio.Buffer().write(body))
+            }
+        }
+        val base = server.url("/0.html").toString()
+        val segs = listOf(base, base)
+        val ranges = listOf(
+            HlsVodDownloader.SegmentRange(0, 1000),
+            HlsVodDownloader.SegmentRange(1000, 2000)
+        )
+        val dest = File(tmp, "ranged.hts")
+        val sidecar = File(tmp, "ranged.hlsrs")
+        HlsVodDownloader.downloadSegments(
+            client, segs, emptyMap(), dest, sidecar,
+            estimatedTotalBytes = 3000L, onProgress = { _, _, _, _ -> }, isCancelled = { false },
+            ranges = ranges
+        )
+        val got = dest.readBytes()
+        assertEquals(3000, got.size)
+        assertTrue(got.contentEquals(resource))
+    }
+
+    @Test
+    fun `decoy response triggers fresh redial and recovery`() = runBlocking {
+        // P-2 measured shape: first dial of the node answers a 577-byte 206
+        // decoy (wrong Content-Range total); the fresh dial serves the real
+        // range. The lane must NOT commit the decoy, must redial, and must
+        // finish with exact bytes.
+        val real = ("R" + "x").let { (0 until 906348).map { 'A' + (it % 26) }.joinToString("").toByteArray() }
+        val decoy = ByteArray(577) { 'd'.code.toByte() }
+        var sawDecoyDelivered = false
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(req: RecordedRequest): MockResponse {
+                val m = Regex("bytes=(\\d+)-(\\d+)").find(req.getHeader("Range") ?: "bytes=0--1")
+                val s = m?.groupValues?.get(1)?.toIntOrNull() ?: 0
+                val e = m?.groupValues?.get(2)?.toIntOrNull() ?: -1
+                if (!sawDecoyDelivered && s == 0) {
+                    sawDecoyDelivered = true
+                    return MockResponse().setResponseCode(206)
+                        .setHeader("Content-Range", "bytes 0-576/577")
+                        .setBody(okio.Buffer().write(decoy))
+                }
+                return MockResponse().setResponseCode(206)
+                    .setHeader("Content-Range", "bytes $s-$e/${real.size}")
+                    .setBody(okio.Buffer().write(real.copyOfRange(s, e + 1)))
+            }
+        }
+        val segs = listOf(server.url("/0.html").toString())
+        val ranges = listOf(HlsVodDownloader.SegmentRange(0, 906348L) as HlsVodDownloader.SegmentRange?)
+        val dest = File(tmp, "decoy.hts")
+        val sidecar = File(tmp, "decoy.hlsrs")
+        HlsVodDownloader.downloadSegments(
+            client, segs, emptyMap(), dest, sidecar,
+            estimatedTotalBytes = 0L, onProgress = { _, _, _, _ -> }, isCancelled = { false },
+            ranges = ranges
+        )
+        assertTrue(sawDecoyDelivered)
+        assertTrue(dest.readBytes().contentEquals(real))
+        assertEquals(HlsVodDownloader.ResumeState(1, real.size.toLong()), HlsVodDownloader.readResume(sidecar))
+    }
+
+    @Test
+    fun `third consecutive decoy escapes as DecoyResponse with the real byte math`() = runBlocking {
+        val decoy = ByteArray(577) { 'd'.code.toByte() }
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(req: RecordedRequest): MockResponse = MockResponse()
+                .setResponseCode(206)
+                .setHeader("Content-Range", "bytes 0-576/577")
+                .setBody(okio.Buffer().write(decoy))
+        }
+        val segs = listOf(server.url("/0.html").toString())
+        val ranges = listOf(HlsVodDownloader.SegmentRange(0, 906348L) as HlsVodDownloader.SegmentRange?)
+        val dest = File(tmp, "decoy3.hts")
+        val sidecar = File(tmp, "decoy3.hlsrs")
+        var caught: HlsVodDownloader.DecoyResponse? = null
+        try {
+            HlsVodDownloader.downloadSegments(
+                client, segs, emptyMap(), dest, sidecar,
+                estimatedTotalBytes = 0L, onProgress = { _, _, _, _ -> }, isCancelled = { false },
+                ranges = ranges
+            )
+        } catch (e: HlsVodDownloader.DecoyResponse) {
+            caught = e
+        }
+        assertNotNull(caught)
+        assertEquals(906348L, caught!!.expectedLen)
+        assertEquals(577L, caught.gotBytes)
+        assertEquals(206, caught.lastStatus)
+        assertEquals(0, caught.segmentsDone)
+        assertEquals(0L, caught.bytesDone)
+        // Nothing committed, boundary at the start, sidecar intact.
+        assertEquals(HlsVodDownloader.ResumeState(0, 0L), HlsVodDownloader.readResume(sidecar))
     }
 
     // ─────────────────────────── P-1 fresh-dial ───────────────────────────

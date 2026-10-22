@@ -53,15 +53,36 @@ object HlsVodDownloader {
     /** Parsed single-variant media playlist. */
     data class ParsedVariant(
         val segments: List<String>,
+        /** Byterange slice per segment (RC-5/P-2 class): null = full-body GET.
+         *  Parallel to [segments]. `start`/`len` from EXT-X-BYTERANGE (RFC
+         *  continuation when the offset is omitted). */
+        val ranges: List<SegmentRange?>,
         val durationSec: Double,
         val encrypted: Boolean,
         val byterange: Boolean,
         val hasEndlist: Boolean
     ) {
-        /** Downloadable by this lane: VOD, unencrypted, no byte-range maps. */
+        /** Downloadable by this lane: VOD, unencrypted. Byte-range playlists
+         *  ARE supported (P-2: tested live on the vidbasic class). */
         val supported: Boolean
-            get() = segments.isNotEmpty() && !encrypted && !byterange && hasEndlist
+            get() = segments.isNotEmpty() && !encrypted && hasEndlist
     }
+
+    data class SegmentRange(val start: Long, val len: Long)
+
+    /** Typed decoy escape (P-2): the node answered, but with content that
+     *  contradicts the playlist's byte math (the vidbasic 577-byte 206 decoy
+     *  measured live). Park/resume family: the boundary holds. */
+    class DecoyResponse(
+        val bytesDone: Long,
+        val segmentsDone: Int,
+        val expectedLen: Long,
+        val gotBytes: Long,
+        val lastStatus: Int
+    ) : Exception(
+        "HLS node served decoy content (HTTP $lastStatus): expected $expectedLen bytes, got $gotBytes " +
+            "after $segmentsDone committed segments — dropping this connection and resuming from a fresh one"
+    )
 
     /** Typed rate-limit escape: carries the REAL status and progress (RC-8
      *  charter: no empty error text ever reaches a park banner). */
@@ -141,25 +162,44 @@ object HlsVodDownloader {
     internal fun parseVariant(body: String, baseUrl: String): ParsedVariant {
         val raw = body.lineSequence().map { it.trim() }.filter { it.isNotEmpty() }.toList()
         val segments = mutableListOf<String>()
+        val ranges = mutableListOf<SegmentRange?>()
         var duration = 0.0
         var encrypted = false
         var byterange = false
         var endlist = false
+        // BYTERANGE always precedes its own URI (HLS semantics). An omitted
+        // @offset continues after the PREVIOUS sub-range of the same resource
+        // (RFC 8216 continuation — the vidbasic shape).
+        segments.clear(); ranges.clear()
+        var nextOffset = -1L
+        var pendingRange: SegmentRange? = null
         for (line in raw) {
             when {
                 line.startsWith("#EXT-X-KEY", ignoreCase = true) -> {
                     if (!line.contains("METHOD=NONE", ignoreCase = true)) encrypted = true
                 }
-                line.startsWith("#EXT-X-BYTERANGE", ignoreCase = true) -> byterange = true
+                line.startsWith("#EXT-X-BYTERANGE", ignoreCase = true) -> {
+                    byterange = true
+                    val spec = line.substringAfter(':')
+                    val n = spec.substringBefore('@').trim().toLongOrNull() ?: -1L
+                    val o = spec.substringAfter('@', "").trim().toLongOrNull()
+                    val start = if (o != null && o >= 0) o else nextOffset
+                    pendingRange = if (n > 0 && start >= 0) SegmentRange(start, n) else null
+                }
                 line.startsWith("#EXT-X-ENDLIST", ignoreCase = true) -> endlist = true
                 line.startsWith("#EXTINF", ignoreCase = true) -> {
                     val d = line.substringAfter(':').substringBefore(',').trim().toDoubleOrNull()
                     if (d != null) duration += d
                 }
-                !line.startsWith("#") -> resolveUri(baseUrl, line)?.let { segments.add(it) }
+                !line.startsWith("#") -> {
+                    resolveUri(baseUrl, line)?.let { segments.add(it) }
+                    ranges.add(pendingRange)
+                    pendingRange?.let { nextOffset = it.start + it.len }
+                    pendingRange = null
+                }
             }
         }
-        return ParsedVariant(segments, duration, encrypted, byterange, endlist)
+        return ParsedVariant(segments, ranges, duration, encrypted, byterange, endlist)
     }
 
     // ──────────────────────────── resume state ────────────────────────────
@@ -218,7 +258,8 @@ object HlsVodDownloader {
         sidecar: File,
         estimatedTotalBytes: Long,
         onProgress: (downloaded: Long, total: Long, speed: Long, eta: Long) -> Unit,
-        isCancelled: () -> Boolean
+        isCancelled: () -> Boolean,
+        ranges: List<SegmentRange?>? = null
     ): File = withContext(Dispatchers.IO) {
         val resume = readResume(sidecar)
         var startIndex = resume.segmentsDone.coerceIn(0, segments.size)
@@ -250,18 +291,30 @@ object HlsVodDownloader {
         }
 
         val sizesSeen = mutableListOf<Long>()
+        // P-2 decoy accounting (vidbasic class): the node pool intermittently
+        // answers a 577-byte 206 that contradicts the playlist's byte math.
+        var lastFailureWasDecoy = false
+        var lastDecoyGot = 0L
+        var lastDecoyExpected = 0L
+        var lastStatusSeen = 0
         for (idx in startIndex until segments.size) {
             ensureActive()
             check(!isCancelled()) { "HLS lane cancelled" }
             val url = segments[idx]
+            val range = ranges?.getOrNull(idx)
+            val expectedLen = range?.len ?: -1L
             var lastStatus = 0
             var appended = false
             for (attemptNo in 1..3) {
                 ensureActive()
                 var bytesThisSegment = 0L
                 try {
-                    client.newCall(buildRequest(url, headers)).execute().use { res ->
+                    val reqHeaders = if (range != null) {
+                        headers + mapOf("Range" to "bytes=${range.start}-${range.start + range.len - 1}")
+                    } else headers
+                    client.newCall(buildRequest(url, reqHeaders)).execute().use { res ->
                         lastStatus = res.code
+                        lastStatusSeen = res.code
                         if (res.code == 403 || res.code == 429) {
                             // P-1 (rows 35/8, owner directive): drop the
                             // throttled connection and pick up a NEW one
@@ -298,8 +351,23 @@ object HlsVodDownloader {
                                 bytesThisSegment += max(0, n)
                             }
                         }
+                        // P-2 decoy gate: the playlist's byte math is the truth.
+                        // A ranged segment that delivered a different length
+                        // than declared is the live-measured vidbasic decoy
+                        // (577-byte 206 from a bad node) — do NOT commit it;
+                        // drop this connection and let the retry redial fresh.
+                        if (range != null && bytesThisSegment != range.len) {
+                            runCatching { client.connectionPool.evictAll() }
+                            lastFailureWasDecoy = true
+                            lastDecoyGot = bytesThisSegment
+                            lastDecoyExpected = range.len
+                            throw java.io.IOException(
+                                "decoy response: expected ${range.len} bytes, got $bytesThisSegment"
+                            )
+                        }
                     }
                     appended = true
+                    lastFailureWasDecoy = false
                     if (bytesThisSegment > 0) {
                         // A partially-written previous attempt is overwritten
                         // from the water mark, so the file never forks.
@@ -326,6 +394,13 @@ object HlsVodDownloader {
                     // Partial bytes past the water mark are overwritten by the
                     // retry (seek(cumulative) above), so integrity holds.
                     if (attemptNo == 3) {
+                        if (lastFailureWasDecoy) {
+                            // P-2 family escape: park/resume at the boundary
+                            // with the real expected/got byte math.
+                            throw DecoyResponse(
+                                cumulative, idx, lastDecoyExpected, lastDecoyGot, lastStatusSeen
+                            )
+                        }
                         throw java.io.IOException(
                             "HLS segment $idx failed after 3 attempts (status $lastStatus): ${e.message}"
                         )
@@ -409,7 +484,10 @@ object HlsVodDownloader {
 
         val staging = File(outPath.absolutePath + ".hts")
         try {
-            downloadSegments(client, variant.segments, headers, staging, sidecar, estimatedTotalBytes, onProgress, isCancelled)
+            downloadSegments(
+                client, variant.segments, headers, staging, sidecar, estimatedTotalBytes,
+                onProgress, isCancelled, variant.ranges
+            )
         } catch (e: Exception) {
             // Staged bytes + sidecar are intentionally kept for the resumed
             // attempt (byte-resume, not restart).
