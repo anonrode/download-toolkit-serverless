@@ -330,12 +330,38 @@ object TurboDownloader {
         private val ready = AtomicBoolean(false)
         private val preparing = AtomicBoolean(false)
         private val promotedInUse = AtomicBoolean(false)
+        // A standby probe is a real ranged GET. Hostile WAFs answer 401/403/
+        // 429/503; retrying that every 5 s for the whole download is a
+        // self-inflicted request storm. Two ordinary failures are also enough.
+        private val disabled = AtomicBoolean(false)
+        private val consecutiveFailures = AtomicInteger(0)
+        private val preparedAtMs = AtomicLong(0L)
 
         val isReady: Boolean get() = ready.get()
 
+        /** The keeper loop exits permanently once this is true. */
+        val isDisabled: Boolean get() = disabled.get()
+
         /** A new dial is safe only when no spare is ready AND the previously
          *  promoted socket has been fully released. */
-        fun canPrepare(): Boolean = !ready.get() && !promotedInUse.get()
+        fun canPrepare(): Boolean =
+            !disabled.get() && !ready.get() && !promotedInUse.get()
+
+        private fun fail(code: Int) {
+            if (code == 401 || code == 403 || code == 429 || code == 503) {
+                if (disabled.compareAndSet(false, true)) {
+                    com.anonrode.downloader.util.DebugLog.backend(
+                        "task=$taskId standby pre-dial disabled after HTTP $code"
+                    )
+                }
+            } else if (consecutiveFailures.incrementAndGet() >= 2) {
+                if (disabled.compareAndSet(false, true)) {
+                    com.anonrode.downloader.util.DebugLog.backend(
+                        "task=$taskId standby pre-dial disabled after repeated failures"
+                    )
+                }
+            }
+        }
 
         /**
          * Pre-dial one keep-alive connection. Returns true when a pooled
@@ -357,10 +383,16 @@ object TurboDownloader {
                         val body = res.body
                         // Only a complete 1-byte 206 leaves the socket
                         // reusable; anything else (403, 200 full body, HTML)
-                        // closes it and the keeper backs off.
+                        // closes it and either backs off or disables the
+                        // standby for this task.
                         if (res.code == 206 && body != null && body.contentLength() == 1L) {
                             body.source().readByteArray(1)
+                            consecutiveFailures.set(0)
+                            preparedAtMs.set(System.currentTimeMillis())
                             ready.set(true)
+                        } else {
+                            ready.set(false)
+                            fail(res.code)
                         }
                     }
                 } finally {
@@ -368,6 +400,7 @@ object TurboDownloader {
                 }
             } catch (_: Exception) {
                 ready.set(false)
+                fail(0)
             } finally {
                 preparing.set(false)
             }
@@ -377,6 +410,18 @@ object TurboDownloader {
         /** Takes the pre-dialed connection for one piece attempt, or null
          *  when no spare is ready (caller falls back to a fresh dial). */
         fun promote(): OkHttpClient? {
+            if (disabled.get()) return null
+            // OkHttp evicts idle pooled connections at STANDBY_POOL_KEEPALIVE
+            // SECONDS. A ready flag older than that would hand the caller a
+            // dead "warm" pool and pay a full dial anyway; expire it here.
+            val preparedAt = preparedAtMs.get()
+            if (preparedAt > 0L &&
+                System.currentTimeMillis() - preparedAt >
+                (STANDBY_POOL_KEEPALIVE_SECONDS - 2) * 1000L
+            ) {
+                ready.set(false)
+                return null
+            }
             if (!ready.compareAndSet(true, false)) return null
             promotedInUse.set(true)
             return client
@@ -1338,6 +1383,7 @@ object TurboDownloader {
                                 delay(minOf(cooldownLeft, 2_000L))
                                 continue
                             }
+                            if (standby.isDisabled) break
                             val prepared = if (standby.canPrepare()) {
                                 standby.prepare()
                             } else {

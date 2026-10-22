@@ -2276,7 +2276,7 @@ class DownloadEngine(
             // actual aggregate the backend printed instead of asserting
             // "empty response" — a blank yt-dlp ERROR is a missing-reason
             // symptom, and the wording must not mask a status-bearing fail.
-            return "The source server returned a blank failure line (${rawErr.trim().take(120)}) instead of a video. " +
+            return "The source server returned a blank failure line (${msg.take(120)}) instead of a video. " +
                 "Tap retry to fetch a fresh link."
         }
         if (lower.contains("origincooldown") || lower.contains("cooling down")) {
