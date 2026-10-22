@@ -226,8 +226,10 @@ object YoutubeDlDownloader {
     ).joinToString(",")
 
     /** File extensions that are never the produced media artifact (subtitle
-     *  sidecars written by the embed-subs pass). */
-    private val SUBTITLE_ARTIFACT_EXTS = setOf("srt", "vtt", "ass", "ssa", "ttml", "json3", "srv3")
+     *  sidecars written by the embed-subs pass). Single source of truth is
+     *  [SubtitleArtifacts]: player formats (srt/vtt/ass/ssa) plus the exotic
+     *  timed-text formats yt-dlp can leave behind (ttml/json3/srv3). */
+    private val SUBTITLE_ARTIFACT_EXTS = SubtitleArtifacts.RENAMED_ARTIFACT_EXTS
 
     /** Terminal-stub floor for the FINAL accepted output (activity-log audit
      *  §3.4 class): a yt-dlp/aria2c "artifact" under this size is a decoy or
@@ -1078,7 +1080,25 @@ object YoutubeDlDownloader {
                 if (sExt in SUBTITLE_ARTIFACT_EXTS) {
                     val langTag = sibling.nameWithoutExtension.substringAfterLast('.')
                         .takeIf { Regex("^[a-zA-Z]{2,3}$").matches(it) } ?: "en"
-                    var sibDest = File(targetDir, "$destBase.$langTag.$sExt")
+                    // Player-format alignment (2026-10-21): the player only
+                    // discovers srt/vtt/ass/ssa. Exotic timed-text (ttml/
+                    // json3/srv3) is converted to SRT BEFORE it enters the
+                    // media folder; a body we cannot parse is left out with an
+                    // explicit log instead of being renamed where discovery
+                    // would silently ignore it.
+                    val converted = if (sExt in SubtitleArtifacts.EXOTIC_TIMED_TEXT_EXTS) {
+                        runCatching { sibling.readText() }.getOrNull()
+                            ?.let { SubtitleArtifacts.alignForPlayer(it, sExt) }
+                    } else null
+                    if (sExt in SubtitleArtifacts.EXOTIC_TIMED_TEXT_EXTS && converted == null) {
+                        com.anonrode.downloader.util.DebugLog.backend(
+                            "task=$taskId subtitle .$sExt is not player-renderable and could not be converted; " +
+                                "not placed beside the video"
+                        )
+                        return@forEach
+                    }
+                    val finalExt = converted?.extension ?: sExt
+                    var sibDest = File(targetDir, "$destBase.$langTag.$finalExt")
                     var sn = 1
                     while (sibDest.exists()) {
                         // Keep the collision inside the "$destBase." prefix
@@ -1086,11 +1106,21 @@ object YoutubeDlDownloader {
                         // and derives the language from the next dot segment
                         // ("destBase.en-2.srt" -> "en"). A "destBase (2).en.srt"
                         // collision name would be invisible to the discovery.
-                        sibDest = File(targetDir, "$destBase.$langTag-$sn.$sExt")
+                        sibDest = File(targetDir, "$destBase.$langTag-$sn.$finalExt")
                         sn++
                     }
-                    if (!sibling.renameTo(sibDest)) {
-                        runCatching { sibling.copyTo(sibDest, overwrite = true); sibling.delete() }
+                    val placed = if (converted != null) {
+                        runCatching {
+                            sibDest.writeText(converted.body)
+                            sibling.delete()
+                        }.isSuccess
+                    } else if (!sibling.renameTo(sibDest)) {
+                        runCatching { sibling.copyTo(sibDest, overwrite = true); sibling.delete() }.isSuccess
+                    } else true
+                    if (!placed) {
+                        com.anonrode.downloader.util.DebugLog.backend(
+                            "task=$taskId subtitle sidecar move failed: ${sibling.name}"
+                        )
                     }
                     return@forEach
                 }

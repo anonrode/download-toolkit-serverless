@@ -226,6 +226,218 @@ enum class DramaCountry {
     UNKNOWN
 }
 
+/**
+ * Subtitle artifact extensions and the player-facing alignment (2026-10-21).
+ *
+ * Two different sets, deliberately:
+ *  - [PLAYER_SIDECAR_EXTS] is exactly what the player discovers/renders
+ *    (`<stem>.<lang>.srt|vtt|ass|ssa`; MediaPlayerModal's sidecar scan).
+ *  - [RENAMED_ARTIFACT_EXTS] also carries the timed-text formats yt-dlp can
+ *    leave behind (ttml/json3/srv3). They are subtitle artifacts — never the
+ *    media file — but the player cannot render them.
+ *
+ * The engine therefore NEVER exposes an exotic format as a sidecar in the
+ * media folder: [alignForPlayer] converts ttml/json3/srv3 to SRT first, and
+ * a body it cannot parse is skipped with an explicit log instead of being
+ * renamed into a folder where discovery would silently ignore it. This is
+ * the engine half of the alignment; no player-side extension list change is
+ * needed because unsupported formats never reach the shared folder.
+ */
+internal object SubtitleArtifacts {
+
+    val PLAYER_SIDECAR_EXTS = setOf("srt", "vtt", "ass", "ssa")
+    val EXOTIC_TIMED_TEXT_EXTS = setOf("ttml", "json3", "srv3")
+    val RENAMED_ARTIFACT_EXTS = PLAYER_SIDECAR_EXTS + EXOTIC_TIMED_TEXT_EXTS
+
+    data class AlignedSidecar(val extension: String, val body: String)
+
+    /**
+     * Returns the body+extension to write into the media folder, or null when
+     * [extension] is an unknown / unparseable format. Native player formats
+     * pass through (ssa is normalized to ass); exotic formats are converted
+     * to SRT.
+     */
+    fun alignForPlayer(body: String, extension: String): AlignedSidecar? {
+        val ext = extension.trim().lowercase().removePrefix(".")
+        if (ext in PLAYER_SIDECAR_EXTS) {
+            return AlignedSidecar(if (ext == "ssa") "ass" else ext, body)
+        }
+        val srt = when (ext) {
+            "json3" -> json3ToSrt(body)
+            "ttml" -> xmlTimedTextToSrt(body, tag = "p")
+            "srv3" -> xmlTimedTextToSrt(body, tag = "text")
+            else -> null
+        } ?: return null
+        return AlignedSidecar("srt", srt)
+    }
+
+    /** True when the body looks like one of the exotic timed-text formats
+     *  (used to avoid labelling an XML/JSON subtitle as SRT). */
+    fun sniffExotic(body: String): String? {
+        val head = body.take(8192)
+        return when {
+            head.contains("\"tStartMs\"") && head.contains("\"segs\"") -> "json3"
+            head.contains("<text ", ignoreCase = true) &&
+                head.contains("start=", ignoreCase = true) -> "srv3"
+            (head.contains("<tt", ignoreCase = true) || head.contains(":tt", ignoreCase = true)) &&
+                head.contains("<p", ignoreCase = true) -> "ttml"
+            else -> null
+        }
+    }
+
+    private data class Cue(val startMs: Long, val endMs: Long, val text: String)
+
+    private fun json3ToSrt(body: String): String? {
+        if (!body.contains("tStartMs")) return null
+        // yt-dlp/YouTube json3 events are flat objects carrying tStartMs,
+        // dDurationMs and a segs array. Field order is stable in practice;
+        // the regex tolerates other keys between them.
+        val event = Regex(
+            """\{[^{}]*?"tStartMs"\s*:\s*(-?\d+)[^{}]*?"dDurationMs"\s*:\s*(\d+)[^{}]*?"segs"\s*:\s*\[(.*?)]""",
+            RegexOption.DOT_MATCHES_ALL
+        )
+        val jsonString = Regex("\"utf8\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"")
+        val cues = event.findAll(body).mapNotNull { m ->
+            val start = m.groupValues[1].toLongOrNull() ?: return@mapNotNull null
+            val dur = m.groupValues[2].toLongOrNull() ?: 0L
+            val text = jsonString.findAll(m.groupValues[3])
+                .joinToString("") { unescapeJson(it.groupValues[1]) }
+                .replace(Regex("\\s+"), " ")
+                .trim()
+            if (text.isBlank()) null else Cue(start, start + maxOf(dur, 500L), text)
+        }.toList()
+        return renderSrt(cues)
+    }
+
+    private fun xmlTimedTextToSrt(body: String, tag: String): String? {
+        val block = Regex("(?s)<" + tag + "\\b([^>]*)>(.*?)</" + tag + ">")
+        val cues = block.findAll(body).mapNotNull { m ->
+            val attrs = m.groupValues[1]
+            val text = cleanXmlText(m.groupValues[2])
+            if (text.isBlank()) return@mapNotNull null
+            val startRaw = attrValue(attrs, "begin") ?: attrValue(attrs, "start") ?: return@mapNotNull null
+            val start = parseTimeMs(startRaw) ?: return@mapNotNull null
+            val end = parseTimeMs(attrValue(attrs, "end") ?: "")
+                ?: parseTimeMs(attrValue(attrs, "dur") ?: "")?.let { start + it }
+                ?: (start + 2_000L)
+            Cue(start, maxOf(end, start + 250L), text)
+        }.toList()
+        return renderSrt(cues)
+    }
+
+    private fun attrValue(attrs: String, name: String): String? =
+        Regex("\\b" + name + "\\s*=\\s*\"([^\"]*)\"").find(attrs)?.groupValues?.get(1)
+
+    /** TTML clock ("hh:mm:ss.mmm", "hh:mm:ss:ff") or seconds ("1.5", "1.5s",
+     *  "1500ms") to epoch-free milliseconds. */
+    private fun parseTimeMs(raw: String): Long? {
+        var v = raw.trim()
+        if (v.isEmpty()) return null
+        if (v.endsWith("ms", ignoreCase = true)) {
+            return v.dropLast(2).toDoubleOrNull()?.let { Math.round(it) }
+        }
+        if (v.endsWith("s", ignoreCase = true)) v = v.dropLast(1)
+        if (v.contains(':')) {
+            val parts = v.split(':')
+            if (parts.size < 3) return null
+            val h = parts[0].toLongOrNull() ?: return null
+            val m = parts[1].toLongOrNull() ?: return null
+            val secPart = parts[2]
+            val sec = secPart.toDoubleOrNull() ?: return null
+            var ms = ((h * 60 + m) * 60) * 1000L + Math.round(sec * 1000.0)
+            if (parts.size >= 4) {
+                val frames = parts[3].toLongOrNull() ?: 0L
+                ms += Math.round(frames * 1000.0 / 30.0)
+            }
+            return ms
+        }
+        return v.toDoubleOrNull()?.let { Math.round(it * 1000.0) }
+    }
+
+    private fun cleanXmlText(raw: String): String {
+        val withBreaks = raw.replace(Regex("(?i)<br\\s*/?>"), "\n")
+        val noTags = withBreaks.replace(Regex("<[^>]+>"), "")
+        return decodeEntities(noTags).trim()
+    }
+
+    private fun decodeEntities(raw: String): String {
+        var out = raw
+            .replace("&nbsp;", " ")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"")
+            .replace("&apos;", "'")
+            .replace("&#39;", "'")
+            .replace("&amp;", "&")
+        out = Regex("&#(\\d+);").replace(out) { m ->
+            m.groupValues[1].toIntOrNull()?.let { String(Character.toChars(it)) } ?: m.value
+        }
+        out = Regex("&#x([0-9A-Fa-f]+);").replace(out) { m ->
+            m.groupValues[1].toIntOrNull(16)?.let { String(Character.toChars(it)) } ?: m.value
+        }
+        return out
+    }
+
+    private fun unescapeJson(raw: String): String {
+        val sb = StringBuilder(raw.length)
+        var i = 0
+        while (i < raw.length) {
+            val c = raw[i]
+            if (c != '\\' || i + 1 >= raw.length) {
+                sb.append(c)
+                i++
+                continue
+            }
+            when (val n = raw[i + 1]) {
+                'n' -> sb.append('\n')
+                'r' -> sb.append('\r')
+                't' -> sb.append('\t')
+                'b' -> sb.append('\b')
+                'f' -> sb.append('\u000C')
+                '"' -> sb.append('"')
+                '\\' -> sb.append('\\')
+                '/' -> sb.append('/')
+                'u' -> {
+                    if (i + 5 < raw.length) {
+                        val hex = raw.substring(i + 2, i + 6)
+                        val code = hex.toIntOrNull(16)
+                        if (code != null) {
+                            sb.append(code.toChar())
+                            i += 6
+                            continue
+                        }
+                    }
+                    sb.append(n)
+                }
+                else -> sb.append(n)
+            }
+            i += 2
+        }
+        return sb.toString()
+    }
+
+    private fun renderSrt(cues: List<Cue>): String? {
+        val usable = cues.filter { it.text.isNotBlank() && it.endMs > it.startMs }.sortedBy { it.startMs }
+        if (usable.isEmpty()) return null
+        val sb = StringBuilder()
+        usable.forEachIndexed { index, cue ->
+            sb.append(index + 1).append('\n')
+            sb.append(srtTime(cue.startMs)).append(" --> ").append(srtTime(cue.endMs)).append('\n')
+            sb.append(cue.text).append("\n\n")
+        }
+        return sb.toString()
+    }
+
+    private fun srtTime(ms: Long): String {
+        val safe = ms.coerceAtLeast(0L)
+        val h = safe / 3_600_000L
+        val m = (safe % 3_600_000L) / 60_000L
+        val s = (safe % 60_000L) / 1000L
+        val milli = safe % 1000L
+        return String.format(java.util.Locale.US, "%02d:%02d:%02d,%03d", h, m, s, milli)
+    }
+}
+
 class DownloadEngine(
     private val context: Context,
     private val repository: DownloadRepository,
@@ -2256,13 +2468,24 @@ class DownloadEngine(
                         continue
                     }
                     val kind = subtitleExtension(track.kind, track.url, trimmed)
+                    // Engine/player alignment: only srt/vtt/ass sidecars are
+                    // discoverable. Exotic timed-text is converted to SRT; an
+                    // unparseable body is skipped with an explicit log rather
+                    // than written under a lying extension.
+                    val aligned = SubtitleArtifacts.alignForPlayer(trimmed, kind)
+                    if (aligned == null) {
+                        com.anonrode.downloader.util.DebugLog.resolve(
+                            "task=${task.id} subtitle skipped: .$kind is not player-renderable and could not be converted ${track.url.take(100)}"
+                        )
+                        continue
+                    }
                     val lang = sanitizeSubtitleLang(track.lang)
-                    val dest = File(video.parentFile, "${video.nameWithoutExtension}.$lang.$kind")
+                    val dest = File(video.parentFile, "${video.nameWithoutExtension}.$lang.${aligned.extension}")
                     if (dest.exists() && dest.length() > 16L) continue
                     val tmp = File(video.parentFile, "${dest.name}.tmp")
-                    tmp.writeText(trimmed)
+                    tmp.writeText(aligned.body)
                     if (!tmp.renameTo(dest)) {
-                        dest.writeText(trimmed)
+                        dest.writeText(aligned.body)
                         tmp.delete()
                     }
                     com.anonrode.downloader.util.DebugLog.resolve(
@@ -2290,9 +2513,14 @@ class DownloadEngine(
 
     internal fun subtitleExtension(kindHint: String, url: String, body: String): String {
         val hint = kindHint.trim().lowercase().removePrefix(".")
-        if (hint in setOf("vtt", "srt", "ass", "ssa")) return if (hint == "ssa") "ass" else hint
+        val known = SubtitleArtifacts.RENAMED_ARTIFACT_EXTS
+        if (hint in known) return if (hint == "ssa") "ass" else hint
         val pathExt = url.substringBefore('?').substringBefore('#').substringAfterLast('.', "").lowercase()
-        if (pathExt in setOf("vtt", "srt", "ass", "ssa")) return if (pathExt == "ssa") "ass" else pathExt
+        if (pathExt in known) return if (pathExt == "ssa") "ass" else pathExt
+        // Exotic timed-text bodies are identified explicitly: the old
+        // body-sniff fallback labelled TTML/JSON3 as SRT, producing a sidecar
+        // the player attached as SubRip but rendered with zero cues.
+        SubtitleArtifacts.sniffExotic(body)?.let { return it }
         val head = body.take(4096)
         return when {
             head.startsWith("WEBVTT", ignoreCase = true) -> "vtt"
