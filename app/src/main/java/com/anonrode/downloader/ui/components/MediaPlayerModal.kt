@@ -83,6 +83,7 @@ import androidx.compose.material3.minimumInteractiveComponentSize
 import coil.compose.AsyncImage
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -139,7 +140,9 @@ import com.anonrode.downloader.data.WatchHistoryStore
 import com.anonrode.downloader.data.models.DownloadTask
 import com.anonrode.downloader.providers.SubtitleSurfaces
 import com.anonrode.downloader.ui.theme.Motion
+import com.anonrode.downloader.ui.theme.Radius
 import com.anonrode.downloader.ui.theme.Spacing
+import com.anonrode.downloader.data.WatchHistoryCore
 import com.anonrode.downloader.ui.util.tick
 import kotlinx.coroutines.delay
 import java.io.File
@@ -643,6 +646,10 @@ private fun MediaPlayerModalImpl(
     }
     var showAudioSheet by remember { mutableStateOf(false) }
     var showSubtitleSheet by remember { mutableStateOf(false) }
+    var showEpisodesSheet by remember { mutableStateOf(false) }
+    // Subscribed (not .value) so the episode list keeps its Playing/Watched
+    // prefixes current while the modal stays open.
+    val watchRecords by WatchHistoryStore.recordsFlow.collectAsState()
     var tracksLoaded by remember { mutableStateOf(false) }
     // Rotation state (user-driven via the Rotate chip): true = force
     // SENSOR_LANDSCAPE, false = force PORTRAIT. The system bars are hidden
@@ -1177,6 +1184,23 @@ private fun MediaPlayerModalImpl(
         if (prev != null) ctx.onPlayFile(prev)
     }
 
+    // Directive §5.2: the explicit Next label + the end-of-episode card.
+    val nextPeerPath = remember(ctx.queuePeerPaths, ctx.filePath) {
+        val idx = ctx.queuePeerPaths.indexOf(ctx.filePath)
+        ctx.queuePeerPaths.drop(idx + 1).firstOrNull { File(it).exists() }
+    }
+    val nextTag = remember(nextPeerPath) {
+        nextPeerPath?.let { episodeTagFromPath(it) ?: File(it).nameWithoutExtension.take(16) }
+    }
+    var upNextDismissed by remember(ctx.filePath) { mutableStateOf(false) }
+    val upNextRemainingMs = if (duration > 0L) duration - currentPosition else 0L
+    val upNextSeriesTask = ctx.taskForPath(ctx.filePath)
+    val hasSeriesContinuation = !upNextSeriesTask?.seriesUrl.isNullOrBlank()
+    // A standalone movie must not advertise "next episode": only offer the
+    // card when there is a downloaded peer or a known series to fetch from.
+    val showUpNextCard = !inPip && !upNextDismissed && duration > 60_000L &&
+        upNextRemainingMs in 1L..12_000L && (nextPeerPath != null || hasSeriesContinuation)
+
     // ---- UI: one layout for every orientation ----
     // ROOT-LEVEL OVERLAY, not a Dialog. The player used to live in its own
     // Compose Dialog WINDOW; every window-level tactic tried over six
@@ -1483,6 +1507,16 @@ private fun MediaPlayerModalImpl(
                                 .weight(1f)
                                 .padding(horizontal = Spacing.md)
                         )
+                        if (ctx.queuePeerPaths.size > 1) {
+                            // Directive §5.2: Episodes (N) — every downloaded
+                            // peer, with playing/watched/time-left state.
+                            PlayerCircleButton(
+                                icon = Icons.Rounded.VideoLibrary,
+                                contentDescription = "Episodes (${ctx.queuePeerPaths.size})",
+                                onClick = { touchControls(); showEpisodesSheet = true }
+                            )
+                            Spacer(modifier = Modifier.width(Spacing.sm))
+                        }
                         if (!isAudio) {
                             // 2026-09-14 (user spec): this slot used to be
                             // the fullscreen rotation toggle. Rotation moved
@@ -1567,14 +1601,41 @@ private fun MediaPlayerModalImpl(
                             size = 48.dp,
                             iconSize = 28.dp
                         )
-                        PlayerCircleButton(
-                            icon = Icons.Rounded.SkipNext,
-                            contentDescription = "Next",
-                            onClick = { touchControls(); playNext() },
-                            enabled = hasNext,
-                            size = 44.dp,
-                            iconSize = 24.dp
-                        )
+                        if (hasNext && nextTag != null) {
+                            // Directive §5.2: an explicit "Next: E05" chip so
+                            // the user always sees what is queued next.
+                            Row(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(Radius.pill))
+                                    .background(Color.White.copy(alpha = 0.14f))
+                                    .clickable { touchControls(); playNext() }
+                                    .padding(horizontal = 10.dp, vertical = 7.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.SkipNext,
+                                    contentDescription = "Next: $nextTag",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = "Next: $nextTag",
+                                    color = Color.White,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                        } else {
+                            PlayerCircleButton(
+                                icon = Icons.Rounded.SkipNext,
+                                contentDescription = "Next",
+                                onClick = { touchControls(); playNext() },
+                                enabled = hasNext,
+                                size = 44.dp,
+                                iconSize = 24.dp
+                            )
+                        }
                     }
 
                     // ---- Bottom: seek, then speed / audio / subtitles ----
@@ -1743,6 +1804,82 @@ private fun MediaPlayerModalImpl(
                     }
                 }
             }
+
+            // ── Floating Up-Next card (directive §5.2): appears in the last
+            // 12 seconds. Plays the next downloaded file, or routes to the
+            // drawer with Remaining preselected when the queue is exhausted.
+            if (showUpNextCard) {
+                val seriesTask = upNextSeriesTask
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(end = 16.dp, bottom = 96.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(Color(0xE6141419))
+                        .border(1.dp, Color.White.copy(alpha = 0.14f), RoundedCornerShape(12.dp))
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f, fill = false)) {
+                        Text(
+                            text = if (nextPeerPath != null) {
+                                "UP NEXT" + (nextTag?.let { " · $it" } ?: "")
+                            } else {
+                                "Finished downloaded episodes"
+                            },
+                            color = Color.White,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = if (nextPeerPath != null) {
+                                "Plays automatically when this ends"
+                            } else {
+                                "Get the next episodes"
+                            },
+                            color = Color.White.copy(alpha = 0.7f),
+                            fontSize = 10.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Text(
+                        text = if (nextPeerPath != null) "Play now" else "Get next episodes",
+                        color = PlayerAccent,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier
+                            .clickable {
+                                touchControls()
+                                if (nextPeerPath != null) {
+                                    ctx.onPlayFile(nextPeerPath)
+                                } else {
+                                    seriesTask?.let { t ->
+                                        ctx.openRemaining?.invoke(
+                                            t.showTitle,
+                                            t.seriesUrl,
+                                            t.site
+                                        )
+                                    }
+                                    onDismiss()
+                                }
+                            }
+                            .padding(horizontal = 4.dp, vertical = 6.dp)
+                    )
+                    Text(
+                        text = "✕",
+                        color = Color.White.copy(alpha = 0.6f),
+                        fontSize = 13.sp,
+                        modifier = Modifier
+                            .clickable { upNextDismissed = true }
+                            .padding(start = 6.dp, end = 2.dp)
+                    )
+                }
+            }
         }
         // (formerly the Dialog's closing brace — the overlay Box now closes
         // directly before the choice sheets)
@@ -1781,6 +1918,45 @@ private fun MediaPlayerModalImpl(
                 onDismiss = { showAudioSheet = false }
             )
         }
+    if (showEpisodesSheet) {
+        // Directive §5.2 in-player episode list: tag, title, watch state,
+        // size; tapping switches playback through the existing onPlayFile.
+        val byLabel = LinkedHashMap<String, String>()
+        ctx.queuePeerPaths.forEach { p ->
+            val tag = episodeTagFromPath(p) ?: File(p).nameWithoutExtension
+            val rec = watchRecords.firstOrNull { it.filePath == p }
+            val prefix = when {
+                p == ctx.filePath -> "Playing · "
+                rec?.isWatched == true -> "Watched ✓ · "
+                rec != null && rec.positionMs > 0L ->
+                    WatchHistoryCore.formatTimeLeft(rec.positionMs, rec.durationMs) + " · "
+                else -> ""
+            }
+            val sizeMb = runCatching {
+                "%.0f MB".format(File(p).length() / (1024.0 * 1024.0))
+            }.getOrDefault("")
+            val baseLabel = "$prefix$tag · ${File(p).nameWithoutExtension.take(30)} · $sizeMb"
+            var label = baseLabel
+            var suffix = 2
+            while (byLabel.containsKey(label)) {
+                label = "$baseLabel ($suffix)"
+                suffix++
+            }
+            byLabel[label] = p
+        }
+        BottomChoiceSheet(
+            title = "Episodes (${ctx.queuePeerPaths.size})",
+            options = byLabel.keys.toList(),
+            selected = byLabel.entries.firstOrNull { it.value == ctx.filePath }?.key,
+            onPick = { label ->
+                val path = byLabel[label]
+                if (path != null && path != ctx.filePath) ctx.onPlayFile(path)
+                showEpisodesSheet = false
+            },
+            onDismiss = { showEpisodesSheet = false }
+        )
+    }
+
     if (showSubtitleSheet) {
         BottomChoiceSheet(
             title = "Subtitles",
@@ -1809,6 +1985,19 @@ private fun MediaPlayerModalImpl(
 
 private fun formatSpeed(s: Float): String =
     if (s == s.toInt().toFloat()) "${s.toInt()}x" else "${s}x"
+
+/** Extracts "S01E05" / "E05" from a downloaded file name, for the player's
+ *  Next label and episode list (directive §5.2). */
+private fun episodeTagFromPath(path: String): String? {
+    val name = File(path).nameWithoutExtension
+    Regex("""(?i)\bS(\d{1,2})[\s._-]?E(\d{1,3})\b""").find(name)?.let { m ->
+        return "S%02dE%02d".format(m.groupValues[1].toInt(), m.groupValues[2].toInt())
+    }
+    Regex("""(?i)\b(?:E|EP|EPISODE)[\s._-]?(\d{1,3})\b""").find(name)?.let { m ->
+        return "E%02d".format(m.groupValues[1].toInt())
+    }
+    return null
+}
 
 private fun applySubtitleByLabel(
     player: ExoPlayer,
