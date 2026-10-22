@@ -1,5 +1,6 @@
 package com.anonrode.downloader.providers
 
+import com.anonrode.downloader.data.net.HttpClient
 import org.json.JSONArray
 import org.json.JSONObject
 import org.jsoup.nodes.Document
