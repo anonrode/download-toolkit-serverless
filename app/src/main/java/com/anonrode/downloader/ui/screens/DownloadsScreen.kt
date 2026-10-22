@@ -87,6 +87,8 @@ import com.anonrode.downloader.ui.components.PosterImageOrFallback
 import com.anonrode.downloader.ui.components.downloadsStats
 import com.anonrode.downloader.ui.components.rememberReduceMotion
 import com.anonrode.downloader.ui.theme.*
+import com.anonrode.downloader.util.SeasonEpisode
+import com.anonrode.downloader.util.ShowIdentity
 import com.anonrode.downloader.ui.util.TitleFormatting
 import com.anonrode.downloader.ui.util.rejectHaptic
 import com.anonrode.downloader.viewmodel.MainViewModel
@@ -530,6 +532,11 @@ fun DownloadsScreen(
     // + remove is irreversible) — like "Cancel all" used to be, it is the only
     // delete path WITHOUT an extra confirm gate.
     var pendingDeleteTask by remember { mutableStateOf<DownloadTask?>(null) }
+    // Show-level actions (directive §3.3): reachable from the By-Show ⋮ and
+    // from a single-task dialog when the show has >= 2 tasks.
+    var showActionsTitle by remember { mutableStateOf<String?>(null) }
+    var showDeleteMode by remember { mutableStateOf<String?>(null) } // "watched" | "all"
+    var showDeleteSeason by remember { mutableStateOf<Int?>(null) }
 
     // The player overlay is hosted by MainActivity at the ROOT of the window
     // tree (see MediaPlayerModal's comment): rendered inside this screen it
@@ -1117,7 +1124,11 @@ fun DownloadsScreen(
                             onRetryTask = { viewModel.engine.retry(it) },
                             onCancelTask = { viewModel.engine.cancel(it) },
                             onRequestActions = { pendingActionsTask = it },
-                            watchByPath = watchByPath
+                            watchByPath = watchByPath,
+                            continueCard = continueCards.firstOrNull {
+                                it.showKey == ShowIdentity.normalizeShowKey(showTitle)
+                            },
+                            onShowActions = { showActionsTitle = showTitle }
                         )
                     }
                 } else {
@@ -1265,22 +1276,41 @@ fun DownloadsScreen(
                 // §3.2: the card face shows the failure ONE line; the full
                 // humanized reason (and the raw engine string when it adds
                 // anything) lives here, in the ⋮ actions dialog.
-                val baseText = when {
-                    failedTarget -> "\"${target.episodeTitle}\" did not finish. Retry now, or remove the dead task?"
-                    finishedTarget -> "\"${target.episodeTitle}\" is finished and on this device."
-                    else -> "\"${target.episodeTitle}\" has not finished yet. Cancel it and remove the task?"
+                Column {
+                    val baseText = when {
+                        failedTarget -> "\"${target.episodeTitle}\" did not finish. Retry now, or remove the dead task?"
+                        finishedTarget -> "\"${target.episodeTitle}\" is finished and on this device."
+                        else -> "\"${target.episodeTitle}\" has not finished yet. Cancel it and remove the task?"
+                    }
+                    val failureDetail = if (failedTarget) {
+                        val reason = humanizeFailure(target.errorMessage ?: "").trim()
+                        if (reason.isBlank()) "" else "\n\n$reason"
+                    } else ""
+                    Text(
+                        baseText + failureDetail,
+                        color = TextSecondary,
+                        fontSize = Type.body.fontSize,
+                        maxLines = 6,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    // Directive §3.3: the show-level sheet must be reachable
+                    // from the date/status/size views too, where a task's ⋮ is
+                    // the only entry point.
+                    if (tasks.count { it.showTitle == target.showTitle } >= 2) {
+                        TextButton(
+                            onClick = {
+                                pendingActionsTask = null
+                                showActionsTitle = target.showTitle
+                            }
+                        ) {
+                            Text(
+                                "Manage show (${target.showTitle})…",
+                                color = AccentViolet,
+                                fontSize = Type.body.fontSize
+                            )
+                        }
+                    }
                 }
-                val failureDetail = if (failedTarget) {
-                    val reason = humanizeFailure(target.errorMessage ?: "").trim()
-                    if (reason.isBlank()) "" else "\n\n$reason"
-                } else ""
-                Text(
-                    baseText + failureDetail,
-                    color = TextSecondary,
-                    fontSize = Type.body.fontSize,
-                    maxLines = 6,
-                    overflow = TextOverflow.Ellipsis
-                )
             },
             confirmButton = {
                 Row(horizontalArrangement = Arrangement.spacedBy(Spacing.xs)) {
@@ -1359,6 +1389,228 @@ fun DownloadsScreen(
                 }
             }
         )
+    }
+
+    // ═══ SHOW ACTIONS (directive §3.3) ═══════════════════════════════════
+    if (showDeleteMode == null) {
+        showActionsTitle?.let { title ->
+            val showTasks = tasks.filter { it.showTitle == title }
+            val completedTasks = showTasks.filter {
+                it.status == TaskStatus.COMPLETED && it.filePath.isNotBlank()
+            }
+            val watchedTasks = completedTasks.filter {
+                watchByPath[it.filePath]?.isWatched == true ||
+                    PlaybackPositions.get(context, it.filePath) != null
+            }
+            val unwatched = completedTasks.filterNot { it in watchedTasks }
+            fun bytesOf(list: List<DownloadTask>): Long =
+                list.sumOf { if (it.totalBytes > 0) it.totalBytes else it.downloadedBytes }
+            val totalBytes = bytesOf(showTasks)
+            val watchedBytes = bytesOf(watchedTasks)
+            val unwatchedBytes = bytesOf(unwatched)
+            val seriesUrl = showTasks.firstOrNull { it.seriesUrl.isNotBlank() }?.seriesUrl.orEmpty()
+            val seriesSite = showTasks.firstOrNull { it.seriesUrl.isNotBlank() }?.site.orEmpty()
+            val card = continueCards.firstOrNull {
+                it.showKey == ShowIdentity.normalizeShowKey(title)
+            }
+
+            AlertDialog(
+                onDismissRequest = { showActionsTitle = null },
+                shape = RoundedCornerShape(Radius.lg),
+                containerColor = SurfaceCard,
+                titleContentColor = TextPrimary,
+                textContentColor = TextSecondary,
+                title = { Text(title) },
+                text = {
+                    Column {
+                        Text(
+                            "${showTasks.size} episodes on device · ${formatBytes(totalBytes)} total",
+                            fontSize = Type.body.fontSize,
+                            color = TextSecondary
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            "${watchedTasks.size} watched (${formatBytes(watchedBytes)}) · " +
+                                "${unwatched.size} unwatched (${formatBytes(unwatchedBytes)})",
+                            fontSize = Type.caption.fontSize,
+                            color = TextMuted
+                        )
+                        Spacer(modifier = Modifier.height(Spacing.xs))
+                        if (card != null) {
+                            val label = when (card.state) {
+                                ContinueState.RESUME ->
+                                    "Resume ${episodeLabel(card.season, card.episode)} " +
+                                        "(${WatchHistoryCore.formatTimeLeft(card.positionMs, card.durationMs)})"
+                                ContinueState.UP_NEXT -> "Play ${episodeLabel(card.season, card.episode)}"
+                                ContinueState.FETCH_NEXT -> "Download the next episode"
+                            }
+                            TextButton(onClick = {
+                                showActionsTitle = null
+                                if (card.state == ContinueState.FETCH_NEXT) {
+                                    viewModel.openRemainingEpisodes(
+                                        card.showTitle, card.seriesUrl, card.site
+                                    )
+                                } else {
+                                    card.task?.let { onPlayTask(it) }
+                                }
+                            }) { Text(label, color = AccentViolet) }
+                        }
+                        if (seriesUrl.isNotBlank()) {
+                            TextButton(onClick = {
+                                showActionsTitle = null
+                                viewModel.openRemainingEpisodes(title, seriesUrl, seriesSite)
+                            }) { Text("Download remaining episodes", color = AccentViolet) }
+                        }
+                        TextButton(
+                            enabled = watchedTasks.isNotEmpty(),
+                            onClick = { showDeleteMode = "watched" }
+                        ) {
+                            Text(
+                                "Delete watched episodes only " +
+                                    "(${watchedTasks.size} files · ${formatBytes(watchedBytes)})",
+                                color = if (watchedTasks.isNotEmpty()) StatusError else TextMuted
+                            )
+                        }
+                        TextButton(onClick = {
+                            showDeleteSeason = null
+                            showDeleteMode = "all"
+                        }) {
+                            Text(
+                                "Delete entire show (All ${showTasks.size} files · ${formatBytes(totalBytes)})",
+                                color = StatusError
+                            )
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { showActionsTitle = null }) {
+                        Text("Keep Everything", color = TextPrimary)
+                    }
+                }
+            )
+        }
+    }
+
+    // ═══ BATCH DELETE CONFIRMATION ═══════════════════════════════════════
+    showDeleteMode?.let { mode ->
+        val title = showActionsTitle.orEmpty()
+        if (title.isNotBlank()) {
+            val showTasks = tasks.filter { it.showTitle == title }
+            val completedTasks = showTasks.filter {
+                it.status == TaskStatus.COMPLETED && it.filePath.isNotBlank()
+            }
+            val watchedTasks = completedTasks.filter {
+                watchByPath[it.filePath]?.isWatched == true ||
+                    PlaybackPositions.get(context, it.filePath) != null
+            }
+            val seasons = showTasks.map { SeasonEpisode.seasonOf(it) }
+                .filter { it > 0 }.distinct().sorted()
+            val selectedSeason = showDeleteSeason
+            val scope = if (mode == "watched") {
+                watchedTasks
+            } else {
+                showTasks.filter {
+                    selectedSeason == null || SeasonEpisode.seasonOf(it) == selectedSeason
+                }
+            }
+            val scopeBytes = scope.sumOf {
+                if (it.totalBytes > 0) it.totalBytes else it.downloadedBytes
+            }
+            val cancelCount = scope.count { it.status != TaskStatus.COMPLETED }
+            val fileCount = scope.count {
+                it.status == TaskStatus.COMPLETED && it.filePath.isNotBlank()
+            }
+
+            AlertDialog(
+                onDismissRequest = { showDeleteMode = null },
+                shape = RoundedCornerShape(Radius.lg),
+                containerColor = SurfaceCard,
+                titleContentColor = TextPrimary,
+                textContentColor = TextSecondary,
+                title = {
+                    Text(if (mode == "watched") "Delete watched episodes?" else "Delete entire show?")
+                },
+                text = {
+                    Column {
+                        if (mode == "all" && seasons.size > 1) {
+                            // Directive §3.3: season scope when the show spans
+                            // more than one season.
+                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                FilterChip(
+                                    selected = selectedSeason == null,
+                                    onClick = { showDeleteSeason = null },
+                                    label = { Text("All Seasons", fontSize = 11.sp) }
+                                )
+                                seasons.take(3).forEach { season ->
+                                    FilterChip(
+                                        selected = selectedSeason == season,
+                                        onClick = { showDeleteSeason = season },
+                                        label = { Text("Season $season", fontSize = 11.sp) }
+                                    )
+                                }
+                            }
+                            Spacer(modifier = Modifier.height(4.dp))
+                        }
+                        Text(
+                            "Removes $fileCount file(s) (${formatBytes(scopeBytes)})" +
+                                (if (cancelCount > 0) {
+                                    " and cancels $cancelCount active download(s)"
+                                } else "") +
+                                ". " +
+                                (if (mode == "watched") {
+                                    "Watched history is kept so you do not lose your place. "
+                                } else {
+                                    "Watch history for this show is removed. "
+                                }) +
+                                "This cannot be undone.",
+                            color = TextSecondary,
+                            fontSize = Type.body.fontSize,
+                            maxLines = 6,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                },
+                // Safe action is the PRIMARY button; the destructive verb is
+                // the ghost (anti muscle-memory), per directive §3.3.
+                confirmButton = {
+                    TextButton(onClick = {
+                        showDeleteMode = null
+                        showActionsTitle = null
+                        showDeleteSeason = null
+                    }) { Text("Keep everything", color = TextPrimary) }
+                },
+                dismissButton = {
+                    TextButton(onClick = {
+                        hapticView.rejectHaptic()
+                        val paths = scope.map { it.filePath }
+                            .filter { it.isNotBlank() }.toSet()
+                        scope.forEach { viewModel.engine.cancel(it.id) }
+                        paths.forEach { PlaybackPositions.clear(context, it) }
+                        WatchHistoryStore.onFilesDeleted(
+                            deletedPaths = paths,
+                            deletedShowKeys = if (mode == "all") {
+                                setOf(ShowIdentity.normalizeShowKey(title))
+                            } else {
+                                emptySet()
+                            },
+                            clearShowHistory = mode == "all"
+                        )
+                        showDeleteMode = null
+                        showActionsTitle = null
+                        showDeleteSeason = null
+                    }) {
+                        Text(
+                            if (mode == "watched") {
+                                "Delete ${watchedTasks.size} watched (${formatBytes(scopeBytes)})"
+                            } else {
+                                "Delete all ${scope.size} files (${formatBytes(scopeBytes)})"
+                            },
+                            color = StatusError
+                        )
+                    }
+                }
+            )
+        }
     }
 }
 
@@ -2528,6 +2780,10 @@ private fun shelfBadge(task: DownloadTask): String {
     }
 }
 
+/** "S01E04" when season/episode are known; "Ep 4" otherwise. */
+private fun episodeLabel(season: Int, episode: Int): String =
+    if (season > 0 || episode > 0) "S%02dE%02d".format(season, episode) else "Ep $episode"
+
 /** Directive §2.2 series Continue tile: 210×118, poster backdrop, violet
  *  border, RESUME / UP NEXT / NEXT EP ⬇ pill, SxxEyy tag, play or download
  *  circle, title + subtitle, [Eps ▾] and a flush 3 dp progress bar. */
@@ -2813,7 +3069,11 @@ internal fun ShowFolderCard(
     onRetryTask: (String) -> Unit,
     onCancelTask: (String) -> Unit,
     onRequestActions: (DownloadTask) -> Unit,
-    watchByPath: Map<String, WatchRecord> = emptyMap()
+    watchByPath: Map<String, WatchRecord> = emptyMap(),
+    /** Resolved Continue state for this show, when one exists. */
+    continueCard: SeriesContinueCard? = null,
+    /** Opens the show-level actions sheet (batch delete, remaining…). */
+    onShowActions: () -> Unit = {}
 ) {
     val completedCount = items.count { it.status == TaskStatus.COMPLETED }
     // Count with the same shared four-state predicate as the screen header /
@@ -2821,6 +3081,23 @@ internal fun ShowFolderCard(
     // with the global one for the same tasks.
     val activeCount = items.count { DownloadsSorter.isActiveTask(it) }
     val totalBytes = items.sumOf { if (it.totalBytes > 0) it.totalBytes else it.downloadedBytes }
+    val watchedCount = items.count { watchByPath[it.filePath]?.isWatched == true }
+    val posterUrl = items.firstOrNull { it.posterUrl.isNotBlank() }?.posterUrl.orEmpty()
+    // Directive §3.2: quick-play resumes the Continue target or plays the
+    // first downloaded episode. Items arrive already in episode order.
+    val playTarget = continueCard?.task
+        ?: items.firstOrNull { it.status == TaskStatus.COMPLETED && it.filePath.isNotBlank() }
+    val lastLine = when {
+        continueCard == null -> null
+        continueCard.state == ContinueState.RESUME ->
+            "Last: ${episodeLabel(continueCard.season, continueCard.episode)}" +
+                " (${WatchHistoryCore.formatTimeLeft(continueCard.positionMs, continueCard.durationMs)})"
+        continueCard.state == ContinueState.UP_NEXT ->
+            "Up Next: ${episodeLabel(continueCard.season, continueCard.episode)}"
+        continueCard.state == ContinueState.FETCH_NEXT ->
+            "Finished: ${episodeLabel(continueCard.season, continueCard.episode)} · get next"
+        else -> null
+    }
 
     Card(
         shape = RoundedCornerShape(Radius.lg),
@@ -2837,20 +3114,14 @@ internal fun ShowFolderCard(
                     .padding(Spacing.md),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Box(
-                    modifier = Modifier
-                        .size(44.dp)
-                        .clip(RoundedCornerShape(Radius.md))
-                        .background(SurfaceElevated),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = if (activeCount > 0) Icons.Rounded.Download else Icons.Rounded.Folder,
-                        contentDescription = null,
-                        tint = TextSecondary,
-                        modifier = Modifier.size(24.dp)
-                    )
-                }
+                PosterImageOrFallback(
+                    posterUrl = posterUrl,
+                    showTitle = showTitle,
+                    modifier = Modifier.size(width = 44.dp, height = 62.dp),
+                    shape = RoundedCornerShape(Radius.sm),
+                    fallbackIcon = if (activeCount > 0) Icons.Rounded.Download else Icons.Rounded.Folder,
+                    showFallbackTitle = false
+                )
 
                 Spacer(modifier = Modifier.width(Spacing.md))
 
@@ -2880,6 +3151,13 @@ internal fun ShowFolderCard(
                                 color = TextMuted
                             )
                         }
+                        if (watchedCount > 0) {
+                            Text(
+                                text = "· $watchedCount watched",
+                                fontSize = Type.caption.fontSize,
+                                color = TextMuted
+                            )
+                        }
                         if (activeCount > 0) {
                             Text(
                                 text = "· $activeCount active",
@@ -2896,9 +3174,52 @@ internal fun ShowFolderCard(
                             )
                         }
                     }
+                    if (lastLine != null) {
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = lastLine,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = AccentViolet,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                 }
 
-                Spacer(modifier = Modifier.width(Spacing.sm))
+                Spacer(modifier = Modifier.width(Spacing.xs))
+
+                // Directive §3.2 header controls: quick play · ⋮ · expand.
+                if (playTarget != null) {
+                    val isDark = AnonTheme.colors.isDark
+                    Box(
+                        modifier = Modifier
+                            .size(32.dp)
+                            .clip(CircleShape)
+                            .background(if (isDark) Color(0xFFF3F5F9) else Color(0xFF0F172A))
+                            .clickable(onClickLabel = "Play") { onPlayTask(playTarget) },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.PlayArrow,
+                            contentDescription = "Play",
+                            tint = if (isDark) Color(0xFF090B10) else Color.White,
+                            modifier = Modifier.size(15.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(2.dp))
+                }
+                IconButton(
+                    onClick = onShowActions,
+                    modifier = Modifier.size(32.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.MoreVert,
+                        contentDescription = "Show actions",
+                        tint = TextSecondary,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
 
                 IconButton(
                     onClick = onToggleExpand,
