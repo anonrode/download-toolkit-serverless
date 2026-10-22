@@ -147,7 +147,7 @@ class WatchUiScreenshotTest {
                             card = card(ContinueState.FETCH_NEXT), posterUrl = "",
                             onPlay = {}, onFetch = {}
                         )
-                        else -> SocialShelfTile(
+                        6 -> SocialShelfTile(
                             task = DownloadTask(
                                 id = "social-1",
                                 showTitle = "Social/Instagram",
@@ -170,6 +170,35 @@ class WatchUiScreenshotTest {
                                 updatedAtMs = 9_000L
                             ),
                             onPlay = {}, onOpenActions = {}
+                        )
+                        7 -> EpisodeRow(
+                            episode = com.anonrode.downloader.data.models.EpisodeItem(
+                                title = "Episode 4",
+                                url = "https://source/ep4",
+                                episodeNum = 4,
+                                site = "naijaprey",
+                                season = 1,
+                                episode = 4
+                            ),
+                            isSelected = false,
+                            onToggle = {},
+                            isDownloaded = true,
+                            isWatched = true,
+                            onDownloadSingle = {}
+                        )
+                        else -> EpisodeRow(
+                            episode = com.anonrode.downloader.data.models.EpisodeItem(
+                                title = "Episode 5",
+                                url = "https://source/ep5",
+                                episodeNum = 5,
+                                site = "naijaprey",
+                                season = 1,
+                                episode = 5
+                            ),
+                            isSelected = false,
+                            onToggle = {},
+                            watchTimeLeft = "23m left",
+                            onDownloadSingle = {}
                         )
                     }
                 }
@@ -230,5 +259,15 @@ class WatchUiScreenshotTest {
         composeRule.waitForIdle()
         composeRule.onNodeWithText("CONTINUE").assertExists()
         capture("16_social_continue")
+
+        scenario = 7
+        composeRule.waitForIdle()
+        composeRule.onNodeWithText("✓ Watched").assertExists()
+        capture("17_drawer_row_watched")
+
+        scenario = 8
+        composeRule.waitForIdle()
+        composeRule.onNodeWithText("23m left").assertExists()
+        capture("18_drawer_row_in_progress")
     }
 }

@@ -68,6 +68,23 @@ class PausedRemainingSemanticsTest {
     }
 
     @Test
+    fun watchedEpisodesAreExcludedEvenWhenTheirFilesAreGone() {
+        // Directive §4: a watched-and-deleted episode must never be offered
+        // again by "Remaining" (E1 completed, E2 watched-then-deleted).
+        val episodes = (1..4).map { ep(it) }
+        val remaining = remainingEpisodesOf(
+            episodes = episodes,
+            completedUrls = setOf(episodes[0].url),
+            inFlightUrls = emptySet(),
+            watchedUrls = setOf(episodes[1].url)
+        )
+        assertEquals(
+            listOf(episodes[2].url, episodes[3].url),
+            remaining.map { it.url }
+        )
+    }
+
+    @Test
     fun downloadsActionStaysVisibleWithPausedTasks() {
         // All non-failed tasks paused: the old `status != FAILED` math read
         // zero remaining and removed the action. It must stay at 2.

@@ -49,6 +49,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
@@ -82,20 +83,31 @@ import androidx.compose.ui.window.DialogWindowProvider
 import androidx.core.view.WindowCompat
 import coil.compose.SubcomposeAsyncImage
 import androidx.lifecycle.viewModelScope
+import com.anonrode.downloader.data.ContinueState
+import com.anonrode.downloader.data.SeriesContinueCard
+import com.anonrode.downloader.data.WatchHistoryCore
+import com.anonrode.downloader.data.WatchHistoryStore
+import com.anonrode.downloader.data.WatchRecord
 import com.anonrode.downloader.data.models.EpisodeItem
 import com.anonrode.downloader.data.models.ShowCard
 import com.anonrode.downloader.data.models.TaskStatus
 import com.anonrode.downloader.providers.PosterStore
 import com.anonrode.downloader.util.SeasonEpisode
+import com.anonrode.downloader.util.ShowIdentity
 import com.anonrode.downloader.ui.components.PosterImageOrFallback
 import com.anonrode.downloader.ui.components.PosterRequests
 import com.anonrode.downloader.ui.components.SkeletonBox
 import com.anonrode.downloader.ui.components.rememberInfiniteSweep
 import com.anonrode.downloader.ui.components.rememberReduceMotion
 import com.anonrode.downloader.ui.components.rememberShimmerX
+import com.anonrode.downloader.ui.theme.AccentViolet
 import com.anonrode.downloader.ui.theme.AnonTheme
+import com.anonrode.downloader.ui.theme.BorderHairline
 import com.anonrode.downloader.ui.theme.Motion
 import com.anonrode.downloader.ui.theme.Radius
+import com.anonrode.downloader.ui.theme.SurfaceElevated
+import com.anonrode.downloader.ui.theme.TextPrimary
+import com.anonrode.downloader.ui.theme.TextSecondary
 import com.anonrode.downloader.ui.util.TitleFormatting
 import com.anonrode.downloader.viewmodel.MainViewModel
 import com.anonrode.downloader.ui.util.confirmHaptic
@@ -109,6 +121,10 @@ import kotlinx.coroutines.withContext
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.abs
 import kotlin.math.roundToInt
+
+/** "S01E04" when the coordinates are known; "Ep 4" otherwise (drawer). */
+private fun drawerEpLabel(season: Int, episode: Int): String =
+    if (season > 0 || episode > 0) "S%02dE%02d".format(season, episode) else "Ep $episode"
 
 /**
  * Shared "remaining" semantics for the episode drawer and the Downloads
@@ -131,9 +147,12 @@ internal fun isInFlightStatus(status: TaskStatus): Boolean = when (status) {
 internal fun remainingEpisodesOf(
     episodes: List<EpisodeItem>,
     completedUrls: Set<String>,
-    inFlightUrls: Set<String>
+    inFlightUrls: Set<String>,
+    /** Watched episodes are excluded even when their file was deleted
+     *  (directive §4: Remaining must never re-download something you watched). */
+    watchedUrls: Set<String> = emptySet()
 ): List<EpisodeItem> = episodes.filter {
-    it.url !in completedUrls && it.url !in inFlightUrls
+    it.url !in completedUrls && it.url !in inFlightUrls && it.url !in watchedUrls
 }
 
 /** Downloads-card hint: seriesTotal minus completed/in-flight tasks.
@@ -298,10 +317,38 @@ fun EpisodeDrawer(
         showTasks.filter { isInFlightStatus(it.status) }
             .map { it.sourceUrl }.filter { it.isNotBlank() }.toSet()
     }
-    // Remaining = not completed AND not in flight: PAUSED and FAILED episodes
-    // stay here so they can be resumed/retried in one tap.
-    val remainingEpisodes = remember(episodes, completedUrls, activeOrQueuedUrls) {
-        remainingEpisodesOf(episodes, completedUrls, activeOrQueuedUrls)
+    // Watch history (directive §4): watched episodes are excluded from
+    // Remaining even after their files were deleted; matching is URL-first
+    // then season/episode, the same rule the core uses everywhere.
+    val watchRecords by WatchHistoryStore.recordsFlow.collectAsState()
+    val watchByUrl = remember(watchRecords) {
+        watchRecords.filter { it.sourceUrl.isNotBlank() }.associateBy { it.sourceUrl }
+    }
+    fun epSeason(ep: EpisodeItem): Int = if (ep.season > 0) ep.season else 0
+    fun epEpisode(ep: EpisodeItem): Int = if (ep.episode > 0) ep.episode else ep.episodeNum
+    fun watchFor(ep: EpisodeItem): WatchRecord? =
+        watchByUrl[ep.url] ?: watchRecords.firstOrNull { r ->
+            r.season > 0 && r.season == epSeason(ep) && r.episode == epEpisode(ep) &&
+                ShowIdentity.normalizeShowKey(r.showTitle) == ShowIdentity.normalizeShowKey(show.title)
+        }
+    val watchedUrls = remember(watchRecords, episodes, show.title) {
+        episodes.filter { watchFor(it)?.isWatched == true }.map { it.url }.toSet()
+    }
+    // Remaining = not completed AND not in flight AND not watched: PAUSED and
+    // FAILED episodes stay here so they can be resumed/retried in one tap.
+    val remainingEpisodes = remember(episodes, completedUrls, activeOrQueuedUrls, watchedUrls) {
+        remainingEpisodesOf(episodes, completedUrls, activeOrQueuedUrls, watchedUrls)
+    }
+
+    // Resume/Up-Next banner (directive §4): only when the target file is on
+    // disk — FETCH_NEXT has no file and belongs to the shelf, not the banner.
+    val drawerContinue: SeriesContinueCard? = remember(watchRecords, allTasks, show.title) {
+        WatchHistoryCore.resolveContinueCards(watchRecords, allTasks)
+            .firstOrNull {
+                it.showKey == ShowIdentity.normalizeShowKey(show.title) &&
+                    it.state != ContinueState.FETCH_NEXT &&
+                    it.task != null
+            }
     }
 
     // One-shot auto-selection: fires once the drawer's live scrape lands. The
@@ -1032,6 +1079,99 @@ fun EpisodeDrawer(
                                     }
                                 }
 
+                                // ── RESUME / UP NEXT BANNER (directive §4) ──
+                                drawerContinue?.let { card ->
+                                    val bannerLabel = if (card.state == ContinueState.RESUME) {
+                                        "LAST WATCHED · ${drawerEpLabel(card.season, card.episode)}"
+                                    } else {
+                                        "UP NEXT · ${drawerEpLabel(card.season, card.episode)}"
+                                    }
+                                    val bannerSub = if (card.state == ContinueState.RESUME) {
+                                        WatchHistoryCore.formatTimeLeft(card.positionMs, card.durationMs)
+                                    } else {
+                                        "Ready to play"
+                                    }
+                                    val fraction = if (card.state == ContinueState.RESUME &&
+                                        card.durationMs > 0L
+                                    ) {
+                                        (card.positionMs.toFloat() / card.durationMs.toFloat())
+                                            .coerceIn(0.03f, 0.98f)
+                                    } else 0f
+
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = gutter, vertical = 4.dp)
+                                            .clip(RoundedCornerShape(12.dp))
+                                            .background(SurfaceElevated)
+                                            .border(
+                                                1.dp,
+                                                AccentViolet.copy(alpha = 0.4f),
+                                                RoundedCornerShape(12.dp)
+                                            )
+                                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                Box(
+                                                    modifier = Modifier
+                                                        .size(6.dp)
+                                                        .clip(CircleShape)
+                                                        .background(AccentViolet)
+                                                )
+                                                Spacer(modifier = Modifier.width(6.dp))
+                                                Text(
+                                                    text = bannerLabel,
+                                                    fontSize = 11.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    letterSpacing = 0.4.sp,
+                                                    color = AccentViolet
+                                                )
+                                            }
+                                            Spacer(modifier = Modifier.height(2.dp))
+                                            Text(
+                                                text = bannerSub,
+                                                fontSize = 12.sp,
+                                                color = TextSecondary
+                                            )
+                                            if (card.state == ContinueState.RESUME) {
+                                                Spacer(modifier = Modifier.height(6.dp))
+                                                LinearProgressIndicator(
+                                                    progress = { fraction },
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .height(3.dp),
+                                                    color = AccentViolet,
+                                                    trackColor = Color(0x33FFFFFF),
+                                                    strokeCap = StrokeCap.Square
+                                                )
+                                            }
+                                        }
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Box(
+                                            modifier = Modifier
+                                                .size(32.dp)
+                                                .clip(CircleShape)
+                                                .background(Color.White)
+                                                .clickable(onClickLabel = "Play") {
+                                                    card.task?.let { target ->
+                                                        viewModel.activePlayingTaskId.value = target.id
+                                                        onDismiss()
+                                                    }
+                                                },
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Rounded.PlayArrow,
+                                                contentDescription = "Play",
+                                                tint = Color(0xFF090B10),
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                        }
+                                    }
+                                }
+
                                 // ── SELECTION RAIL (pinned): All · [Remaining] · [Seasons…] · [Range] · Clear. ──
                                 if (!isSingleMovie) {
                                     Row(
@@ -1239,6 +1379,15 @@ fun EpisodeDrawer(
                                                     episode = ep,
                                                     isSelected = isSelected,
                                                     isDownloaded = isDownloaded,
+                                                    isWatched = watchedUrls.contains(ep.url),
+                                                    watchTimeLeft = watchFor(ep)
+                                                        ?.takeIf { !it.isWatched && it.positionMs > 0L }
+                                                        ?.let {
+                                                            WatchHistoryCore.formatTimeLeft(
+                                                                it.positionMs,
+                                                                it.durationMs
+                                                            )
+                                                        },
                                                     onToggle = {
                                                         hapticView.tick()
                                                         updateSelected(
@@ -1445,11 +1594,15 @@ fun EpisodeDrawer(
  * indicator (selected = white fill + dark check; unselected = hairline).
  */
 @Composable
-fun EpisodeRow(
+internal fun EpisodeRow(
     episode: EpisodeItem,
     isSelected: Boolean,
     onToggle: () -> Unit,
     isDownloaded: Boolean = false,
+    /** Directive §4: permanent completion outranks Downloaded in the badge. */
+    isWatched: Boolean = false,
+    /** Non-null when the episode is mid-watch (e.g. "23m left"). */
+    watchTimeLeft: String? = null,
     onDownloadSingle: () -> Unit,
     displayTitle: String = episode.title,
     groupIndex: Int = 0,
@@ -1529,26 +1682,47 @@ fun EpisodeRow(
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f, fill = false)
                     )
-                    AnimatedVisibility(
-                        visible = isDownloaded,
-                        enter = fadeIn(tween(Motion.DurationFast)),
-                        exit = fadeOut(tween(Motion.DurationNavExit))
-                    ) {
+                    if (isWatched || watchTimeLeft != null || isDownloaded) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Spacer(modifier = Modifier.width(6.dp))
-                            // §2.6 emerald state pill: ✓ Downloaded / already queued —
-                            // a scannable tick in a 130-row list, colour+word+glyph.
-                            Text(
-                                text = "✓ Downloaded",
-                                fontSize = 9.sp,
-                                fontWeight = FontWeight.ExtraBold,
-                                letterSpacing = 0.4.sp,
-                                color = pal.emeraldText,
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(Radius.pill))
-                                    .background(pal.emeraldTint)
-                                    .padding(horizontal = 6.dp, vertical = 2.dp)
-                            )
+                            // Directive §4 badge precedence: Watched (violet) >
+                            // in-progress time-left > Downloaded (emerald).
+                            when {
+                                isWatched -> Text(
+                                    text = "✓ Watched",
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    letterSpacing = 0.4.sp,
+                                    color = Color(0xFFC4B5FD),
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(Radius.pill))
+                                        .background(Color(0x268B5CF6))
+                                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                                watchTimeLeft != null -> Text(
+                                    text = watchTimeLeft,
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFFC4B5FD),
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(Radius.pill))
+                                        .background(Color(0x268B5CF6))
+                                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                                else -> Text(
+                                    // §2.6 emerald state pill: ✓ Downloaded / already queued —
+                                    // a scannable tick in a 130-row list, colour+word+glyph.
+                                    text = "✓ Downloaded",
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    letterSpacing = 0.4.sp,
+                                    color = pal.emeraldText,
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(Radius.pill))
+                                        .background(pal.emeraldTint)
+                                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                            }
                         }
                     }
                 }
