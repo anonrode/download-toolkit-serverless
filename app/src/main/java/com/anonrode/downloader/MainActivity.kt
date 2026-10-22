@@ -290,6 +290,14 @@ class MainActivity : ComponentActivity() {
                                 .playQueueFor(tasksSnapshot, sortMode, t),
                             onPlayFile = { path ->
                                 tasksSnapshot.firstOrNull { it.filePath == path }?.let { openPlayer(it) }
+                            },
+                            // Watch history (directive §5): metadata lookup by
+                            // path + the end-of-episode "get next" action.
+                            taskForPath = { path ->
+                                tasksSnapshot.firstOrNull { it.filePath == path }
+                            },
+                            openRemaining = { title, seriesUrl, site ->
+                                viewModel.openRemainingEpisodes(title, seriesUrl, site)
                             }
                         )
                     }

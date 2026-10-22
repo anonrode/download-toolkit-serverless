@@ -135,6 +135,8 @@ import androidx.media3.ui.CaptionStyleCompat
 import androidx.media3.ui.PlayerView
 import androidx.media3.ui.SubtitleView
 import com.anonrode.downloader.R
+import com.anonrode.downloader.data.WatchHistoryStore
+import com.anonrode.downloader.data.models.DownloadTask
 import com.anonrode.downloader.providers.SubtitleSurfaces
 import com.anonrode.downloader.ui.theme.Motion
 import com.anonrode.downloader.ui.theme.Spacing
@@ -153,7 +155,11 @@ data class MediaPlayerContext(
     val filePath: String,
     val title: String,
     val queuePeerPaths: List<String> = emptyList(),
-    val onPlayFile: (String) -> Unit = {}
+    val onPlayFile: (String) -> Unit = {},
+    /** Resolves the task metadata backing a file path (watch history). */
+    val taskForPath: (String) -> DownloadTask? = { null },
+    /** Opens the EpisodeDrawer with Remaining preselected (end-of-episode). */
+    val openRemaining: ((title: String, seriesUrl: String, site: String) -> Unit)? = null
 )
 
 /**
@@ -478,6 +484,20 @@ private fun MediaPlayerModalImpl(
     val currentCtx by rememberUpdatedState(ctx)
     val currentOnDismiss by rememberUpdatedState(onDismiss)
 
+    /** Directive §5.1: mirror playback into the persistent watch history.
+     *  Called on the 5 s poll, on file switch, on stop and on dismiss. */
+    fun recordWatchHistory(path: String, positionMs: Long, durationMs: Long) {
+        if (path.isBlank() || durationMs <= 0L) return
+        val task = currentCtx.taskForPath(path)
+        WatchHistoryStore.recordProgress(
+            task = task,
+            filePath = path,
+            title = task?.episodeTitle ?: currentCtx.title,
+            positionMs = positionMs.coerceAtLeast(0L),
+            durationMs = durationMs
+        )
+    }
+
     val file = remember(ctx.filePath) { File(ctx.filePath) }
 
     // Missing file (deleted after completion): skip forward to the next
@@ -800,6 +820,11 @@ private fun MediaPlayerModalImpl(
                     exoPlayer.currentPosition.coerceAtLeast(0L),
                     exoPlayer.duration.coerceAtLeast(0L)
                 )
+                recordWatchHistory(
+                    leaving,
+                    exoPlayer.currentPosition.coerceAtLeast(0L),
+                    exoPlayer.duration.coerceAtLeast(0L)
+                )
             }
         }
         // Resume where the user left off the last time this file was open;
@@ -866,6 +891,17 @@ private fun MediaPlayerModalImpl(
                         }
                     }
                     Player.STATE_ENDED -> {
+                        // Directive §5.1: record the completion BEFORE the
+                        // position entry is cleared, so the episode stays
+                        // permanently Watched and Up Next advances.
+                        val endedPath = currentCtx.filePath
+                        val endedTask = currentCtx.taskForPath(endedPath)
+                        WatchHistoryStore.markEnded(
+                            task = endedTask,
+                            filePath = endedPath,
+                            title = endedTask?.episodeTitle ?: currentCtx.title,
+                            durationMs = exoPlayer.duration.coerceAtLeast(0L)
+                        )
                         // Watched to the end: drop the saved position so a
                         // reopen starts from the beginning.
                         PlaybackPositions.clear(context, currentCtx.filePath)
@@ -997,6 +1033,7 @@ private fun MediaPlayerModalImpl(
                     // or app kill loses at most a few seconds of progress.
                     if (++saveTick % 10 == 0) {
                         PlaybackPositions.save(context, currentCtx.filePath, currentPosition, duration)
+                        recordWatchHistory(currentCtx.filePath, currentPosition, duration)
                     }
                 }
             } catch (_: Exception) { /* race during teardown */ }
@@ -1086,6 +1123,11 @@ private fun MediaPlayerModalImpl(
         val savePosition = {
             runCatching {
                 PlaybackPositions.save(context, currentCtx.filePath, exoPlayer.currentPosition, exoPlayer.duration)
+                recordWatchHistory(
+                    currentCtx.filePath,
+                    exoPlayer.currentPosition.coerceAtLeast(0L),
+                    exoPlayer.duration.coerceAtLeast(0L)
+                )
             }
         }
         val observer = LifecycleEventObserver { _, event ->
