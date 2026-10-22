@@ -74,7 +74,126 @@ object ProviderRegistry {
         return allProviders.find { it.name.equals(site, ignoreCase = true) }
     }
 
-    private val searchCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, List<ShowCard>>>()
+    // ---- last-good search cache (RC-2) --------------------------------------
+    //
+    // The first search of a session paints late because every provider crawl
+    // starts cold (asianc's first API call alone wedged 30s twice, share-43
+    // §RC-2). This cache keeps the LAST GOOD non-empty result of every
+    // (provider, normalized query) pair for 5 minutes: a repeat/cold query
+    // paints instantly from memory while the normal fan-out refreshes in the
+    // background.
+    //
+    // Rules that are load-bearing:
+    //  - exact key: provider + EXACT normalized query. A cache hit can never
+    //    surface a different query's cards (the old cross-query bleed bug).
+    //  - never cache empty/failed: providers swallow failures into empty
+    //    lists; an empty answer must never overwrite a good entry. (The
+    //    drawer negative cache in loadEpisodes is a separate mechanism and is
+    //    deliberately not duplicated here.)
+    //  - bounded: hard LRU of [MAX_SEARCH_CACHE_ENTRIES]; no unbounded map.
+    internal object SearchLastGoodCache {
+        const val MAX_SEARCH_CACHE_ENTRIES = 64
+
+        /** 5-minute freshness (owner spec). Internal setter = test seam. */
+        internal var ttlMs: Long = 5 * 60_000L
+
+        private data class Entry(val query: String, val atMs: Long, val cards: List<ShowCard>)
+
+        private val lock = Any()
+        private val lru = object : java.util.LinkedHashMap<String, Entry>(
+            MAX_SEARCH_CACHE_ENTRIES, 0.75f, true
+        ) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Entry>?): Boolean {
+                val evict = size > MAX_SEARCH_CACHE_ENTRIES
+                if (evict) evictions.incrementAndGet()
+                return evict
+            }
+        }
+        private val hits = java.util.concurrent.atomic.AtomicLong()
+        private val misses = java.util.concurrent.atomic.AtomicLong()
+        private val stores = java.util.concurrent.atomic.AtomicLong()
+        private val evictions = java.util.concurrent.atomic.AtomicLong()
+
+        /** Case/whitespace-insensitive identity. Nothing else is normalized:
+         *  two different queries must never share an entry. */
+        fun normalizeQuery(raw: String): String = raw.trim().lowercase().replace(Regex("\\s+"), " ")
+
+        private fun keyOf(provider: String, normalizedQuery: String): String =
+            "${provider.trim().lowercase()}|$normalizedQuery"
+
+        fun get(
+            provider: String,
+            normalizedQuery: String,
+            nowMs: Long = System.currentTimeMillis()
+        ): List<ShowCard>? {
+            val key = keyOf(provider, normalizedQuery)
+            synchronized(lock) {
+                val entry = lru[key]
+                if (entry == null) {
+                    misses.incrementAndGet()
+                    return null
+                }
+                // Exact-query guard: even a key-shape collision must not
+                // serve another query's cards.
+                if (entry.query != normalizedQuery) {
+                    lru.remove(key)
+                    misses.incrementAndGet()
+                    return null
+                }
+                if (nowMs - entry.atMs >= ttlMs) {
+                    lru.remove(key)
+                    misses.incrementAndGet()
+                    return null
+                }
+                hits.incrementAndGet()
+                return entry.cards
+            }
+        }
+
+        /** Only a NON-EMPTY live answer is last-good. Returns true on store. */
+        fun put(
+            provider: String,
+            normalizedQuery: String,
+            cards: List<ShowCard>,
+            nowMs: Long = System.currentTimeMillis()
+        ): Boolean {
+            if (cards.isEmpty()) return false
+            synchronized(lock) {
+                lru[keyOf(provider, normalizedQuery)] = Entry(normalizedQuery, nowMs, cards.toList())
+                stores.incrementAndGet()
+            }
+            return true
+        }
+
+        internal data class Stats(
+            val hits: Long,
+            val misses: Long,
+            val stores: Long,
+            val evictions: Long,
+            val size: Int
+        )
+
+        internal fun stats(): Stats = synchronized(lock) {
+            Stats(hits.get(), misses.get(), stores.get(), evictions.get(), lru.size)
+        }
+
+        internal fun clear() = synchronized(lock) { lru.clear() }
+    }
+
+    /** Test seam: the provider fan-out used by [searchStreaming]. Production
+     *  leaves this null (= [enabledProviders]). */
+    internal var searchProvidersForTest: List<SiteProvider>? = null
+
+    internal var searchCacheTtlMs: Long
+        get() = SearchLastGoodCache.ttlMs
+        set(value) { SearchLastGoodCache.ttlMs = value }
+
+    internal fun clearSearchCachesForTest() {
+        SearchLastGoodCache.clear()
+        SearchLastGoodCache.ttlMs = 5 * 60_000L
+    }
+
+    internal fun searchCacheStatsForTest(): SearchLastGoodCache.Stats = SearchLastGoodCache.stats()
 
     // ---- search-result hygiene ----------------------------------------------
     //
@@ -127,44 +246,54 @@ object ProviderRegistry {
     }
 
     fun searchStreaming(query: String, siteFilter: String? = null): Flow<List<ShowCard>> = channelFlow {
-        val cacheKey = "${query.trim().lowercase()}::${siteFilter ?: "all"}"
-        val now = System.currentTimeMillis()
-        val cached = searchCache[cacheKey]
-
-        // If cached within the last 4 minutes, serve it and skip the live
-        // crawl entirely — the old code emitted the cache but STILL fetched
-        // every provider page, so the TTL bought a faster first paint while
-        // burning the same mobile data as no cache at all. Stale entries
-        // below still get the stale-while-revalidate treatment.
-        if (cached != null && (now - cached.first) < 240_000L && cached.second.isNotEmpty()) {
-            send(cached.second)
-            return@channelFlow
-        }
-        // Stale-cache sweep: any OTHER query's cached results for this filter
-        // are obsolete the moment this crawl starts, otherwise a failed/empty
-        // crawl below emits NOTHING and the stale query's results stay on
-        // screen (the "previous search bleeding into the next" report).
-        if (searchCache.size > 64) {
-            val cutoff = now - 240_000L
-            searchCache.entries.removeIf { it.value.first < cutoff }
-        }
-        val staleKeys = searchCache.keys.filter { it.endsWith("::${siteFilter ?: "all"}") && it != cacheKey }
-        for (sk in staleKeys) searchCache.remove(sk)
+        val normalizedQuery = SearchLastGoodCache.normalizeQuery(query)
+        val filterLabel = siteFilter?.trim()?.lowercase()?.takeIf { it.isNotBlank() } ?: "all"
 
         // Site-filter resolution must also honor the OTA kill switch: an
         // explicitly requested disabled site returns no cards, exactly like a
         // site with no results — no request is fired for it.
-        val currentProviders = enabledProviders
-        val targets = if (!siteFilter.isNullOrBlank() && siteFilter != "all") {
-            currentProviders.filter { it.name.equals(siteFilter, ignoreCase = true) || it.name.contains(siteFilter, ignoreCase = true) || siteFilter.contains(it.name, ignoreCase = true) }
+        val currentProviders = searchProvidersForTest ?: enabledProviders
+        val targets = if (filterLabel != "all") {
+            currentProviders.filter { it.name.equals(filterLabel, ignoreCase = true) || it.name.contains(filterLabel, ignoreCase = true) || filterLabel.contains(it.name, ignoreCase = true) }
         } else {
             currentProviders
         }.filter { it.searchEnabled && DynamicRulesManager.isSiteEnabled(it.name) }
 
         val timeoutMs = if (targets.size == 1) 15000L else 7000L
-        val accumulated = java.util.Collections.synchronizedList(mutableListOf<ShowCard>())
-        val emitMutex = Mutex()
 
+        // One basket per provider. A live refresh REPLACES that provider's
+        // basket rather than appending, so a refreshed card can never sit
+        // beside its stale cached twin.
+        val baskets = java.util.Collections.synchronizedMap(LinkedHashMap<String, List<ShowCard>>())
+        val emitMutex = Mutex()
+        var liveResults = false
+
+        fun snapshot(): List<ShowCard> {
+            val all = synchronized(baskets) { baskets.values.toList().flatten() }
+            return RelevanceScorer.filterAndSort(query, all)
+        }
+
+        // 1. INSTANT LAST-GOOD. Exact (provider, normalized query) entries
+        // only — a different query never reads this entry. Enabled-site
+        // filtering is re-applied because the OTA kill switch can flip
+        // inside the TTL.
+        for (provider in targets) {
+            val cached = SearchLastGoodCache.get(provider.name, normalizedQuery) ?: continue
+            // Re-filter: the OTA kill switch may have disabled a site since
+            // this entry was stored. Never paint a basket that filters empty.
+            val usable = filterEnabledCards(cached)
+            if (usable.isNotEmpty()) baskets[provider.name] = usable
+        }
+        if (baskets.isNotEmpty()) {
+            DebugLog.net(
+                "search cache hit query=\"${normalizedQuery.take(60)}\" providers=${baskets.keys.joinToString(",")}"
+            )
+            send(snapshot())
+        }
+
+        // 2. BACKGROUND REFRESH. The crawl always runs — a fresh cache entry
+        // must not freeze the results for its whole TTL. Empty/failed answers
+        // never overwrite the last-good entry.
         coroutineScope {
             targets.forEach { provider ->
                 launch(Dispatchers.IO) {
@@ -172,10 +301,11 @@ object ProviderRegistry {
                         val raw = withTimeoutOrNull(timeoutMs) { provider.search(query) } ?: emptyList()
                         val items = filterEnabledCards(filteredItems(provider, raw))
                         if (items.isNotEmpty()) {
+                            SearchLastGoodCache.put(provider.name, normalizedQuery, items)
                             emitMutex.withLock {
-                                accumulated.addAll(items)
-                                val ranked = RelevanceScorer.filterAndSort(query, accumulated.toList())
-                                send(ranked)
+                                baskets[provider.name] = items
+                                liveResults = true
+                                send(snapshot())
                             }
                         }
                     } catch (cancelled: CancellationException) {
@@ -185,19 +315,10 @@ object ProviderRegistry {
             }
         }
 
-        if (accumulated.isNotEmpty()) {
-            val finalRanked = RelevanceScorer.filterAndSort(query, accumulated.toList())
-            searchCache[cacheKey] = Pair(now, finalRanked)
-            send(finalRanked)
-        } else if (cached == null || cached.second.isEmpty()) {
-            send(emptyList())
-        }
-        // Dead-end guard: when the crawl came up empty and a DIFFERENT query's
-        // stale results for this filter were still cached, emit an explicit
-        // empty list. Without this the collector never fires, isSearching
-        // clears to "done", and the previous query's cards stay on screen and
-        // tappable under the new query.
-        if (accumulated.isEmpty() && staleKeys.isNotEmpty()) {
+        // 3. END STATE. A failed refresh keeps the last-good paint on screen;
+        // only a query with nothing cached AND nothing live emits the explicit
+        // empty list that clears the previous query's grid.
+        if (!liveResults && baskets.isEmpty()) {
             send(emptyList())
         }
     }.flowOn(Dispatchers.IO)
