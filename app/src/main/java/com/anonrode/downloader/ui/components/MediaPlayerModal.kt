@@ -662,6 +662,9 @@ private fun MediaPlayerModalImpl(
     // Gesture HUD (directive §5.3): one transient pill shared by double-tap
     // seek, center play/pause, left-half brightness and hold-to-boost speed.
     var gestureHudText by remember { mutableStateOf<String?>(null) }
+    // Retained so the fade-out animates a real caption instead of collapsing
+    // to an empty pill the moment gestureHudText nulls.
+    var gestureHudLastText by remember { mutableStateOf("") }
     var gestureHudIcon by remember { mutableStateOf<ImageVector?>(null) }
     var gestureHudTick by remember { mutableIntStateOf(0) }
     var isBrightnessDragging by remember { mutableStateOf(false) }
@@ -1119,6 +1122,11 @@ private fun MediaPlayerModalImpl(
             delay(1200)
             showVolumeHud = false
         }
+    }
+
+    // Keep the last caption for the exit animation.
+    LaunchedEffect(gestureHudText) {
+        gestureHudText?.let { gestureHudLastText = it }
     }
 
     // Gesture HUD: lingers briefly after the gesture, but never disappears
@@ -1661,7 +1669,7 @@ private fun MediaPlayerModalImpl(
             ) {
                 GestureHudPill(
                     icon = gestureHudIcon ?: Icons.Rounded.PlayArrow,
-                    label = gestureHudText.orEmpty()
+                    label = gestureHudText ?: gestureHudLastText
                 )
             }
 
