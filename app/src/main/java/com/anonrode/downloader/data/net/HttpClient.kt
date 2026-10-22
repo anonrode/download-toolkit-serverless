@@ -9,8 +9,15 @@ import okhttp3.Protocol
 import okhttp3.Request
 import okhttp3.Response
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import java.util.Collections
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 object HttpClient {
     const val DEFAULT_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -320,6 +327,93 @@ object HttpClient {
         return retryAfterCooldown.remainingMs(safe, scope = scope) > 0L
     }
 
+    // ------------------------------------------------------------- boot warm-up
+
+    /** Tag for boot warm-up traffic. It routes to the DOWNLOAD request scope
+     *  ([requestScope]), never SEARCH: warming six origins can therefore not
+     *  consume the first search's budget or queue ahead of it. */
+    internal const val WARMUP_TAG = "warmup"
+
+    /**
+     * RC-2 cold start: warm DNS + a pooled connection for the hard-coded hot
+     * origins once connectivity exists. Idempotent (successes warm once per
+     * process), silent (failures are swallowed), non-blocking (returns after
+     * launching; the work runs on [ConnectionWarmup]'s IO scope).
+     *
+     * Why it helps: the day's first asianc call paid the HTTP/2 preface
+     * negotiation and a cold DNS lookup — twice it wedged the full 30s read
+     * timeout ("Required SETTINGS preface not received after 30978ms"). A
+     * HEAD at boot negotiates the same connection while the user is still on
+     * the first screen, so the first search finds an established pooled
+     * connection instead of a cold one.
+     */
+    fun warmHotOrigins() {
+        ConnectionWarmup.start()
+    }
+
+    /**
+     * One HEAD at [url]. ANY HTTP answer proves DNS + TCP + TLS + protocol
+     * negotiation succeeded and leaves the connection in [pool] for the next
+     * GET. Honors Retry-After cooldowns and the per-origin scheduler as a
+     * DOWNLOAD-class request. Returns false on every failure (never throws
+     * except coroutine cancellation).
+     */
+    internal fun warmConnection(
+        url: String,
+        baseClient: OkHttpClient = shared,
+        timeoutMs: Long = ConnectionWarmup.WARM_TIMEOUT_MS
+    ): Boolean {
+        if (!isSafeTarget(url)) return false
+        // Never re-hit an origin that asked us to back off, just to warm it.
+        if (isOriginCoolingDown(url, requestScope(WARMUP_TAG))) return false
+        val cls = requestClass(WARMUP_TAG)
+        // Short, bounded admission: a busy origin keeps its slots and the
+        // warm-up simply skips it (fail-open is wrong here — no request).
+        val admitted = OriginLoadScheduler.acquire(url, cls, maxWaitMs = 250L)
+        try {
+            val client = baseClient.newBuilder()
+                .connectTimeout(timeoutMs, TimeUnit.MILLISECONDS)
+                .readTimeout(timeoutMs, TimeUnit.MILLISECONDS)
+                .writeTimeout(timeoutMs, TimeUnit.MILLISECONDS)
+                .callTimeout(timeoutMs, TimeUnit.MILLISECONDS)
+                .build()
+            val request = Request.Builder()
+                .url(safeUrl(url))
+                .head()
+                .header("User-Agent", DEFAULT_UA)
+                .header("Accept", "*/*")
+                .build()
+            val call = client.newCall(request)
+            inFlightCalls.add(call)
+            val started = System.currentTimeMillis()
+            try {
+                call.execute().use { res ->
+                    recordCooldown(res, WARMUP_TAG)
+                    com.anonrode.downloader.util.DebugLog.net(
+                        "WARM ${safeUrl(url)} -> ${res.code} in ${System.currentTimeMillis() - started}ms " +
+                            "protocol=${res.protocol}"
+                    )
+                }
+                return true
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (e: Exception) {
+                com.anonrode.downloader.util.DebugLog.net(
+                    "WARM ${safeUrl(url)} FAILED ${e.javaClass.simpleName}: ${e.message}"
+                )
+                return false
+            } finally {
+                inFlightCalls.remove(call)
+            }
+        } finally {
+            if (admitted) OriginLoadScheduler.release(url, cls)
+        }
+    }
+
+    /** Tests only: the scheduler class warm-up traffic takes (must be
+     *  DOWNLOAD, i.e. never the SEARCH budget). */
+    internal fun warmupRequestClassForTest(): OriginRequestClass = requestClass(WARMUP_TAG)
+
     /**
      * Hybrid Smart-DNS:
      * 1. Primary: System DNS (fast, geo-routes CDN IPs for max video speeds).
@@ -380,6 +474,14 @@ object HttpClient {
 
 
     /**
+     * Tests only: replace the whole DNS pipeline (system race + DoH + SSRF
+     * floor) so MockWebServer's loopback origins can exercise the REAL request
+     * paths. Production leaves this null. A test that sets it MUST reset it in
+     * @After — the SSRF floor is a security boundary, not a preference.
+     */
+    internal var dnsForTest: okhttp3.Dns? = null
+
+    /**
      * SSRF floor for every PAGE/RESOLVER fetch: after the hybrid resolver, drop
      * any address that points into private/loopback/link-local/metadata space.
      * A hostile or compromised page we merely fetch can declare a URL that names
@@ -391,6 +493,7 @@ object HttpClient {
      */
     private val safeDns = object : okhttp3.Dns {
         override fun lookup(hostname: String): List<java.net.InetAddress> {
+            dnsForTest?.let { return it.lookup(hostname) }
             val resolved = hybridDns.lookup(hostname)
             val safe = resolved.filterNot { isBlockedAddress(it) }
             if (safe.isEmpty()) {
@@ -1855,5 +1958,136 @@ internal object OriginLoadScheduler {
     internal fun clearForTests() {
         lock.lock()
         try { gates.clear() } finally { lock.unlock() }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Boot warm-up (RC-2 cold start, 2026-10-21)
+// ---------------------------------------------------------------------------
+
+/**
+ * Silent, idempotent, non-blocking boot warm-up for the origins the first
+ * user interaction always touches (AsianC search + the four trending feeds).
+ *
+ * Contract:
+ *  - once connectivity exists, [start] launches ONE warm per origin and
+ *    returns immediately — app start and the UI thread never wait for it;
+ *  - a successful warm is remembered for the process (idempotent: later
+ *    [start] calls dial nothing); a FAILED one stays retryable, so the next
+ *    connectivity change gives it another chance;
+ *  - failures are silent by construction: [HttpClient.warmConnection] returns
+ *    false, never throws;
+ *  - every warm is a DOWNLOAD-class, cooldown-aware scheduler request, so it
+ *    cannot consume the search budget ([HttpClient.WARMUP_TAG]).
+ *
+ * The transport is injectable ([warmAsync]'s [warmer]) so the idempotence /
+ * silence / non-blocking contract is JVM-testable without sockets.
+ */
+internal object ConnectionWarmup {
+
+    /** The hot origins: AsianC search/detail plus the trending feed fan-out. */
+    val HOT_ORIGINS: List<String> = listOf(
+        "https://asianc.id/",
+        "https://nepu.gd/",
+        "https://9jarocks.net/",
+        "https://www.naijaprey.tv/",
+        "https://thenkiri.com/",
+        "https://www.naijavault.com/"
+    )
+
+    /** Per-origin budget. Generous for a cold mobile DNS+TLS+H2 negotiation,
+     *  far below the 30s read timeout it replaces. */
+    const val WARM_TIMEOUT_MS = 5_000L
+
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private val warmed: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    private val inFlight: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    private val attempts = AtomicInteger()
+    private val successes = AtomicInteger()
+    private val failures = AtomicInteger()
+
+    /**
+     * Production entry point: fire-and-forget. Idempotence lives in
+     * [warmOne] (warmed set + in-flight single-flight), so calling this on
+     * every connectivity change costs nothing after the first success and
+     * retries only the origins that failed while the network was flapping.
+     */
+    fun start() {
+        warmAsync(HOT_ORIGINS)
+    }
+
+    internal data class WarmStats(
+        val attempts: Int,
+        val successes: Int,
+        val failures: Int,
+        val warmed: Int
+    )
+
+    /**
+     * Warm [origins] concurrently. Returns the [Job] so tests can await
+     * completion; production ignores it. Distinct origins only. Each origin
+     * warms at most once (successes only — a failed origin may be retried).
+     */
+    internal fun warmAsync(
+        origins: List<String>,
+        timeoutMs: Long = WARM_TIMEOUT_MS,
+        warmer: suspend (String) -> Boolean = { origin ->
+            HttpClient.warmConnection(origin, timeoutMs = timeoutMs)
+        }
+    ): Job = scope.launch {
+        coroutineScope {
+            origins.distinct().forEach { origin ->
+                launch { warmOne(origin, warmer) }
+            }
+        }
+    }
+
+    private suspend fun warmOne(origin: String, warmer: suspend (String) -> Boolean) {
+        val url = normalizeOrigin(origin)
+        if (url.isBlank() || warmed.contains(url)) return
+        // Single-flight per origin: two start()/reconnect calls racing must
+        // not double-dial the same host.
+        if (!inFlight.add(url)) return
+        attempts.incrementAndGet()
+        try {
+            val ok = try {
+                warmer(url)
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                false
+            }
+            if (ok) {
+                warmed.add(url)
+                successes.incrementAndGet()
+            } else {
+                failures.incrementAndGet()
+            }
+        } finally {
+            inFlight.remove(url)
+        }
+    }
+
+    private fun normalizeOrigin(origin: String): String {
+        val trimmed = origin.trim()
+        if (trimmed.isBlank()) return ""
+        val withScheme = if (trimmed.startsWith("http://", true) || trimmed.startsWith("https://", true)) {
+            trimmed
+        } else {
+            "https://$trimmed"
+        }
+        return if (withScheme.endsWith("/")) withScheme else "$withScheme/"
+    }
+
+    /** Tiny stats hook for tests. */
+    internal fun statsForTest(): WarmStats =
+        WarmStats(attempts.get(), successes.get(), failures.get(), warmed.size)
+
+    internal fun resetForTest() {
+        warmed.clear()
+        inFlight.clear()
+        attempts.set(0)
+        successes.set(0)
+        failures.set(0)
     }
 }

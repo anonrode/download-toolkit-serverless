@@ -1,5 +1,7 @@
 package com.anonrode.downloader.data.net
 
+import android.app.Application
+import okhttp3.Dns
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.SocketPolicy
@@ -8,6 +10,10 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
+import java.net.InetAddress
 
 /**
  * Cold-start search budget (share-43 §RC-2): a wedged HTTP/2 edge — TCP open,
@@ -16,19 +22,27 @@ import org.junit.Test
  * "Read timed out after 30529ms", both on the day's FIRST search call).
  * getTextWithTimeout must answer within its own budget: null fast enough to
  * retry on a stalled origin, and the body untouched on a healthy one.
+ *
+ * Robolectric hosts the android.util.Log failure journaling; [HttpClient.dnsForTest]
+ * maps MockWebServer's loopback origin past the production SSRF floor (which
+ * deliberately refuses loopback). Both are reset in [tearDown].
  */
+@RunWith(RobolectricTestRunner::class)
+@Config(manifest = Config.NONE, application = Application::class)
 class HttpClientGetTimeoutTest {
 
     private lateinit var server: MockWebServer
 
     @Before
     fun setUp() {
+        HttpClient.dnsForTest = Dns { listOf(InetAddress.getByName("127.0.0.1")) }
         server = MockWebServer()
         server.start()
     }
 
     @After
     fun tearDown() {
+        HttpClient.dnsForTest = null
         server.shutdown()
     }
 

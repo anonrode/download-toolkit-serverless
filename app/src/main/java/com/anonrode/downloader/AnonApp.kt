@@ -62,6 +62,13 @@ class AnonApp : Application(), ImageLoaderFactory {
         appScope.launch {
             networkObserver.status.collect { status ->
                 PosterNetwork.isOnline = status.isConnected
+                if (status.isConnected) {
+                    // RC-2: negotiate DNS + a pooled connection for the hot
+                    // origins while the user is still on the first screen, so
+                    // the first search does not pay the HTTP/2 preface stall.
+                    // Fire-and-forget: idempotent, silent, non-blocking.
+                    HttpClient.warmHotOrigins()
+                }
             }
         }
         // Torrent selective-file picker: the engine suspends on this callback
