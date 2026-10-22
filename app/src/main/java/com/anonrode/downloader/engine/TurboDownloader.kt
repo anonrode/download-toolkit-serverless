@@ -61,6 +61,15 @@ object TurboDownloader {
     private const val SEVERE_LAG_MIN_BEST_BPS = 512L * 1024
     private const val SEVERE_LAG_FRACTION = 0.12
 
+    // Warm standby (board row 5, 2026-10-21): one PRE-DIALED spare connection
+    // per active task so a dropped/throttled lane is replaced by a socket that
+    // already completed TCP+TLS, hiding the handshake that used to show as a
+    // visible throughput dip. The spare is idle until promoted; active lanes
+    // plus the spare never exceed min(per-host cap, lane grant).
+    private const val STANDBY_KEEPALIVE_MS = 1_000L
+    private const val STANDBY_RETRY_MS = 5_000L
+    private const val STANDBY_POOL_KEEPALIVE_SECONDS = 30L
+
     /** Decaying shared best-window reference (30s half-life). */
     private const val BEST_HALF_LIFE_MS = 30_000L
 
@@ -102,6 +111,37 @@ object TurboDownloader {
 
         fun budgetAllows(drops: Int, noMoreDrops: Boolean): Boolean =
             !noMoreDrops && drops < MAX_DROPS_PER_PIECE
+    }
+
+    /**
+     * Pure standby accounting (board row 5). The runtime pre-dial is in
+     * [StandbySocket]; these helpers keep the CAP INVARIANT testable:
+     * active worker lanes + idle standbys <= min(per-host cap, lane grant),
+     * with at least one lane whenever the task is admitted.
+     */
+    internal object StandbyPolicy {
+        const val MAX_STANDBY_PER_TASK = 1
+
+        /** Connections the task may hold in total. */
+        fun capacity(hostCap: Int, laneGrant: Int): Int =
+            minOf(hostCap, laneGrant).coerceAtLeast(1)
+
+        /** The task can afford to park one idle connection only when the
+         *  capacity leaves at least one lane doing work. */
+        fun standbyAllowed(hostCap: Int, laneGrant: Int): Boolean =
+            capacity(hostCap, laneGrant) > MAX_STANDBY_PER_TASK
+
+        /** ACTIVE worker lanes after reserving the standby slot. */
+        fun activeWorkerBudget(hostCap: Int, laneGrant: Int, standbyActive: Boolean): Int {
+            val cap = capacity(hostCap, laneGrant)
+            return if (standbyActive) (cap - MAX_STANDBY_PER_TASK).coerceAtLeast(1) else cap
+        }
+
+        /** Range a promoted connection may request: it repairs exactly the
+         *  not-yet-committed tail of the abandoned piece. Null means the piece
+         *  is already complete (promotion must not re-request anything). */
+        fun promotionRange(current: Long, end: Long): LongRange? =
+            if (current > end) null else current..end
     }
 
     // Read coalescing (directive Fix 5): Okio returns at most one 8 KiB segment
@@ -250,6 +290,97 @@ object TurboDownloader {
      *  TLS choice the caller made). */
     private fun freshConnectionClient(base: OkHttpClient): OkHttpClient =
         base.newBuilder().connectionPool(zeroIdlePool).build()
+
+    /**
+     * One pre-dialed replacement socket per task (board row 5).
+     *
+     * A tiny ranged GET (`bytes=0-0`, the probe's own shape) opens and then
+     * RETURNS a keep-alive connection to this instance's private pool. When a
+     * slow lane is dropped, [promote] hands the pooled client to the piece's
+     * next attempt: the request skips TCP+TLS (the measured dip after a
+     * drop-and-replace), and `Connection: close` on the retry makes it
+     * one-shot. The keeper then pre-dials the NEXT spare, but only after
+     * [releasePromoted] — so the live promoted socket and a fresh handshake
+     * are never counted on top of the full worker budget.
+     *
+     * Accounting invariant: at most one idle standby exists per task, and it
+     * only exists while [StandbyPolicy.activeWorkerBudget] has already
+     * subtracted its slot from the worker lanes.
+     */
+    internal class StandbySocket(
+        private val url: String,
+        private val headers: Map<String, String>,
+        baseClient: OkHttpClient,
+        private val taskId: String,
+        private val track: (okhttp3.Call) -> Unit = {},
+        private val untrack: (okhttp3.Call) -> Unit = {}
+    ) {
+        private val pool = okhttp3.ConnectionPool(
+            StandbyPolicy.MAX_STANDBY_PER_TASK,
+            STANDBY_POOL_KEEPALIVE_SECONDS,
+            java.util.concurrent.TimeUnit.SECONDS
+        )
+        private val client = baseClient.newBuilder().connectionPool(pool).build()
+        private val ready = AtomicBoolean(false)
+        private val preparing = AtomicBoolean(false)
+        private val promotedInUse = AtomicBoolean(false)
+
+        val isReady: Boolean get() = ready.get()
+
+        /** A new dial is safe only when no spare is ready AND the previously
+         *  promoted socket has been fully released. */
+        fun canPrepare(): Boolean = !ready.get() && !promotedInUse.get()
+
+        /**
+         * Pre-dial one keep-alive connection. Returns true when a pooled
+         * connection is ready to promote. Blocking; call on Dispatchers.IO.
+         */
+        fun prepare(): Boolean {
+            if (!canPrepare() || !preparing.compareAndSet(false, true)) return ready.get()
+            try {
+                val req = Request.Builder().url(url).apply {
+                    header("User-Agent", headers["User-Agent"] ?: HttpClient.DEFAULT_UA)
+                    headers.forEach { (k, v) -> if (!k.equals("User-Agent", true)) header(k, v) }
+                    header("Range", "bytes=0-0")
+                    header("Accept-Encoding", "identity")
+                }.build()
+                val call = client.newCall(req)
+                track(call)
+                try {
+                    call.execute().use { res ->
+                        val body = res.body
+                        // Only a complete 1-byte 206 leaves the socket
+                        // reusable; anything else (403, 200 full body, HTML)
+                        // closes it and the keeper backs off.
+                        if (res.code == 206 && body != null && body.contentLength() == 1L) {
+                            body.source().readByteArray(1)
+                            ready.set(true)
+                        }
+                    }
+                } finally {
+                    untrack(call)
+                }
+            } catch (_: Exception) {
+                ready.set(false)
+            } finally {
+                preparing.set(false)
+            }
+            return ready.get()
+        }
+
+        /** Takes the pre-dialed connection for one piece attempt, or null
+         *  when no spare is ready (caller falls back to a fresh dial). */
+        fun promote(): OkHttpClient? {
+            if (!ready.compareAndSet(true, false)) return null
+            promotedInUse.set(true)
+            return client
+        }
+
+        /** Marks the promoted attempt finished so the keeper may re-dial. */
+        fun releasePromoted() {
+            promotedInUse.set(false)
+        }
+    }
 
     /** Coalesce Okio's <=8 KiB segment reads into one up-to-64 KiB write.
      *  Stops early on a short segment read (socket buffer drained) so the
@@ -675,7 +806,6 @@ object TurboDownloader {
         // survivors drain everything the departed workers would have claimed.
         val throttleUntil = AtomicLong(0L)
         val throttleCycles = AtomicInteger(0)
-        val maxWorkers = AtomicInteger(sockets)
         // Startup ramp state (fresh tasks only). `sockets` is the admission
         // grant; the ramp may grow to the per-host ceiling as the global
         // controller rebalances (growth is consumed at piece boundaries).
@@ -685,16 +815,35 @@ object TurboDownloader {
             return if (grant > 0) minOf(grant, hostCeiling) else sockets
         }
         val freshStart = initialBytes == 0L
+        // Warm standby (board row 5): one pre-dialed spare per active task.
+        // Its slot is subtracted BEFORE any lane starts, so active lanes +
+        // the idle spare can never exceed min(per-host cap, lane grant).
+        val standbyEnabled = StandbyPolicy.standbyAllowed(hostCeiling, laneGrant())
+        fun workerCeiling(): Int =
+            StandbyPolicy.activeWorkerBudget(hostCeiling, laneGrant(), standbyEnabled)
+        val workerBudget = workerCeiling()
+        val standby = if (standbyEnabled) {
+            StandbySocket(
+                url = url,
+                headers = headers,
+                baseClient = client,
+                taskId = taskId,
+                track = { call -> trackCall(taskId, call) },
+                untrack = { call -> untrackCall(taskId, call) }
+            )
+        } else null
+        val maxWorkers = AtomicInteger(workerBudget)
         // The controller's admission grant is the ceiling; the ramp is the
-        // additive-only startup curve inside it.
-        val rampStart = if (freshStart) minOf(RAMP_STEPS.first(), sockets, laneGrant()) else sockets
+        // additive-only startup curve inside it (standby slot already out).
+        val rampStart = if (freshStart) minOf(RAMP_STEPS.first(), sockets, workerBudget) else minOf(sockets, workerBudget)
         val activeWorkers = AtomicInteger(rampStart)
         val rampStartedAt = System.currentTimeMillis()
         val sawFirstByte = AtomicBoolean(false)
         val sawFirstMegabyte = AtomicBoolean(false)
         if (freshStart && taskId.isNotEmpty()) {
             com.anonrode.downloader.util.DebugLog.backend(
-                "task=$taskId lane ramp start=$rampStart cap=$hostCeiling total=0KB/s"
+                "task=$taskId lane ramp start=$rampStart cap=$hostCeiling " +
+                    "standby=${if (standbyEnabled) 1 else 0} total=0KB/s"
             )
         }
         fun enterRateLimit() {
@@ -835,7 +984,15 @@ object TurboDownloader {
                                 // could otherwise hand back the throttled socket.
                                 if (drops > 0) header("Connection", "close")
                             }.build()
-                            val call = (if (drops > 0) freshConnectionClient(client) else client).newCall(req)
+                            // A dropped piece promotes the pre-dialed spare
+                            // when one is ready: the next attempt starts on an
+                            // established connection, hiding the TCP+TLS
+                            // handshake the dip used to show. The fallback
+                            // stays the old fresh-dial client.
+                            val standbyClient = if (drops > 0) standby?.promote() else null
+                            val attemptClient = standbyClient
+                                ?: if (drops > 0) freshConnectionClient(client) else client
+                            val call = attemptClient.newCall(req)
                             trackCall(taskId, call)
                             try {
                                 call.execute().use { res ->
@@ -1003,6 +1160,12 @@ object TurboDownloader {
                                 }
                                 } finally {
                                     untrackCall(taskId, call)
+                                    // The spare stays "in use" until this
+                                    // attempt is fully done; only then may the
+                                    // keeper pre-dial its replacement, so a
+                                    // promoted socket and a fresh handshake are
+                                    // never counted on top of the worker budget.
+                                    if (standbyClient != null) standby?.releasePromoted()
                                 }
                                 if (completed) return true
                                 if (rateLimited) {
@@ -1100,7 +1263,7 @@ object TurboDownloader {
                             val improved = lastBps == 0.0 || bps > lastBps * RAMP_IMPROVE_RATIO
                             if (!improved) break
                             stepIdx = (stepIdx + 1).coerceAtMost(RAMP_STEPS.lastIndex)
-                            val target = minOf(RAMP_STEPS[stepIdx], hostCeiling, grant)
+                            val target = minOf(RAMP_STEPS[stepIdx], workerCeiling())
                             if (target > activeWorkers.get()) {
                                 val prev = activeWorkers.getAndSet(target)
                                 if (taskId.isNotEmpty()) {
@@ -1113,8 +1276,28 @@ object TurboDownloader {
                             lastBps = bps
                             lastDone = cur
                             lastMs = now
-                            if (activeWorkers.get() >= minOf(sockets, grant)) break
+                            if (activeWorkers.get() >= minOf(sockets, grant, workerCeiling())) break
                             rampWait(RAMP_INTERVAL_MS)
+                        }
+                    }
+                    // Warm-standby keeper (board row 5): keeps exactly one
+                    // pre-dialed connection ready for the next drop. It sits
+                    // out rate-limit cooldowns and backs off on a refused
+                    // pre-dial, so the spare can never become a request storm.
+                    if (standby != null) launch(Dispatchers.IO) {
+                        while (isActive && !failed.get() && workRemains()) {
+                            val cooldownLeft = (throttleUntil.get() - System.currentTimeMillis())
+                                .coerceAtLeast(0L)
+                            if (cooldownLeft > 0L) {
+                                delay(minOf(cooldownLeft, 2_000L))
+                                continue
+                            }
+                            val prepared = if (standby.canPrepare()) {
+                                standby.prepare()
+                            } else {
+                                standby.isReady
+                            }
+                            delay(if (prepared) STANDBY_KEEPALIVE_MS else STANDBY_RETRY_MS)
                         }
                     }
                     repeat(minOf(hostCeiling, plan.size)) { i ->
@@ -1128,8 +1311,10 @@ object TurboDownloader {
                                     if (i >= maxWorkers.get()) break
                                     // Controller grant: a shrink takes effect
                                     // HERE, at the next piece boundary — an
-                                    // in-flight piece is never revoked.
-                                    if (i >= activeWorkers.get() || i >= laneGrant()) {
+                                    // in-flight piece is never revoked. The
+                                    // standby's reserved slot is already out of
+                                    // workerCeiling().
+                                    if (i >= activeWorkers.get() || i >= workerCeiling()) {
                                         if (plan.none { it.current <= it.end }) break
                                         delay(100L)
                                         continue
