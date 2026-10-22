@@ -90,9 +90,20 @@ fun MainScaffold(
     onThemeChanged: (String) -> Unit,
     onOpenSocial: (String, String) -> Unit,
     onWriteTabPref: (String) -> Unit,
-    onPlayTask: (com.anonrode.downloader.data.models.DownloadTask) -> Unit
+    onPlayTask: (com.anonrode.downloader.data.models.DownloadTask) -> Unit,
+    /** Warm-start deep-link request (notification tap). Applied directly so
+     *  rememberSaveable cannot restore the previous tab over it. */
+    requestedTab: String? = null,
+    onTabRequestConsumed: () -> Unit = {}
 ) {
     var currentTab by rememberSaveable { mutableStateOf(initialTab) }
+
+    LaunchedEffect(requestedTab) {
+        if (!requestedTab.isNullOrBlank()) {
+            currentTab = requestedTab
+            onTabRequestConsumed()
+        }
+    }
 
     // -- System back routing --
     // One handler per branch keeps each rule on one line and avoids the

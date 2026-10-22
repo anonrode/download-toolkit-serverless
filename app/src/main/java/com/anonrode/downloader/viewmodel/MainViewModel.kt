@@ -277,6 +277,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
+    override fun onCleared() {
+        // viewModelScope is cancelled right after this call; a pending
+        // 500ms coalesced settings write would otherwise be dropped when the
+        // Activity finishes. The engine save is SharedPreferences.apply().
+        flushPendingSettings()
+        super.onCleared()
+    }
+
     // ── Genre tiles: one retry loop per category, backoff 2/5/15/60/300s ────
 
     private val tileJobs = mutableMapOf<String, Job>()

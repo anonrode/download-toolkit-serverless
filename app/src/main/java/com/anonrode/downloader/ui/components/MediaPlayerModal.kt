@@ -1238,7 +1238,7 @@ private fun MediaPlayerModalImpl(
     // modal is recomposed with the new path and the same player swaps media.
     val hasNext = remember(ctx.queuePeerPaths, ctx.filePath) {
         val idx = ctx.queuePeerPaths.indexOf(ctx.filePath)
-        ctx.queuePeerPaths.drop(idx + 1).any { File(it).exists() }
+        idx >= 0 && ctx.queuePeerPaths.drop(idx + 1).any { File(it).exists() }
     }
     val hasPrev = remember(ctx.queuePeerPaths, ctx.filePath) {
         val idx = ctx.queuePeerPaths.indexOf(ctx.filePath)
@@ -1246,7 +1246,9 @@ private fun MediaPlayerModalImpl(
     }
     val playNext: () -> Unit = {
         val idx = ctx.queuePeerPaths.indexOf(ctx.filePath)
-        val next = ctx.queuePeerPaths.drop(idx + 1).firstOrNull { File(it).exists() }
+        val next = if (idx >= 0) {
+            ctx.queuePeerPaths.drop(idx + 1).firstOrNull { File(it).exists() }
+        } else null
         if (next != null) ctx.onPlayFile(next)
     }
     val playPrev: () -> Unit = {
@@ -1258,7 +1260,8 @@ private fun MediaPlayerModalImpl(
     // Directive §5.2: the explicit Next label + the end-of-episode card.
     val nextPeerPath = remember(ctx.queuePeerPaths, ctx.filePath) {
         val idx = ctx.queuePeerPaths.indexOf(ctx.filePath)
-        ctx.queuePeerPaths.drop(idx + 1).firstOrNull { File(it).exists() }
+        if (idx < 0) null
+        else ctx.queuePeerPaths.drop(idx + 1).firstOrNull { File(it).exists() }
     }
     val nextTag = remember(nextPeerPath) {
         nextPeerPath?.let { episodeTagFromPath(it) ?: File(it).nameWithoutExtension.take(16) }
@@ -2016,6 +2019,20 @@ private fun MediaPlayerModalImpl(
                     onAction = {
                         touchControls()
                         if (nextPeerPath != null) {
+                            // Explicit "Play now" advances before STATE_ENDED.
+                            // Treat it as completion of the current episode so
+                            // the history does not leave it mid-RESUME.
+                            val currentPath = currentCtx.filePath
+                            val currentTask = currentCtx.taskForPath(currentPath)
+                            val dur = if (duration > 0L) duration
+                                else exoPlayer.duration.coerceAtLeast(0L)
+                            WatchHistoryStore.markEnded(
+                                task = currentTask,
+                                filePath = currentPath,
+                                title = currentTask?.episodeTitle ?: currentCtx.title,
+                                durationMs = dur
+                            )
+                            PlaybackPositions.clear(context, currentPath)
                             ctx.onPlayFile(nextPeerPath)
                         } else {
                             upNextSeriesTask?.let { t ->

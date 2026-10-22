@@ -42,6 +42,7 @@ import androidx.core.view.WindowCompat
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import kotlinx.coroutines.flow.MutableStateFlow
 import com.anonrode.downloader.ui.components.AnnouncementHost
 import com.anonrode.downloader.ui.components.MainScaffold
 import com.anonrode.downloader.ui.components.MainTab
@@ -72,19 +73,23 @@ class MainActivity : ComponentActivity() {
 
     private val viewModel: MainViewModel by viewModels()
 
+    /** Warm-start tab requests. A StateFlow survives the tab's
+     *  rememberSaveable: no Activity recreation, and MainScaffold applies the
+     *  request directly before clearing it. */
+    private val pendingTabRequest = MutableStateFlow<String?>(null)
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
         val tab = intent.getStringExtra(EXTRA_OPEN_TAB)
         if (!tab.isNullOrBlank()) {
-            // Persist + recreate: the tab machinery reads pref_last_tab during
-            // creation, so recreation is the deterministic way to land on the
-            // requested tab from a warm activity (no new nav plumbing, no new
-            // state to keep in sync).
+            // Do NOT recreate(): instance state restores MainScaffold's
+            // rememberSaveable tab ("search") and the old code overwrote the
+            // pref back before the new tab ever appeared.
+            pendingTabRequest.value = tab
+            intent.removeExtra(EXTRA_OPEN_TAB)
             getSharedPreferences("downloader_settings", android.content.Context.MODE_PRIVATE)
                 .edit().putString("pref_last_tab", tab).apply()
-            intent.removeExtra(EXTRA_OPEN_TAB)
-            recreate()
         }
     }
 
@@ -303,9 +308,13 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
+                val tabRequest by pendingTabRequest.collectAsState()
+
                 MainScaffold(
                     viewModel = viewModel,
                     initialTab = initialTab,
+                    requestedTab = tabRequest,
+                    onTabRequestConsumed = { pendingTabRequest.value = null },
                     themeMode = themeMode,
                     onThemeChanged = { newMode ->
                         setWindowBackground(resolveIsDark(newMode))

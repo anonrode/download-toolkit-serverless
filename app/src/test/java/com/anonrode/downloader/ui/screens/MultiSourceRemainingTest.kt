@@ -1,5 +1,7 @@
 package com.anonrode.downloader.ui.screens
 
+import com.anonrode.downloader.data.WatchHistoryCore
+import com.anonrode.downloader.data.WatchRecord
 import com.anonrode.downloader.data.models.DownloadTask
 import com.anonrode.downloader.data.models.EpisodeItem
 import com.anonrode.downloader.data.models.ShowCard
@@ -56,6 +58,36 @@ class MultiSourceRemainingTest {
     //    one that still has episodes. Old behavior loaded only the FIRST
     //    task's seriesUrl (fully downloaded → live 0 → action hidden); the
     //    aggregate must show the other source's 3. ──
+
+    @Test
+    fun watchedAndDeletedEpisodesAreNotRemaining() {
+        // Regression: the Downloads card used to count watched-but-deleted
+        // episodes as remaining, keeping "Download remaining" alive forever.
+        val live = mapOf(
+            "https://s/a" to listOf(
+                ep("https://s/a/e1"), ep("https://s/a/e2"), ep("https://s/a/e3")
+            )
+        )
+        val watched = WatchRecord(
+            id = "Show#S0E0",
+            showKey = "Show",
+            showTitle = "Show",
+            kind = WatchHistoryCore.KIND_SERIES,
+            filePath = "",
+            sourceUrl = "https://s/a/e1",
+            isWatched = true,
+            updatedAtMs = 1L
+        )
+        assertEquals(
+            2,
+            remainingCountAcrossSources(
+                liveBySource = live,
+                tasks = emptyList(),
+                watchedRecords = listOf(watched),
+                showTitle = "Show"
+            )
+        )
+    }
 
     @Test
     fun multiSourceFolderShowsActionForTheSourceWithEpisodesLeft() {

@@ -1201,7 +1201,9 @@ fun EpisodeDrawer(
                                         // Remaining Episodes Chip (when some episodes are already
                                         // completed or in flight). FAILED episodes count as
                                         // Remaining, so they are re-downloadable from here.
-                                        if ((completedUrls.isNotEmpty() || activeOrQueuedUrls.isNotEmpty()) &&
+                                        if ((completedUrls.isNotEmpty() ||
+                                                activeOrQueuedUrls.isNotEmpty() ||
+                                                watchedUrls.isNotEmpty()) &&
                                             remainingEpisodes.isNotEmpty()
                                         ) {
                                             val isRemainingSelected = remainingEpisodes.all { it.url in selectedUrls }

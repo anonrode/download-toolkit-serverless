@@ -244,7 +244,11 @@ internal fun seriesSourcesOf(tasks: List<DownloadTask>): List<SeriesSourceRef> =
 internal fun remainingCountAcrossSources(
     liveBySource: Map<String, List<EpisodeItem>>,
     tasks: List<DownloadTask>,
-    guessedSources: Set<String> = emptySet()
+    guessedSources: Set<String> = emptySet(),
+    /** Watched history for this show; watched-and-deleted episodes must not
+     *  count as "remaining" or the card keeps offering work already done. */
+    watchedRecords: List<WatchRecord> = emptyList(),
+    showTitle: String = ""
 ): Int? {
     if (liveBySource.isEmpty()) return null
     var recognized = 0
@@ -263,7 +267,24 @@ internal fun remainingCountAcrossSources(
         val inFlight = counted
             .filter { isInFlightStatus(it.status) }
             .mapTo(mutableSetOf()) { it.sourceUrl }
-        val sourceRemaining = remainingEpisodesOf(episodes, completed, inFlight).size
+        val watchedUrls = if (showTitle.isBlank()) {
+            emptySet()
+        } else {
+            val showKey = ShowIdentity.normalizeShowKey(showTitle)
+            episodes.filter { ep ->
+                watchedRecords.any { record ->
+                    record.isWatched &&
+                        ShowIdentity.normalizeShowKey(record.showTitle) == showKey &&
+                        (
+                            record.sourceUrl == ep.url ||
+                                (record.season > 0 &&
+                                    record.season == SeasonEpisode.seasonOf(ep) &&
+                                    record.episode == SeasonEpisode.episodeOf(ep))
+                            )
+                }
+            }.mapTo(mutableSetOf()) { it.url }
+        }
+        val sourceRemaining = remainingEpisodesOf(episodes, completed, inFlight, watchedUrls).size
         if (sourceUrl in guessedSources && sourceRemaining == 0) {
             // A guessed source that reports zero must prove it knows the
             // whole folder, or it is just an episode page — treat it as
@@ -300,6 +321,7 @@ internal suspend fun loadRemainingAcrossSources(
     sources: List<SeriesSourceRef>,
     tasks: List<DownloadTask>,
     showTitle: String,
+    watchedRecords: List<WatchRecord> = emptyList(),
     parallelism: Int = SOURCE_LOAD_PARALLELISM,
     load: suspend (ShowCard) -> ShowDetails?
 ): Int? {
@@ -332,7 +354,9 @@ internal suspend fun loadRemainingAcrossSources(
     return remainingCountAcrossSources(
         liveBySource,
         tasks,
-        guessedSources = sources.filter { it.guessed }.mapTo(mutableSetOf()) { it.seriesUrl }
+        guessedSources = sources.filter { it.guessed }.mapTo(mutableSetOf()) { it.seriesUrl },
+        watchedRecords = watchedRecords,
+        showTitle = showTitle
     )
 }
 
@@ -1114,7 +1138,8 @@ fun DownloadsScreen(
                             val count = loadRemainingAcrossSources(
                                 sources = folderSources,
                                 tasks = allShowItems,
-                                showTitle = displayTitle
+                                showTitle = displayTitle,
+                                watchedRecords = watchRecords
                             ) { card ->
                                 com.anonrode.downloader.providers.ProviderRegistry.loadEpisodes(card)
                             }
@@ -1417,6 +1442,13 @@ fun DownloadsScreen(
                     onClick = {
                         pendingDeleteTask = null
                         hapticView.rejectHaptic()
+                        if (task.filePath.isNotBlank()) {
+                            PlaybackPositions.clear(context, task.filePath)
+                            WatchHistoryStore.onFilesDeleted(
+                                deletedPaths = setOf(task.filePath),
+                                clearShowHistory = false
+                            )
+                        }
                         viewModel.engine.cancel(task.id)
                     }
                 ) { Text("Delete", color = TextPrimary) }
@@ -1628,7 +1660,7 @@ fun DownloadsScreen(
                         hapticView.rejectHaptic()
                         val paths = scope.map { it.filePath }
                             .filter { it.isNotBlank() }.toSet()
-                        scope.forEach { viewModel.engine.cancel(it.id) }
+                        viewModel.engine.cancelTasks(scope.map { it.id })
                         paths.forEach { PlaybackPositions.clear(context, it) }
                         WatchHistoryStore.onFilesDeleted(
                             deletedPaths = paths,
@@ -2183,14 +2215,9 @@ internal fun ActivityRow(
         animationSpec = tween(Motion.DurationNormal),
         label = "rowProgress"
     )
-    // Flush bottom progress bar: active + paused transfers, plus the violet
-    // watch-progress bar on a completed file that is mid-episode.
-    val barVisible = ((isActive || isPaused) && !isDone && !isFailed) || watchInProgress
-    val barIndeterminate = isActive && !totalKnown && task.downloadedBytes > 0
-    val watchBarFraction = if (watchInProgress) watchFraction else null
-
     // Watch state (directive §3.1): a completed file can be in progress or
-    // permanently watched; both outrank the generic "Done" word.
+    // permanently watched; both outrank the generic "Done" word. Declared
+    // BEFORE the bar flags, which consume watchInProgress/watchFraction.
     val watchInProgress = isDone && watchRecord != null &&
         !watchRecord.isWatched && watchRecord.positionMs > 0L
     val watchFinished = isDone && watchRecord?.isWatched == true
@@ -2202,6 +2229,12 @@ internal fun ActivityRow(
     val watchFraction = if (watchInProgress && watchRecord != null && watchRecord.durationMs > 0L) {
         (watchRecord.positionMs.toFloat() / watchRecord.durationMs.toFloat()).coerceIn(0.03f, 0.98f)
     } else 0f
+
+    // Flush bottom progress bar: active + paused transfers, plus the violet
+    // watch-progress bar on a completed file that is mid-episode.
+    val barVisible = ((isActive || isPaused) && !isDone && !isFailed) || watchInProgress
+    val barIndeterminate = isActive && !totalKnown && task.downloadedBytes > 0
+    val watchBarFraction = if (watchInProgress) watchFraction else null
 
     Card(
         shape = RoundedCornerShape(12.dp),
