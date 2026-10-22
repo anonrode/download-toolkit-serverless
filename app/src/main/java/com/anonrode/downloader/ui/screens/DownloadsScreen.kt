@@ -37,6 +37,7 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
@@ -1119,7 +1120,8 @@ fun DownloadsScreen(
                             onPauseTask = { viewModel.engine.pause(it) },
                             onRetryTask = { viewModel.engine.retry(it) },
                             onCancelTask = { viewModel.engine.cancel(it) },
-                            onRequestActions = { pendingActionsTask = it }
+                            onRequestActions = { pendingActionsTask = it },
+                            watchByPath = watchByPath
                         )
                     }
                 } else {
@@ -1183,6 +1185,7 @@ fun DownloadsScreen(
                                     onRetry = { viewModel.engine.retry(task.id) },
                                     onCancel = { viewModel.engine.cancel(task.id) },
                                     onOpenActions = { pendingActionsTask = task },
+                                    watchRecord = watchByPath[task.filePath],
                                     // List Item Enter/Move (same shared spec as
                                     // every Home list — was the only list without).
                                     modifier = Modifier.animateItem(
@@ -1228,6 +1231,7 @@ fun DownloadsScreen(
                                         onRetry = { viewModel.engine.retry(task.id) },
                                         onCancel = { viewModel.engine.cancel(task.id) },
                                         onOpenActions = { pendingActionsTask = task },
+                                        watchRecord = watchByPath[task.filePath],
                                         modifier = Modifier.animateItem(
                                             fadeInSpec = Motion.ItemFadeIn,
                                             placementSpec = Motion.ItemPlacement,
@@ -1825,6 +1829,8 @@ private fun ActivityRow(
     // dialog ("Cancel this download?"), matching the mock's two-control cards.
     onCancel: () -> Unit,
     onOpenActions: () -> Unit,
+    /** Watch-history entry for this file, when known (directive §3.1). */
+    watchRecord: WatchRecord? = null,
     /** Caller-owned modifier (list placement animation rides here). */
     modifier: Modifier = Modifier
 ) {
@@ -1885,8 +1891,25 @@ private fun ActivityRow(
         animationSpec = tween(Motion.DurationNormal),
         label = "rowProgress"
     )
-    val barVisible = (isActive || isPaused) && !isDone && !isFailed
+    // Flush bottom progress bar: active + paused transfers, plus the violet
+    // watch-progress bar on a completed file that is mid-episode.
+    val barVisible = ((isActive || isPaused) && !isDone && !isFailed) || watchInProgress
     val barIndeterminate = isActive && !totalKnown && task.downloadedBytes > 0
+    val watchBarFraction = if (watchInProgress) watchFraction else null
+
+    // Watch state (directive §3.1): a completed file can be in progress or
+    // permanently watched; both outrank the generic "Done" word.
+    val watchInProgress = isDone && watchRecord != null &&
+        !watchRecord.isWatched && watchRecord.positionMs > 0L
+    val watchFinished = isDone && watchRecord?.isWatched == true
+    val watchWord = when {
+        watchInProgress -> "Resume"
+        watchFinished -> "Watched ✓"
+        else -> null
+    }
+    val watchFraction = if (watchInProgress && watchRecord != null && watchRecord.durationMs > 0L) {
+        (watchRecord.positionMs.toFloat() / watchRecord.durationMs.toFloat()).coerceIn(0.03f, 0.98f)
+    } else 0f
 
     Card(
         shape = RoundedCornerShape(12.dp),
@@ -1900,7 +1923,7 @@ private fun ActivityRow(
                 // sanctioned resume path — it clears the user-pause mark.
                 enabled = isDone || isFailed || isPaused,
                 onClickLabel = when {
-                    isDone -> "Play"
+                    isDone -> if (watchInProgress) "Resume" else "Play"
                     isPaused -> "Resume"
                     else -> "Retry"
                 }
@@ -1915,6 +1938,9 @@ private fun ActivityRow(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
+                    // Directive §3.1: a fully watched row mutes to 0.82 so
+                    // unwatched episodes stand out. Visual only.
+                    .alpha(if (watchFinished) 0.82f else 1f)
                     .padding(
                         start = 12.dp, end = 12.dp,
                         top = 10.dp, bottom = if (barVisible) 13.dp else 10.dp
@@ -1973,23 +1999,31 @@ private fun ActivityRow(
                         }
                         // State Morph: the ink glides and the word crossfades
                         // when QUEUED → DOWNLOADING → DONE lands (was a hard swap).
+                        // Watch states (Resume / Watched ✓) outrank "Done".
                         val statusInk by animateColorAsState(
-                            targetValue = style.accent,
+                            targetValue = when {
+                                watchInProgress -> AccentViolet
+                                watchFinished -> StatusSuccess
+                                else -> style.accent
+                            },
                             animationSpec = tween(Motion.DurationFast),
                             label = "rowStatusInk"
                         )
-                        if (style.kind == DownloadStateKind.LIVE) {
-                            StatusDot(color = statusInk, pulse = true)
-                        } else {
-                            Text(
-                                text = style.glyph,
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.ExtraBold,
-                                color = statusInk
-                            )
+                        val statusWord = watchWord ?: style.word
+                        if (watchWord == null) {
+                            if (style.kind == DownloadStateKind.LIVE) {
+                                StatusDot(color = statusInk, pulse = true)
+                            } else {
+                                Text(
+                                    text = style.glyph,
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = statusInk
+                                )
+                            }
                         }
                         AnimatedContent(
-                            targetState = style.word,
+                            targetState = statusWord,
                             transitionSpec = {
                                 fadeIn(tween(Motion.DurationFast)) togetherWith
                                     fadeOut(tween(Motion.DurationNavExit))
@@ -1999,9 +2033,17 @@ private fun ActivityRow(
                             Text(
                                 text = word,
                                 fontSize = 11.sp,
-                                fontWeight = FontWeight.SemiBold,
+                                fontWeight = if (watchWord != null) FontWeight.Bold else FontWeight.SemiBold,
                                 color = statusInk,
                                 maxLines = 1
+                            )
+                        }
+                        if (watchInProgress) {
+                            Box(
+                                modifier = Modifier
+                                    .size(5.dp)
+                                    .clip(CircleShape)
+                                    .background(statusInk)
                             )
                         }
                     }
@@ -2019,7 +2061,13 @@ private fun ActivityRow(
                             lineHeight = 15.sp
                         )
                     } else {
-                        val metrics = cardProgressMetrics(task)
+                        val sizeText = formatBytes(if (task.totalBytes > 0) task.totalBytes else task.downloadedBytes)
+                        val metrics = when {
+                            watchInProgress && watchRecord != null ->
+                                "${WatchHistoryCore.formatTimeLeft(watchRecord.positionMs, watchRecord.durationMs)} · $sizeText"
+                            watchFinished -> "$sizeText · Watched"
+                            else -> cardProgressMetrics(task)
+                        }
                         if (metrics.isNotBlank()) {
                             Text(
                                 text = metrics,
@@ -2072,7 +2120,8 @@ private fun ActivityRow(
                 indeterminate = barIndeterminate,
                 fraction = barFraction,
                 paused = isPaused,
-                chroma = chroma
+                chroma = chroma,
+                watchFraction = watchBarFraction
             )
         }
     }
@@ -2092,7 +2141,9 @@ private fun BoxScope.ActivityProgressOverlay(
     indeterminate: Boolean,
     fraction: Float,
     paused: Boolean,
-    chroma: DownloadsChroma
+    chroma: DownloadsChroma,
+    /** Non-null = violet watch-progress bar on a completed row. */
+    watchFraction: Float? = null
 ) {
     AnimatedVisibility(
         visible = visible,
@@ -2100,8 +2151,26 @@ private fun BoxScope.ActivityProgressOverlay(
         enter = fadeIn(tween(Motion.DurationFast)),
         exit = fadeOut(tween(Motion.DurationNavExit))
     ) {
-        val barColor = if (paused) chroma.paused else chroma.live
-        if (indeterminate) {
+        val barColor = when {
+            watchFraction != null -> AccentViolet
+            paused -> chroma.paused
+            else -> chroma.live
+        }
+        if (watchFraction != null) {
+            LinearProgressIndicator(
+                progress = { watchFraction },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(3.dp)
+                    .semantics {
+                        progressBarRangeInfo = ProgressBarRangeInfo(watchFraction, 0f..1f)
+                        contentDescription = "Episode watch progress"
+                    },
+                color = barColor,
+                trackColor = SurfaceElevated,
+                strokeCap = StrokeCap.Square
+            )
+        } else if (indeterminate) {
             LinearProgressIndicator(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -2747,7 +2816,8 @@ private fun ShowFolderCard(
     onPauseTask: (String) -> Unit,
     onRetryTask: (String) -> Unit,
     onCancelTask: (String) -> Unit,
-    onRequestActions: (DownloadTask) -> Unit
+    onRequestActions: (DownloadTask) -> Unit,
+    watchByPath: Map<String, WatchRecord> = emptyMap()
 ) {
     val completedCount = items.count { it.status == TaskStatus.COMPLETED }
     // Count with the same shared four-state predicate as the screen header /
@@ -2885,7 +2955,8 @@ private fun ShowFolderCard(
                                 onPause = { onPauseTask(task.id) },
                                 onRetry = { onRetryTask(task.id) },
                                 onCancel = { onCancelTask(task.id) },
-                                onOpenActions = { onRequestActions(task) }
+                                onOpenActions = { onRequestActions(task) },
+                                watchRecord = watchByPath[task.filePath]
                             )
                         }
                     }
