@@ -101,6 +101,29 @@ object YoutubeDlDownloader {
             Regex("""\b4\d\d\b[^\r\n]{0,40}(Forbidden|Unauthorized|Not Found)""").containsMatchIn(t)
     }
 
+    /**
+     * Board row 4 / trace C2: ETA shown to the user must come from the same
+     * kind of window the card's speed does. The raw per-line yt-dlp "ETA
+     * 00:05" is jumpy by design (it is an instantaneous estimate per
+     * progress line), so the windowed FlickerFreeEtaCalculator wins whenever
+     * it can produce a reading; the library's own ETA is the next fallback
+     * and the raw line is the last resort for the first ticks.
+     *
+     * This only ranks the DISPLAY value passed to `onProgress`. The raw
+     * `speedBytesPerSec` handed to the same callback (and read by
+     * ProgressWatchdog) is untouched.
+     */
+    internal fun chooseDisplayEta(
+        windowedEtaSeconds: Long,
+        libraryEtaSeconds: Long,
+        rawLineEtaSeconds: Long
+    ): Long = when {
+        windowedEtaSeconds > 0L -> windowedEtaSeconds
+        libraryEtaSeconds > 0L -> libraryEtaSeconds
+        rawLineEtaSeconds > 0L -> rawLineEtaSeconds
+        else -> 0L
+    }
+
     /** Last HTTP status evidencing WHY the transfer died — "HTTP Error 403"
      *  (yt-dlp native), then a "<code> <reason>" fallback. Null when the
      *  output never surfaced one (charter: never fabricate a status). */
@@ -739,11 +762,11 @@ object YoutubeDlDownloader {
                     if (effectiveDl != lastDl || effectiveTot != lastTot || tick.speedBytesPerSec > 0.0) {
                         lastDl = effectiveDl
                         lastTot = effectiveTot
-                        val eta = when {
-                            tick.etaSeconds > 0 -> tick.etaSeconds
-                            etaInSeconds > 0 -> etaInSeconds
-                            else -> etaCalc.update(lastDl, lastTot, tick.speedBytesPerSec)
-                        }
+                        // The windowed smoother must SEE every tick to have a
+                        // window at all; the chosen display ETA then prefers
+                        // it over the per-line value (trace C2 / row 4).
+                        val windowedEta = etaCalc.update(lastDl, lastTot, tick.speedBytesPerSec)
+                        val eta = chooseDisplayEta(windowedEta, etaInSeconds, tick.etaSeconds)
                         if (!ttfbLogged && lastDl > 0L) {
                             ttfbLogged = true
                             com.anonrode.downloader.util.DebugLog.backend(
