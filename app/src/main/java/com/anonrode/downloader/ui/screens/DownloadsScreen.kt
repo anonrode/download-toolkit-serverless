@@ -625,17 +625,8 @@ fun DownloadsScreen(
         else liveGroups.map { (header, items) -> header to items.filter { it.matchesStatusFilter(statusFilter) } }
             .filter { it.second.isNotEmpty() }
     }
-    // ── Watch history (directive Phase 2): one-shot init + bootstrap, then
-    // the store's StateFlow drives the Continue shelf and the row badges.
-    LaunchedEffect(Unit) {
-        WatchHistoryStore.init(context)
-        WatchHistoryStore.syncWithTasks(
-            viewModel.engine.tasks.value,
-            positionFor = { path ->
-                PlaybackPositions.get(context, path)?.let { it.positionMs to it.durationMs }
-            }
-        )
-    }
+    // ── Watch history (directive Phase 2): the store is initialized app-wide
+    // in AnonApp; this screen only consumes its StateFlow.
     val watchRecords by WatchHistoryStore.recordsFlow.collectAsState()
     val continueCards = remember(watchRecords, structureSig) {
         WatchHistoryCore.resolveContinueCards(watchRecords, viewModel.engine.tasks.value)

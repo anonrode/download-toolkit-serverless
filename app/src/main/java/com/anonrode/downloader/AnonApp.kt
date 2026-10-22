@@ -58,6 +58,18 @@ class AnonApp : Application(), ImageLoaderFactory {
         networkObserver = NetworkObserver(this)
         PosterNetwork.isOnline = networkObserver.status.value.isConnected
         engine = DownloadEngine(this, repository, networkObserver)
+        // Watch history (owner directive): app-wide init so the player can
+        // record/read even when the Downloads tab was never opened. The
+        // bootstrap seeds existing completed tasks that already carry a saved
+        // playback position; historical records are never rewritten.
+        com.anonrode.downloader.data.WatchHistoryStore.init(this)
+        com.anonrode.downloader.data.WatchHistoryStore.syncWithTasks(
+            repository.tasks.value,
+            positionFor = { path ->
+                com.anonrode.downloader.ui.components.PlaybackPositions.get(this, path)
+                    ?.let { it.positionMs to it.durationMs }
+            }
+        )
         // Keep the process-wide poster flag honest for the whole session.
         appScope.launch {
             networkObserver.status.collect { status ->
