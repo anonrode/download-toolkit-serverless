@@ -51,7 +51,10 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Subtitles
 import androidx.compose.material.icons.rounded.AspectRatio
+import androidx.compose.material.icons.rounded.BrightnessMedium
 import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.FastForward
+import androidx.compose.material.icons.rounded.FastRewind
 import androidx.compose.material.icons.rounded.Forward10
 import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.OpenInNew
@@ -70,6 +73,7 @@ import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.rounded.Speed
 import androidx.compose.material.icons.rounded.SubtitlesOff
+import androidx.compose.material.icons.rounded.VideoLibrary
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -597,6 +601,48 @@ private fun MediaPlayerModalImpl(
     val initialSavedVolume = remember {
         (MediaPlayerPrefs.getMediaVolume(context) * 100).toInt().coerceIn(0, 100)
     }
+    // Brightness gesture (directive §5.3): starts from the persisted player
+    // level, or the system level on first use. The window override is applied
+    // only while the player is open and cleared on dispose; the pref carries
+    // the choice into the next session.
+    val initialBrightnessPercent = remember {
+        val saved = MediaPlayerPrefs.getWindowBrightness(context)
+        if (saved in 0.02f..1f) {
+            saved * 100f
+        } else {
+            val system = runCatching {
+                android.provider.Settings.System.getInt(
+                    context.contentResolver,
+                    android.provider.Settings.System.SCREEN_BRIGHTNESS
+                )
+            }.getOrDefault(255)
+            (system / 255f * 100f).coerceIn(2f, 100f)
+        }
+    }
+    val applyWindowBrightness: (Float) -> Unit = { fraction ->
+        activity?.let { act ->
+            runCatching {
+                val attrs = act.window.attributes
+                attrs.screenBrightness = fraction.coerceIn(0.02f, 1f)
+                act.window.attributes = attrs
+            }
+        }
+    }
+    LaunchedEffect(activity) {
+        val saved = MediaPlayerPrefs.getWindowBrightness(context)
+        if (saved in 0.02f..1f) applyWindowBrightness(saved)
+    }
+    DisposableEffect(activity) {
+        onDispose {
+            activity?.let { act ->
+                runCatching {
+                    val attrs = act.window.attributes
+                    attrs.screenBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+                    act.window.attributes = attrs
+                }
+            }
+        }
+    }
 
     // ---- UI state ----
     var isPlaying by remember { mutableStateOf(true) }
@@ -613,6 +659,14 @@ private fun MediaPlayerModalImpl(
     var volumeHudTick by remember { mutableIntStateOf(0) }
     var overdragDistance by remember { mutableFloatStateOf(0f) }
     var boostDetentBroken by remember { mutableStateOf(false) }
+    // Gesture HUD (directive §5.3): one transient pill shared by double-tap
+    // seek, center play/pause, left-half brightness and hold-to-boost speed.
+    var gestureHudText by remember { mutableStateOf<String?>(null) }
+    var gestureHudIcon by remember { mutableStateOf<ImageVector?>(null) }
+    var gestureHudTick by remember { mutableIntStateOf(0) }
+    var isBrightnessDragging by remember { mutableStateOf(false) }
+    var isSpeedBoosting by remember { mutableStateOf(false) }
+    var brightnessPercent by remember { mutableFloatStateOf(initialBrightnessPercent) }
     // Seek-drag ownership: while the thumb is held, the finger (dragFrac) IS
     // the value. The 500 ms poll otherwise yanks the thumb back to the
     // player's real (pre-seek, keyframe-snapped) position mid-drag, and
@@ -1067,6 +1121,15 @@ private fun MediaPlayerModalImpl(
         }
     }
 
+    // Gesture HUD: lingers briefly after the gesture, but never disappears
+    // mid-hold — a brightness drag or 2x press keeps it on screen.
+    LaunchedEffect(gestureHudText, gestureHudTick, isBrightnessDragging, isSpeedBoosting) {
+        if (gestureHudText != null && !isBrightnessDragging && !isSpeedBoosting) {
+            delay(900)
+            gestureHudText = null
+        }
+    }
+
     // Rotation (Rotate chip): SENSOR_LANDSCAPE (not USER_LANDSCAPE) so the
     // tap works even with system rotation locked; PORTRAIT is a hard lock
     // so "rotate to portrait" means portrait, not "whatever the sensor
@@ -1230,6 +1293,73 @@ private fun MediaPlayerModalImpl(
                 detectTapGestures(
                     onTap = {
                         showControls = !showControls
+                    },
+                    onDoubleTap = { offset ->
+                        // Directive §5.3: left/right 35% seek ∓10s, center 30%
+                        // toggles play/pause. The HUD pill reports the action
+                        // without bringing the whole chrome back.
+                        when (playerTapZone(offset.x, size.width.toFloat())) {
+                            PlayerTapZone.REWIND -> {
+                                val target = clampedSeekTarget(
+                                    exoPlayer.currentPosition,
+                                    exoPlayer.duration,
+                                    -10_000L
+                                )
+                                exoPlayer.seekTo(target)
+                                currentPosition = target
+                                gestureHudIcon = Icons.Rounded.FastRewind
+                                gestureHudText = formatSeekHud(-10_000L)
+                                showControls = false
+                                touchControls()
+                            }
+                            PlayerTapZone.FORWARD -> {
+                                val target = clampedSeekTarget(
+                                    exoPlayer.currentPosition,
+                                    exoPlayer.duration,
+                                    10_000L
+                                )
+                                exoPlayer.seekTo(target)
+                                currentPosition = target
+                                gestureHudIcon = Icons.Rounded.FastForward
+                                gestureHudText = formatSeekHud(10_000L)
+                                showControls = false
+                                touchControls()
+                            }
+                            PlayerTapZone.PLAY_PAUSE -> {
+                                if (exoPlayer.isPlaying) {
+                                    exoPlayer.pause()
+                                    gestureHudIcon = Icons.Rounded.Pause
+                                    gestureHudText = "Paused"
+                                } else {
+                                    exoPlayer.play()
+                                    gestureHudIcon = Icons.Rounded.PlayArrow
+                                    gestureHudText = "Playing"
+                                }
+                                touchControls()
+                            }
+                        }
+                        gestureHudTick++
+                    },
+                    onLongPress = {
+                        // Hold for 2x: the user's chosen speed is untouched —
+                        // release restores it from playbackSpeed.
+                        isSpeedBoosting = true
+                        exoPlayer.playbackParameters = PlaybackParameters(2.0f)
+                        gestureHudIcon = Icons.Rounded.Speed
+                        gestureHudText = "2× speed"
+                        gestureHudTick++
+                        touchControls()
+                    },
+                    onPress = {
+                        // Runs for every press; only a hold that set the boost
+                        // needs restoring, and tryAwaitRelease also covers a
+                        // cancelled gesture (finger leaves the screen).
+                        tryAwaitRelease()
+                        if (isSpeedBoosting) {
+                            isSpeedBoosting = false
+                            exoPlayer.playbackParameters = PlaybackParameters(playbackSpeed)
+                            gestureHudText = null
+                        }
                     }
                 )
             }
@@ -1239,6 +1369,8 @@ private fun MediaPlayerModalImpl(
                 // mix until the drag is deliberately past the threshold).
                 var volumeArmed = false
                 var pendingDeadZonePx = 0f
+                var brightnessArmed = false
+                var pendingBrightnessPx = 0f
                 detectVerticalDragGestures(
                     onDragStart = { offset ->
                         // System-gesture zones never start a volume drag:
@@ -1255,6 +1387,17 @@ private fun MediaPlayerModalImpl(
                                 overdragDistance = 0f
                                 boostDetentBroken = (currentVolumePercent > 100)
                                 showControls = false
+                            } else {
+                                // Left half = brightness (directive §5.3),
+                                // same dead zone as volume so accidental
+                                // vertical wobble never dims the screen.
+                                isBrightnessDragging = true
+                                brightnessArmed = false
+                                pendingBrightnessPx = 0f
+                                gestureHudIcon = Icons.Rounded.BrightnessMedium
+                                gestureHudText = "${brightnessPercent.toInt()}%"
+                                gestureHudTick++
+                                showControls = false
                             }
                         }
                     },
@@ -1264,6 +1407,16 @@ private fun MediaPlayerModalImpl(
                         boostDetentBroken = false
                         volumeArmed = false
                         pendingDeadZonePx = 0f
+                        if (isBrightnessDragging) {
+                            isBrightnessDragging = false
+                            runCatching {
+                                MediaPlayerPrefs.setWindowBrightness(
+                                    context,
+                                    brightnessPercent / 100f
+                                )
+                            }
+                            gestureHudTick++
+                        }
                         if (currentVolumePercent <= 100) {
                             MediaPlayerPrefs.setMediaVolume(context, currentVolumePercent / 100f)
                         }
@@ -1274,8 +1427,35 @@ private fun MediaPlayerModalImpl(
                         boostDetentBroken = false
                         volumeArmed = false
                         pendingDeadZonePx = 0f
+                        if (isBrightnessDragging) {
+                            isBrightnessDragging = false
+                            gestureHudTick++
+                        }
                     },
                     onVerticalDrag = { change, dragAmount ->
+                        if (isBrightnessDragging) {
+                            if (!brightnessArmed) {
+                                pendingBrightnessPx += kotlin.math.abs(dragAmount)
+                                if (pendingBrightnessPx < with(density) { 22.dp.toPx() }) {
+                                    change.consume()
+                                    return@detectVerticalDragGestures
+                                }
+                                brightnessArmed = true
+                            }
+                            change.consume()
+                            val next = brightnessPercentAfterDrag(
+                                brightnessPercent,
+                                dragAmount,
+                                size.height.toFloat()
+                            )
+                            if (next != brightnessPercent) {
+                                brightnessPercent = next
+                                applyWindowBrightness(next / 100f)
+                                gestureHudText = "${next.toInt()}%"
+                                gestureHudTick++
+                            }
+                            return@detectVerticalDragGestures
+                        }
                         if (!isVolumeDragging) return@detectVerticalDragGestures
                         // Dead zone: the first ~22dp of a vertical drag arm the
                         // gesture instead of scrubbing volume — tiny accidental
@@ -1467,6 +1647,23 @@ private fun MediaPlayerModalImpl(
                 )
             }
 
+            // Gesture HUD (seek / play-pause / brightness / 2x). Sits in the
+            // same slot as the volume pill because no two gestures run at
+            // once; the icon and caption are the whole feedback.
+            AnimatedVisibility(
+                visible = gestureHudText != null && !inPip,
+                enter = fadeIn(animationSpec = tween(Motion.DurationFast)),
+                exit = fadeOut(animationSpec = tween(Motion.DurationNavExit)),
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 64.dp)
+            ) {
+                GestureHudPill(
+                    icon = gestureHudIcon ?: Icons.Rounded.PlayArrow,
+                    label = gestureHudText.orEmpty()
+                )
+            }
+
             AnimatedVisibility(
                 visible = showControls && !inPip,
                 enter = fadeIn(),
@@ -1544,7 +1741,12 @@ private fun MediaPlayerModalImpl(
                     // ---- Center transport ----
                     Row(
                         modifier = Modifier.align(Alignment.Center),
-                        horizontalArrangement = Arrangement.spacedBy(Spacing.lg),
+                        // The Next pill is wider than the circle it replaces;
+                        // tighten the gaps so the transport still fits a
+                        // 360dp portrait phone.
+                        horizontalArrangement = Arrangement.spacedBy(
+                            if (hasNext && nextTag != null) Spacing.sm else Spacing.lg
+                        ),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         PlayerCircleButton(
@@ -1609,16 +1811,16 @@ private fun MediaPlayerModalImpl(
                                     .clip(RoundedCornerShape(Radius.pill))
                                     .background(Color.White.copy(alpha = 0.14f))
                                     .clickable { touchControls(); playNext() }
-                                    .padding(horizontal = 10.dp, vertical = 7.dp),
+                                    .padding(horizontal = 8.dp, vertical = 7.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Icon(
                                     imageVector = Icons.Rounded.SkipNext,
                                     contentDescription = "Next: $nextTag",
                                     tint = Color.White,
-                                    modifier = Modifier.size(20.dp)
+                                    modifier = Modifier.size(18.dp)
                                 )
-                                Spacer(modifier = Modifier.width(4.dp))
+                                Spacer(modifier = Modifier.width(3.dp))
                                 Text(
                                     text = "Next: $nextTag",
                                     color = Color.White,
@@ -2439,6 +2641,36 @@ private fun AudioOptionsSheet(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun GestureHudPill(
+    icon: ImageVector,
+    label: String
+) {
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(20.dp))
+            .background(Color(0xDD12141A))
+            .border(1.dp, Color.White.copy(alpha = 0.16f), RoundedCornerShape(20.dp))
+            .padding(horizontal = 14.dp, vertical = 9.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = PlayerAccent,
+            modifier = Modifier.size(18.dp)
+        )
+        Text(
+            text = label,
+            color = Color.White,
+            fontSize = Type.rowTitle.fontSize,
+            fontWeight = FontWeight.Bold,
+            maxLines = 1
+        )
     }
 }
 

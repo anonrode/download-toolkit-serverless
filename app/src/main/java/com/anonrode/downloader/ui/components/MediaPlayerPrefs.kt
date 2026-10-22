@@ -15,6 +15,7 @@ object MediaPlayerPrefs {
     private const val KEY_MEDIA_VOLUME = "pref_media_volume"
     private const val KEY_ALLOW_VOLUME_BOOST = "pref_allow_volume_boost"
     private const val KEY_SUBTITLE_TRACK = "pref_subtitle_track"
+    private const val KEY_WINDOW_BRIGHTNESS = "pref_window_brightness"
 
     fun getPlaybackSpeed(context: Context): Float =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -46,9 +47,25 @@ object MediaPlayerPrefs {
             .apply()
     }
 
-    // (Removed: getWindowBrightness/setWindowBrightness + the
-    // pref_window_brightness key — zero writers AND zero readers repo-wide,
-    // so the pair was fully dead; audit F-13.)
+    // Re-introduced for the player brightness gesture: the earlier getter/
+    // setter pair was dead (audit F-13) because nothing called it; the
+    // left-half drag now does.
+
+    /**
+     * Player window brightness (directive §5.3), persisted so the level the
+     * user dragged to is restored on the next open. -1 means "never chosen,
+     * follow the system"; the player only applies values in 0.02..1.0 and
+     * clears the window override on dispose.
+     */
+    fun getWindowBrightness(context: Context): Float =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getFloat(KEY_WINDOW_BRIGHTNESS, -1f)
+
+    fun setWindowBrightness(context: Context, brightness: Float) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putFloat(KEY_WINDOW_BRIGHTNESS, brightness.coerceIn(0.02f, 1f))
+            .apply()
+    }
 
     fun getSubtitleTrack(context: Context): String? =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
