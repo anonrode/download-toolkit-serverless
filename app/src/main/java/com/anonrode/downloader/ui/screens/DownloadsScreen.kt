@@ -69,12 +69,18 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.ui.graphics.StrokeCap
 import coil.compose.SubcomposeAsyncImage
+import com.anonrode.downloader.data.ContinueState
+import com.anonrode.downloader.data.SeriesContinueCard
+import com.anonrode.downloader.data.WatchHistoryCore
+import com.anonrode.downloader.data.WatchHistoryStore
+import com.anonrode.downloader.data.WatchRecord
 import com.anonrode.downloader.data.models.DownloadTask
 import com.anonrode.downloader.data.models.EpisodeItem
 import com.anonrode.downloader.data.models.ShowCard
 import com.anonrode.downloader.data.models.ShowDetails
 import com.anonrode.downloader.data.models.TaskStatus
 import com.anonrode.downloader.ui.components.DownloadsSorter
+import com.anonrode.downloader.ui.components.PlaybackPositions
 import com.anonrode.downloader.ui.components.PosterImageOrFallback
 import com.anonrode.downloader.ui.components.downloadsStats
 import com.anonrode.downloader.ui.components.rememberReduceMotion
@@ -92,6 +98,7 @@ import kotlinx.coroutines.withContext
 
 private const val PREF_SORT = "downloader_settings"
 private const val PREF_SORT_KEY = "pref_downloads_sort"
+private const val PREF_SHELF_COLLAPSED = "pref_media_shelf_collapsed"
 
 /**
  * Remaining-action visibility, shared by every Downloads layout.
@@ -617,9 +624,39 @@ fun DownloadsScreen(
         else liveGroups.map { (header, items) -> header to items.filter { it.matchesStatusFilter(statusFilter) } }
             .filter { it.second.isNotEmpty() }
     }
-    val visibleShelf = remember(shelfItems, statusFilter) {
-        if (statusFilter == FILTER_ALL || statusFilter == FILTER_DONE) shelfItems else emptyList()
+    // ── Watch history (directive Phase 2): one-shot init + bootstrap, then
+    // the store's StateFlow drives the Continue shelf and the row badges.
+    LaunchedEffect(Unit) {
+        WatchHistoryStore.init(context)
+        WatchHistoryStore.syncWithTasks(
+            viewModel.engine.tasks.value,
+            positionFor = { path ->
+                PlaybackPositions.get(context, path)?.let { it.positionMs to it.durationMs }
+            }
+        )
     }
+    val watchRecords by WatchHistoryStore.recordsFlow.collectAsState()
+    val continueCards = remember(watchRecords, structureSig) {
+        WatchHistoryCore.resolveContinueCards(watchRecords, viewModel.engine.tasks.value)
+    }
+    val watchByPath = remember(watchRecords) {
+        watchRecords.filter { it.filePath.isNotBlank() }.associateBy { it.filePath }
+    }
+    val orderedShelf = remember(shelfItems, watchRecords) {
+        WatchHistoryCore.orderShelfWithLastWatched(shelfItems, watchRecords)
+    }
+    val settingsPrefs = remember(context) {
+        context.getSharedPreferences(PREF_SORT, Context.MODE_PRIVATE)
+    }
+    var shelfCollapsed by remember {
+        mutableStateOf(settingsPrefs.getBoolean(PREF_SHELF_COLLAPSED, false))
+    }
+    // Directive §2.2: the shelf carries completed media, so it only shows
+    // under All / Done — never while the user is focused on transfers.
+    val shelfUnderFilter = statusFilter == FILTER_ALL || statusFilter == FILTER_DONE
+    val visibleShelf = if (shelfUnderFilter) orderedShelf else emptyList()
+    val shelfVisible = shelfUnderFilter && (continueCards.isNotEmpty() || visibleShelf.isNotEmpty())
+    val shelfCount = continueCards.size + visibleShelf.size
 
     // Header meta counts (mock: "26.4 GB of 112 GB · 45 done · 0 active · 1
     // failed"). Counts are structural → remembered on the signature.
@@ -934,6 +971,90 @@ fun DownloadsScreen(
                 verticalArrangement = Arrangement.spacedBy(Spacing.md),
                 modifier = Modifier.padding(top = 20.dp).fillMaxSize()
             ) {
+                // ── CONTINUE & MEDIA (directive §2): series continue cards
+                // first, then the last-watched social clip, above the groups.
+                if (shelfVisible) {
+                    item(key = "continue-media-header") {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    val next = !shelfCollapsed
+                                    shelfCollapsed = next
+                                    settingsPrefs.edit()
+                                        .putBoolean(PREF_SHELF_COLLAPSED, next)
+                                        .apply()
+                                }
+                                .padding(vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "CONTINUE & MEDIA · $shelfCount",
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 10.5.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = TextMuted,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Icon(
+                                imageVector = if (shelfCollapsed) {
+                                    Icons.Rounded.KeyboardArrowDown
+                                } else {
+                                    Icons.Rounded.KeyboardArrowUp
+                                },
+                                contentDescription = if (shelfCollapsed) "Expand shelf" else "Collapse shelf",
+                                tint = TextMuted,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                    }
+                    if (!shelfCollapsed) {
+                        item(key = "continue-media-row") {
+                            LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                items(continueCards, key = { "continue-${it.showKey}" }) { card ->
+                                    SeriesContinueTile(
+                                        card = card,
+                                        posterUrl = card.task?.posterUrl ?: card.record.posterUrl,
+                                        onPlay = { task -> onPlayTask(task) },
+                                        onFetch = {
+                                            viewModel.openRemainingEpisodes(
+                                                card.showTitle,
+                                                card.seriesUrl,
+                                                card.site
+                                            )
+                                        }
+                                    )
+                                }
+                                items(visibleShelf, key = { "shelf-${it.id}" }) { item ->
+                                    SocialShelfTile(
+                                        task = item,
+                                        watchRecord = watchByPath[item.filePath],
+                                        onPlay = { onPlayTask(item) },
+                                        onOpenActions = { pendingActionsTask = item },
+                                        modifier = Modifier.animateItem(
+                                            fadeInSpec = Motion.ItemFadeIn,
+                                            placementSpec = Motion.ItemPlacement,
+                                            fadeOutSpec = Motion.ItemFadeOut
+                                        )
+                                    )
+                                }
+                            }
+                        }
+                        item(key = "continue-media-foot") {
+                            Text(
+                                text = "Hold a tile to share or delete · ${visibleShelf.size} items on this device",
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 10.5.sp,
+                                color = TextMuted,
+                                modifier = Modifier.padding(top = 4.dp)
+                            )
+                        }
+                        item(key = "ad-downloads-shelf") {
+                            com.anonrode.downloader.ui.components.AdSlot("downloads_shelf")
+                        }
+                    }
+                }
+
                 if (sortMode == DownloadsSorter.SORT_LIBRARY) {
                     items(filteredGroups, key = { "show-${it.first}" }) { (showTitle, showItems) ->
                         val isExpanded = expandedShows[showTitle] ?: (showItems.size == 1 || showItems.any {
@@ -1119,45 +1240,6 @@ fun DownloadsScreen(
                     }
                 }
 
-                // ── OFFLINE SHELF (mock zone "Social & Media"; ONE LazyRow max) ──
-                if (visibleShelf.isNotEmpty()) {
-                    item(key = "shelf-zone") {
-                        DownloadsGroupHeader(title = "Social & Media", count = visibleShelf.size)
-                        Spacer(modifier = Modifier.height(Spacing.sm))
-                        LazyRow(
-                            horizontalArrangement = Arrangement.spacedBy(12.dp),
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            items(visibleShelf, key = { "shelf-${it.id}" }) { item ->
-                                SocialShelfTile(
-                                    task = item,
-                                    onPlay = { onPlayTask(item) },
-                                    onOpenActions = { pendingActionsTask = item },
-                                    modifier = Modifier.animateItem(
-                                        fadeInSpec = Motion.ItemFadeIn,
-                                        placementSpec = Motion.ItemPlacement,
-                                        fadeOutSpec = Motion.ItemFadeOut
-                                    )
-                                )
-                            }
-                        }
-                    }
-                    // Bottom line (mock): mono caption under the shelf zone.
-                    item(key = "shelf-footnote") {
-                        Text(
-                            text = "Hold a tile to share or delete · ${visibleShelf.size} items on this device",
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 10.5.sp,
-                            color = TextMuted,
-                            modifier = Modifier.padding(top = 4.dp, bottom = 16.dp)
-                        )
-                    }
-                    // House-ad slot (v3.3.0 phase 2) — renders only when the
-                    // OTA payload enables a house ad for this placement.
-                    item(key = "ad-downloads-shelf") {
-                        com.anonrode.downloader.ui.components.AdSlot("downloads_shelf")
-                    }
-                }
             }
         }
     }
@@ -2381,18 +2463,172 @@ private fun shelfBadge(task: DownloadTask): String {
     }
 }
 
+/** Directive §2.2 series Continue tile: 210×118, poster backdrop, violet
+ *  border, RESUME / UP NEXT / NEXT EP ⬇ pill, SxxEyy tag, play or download
+ *  circle, title + subtitle, [Eps ▾] and a flush 3 dp progress bar. */
+@Composable
+private fun SeriesContinueTile(
+    card: SeriesContinueCard,
+    posterUrl: String,
+    onPlay: (DownloadTask) -> Unit,
+    onFetch: () -> Unit
+) {
+    val target = card.task
+    val isFetch = card.state == ContinueState.FETCH_NEXT
+    val pill = when (card.state) {
+        ContinueState.RESUME -> "RESUME"
+        ContinueState.UP_NEXT -> "UP NEXT"
+        ContinueState.FETCH_NEXT -> "NEXT EP ⬇"
+    }
+    val subtitle = when (card.state) {
+        ContinueState.RESUME ->
+            "Ep ${card.episode} · ${WatchHistoryCore.formatTimeLeft(card.positionMs, card.durationMs)}"
+        ContinueState.UP_NEXT -> "Ep ${card.episode} · Ready to play"
+        ContinueState.FETCH_NEXT -> "Finished E${card.episode} · Get E${card.episode + 1} ⬇"
+    }
+    val fraction = when {
+        card.state == ContinueState.RESUME && card.durationMs > 0L ->
+            (card.positionMs.toFloat() / card.durationMs.toFloat()).coerceIn(0.03f, 0.98f)
+        card.state == ContinueState.FETCH_NEXT -> 1f
+        else -> 0f
+    }
+    val tag = if (card.season > 0 || card.episode > 0) {
+        "S%02dE%02d".format(card.season, card.episode)
+    } else ""
+
+    Box(
+        modifier = Modifier
+            .width(210.dp)
+            .height(118.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(ShelfTileDeep)
+            .border(1.dp, AccentViolet.copy(alpha = 0.45f), RoundedCornerShape(12.dp))
+            .clickable {
+                if (isFetch) onFetch() else target?.let(onPlay)
+            }
+    ) {
+        PosterImageOrFallback(
+            posterUrl = posterUrl,
+            showTitle = card.showTitle,
+            modifier = Modifier.fillMaxSize(),
+            shape = RoundedCornerShape(12.dp),
+            fallbackIcon = Icons.Rounded.PlayArrow,
+            showFallbackTitle = false
+        )
+        // Readability scrim behind the type.
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Brush.verticalGradient(listOf(Color.Transparent, Color(0xD9000000))))
+        )
+        Text(
+            text = pill,
+            fontSize = 8.5.sp,
+            fontWeight = FontWeight.ExtraBold,
+            color = Color.White,
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .padding(8.dp)
+                .clip(RoundedCornerShape(Radius.sm))
+                .background(AccentViolet)
+                .padding(horizontal = 6.dp, vertical = 3.dp)
+        )
+        if (tag.isNotBlank()) {
+            Text(
+                text = tag,
+                fontSize = 9.sp,
+                fontWeight = FontWeight.Bold,
+                color = Color.White,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(8.dp)
+                    .clip(RoundedCornerShape(Radius.sm))
+                    .background(Color(0xCC000000))
+                    .padding(horizontal = 5.dp, vertical = 2.dp)
+            )
+        }
+        Box(
+            modifier = Modifier
+                .align(Alignment.Center)
+                .size(36.dp)
+                .clip(CircleShape)
+                .background(GlassPlayScrim)
+                .border(1.dp, GlassPlayOutline, CircleShape),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = if (isFetch) Icons.Rounded.Download else Icons.Rounded.PlayArrow,
+                contentDescription = if (isFetch) "Download next episode" else "Play",
+                tint = Color.White,
+                modifier = Modifier.size(16.dp)
+            )
+        }
+        Column(
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .fillMaxWidth()
+                .padding(start = 10.dp, end = 10.dp, bottom = 9.dp)
+        ) {
+            Text(
+                text = card.showTitle,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+                color = Color(0xFFF4F4F6),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = subtitle,
+                    fontSize = 10.sp,
+                    color = Color(0xFFC4B5FD),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                Text(
+                    text = "Eps ▾",
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Color(0xFFC4B5FD),
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(Radius.sm))
+                        .clickable { onFetch() }
+                        .padding(horizontal = 4.dp, vertical = 2.dp)
+                )
+            }
+        }
+        LinearProgressIndicator(
+            progress = { fraction },
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .height(3.dp),
+            color = AccentViolet,
+            trackColor = Color(0x33FFFFFF),
+            strokeCap = StrokeCap.Square
+        )
+    }
+}
+
 /** Offline-shelf tile (mock .tile): 166×94 deep well, hairline, centered
- *  platform glyph + 34dp glass play (black-50%, white-14% outline, white ▶),
- *  title 11sp/700 + mono "MP4 · 720p · 326.7 KB" beneath. Tap = play;
- *  long-press = share-or-delete dialog. */
+ *  platform glyph + 34dp glass play, title + mono meta beneath. A tile with
+ *  an active watch record carries the directive's CONTINUE pill, resume line
+ *  and a flush 3 dp progress bar. Tap = play; long-press = actions. */
 @Composable
 private fun SocialShelfTile(
     task: DownloadTask,
+    watchRecord: WatchRecord? = null,
     onPlay: () -> Unit,
     onOpenActions: () -> Unit,
     /** Caller-owned modifier (list placement animation rides here). */
     modifier: Modifier = Modifier
 ) {
+    val inProgress = watchRecord != null && !watchRecord.isWatched && watchRecord.positionMs > 0L
+    val fraction = if (inProgress && watchRecord != null && watchRecord.durationMs > 0L) {
+        (watchRecord.positionMs.toFloat() / watchRecord.durationMs.toFloat()).coerceIn(0.03f, 0.98f)
+    } else 0f
+
     Column(modifier = modifier.width(166.dp)) {
         Box(
             modifier = Modifier
@@ -2402,30 +2638,37 @@ private fun SocialShelfTile(
                 .background(ShelfTileDeep)
                 .border(1.dp, BorderHairline, RoundedCornerShape(10.dp))
                 .pointerInput(task.id) {
-                    // detectTapGestures (stable API, same idiom as the
-                    // scaffold's TabPage): combinedClickable would require an
-                    // experimental opt-in this file doesn't carry.
                     detectTapGestures(
                         onTap = { onPlay() },
                         onLongPress = { onOpenActions() }
                     )
                 }
-                // Raw pointerInput carries no semantics — TalkBack could not
-                // activate this tile at all. These actions mirror the gestures
-                // 1:1 so the Play/long-press flows are reachable.
                 .semantics {
                     onClick(label = "Play") { onPlay(); true }
                     onLongClick(label = "More actions") { onOpenActions(); true }
                 },
             contentAlignment = Alignment.Center
         ) {
-            // Platform badge (audit fix): per-task, not the old hardcoded "𝕏".
             Text(
                 text = shelfBadge(task),
                 fontSize = 20.sp,
                 fontWeight = FontWeight.Black,
                 color = TextMuted
             )
+            if (inProgress && watchRecord != null) {
+                Text(
+                    text = "CONTINUE",
+                    fontSize = 8.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    color = Color.White,
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(6.dp)
+                        .clip(RoundedCornerShape(Radius.sm))
+                        .background(AccentViolet)
+                        .padding(horizontal = 5.dp, vertical = 2.dp)
+                )
+            }
             Box(
                 modifier = Modifier
                     .size(34.dp)
@@ -2441,9 +2684,20 @@ private fun SocialShelfTile(
                     modifier = Modifier.size(12.dp)
                 )
             }
+            if (inProgress) {
+                LinearProgressIndicator(
+                    progress = { fraction },
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                        .height(3.dp),
+                    color = AccentViolet,
+                    trackColor = Color(0x33FFFFFF),
+                    strokeCap = StrokeCap.Square
+                )
+            }
         }
         Text(
-            // §5.3: shelf tile titles shed trailing "[yt-dlp_id]" brackets too.
             text = remember(task.episodeTitle) { TitleFormatting.stripTrailingYtDlpId(task.episodeTitle) }
                 .ifBlank { task.episodeTitle },
             fontSize = 11.sp,
@@ -2454,10 +2708,15 @@ private fun SocialShelfTile(
             modifier = Modifier.padding(top = 7.dp)
         )
         Text(
-            text = shelfMetaText(task),
-            fontFamily = FontFamily.Monospace,
-            fontSize = 9.sp,
-            color = TextMuted,
+            text = if (inProgress && watchRecord != null) {
+                "Resume · ${WatchHistoryCore.formatTimeLeft(watchRecord.positionMs, watchRecord.durationMs)}"
+            } else {
+                shelfMetaText(task)
+            },
+            fontFamily = if (inProgress) FontFamily.Default else FontFamily.Monospace,
+            fontSize = if (inProgress) 10.sp else 9.sp,
+            fontWeight = if (inProgress) FontWeight.SemiBold else FontWeight.Normal,
+            color = if (inProgress) AccentViolet else TextMuted,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.padding(top = 3.dp)
