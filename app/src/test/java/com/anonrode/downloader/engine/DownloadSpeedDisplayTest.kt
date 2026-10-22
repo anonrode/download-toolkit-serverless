@@ -95,7 +95,7 @@ class DownloadSpeedDisplayTest {
         // The consumed burst also cannot push later readings over the cap.
         val later = window.record(7_000, 1_000_000L + 2_400_000_000_000L + 3_000_000L)
         assertTrue(later!! <= DISPLAY_SPEED_CEILING_BPS)
-        assertEquals(DISPLAY_SPEED_CEILING_BPS, later, 1.0)
+        assertEquals(DISPLAY_SPEED_CEILING_BPS, later!!, 1.0)
     }
 
     @Test

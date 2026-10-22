@@ -106,8 +106,9 @@ class LaneBudgetTest {
 
     @Test
     fun telemetrySpikesAreClampedAndCannotGrowLanes() {
-        // Single direct task: starts at the ramp rate, grows toward 16.
-        assertEquals(8, budget.reserve("t1", 16, hls = false, plannedTasks = 1))
+        // Single direct task: with no other planned transfers the whole free
+        // pool is available, so admission grants the full direct cap (16).
+        assertEquals(16, budget.reserve("t1", 16, hls = false, plannedTasks = 1))
         // A physical-impossibility spike (the released build's 2.4 GB/s
         // resume-priming sample, perTask=c6710cfb:6:2485125KB/s) is clamped
         // to the plausibility ceiling before it reaches the controller.

@@ -276,10 +276,10 @@ class HlsVodDownloaderTest {
         }
         assertNotNull(caught)
         assertEquals(906348L, caught!!.expectedLen)
-        assertEquals(577L, caught.gotBytes)
-        assertEquals(206, caught.lastStatus)
-        assertEquals(0, caught.segmentsDone)
-        assertEquals(0L, caught.bytesDone)
+        assertEquals(577L, caught!!.gotBytes)
+        assertEquals(206, caught!!.lastStatus)
+        assertEquals(0, caught!!.segmentsDone)
+        assertEquals(0L, caught!!.bytesDone)
         // Nothing committed, boundary at the start, sidecar intact.
         assertEquals(HlsVodDownloader.ResumeState(0, 0L), HlsVodDownloader.readResume(sidecar))
     }
@@ -338,7 +338,7 @@ class HlsVodDownloaderTest {
         }
         assertNotNull(caught)
         assertEquals(403, caught!!.lastStatus)
-        assertEquals(1, caught.segmentsDone)
+        assertEquals(1, caught!!.segmentsDone)
         // Boundary = exactly segment 0's bytes; sidecar resumes there.
         assertTrue(dest.readBytes().contentEquals(segmentBodies[0]))
         assertEquals(HlsVodDownloader.ResumeState(1, segmentBodies[0].size.toLong()),
@@ -462,8 +462,8 @@ class HlsVodDownloaderTest {
         assertNotNull(caught)
         val prefix = concat(segmentBodies.take(2))
         assertEquals(2, caught!!.segmentsDone)
-        assertEquals(403, caught.lastStatus)
-        assertEquals(prefix.size.toLong(), caught.bytesDone)
+        assertEquals(403, caught!!.lastStatus)
+        assertEquals(prefix.size.toLong(), caught!!.bytesDone)
         // The file on disk holds exactly the committed prefix; sidecar matches.
         assertTrue(dest.readBytes().contentEquals(prefix))
         assertEquals(HlsVodDownloader.ResumeState(2, prefix.size.toLong()), HlsVodDownloader.readResume(sidecar))

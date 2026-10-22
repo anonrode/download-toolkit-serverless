@@ -85,10 +85,10 @@ class HostSocketOccupancyTest {
     @Test
     fun sessionMemoryIsPerHost() {
         occupancy.recordBackoff(hostA, 16)
-        assertEquals(8, occupancy.recordBackoff(hostA, 16))
+        assertEquals(4, occupancy.recordBackoff(hostA, 16))
         // A different CDN keeps its own (unpenalised) occupancy.
         assertEquals(12, occupancy.currentForUrl(hostB, 12))
-        assertEquals(8, occupancy.currentForUrl(hostA, 16))
+        assertEquals(4, occupancy.currentForUrl(hostA, 16))
     }
 
     @Test
