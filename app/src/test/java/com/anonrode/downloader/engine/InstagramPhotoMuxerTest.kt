@@ -322,7 +322,8 @@ class InstagramPhotoMuxerTest {
         assertTrue(x264.containsAll(listOf("-loop", "1")))
         assertTrue(x264.windowed(2).any { it == listOf("-c:v", "libx264") })
         assertTrue(x264.contains("-shortest"))
-        assertTrue(x264.windowed(2).any { it == listOf("-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2") })
+        assertTrue(x264.windowed(2).any { it == listOf("-r", "30") })
+        assertTrue(x264.windowed(2).any { it == listOf("-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1") })
         assertEquals("/out/final.mp4", x264.last())
         val mpeg = v[1]
         assertTrue(mpeg.windowed(2).any { it == listOf("-c:v", "mpeg4") })
@@ -339,7 +340,68 @@ class InstagramPhotoMuxerTest {
         // user still gets a playable video without audio.
         assertTrue(x264.containsAll(listOf("-loop", "1", "-t", "5")))
         assertFalse(x264.contains("-shortest"))
+        assertTrue(x264.windowed(2).any { it == listOf("-r", "30") })
         assertEquals("/out/final.mp4", x264.last())
+    }
+
+    @Test
+    fun rawAudioHintsIgnoreVideoProgressiveUrls() {
+        // A video_versions URL must never be treated as an audio track.
+        val video = """{"video_versions":[{"url":"https://x/v.mp4","progressive_download_url":"https://x/v.mp4"}]}"""
+        assertNull(InstagramPhotoMuxer.extractRawAudioHintsFromText(video))
+        val audio = """{"audio_src":"https://x/a.m4a","song_name":"Song","display_artist":"Artist","audio_cluster_id":"123456789"}"""
+        val parts = InstagramPhotoMuxer.extractRawAudioHintsFromText(audio)
+        assertNotNull(parts)
+        assertEquals("https://x/a.m4a", parts!!.audioUrl)
+        assertEquals("Song", parts.title)
+        assertEquals("Artist", parts.artist)
+        assertEquals("123456789", parts.audioClusterId)
+    }
+
+    @Test
+    fun slideTargetSizeIsEvenAndCapped() {
+        assertEquals(1080 to 1350, InstagramPhotoMuxer.slideTargetSize(listOf(1080 to 1350, 1080 to 1080)))
+        assertEquals(1080 to 1920, InstagramPhotoMuxer.slideTargetSize(listOf(2000 to 3000, 1080 to 1920)))
+        // Odd dimensions round down to even; an unknown set falls back to 1080².
+        assertEquals(1080 to 1080, InstagramPhotoMuxer.slideTargetSize(listOf(1081 to 1081)))
+        assertEquals(1080 to 1080, InstagramPhotoMuxer.slideTargetSize(emptyList()))
+    }
+
+    @Test
+    fun ffmpegSlideshowVariantsUseCfrAndSetsar() {
+        val v = InstagramPhotoMuxer.ffmpegSlideshowVariants(
+            "/x/libffmpeg.so", "/w/slides.txt", "/w/a.m4a", "/out/final.mp4"
+        )
+        assertEquals(2, v.size)
+        val x264 = v[0]
+        assertTrue(x264.contains("-shortest"))
+        assertTrue(x264.windowed(2).any { it == listOf("-r", "30") })
+        assertTrue(x264.windowed(2).any { it == listOf("-vsync", "cfr") })
+        assertTrue(x264.windowed(2).any {
+            it == listOf("-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1")
+        })
+    }
+
+    @Test
+    fun ffmpegLdPathCoversUsrLibAndNativeDir() {
+        // Regression: the old code put only the executable's parent on
+        // LD_LIBRARY_PATH; the extracted runtime keeps libav*.so.* in usr/lib.
+        val root = Files.createTempDirectory("ffmpeg-ld").toFile()
+        val native = Files.createTempDirectory("ffmpeg-native-ld").toFile()
+        try {
+            val bin = File(root, "usr/bin").apply { mkdirs() }
+            val usrLib = File(root, "usr/lib").apply { mkdirs() }
+            val exe = File(bin, "ffmpeg").apply { writeBytes(ByteArray(1)) }
+            val parts = InstagramPhotoMuxer
+                .buildFfmpegLdLibraryPath(exe, native.absolutePath)
+                .split(File.pathSeparator)
+            assertTrue(parts.contains(bin.absolutePath))
+            assertTrue(parts.contains(usrLib.absolutePath))
+            assertTrue(parts.contains(native.absolutePath))
+        } finally {
+            root.deleteRecursively()
+            native.deleteRecursively()
+        }
     }
 
     @Test
