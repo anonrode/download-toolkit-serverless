@@ -143,6 +143,15 @@ class DownloadRepository {
         persist()
     }
 
+    /** Batch removal with ONE StateFlow update and ONE persist() (and thus
+     *  one MediaStore history mirror) for a whole show deletion. */
+    fun removeAll(taskIds: Collection<String>) {
+        if (taskIds.isEmpty()) return
+        val ids = taskIds.toSet()
+        _tasks.update { list -> list.filterNot { it.id in ids } }
+        persist()
+    }
+
     fun update(taskId: String, transform: (DownloadTask) -> DownloadTask) {
         _tasks.update { list ->
             list.map { if (it.id == taskId) transform(it) else it }

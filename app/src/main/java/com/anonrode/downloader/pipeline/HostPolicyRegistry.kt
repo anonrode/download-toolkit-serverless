@@ -142,9 +142,32 @@ object HostPolicyRegistry {
             return grant
         }
 
+        /**
+         * Grow an existing grant without ever shrinking it. HLS admission
+         * reserves one lane for the single-connection paced lane; if that
+         * backend declines and yt-dlp takes over, the task reclaims its
+         * fragment width here. `reserve` alone cannot do this: it returns the
+         * existing grant unchanged.
+         */
         @Synchronized
-        fun release(taskId: String): Int {
-            val g = grants.remove(taskId) ?: return 0
+        fun resize(taskId: String, requested: Int, hls: Boolean, plannedTasks: Int = 1): Int {
+            val existing = grants[taskId] ?: return reserve(taskId, requested, hls, plannedTasks)
+            val cap = if (hls) HLS_MAX_LANES else DIRECT_MAX_LANES
+            val want = requested.coerceIn(existing.lanes, cap)
+            if (want <= existing.lanes) return existing.lanes
+            val usedExcluding = grants.values.sumOf { it.lanes } - existing.lanes
+            val free = (globalLanes - usedExcluding).coerceAtLeast(0)
+            val grown = minOf(want, maxOf(existing.lanes, free))
+            existing.lanes = grown
+            com.anonrode.downloader.util.DebugLog.engine(
+                "lane resize task=$taskId lanes=${existing.lanes} (requested=$requested) " +
+                    "used=${grants.values.sumOf { it.lanes }} free=${globalLanes - grants.values.sumOf { it.lanes }}"
+            )
+            return existing.lanes
+        }
+
+        @Synchronized
+        fun release(taskId: String): Int {            val g = grants.remove(taskId) ?: return 0
             com.anonrode.downloader.util.DebugLog.engine(
                 "lane release task=$taskId lanes=${g.lanes} active=${grants.size} " +
                     "used=${grants.values.sumOf { it.lanes }}"
@@ -354,8 +377,13 @@ object HostPolicyRegistry {
         private data class State(
             var sockets: Int,
             var lastBps: Double = 0.0,
-            var improvingSamples: Int = 0
+            var improvingSamples: Int = 0,
+            /** Last sample per task, 15s window. Multiple tasks on one host
+             *  must not overwrite each other's recovery signal. */
+            val latestByTask: MutableMap<String, TaskSample> = mutableMapOf()
         )
+
+        private data class TaskSample(var bps: Double, var atMs: Long)
 
         private val hosts = LinkedHashMap<String, State>()
 
@@ -396,14 +424,22 @@ object HostPolicyRegistry {
          * occupancy the caller should run at.
          */
         @Synchronized
-        fun recordGoodput(url: String, hostCap: Int, bps: Double): Int {
+        fun recordGoodput(url: String, hostCap: Int, bps: Double, taskId: String = ""): Int {
             val (state, cap) = stateFor(url, hostCap)
             if (!bps.isFinite() || bps <= 0.0) {
                 state.improvingSamples = 0
                 return state.sockets
             }
-            val improving = state.lastBps > 0.0 && bps >= state.lastBps * RECOVERY_IMPROVE_RATIO
-            state.lastBps = bps
+            // Aggregate the latest sample per live task (15s window). With one
+            // task this is exactly the old behavior; with two tasks on the
+            // same host, alternating 1.2/2.5 MB/s samples no longer reset the
+            // other's improvingSamples forever.
+            val nowMs = System.currentTimeMillis()
+            state.latestByTask[taskId] = TaskSample(bps, nowMs)
+            state.latestByTask.entries.removeAll { nowMs - it.value.atMs > 15_000L }
+            val aggregate = state.latestByTask.values.sumOf { it.bps }
+            val improving = state.lastBps > 0.0 && aggregate >= state.lastBps * RECOVERY_IMPROVE_RATIO
+            state.lastBps = aggregate
             if (state.sockets >= cap) {
                 state.improvingSamples = 0
                 return state.sockets

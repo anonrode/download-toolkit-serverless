@@ -1,5 +1,6 @@
 package com.anonrode.downloader.pipeline
 
+import com.anonrode.downloader.data.net.HttpClient
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import java.net.URI
 

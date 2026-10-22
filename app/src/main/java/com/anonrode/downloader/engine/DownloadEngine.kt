@@ -720,7 +720,9 @@ class DownloadEngine(
                     val floor = entry?.requeueNotBeforeMs?.get() ?: 0L
                     val banked = maxOf(t.downloadedBytes, computeDiskBytes(t))
                     val longDead = parkedAt > 0L && now - parkedAt > PARKED_LIFETIME_MS && banked == 0L
-                    val hostUsable = com.anonrode.downloader.pipeline.HostHealth.isUsable(t.directUrl)
+                    val hostUsable = com.anonrode.downloader.pipeline.HostHealth.isUsable(
+                        t.directUrl.ifBlank { t.selectedMirrorUrl }.ifBlank { t.sourceUrl }
+                    )
                     // OWNER DIRECTIVE 2026-10-21 ("every error ends in a
                     // download or a proven no-source"): a park NEVER fails the
                     // task and never strands it. The old 30-minute give-up
@@ -1048,7 +1050,10 @@ class DownloadEngine(
                 targetFile.absolutePath in reservedPaths ||
                 targetFile.exists() ||
                 File(targetFile.absolutePath + ".part").exists() ||
-                File(targetFile.absolutePath + ".aria2").exists()
+                File(targetFile.absolutePath + ".aria2").exists() ||
+                File(targetFile.absolutePath + ".turbo").exists() ||
+                File(targetFile.absolutePath + ".hts").exists() ||
+                File(targetFile.absolutePath + ".hlsrs").exists()
             ) {
                 targetFile = File(downloadFolder, "$cleanTitle-$counter.$ext")
                 counter++
@@ -1300,6 +1305,38 @@ class DownloadEngine(
         processQueue()
     }
 
+    /**
+     * Batch cancel/delete. Same per-task teardown as [cancel], but the
+     * repository is updated once and the artifact purges run sequentially in
+     * one coroutine, so a 24-episode show delete does not enqueue 24 JSON
+     * persists, 24 MediaStore mirrors, 24 service updates or 24 racing
+     * folder-cleanup jobs on the UI thread.
+     */
+    fun cancelTasks(taskIds: Collection<String>) {
+        val ids = taskIds.toSet()
+        if (ids.isEmpty()) return
+        val tasks = ids.mapNotNull { repository.find(it) }
+        if (tasks.isEmpty()) return
+        val hadRunning = tasks.any { runtimeRegistry.getActiveJob(it.id) != null }
+        tasks.forEach { task ->
+            val hasRunningJob = runtimeRegistry.getActiveJob(task.id) != null
+            if (hasRunningJob) runtimeRegistry.markFullyCancelled(task.id)
+            runtimeRegistry.cancelAndRemove(task.id)
+            YoutubeDlDownloader.killProcess(task.id)
+            TurboDownloader.cancelTask(task.id, isFullCancel = hasRunningJob)
+            com.anonrode.downloader.util.DebugLog.user("cancel ${task.id}")
+        }
+        if (hadRunning && !runtimeRegistry.hasOtherActiveWork("")) {
+            HttpClient.cancelInFlight()
+        }
+        repository.removeAll(ids)
+        updateServiceState(force = true)
+        processQueue()
+        engineScope.launch {
+            tasks.forEach { purgeTaskArtifacts(it) }
+        }
+    }
+
 
     /** Remove every partial artifact a cancelled download may have left.
      *  deleteRecursively: multi-file torrents write a DIRECTORY, and File.delete()
@@ -1348,6 +1385,8 @@ class DownloadEngine(
                 File(base.absolutePath + ".aria2").delete()
                 File(base.absolutePath + ".turbo").delete()
                 File(base.absolutePath + ".hlsfp").delete()
+                File(base.absolutePath + ".hlsrs").delete()
+                File(base.absolutePath + ".hts").delete()
                 base.parentFile?.let {
                     deletePartFragFiles(it, base.nameWithoutExtension, privateWorkdir = false)
                 }
@@ -1782,6 +1821,8 @@ class DownloadEngine(
                 File(task.filePath + ".aria2").delete()
                 File(task.filePath + ".turbo").delete()
                 File(task.filePath + ".hlsfp").delete()
+                File(task.filePath + ".hlsrs").delete()
+                File(task.filePath + ".hts").delete()
                 File(task.filePath).parentFile?.let {
                     deletePartFragFiles(it, File(task.filePath).nameWithoutExtension, privateWorkdir = false)
                     File(it, ".work-" + task.id).deleteRecursively()
@@ -2161,6 +2202,13 @@ class DownloadEngine(
                 val ctrl = Aria2Control.parse(legacyAria2)
                 return ctrl?.verifiedLandedBytes() ?: ctrl?.pieces?.sumOf { it.current - it.start } ?: 0L
             }
+            // HlsVodDownloader stages the current segment stream in
+            // `<file>.hts` with its resume map in `.hlsrs`. During that
+            // backend's run the .hts file is the ONLY real byte source; when
+            // omitted, the watchdog, park-vs-fail rule and failover guard all
+            // saw 0 bytes landed.
+            val htsFile = File(dir, "$base.hts")
+            if (htsFile.exists()) return htsFile.length()
             // Non-turbo transfers: use strict single-file priority.
             // Guard against unverified pre-allocated files: if the task is actively downloading
             // and the raw file length equals the expected totalBytes, do NOT trust the unverified
@@ -3393,6 +3441,9 @@ class DownloadEngine(
             val originalFilePath = initialTask.filePath
             // Declared outside try so the finally can release the reservation.
             var grantedLanes = 0
+            // HLS fallback width: the paced lane is single-connection, so the
+            // initial reservation is 1 and grows only if yt-dlp takes over.
+            var hlsFallbackLanes = 0
             try {
                 if (!isActive) return@launch
                 var streamUrl = com.anonrode.downloader.pipeline.UrlClassifier.stripPreviewParam(task.directUrl)
@@ -3518,18 +3569,12 @@ class DownloadEngine(
                             val reasonSuffix = if (!hostReason.isNullOrBlank()) " ($hostReason)" else ""
                             com.anonrode.downloader.util.DebugLog.error("task=${task.id} could not crack stream link (host=$host)$reasonSuffix for ${streamUrl.take(120)}")
                             if (attemptCrossProviderFailover(task)) return@launch
-                            // No source found: a resolver chain that came back
-                            // with zero candidates AND failover that exhausted
-                            // every other provider. Record the title for the
-                            // no-source ledger — once here, outside every
-                            // per-candidate loop. Gated on host usability so a
-                            // task merely parking out a cooldown (not a
-                            // terminal verdict) is never recorded.
-                            if (com.anonrode.downloader.pipeline.HostHealth.isUsable(streamUrl)) {
-                                com.anonrode.downloader.pipeline.NoSourceLedger.recordUnresolved(
-                                    task.showTitle.ifBlank { task.episodeTitle }
-                                )
-                            }
+                            // No-source ledger is owned exclusively by
+                            // attemptCrossProviderFailover: only that function
+                            // knows whether every eligible provider actually
+                            // completed a search. A duplicate record here fired
+                            // even when failover was skipped (banked bytes) or
+                            // timed out, hiding the title for 48h.
                             if (!com.anonrode.downloader.pipeline.HostHealth.isUsable(streamUrl)) {
                                 val mins = maxOf(1L, com.anonrode.downloader.pipeline.HostHealth.remainingBackoffMs(streamUrl) / 60_000L)
                                 com.anonrode.downloader.util.DebugLog.resolve("task=${task.id} host $host in backoff — parking for ~${mins}m")
@@ -3812,8 +3857,9 @@ class DownloadEngine(
                             hlsSegmentUrl[0],
                             minOf(hlsFragmentConcurrency, desiredByConcurrency)
                         )
+                    hlsFallbackLanes = wantedLanes
                     grantedLanes = com.anonrode.downloader.pipeline.HostPolicyRegistry.LaneBudget
-                        .reserve(task.id, wantedLanes, hls = true, plannedTasks = plannedTransferCount())
+                        .reserve(task.id, 1, hls = true, plannedTasks = plannedTransferCount())
                     if (grantedLanes == 0) {
                         repository.update(task.id) {
                             it.copy(status = TaskStatus.QUEUED, speedBytesPerSec = 0.0)
@@ -4080,6 +4126,7 @@ class DownloadEngine(
                                     origin = com.anonrode.downloader.pipeline.UrlClassifier.extractOrigin(refererToPass),
                                     ua = uaToPass,
                                     customHeaders = hdrs,
+                                    explicitReferer = taskReferer != null || hintedReferer != null,
                                     parallelSockets = grantedLanes.coerceIn(1, 16),
                                     quality = task.quality ?: defaultQuality,
                                     isExtractorTask = false,
@@ -4140,6 +4187,7 @@ class DownloadEngine(
                                 origin = com.anonrode.downloader.pipeline.UrlClassifier.extractOrigin(refererToPass),
                                 customHeaders = hdrs,
                                 ua = uaToPass,
+                                explicitReferer = taskReferer != null || hintedReferer != null,
                                 parallelSockets = grantedLanes.coerceAtLeast(1),
                                 quality = task.quality ?: defaultQuality,
                                 isExtractorTask = false,
@@ -4167,7 +4215,10 @@ class DownloadEngine(
                 } else {
 
                     suspend fun runYtdlp(url: String, masterFile: File?): File? {
-                        val runReferer = taskReferer ?: getRefererForUrl(url)
+                        val runHint = com.anonrode.downloader.pipeline.ResolvedHints.refererFor(url)
+                        val runReferer = taskReferer ?: runHint
+                            ?: refererToPass.ifBlank { getRefererForUrl(url) }
+                        val runExplicit = taskReferer != null || runHint != null
                         val runUa = taskUa ?: getUserAgentForUrl(url)
                         val runHdrs = buildHeaders(runReferer, runUa)
                         return YoutubeDlDownloader.download(
@@ -4181,6 +4232,7 @@ class DownloadEngine(
                             origin = com.anonrode.downloader.pipeline.UrlClassifier.extractOrigin(runReferer),
                             ua = runUa,
                             customHeaders = runHdrs,
+                            explicitReferer = runExplicit,
                             parallelSockets = (if (grantedLanes > 0) grantedLanes else effectiveSockets).coerceIn(1, 16),
                             quality = task.quality ?: defaultQuality,
                             isExtractorTask = isExtractor,
@@ -4303,6 +4355,17 @@ class DownloadEngine(
                     // the task dies with the first URL's errors.
                     var firstError: Exception? = null
                     producedFile = try {
+                        if (producedFile == null && hlsFallbackLanes > 1) {
+                            // The paced HLS lane declined; yt-dlp needs the
+                            // fragment width that admission originally wanted.
+                            grantedLanes = com.anonrode.downloader.pipeline.HostPolicyRegistry
+                                .LaneBudget.resize(
+                                    task.id,
+                                    hlsFallbackLanes,
+                                    hls = true,
+                                    plannedTasks = plannedTransferCount()
+                                )
+                        }
                         if (producedFile != null) producedFile else runYtdlp(streamUrl, hlsMasterFile)
                     } catch (e: kotlinx.coroutines.CancellationException) {
                         throw e
@@ -4552,7 +4615,7 @@ class DownloadEngine(
                             File(targetPathBeforeCompletion).nameWithoutExtension,
                             File(originalFilePath).nameWithoutExtension
                         )
-                        val sidecarExts = setOf("part", "turbo", "aria2", "ytdl", "hlsfp")
+                        val sidecarExts = setOf("part", "turbo", "aria2", "ytdl", "hlsfp", "hts", "hlsrs")
                         producedFile.parentFile?.listFiles()?.forEach { f ->
                             if (!f.isFile) return@forEach
                             // `.part-Frag<N>` has no fixed extension to match
@@ -4704,6 +4767,8 @@ class DownloadEngine(
                                 File(producedFile.absolutePath + ".turbo").delete()
                                 File(producedFile.absolutePath + ".aria2").delete()
                                 File(producedFile.absolutePath + ".hlsfp").delete()
+                                File(producedFile.absolutePath + ".hlsrs").delete()
+                                File(producedFile.absolutePath + ".hts").delete()
                                 deletePartFragFiles(
                                     producedFile.parentFile ?: File("."),
                                     producedFile.nameWithoutExtension,

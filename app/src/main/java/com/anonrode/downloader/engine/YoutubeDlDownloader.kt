@@ -288,6 +288,11 @@ object YoutubeDlDownloader {
         origin: String = "",
         ua: String = "",
         customHeaders: Map<String, String> = emptyMap(),
+        // True when the referer came from task headers or a resolver recipe
+        // (ResolvedHints), not from generic host policy. Explicit referers
+        // are required by vimeos/nepu/nsrplay-style CDNs and must survive the
+        // HLS fallback; generic ones stay stripped for token-locked CDNs.
+        explicitReferer: Boolean = false,
         parallelSockets: Int = 16,
         quality: String = "720p",
         isExtractorTask: Boolean = false,
@@ -336,7 +341,9 @@ object YoutubeDlDownloader {
         // must apply to a LIVE m3u8 too. Hosts on the explicit allowlist keep
         // their referer; every other HLS referer is stripped exactly as the
         // rewritten-master path always did.
-        val effReferer = if ((hlsMasterFile != null || isM3u8) && !requiresExplicitReferer(referer)) "" else referer
+        val effReferer = if ((hlsMasterFile != null || isM3u8) &&
+            !explicitReferer && !requiresExplicitReferer(referer)
+        ) "" else referer
 
         val height = quality.filter { it.isDigit() }.toIntOrNull() ?: when (quality.lowercase()) {
             "4k" -> 2160

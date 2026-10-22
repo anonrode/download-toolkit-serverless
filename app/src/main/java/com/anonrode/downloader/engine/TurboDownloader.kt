@@ -343,9 +343,16 @@ object TurboDownloader {
         val isDisabled: Boolean get() = disabled.get()
 
         /** A new dial is safe only when no spare is ready AND the previously
-         *  promoted socket has been fully released. */
-        fun canPrepare(): Boolean =
-            !disabled.get() && !ready.get() && !promotedInUse.get()
+         *  promoted socket has been fully released. A "ready" flag whose
+         *  pooled socket was evicted (30 s idle keepalive) is not warm. */
+        fun canPrepare(): Boolean {
+            if (disabled.get() || promotedInUse.get()) return false
+            if (ready.get() && pool.idleConnectionCount() == 0) {
+                ready.set(false)
+                preparedAtMs.set(0L)
+            }
+            return !ready.get()
+        }
 
         private fun fail(code: Int) {
             if (code == 401 || code == 403 || code == 429 || code == 503) {
@@ -430,6 +437,13 @@ object TurboDownloader {
         /** Marks the promoted attempt finished so the keeper may re-dial. */
         fun releasePromoted() {
             promotedInUse.set(false)
+        }
+
+        /** Releases the private pool and its cleanup executor. */
+        fun close() {
+            ready.set(false)
+            preparedAtMs.set(0L)
+            try { pool.evictAll() } catch (_: Throwable) {}
         }
     }
 
@@ -954,7 +968,7 @@ object TurboDownloader {
         fun adaptFromGoodput(bps: Double) {
             if (taskId.isBlank()) return
             val previous = HostPolicyRegistry.HostSocketOccupancy.currentForUrl(url, hostCeiling)
-            val occupancy = HostPolicyRegistry.HostSocketOccupancy.recordGoodput(url, hostCeiling, bps)
+            val occupancy = HostPolicyRegistry.HostSocketOccupancy.recordGoodput(url, hostCeiling, bps, taskId)
             val total = minOf(hostCeiling, laneGrant(), occupancy)
             val target = StandbyPolicy.activeWorkerBudgetForTotal(total, standbyEnabled)
             val targetAboveWidth = target > activeWorkers.get()
@@ -1426,6 +1440,7 @@ object TurboDownloader {
             }
         } finally {
             telemetryTicker.cancel()
+            standby?.close()
             onProgress(committed(), total, speed.getSpeed())
             if (taskId.isNotEmpty()) {
                 throttleDeadlines.remove(taskId)
