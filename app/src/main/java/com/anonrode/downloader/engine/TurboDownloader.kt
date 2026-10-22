@@ -70,6 +70,12 @@ object TurboDownloader {
     private const val STANDBY_RETRY_MS = 5_000L
     private const val STANDBY_POOL_KEEPALIVE_SECONDS = 30L
 
+    // Adaptive per-host occupancy (board rows 5/29): aggregate goodput is
+    // sampled at this cadence and fed to HostPolicyRegistry's per-host
+    // controller (fast halve on 429/403/503, +1 lane only after two
+    // consecutive improving samples).
+    private const val ADAPT_SAMPLE_MS = 4_000L
+
     /** Decaying shared best-window reference (30s half-life). */
     private const val BEST_HALF_LIFE_MS = 30_000L
 
@@ -132,9 +138,14 @@ object TurboDownloader {
             capacity(hostCap, laneGrant) > MAX_STANDBY_PER_TASK
 
         /** ACTIVE worker lanes after reserving the standby slot. */
-        fun activeWorkerBudget(hostCap: Int, laneGrant: Int, standbyActive: Boolean): Int {
-            val cap = capacity(hostCap, laneGrant)
-            return if (standbyActive) (cap - MAX_STANDBY_PER_TASK).coerceAtLeast(1) else cap
+        fun activeWorkerBudget(hostCap: Int, laneGrant: Int, standbyActive: Boolean): Int =
+            activeWorkerBudgetForTotal(capacity(hostCap, laneGrant), standbyActive)
+
+        /** ACTIVE worker lanes for an already-computed TOTAL connection budget
+         *  (host cap AND lane grant AND adaptive occupancy all applied). */
+        fun activeWorkerBudgetForTotal(totalConnections: Int, standbyActive: Boolean): Int {
+            val total = totalConnections.coerceAtLeast(1)
+            return if (standbyActive) (total - MAX_STANDBY_PER_TASK).coerceAtLeast(1) else total
         }
 
         /** Range a promoted connection may request: it repairs exactly the
@@ -151,16 +162,11 @@ object TurboDownloader {
     private const val COALESCE_TARGET_BYTES = 64 * 1024
     private const val OKIO_SEGMENT_SIZE = 8192
 
-    // Adaptive startup ramp (2026-10-19): a fresh task opens 4 lanes, measures
-    // aggregate throughput for ~3.5s, then steps up only while the aggregate
-    // improves. Jumping straight to 16 was part of the connection storm that
-    // triggered CDN throttling; the ramp is additive-only (no mid-ramp drops,
-    // so no churn) and is capped by the lane grant passed in as `sockets`.
-    private val RAMP_STEPS = intArrayOf(4, 6, 8, 12, 16)
-    private const val RAMP_MEASURE_MS = 3_500L
-    private const val RAMP_INTERVAL_MS = 3_000L
-    private const val RAMP_IMPROVE_RATIO = 1.05
-    private const val RAMP_REGRESSION_RATIO = 0.90
+    // Adaptive socket count (2026-10-21, board rows 5/29) supersedes the old
+    // 4→16 startup ramp: a task starts at min(host cap, lane grant, per-host
+    // session occupancy) and HostPolicyRegistry.HostSocketOccupancy moves that
+    // occupancy with fast halving on 429/403/503 and +1-per-two-improving-
+    // samples recovery.
 
     // Work-stealing (directive Fix 3, corrected design D2a/D2b): when all
     // initial pieces are claimed, a free worker splits the ACTIVE piece with
@@ -818,9 +824,22 @@ object TurboDownloader {
         // Warm standby (board row 5): one pre-dialed spare per active task.
         // Its slot is subtracted BEFORE any lane starts, so active lanes +
         // the idle spare can never exceed min(per-host cap, lane grant).
-        val standbyEnabled = StandbyPolicy.standbyAllowed(hostCeiling, laneGrant())
-        fun workerCeiling(): Int =
-            StandbyPolicy.activeWorkerBudget(hostCeiling, laneGrant(), standbyEnabled)
+        // A host whose session occupancy is down to one socket gets no spare.
+        val initialOccupancy = HostPolicyRegistry.HostSocketOccupancy.currentForUrl(url, hostCeiling)
+        val standbyEnabled = StandbyPolicy.standbyAllowed(
+            hostCeiling,
+            minOf(laneGrant(), initialOccupancy)
+        )
+        // Adaptive occupancy (B2): the host's session memory is the THIRD cap
+        // after the static host policy and the global lane grant. It starts at
+        // the host cap and is lowered/raised by HostSocketOccupancy; reading it
+        // here keeps every claim site on the live value.
+        fun workerCeiling(): Int {
+            val occupancy = HostPolicyRegistry.HostSocketOccupancy
+                .currentForUrl(url, hostCeiling)
+            val total = minOf(hostCeiling, laneGrant(), occupancy)
+            return StandbyPolicy.activeWorkerBudgetForTotal(total, standbyEnabled)
+        }
         val workerBudget = workerCeiling()
         val standby = if (standbyEnabled) {
             StandbySocket(
@@ -833,17 +852,19 @@ object TurboDownloader {
             )
         } else null
         val maxWorkers = AtomicInteger(workerBudget)
-        // The controller's admission grant is the ceiling; the ramp is the
-        // additive-only startup curve inside it (standby slot already out).
-        val rampStart = if (freshStart) minOf(RAMP_STEPS.first(), sockets, workerBudget) else minOf(sockets, workerBudget)
+        // Speed-first startup (B2): open the task at its allowed width (host
+        // cap bounded by the lane grant and adaptive occupancy) instead of
+        // ramping up from 4. The expected-default case only enters this branch
+        // when the grant itself is narrow.
+        val rampStart = minOf(sockets, workerBudget)
         val activeWorkers = AtomicInteger(rampStart)
         val rampStartedAt = System.currentTimeMillis()
         val sawFirstByte = AtomicBoolean(false)
         val sawFirstMegabyte = AtomicBoolean(false)
         if (freshStart && taskId.isNotEmpty()) {
             com.anonrode.downloader.util.DebugLog.backend(
-                "task=$taskId lane ramp start=$rampStart cap=$hostCeiling " +
-                    "standby=${if (standbyEnabled) 1 else 0} total=0KB/s"
+                "task=$taskId lane start=$rampStart cap=$hostCeiling " +
+                    "occupancy=$initialOccupancy standby=${if (standbyEnabled) 1 else 0} total=0KB/s"
             )
         }
         fun enterRateLimit() {
@@ -852,9 +873,14 @@ object TurboDownloader {
             val until = System.currentTimeMillis() + waitMs
             throttleUntil.set(until)
             if (taskId.isNotEmpty()) throttleDeadlines[taskId] = until
+            // B2 fast backoff: halve the host's remembered occupancy NOW (a
+            // 429/503 is the host telling us the request width is too high).
+            val occupancy = HostPolicyRegistry.HostSocketOccupancy
+                .recordBackoff(url, hostCeiling)
             maxWorkers.set(maxOf(2, maxWorkers.get() / 2))
             com.anonrode.downloader.util.DebugLog.backend(
-                "task=$taskId rate limited (cycle $cycle): all sockets cooling ${waitMs / 1000}s, workers→${maxWorkers.get()}"
+                "task=$taskId rate limited (cycle $cycle): all sockets cooling ${waitMs / 1000}s, " +
+                    "workers→${maxWorkers.get()} occupancy→$occupancy"
             )
         }
 
@@ -875,6 +901,28 @@ object TurboDownloader {
         fun committed(): Long = plan.sumOf { (it.current - it.start).coerceAtLeast(0L) }
         onProgress(initialBytes, total, 0L)
 
+        // Adaptive occupancy (B2): aggregate goodput is sampled every few
+        // seconds and feeds the per-host controller. Recovery is deliberately
+        // slow (+1 lane per two consecutive improving samples) and every
+        // raise is clamped by the lane grant, host cap and standby slot.
+        var lastAdaptAt = System.currentTimeMillis()
+        fun adaptFromGoodput(bps: Double) {
+            if (taskId.isBlank()) return
+            val occupancy = HostPolicyRegistry.HostSocketOccupancy.recordGoodput(url, hostCeiling, bps)
+            val total = minOf(hostCeiling, laneGrant(), occupancy)
+            val target = StandbyPolicy.activeWorkerBudgetForTotal(total, standbyEnabled)
+            if (target > activeWorkers.get()) {
+                activeWorkers.set(target)
+                // A recovery may undo the rate-limit worker halving; the
+                // throttle ladder itself (cooldown deadline) is untouched.
+                maxWorkers.set(maxOf(maxWorkers.get(), target))
+                com.anonrode.downloader.util.DebugLog.backend(
+                    "task=$taskId lane adapt occupancy=$occupancy target=$target " +
+                        "total=${(bps / 1024).toInt()}KB/s"
+                )
+            }
+        }
+
         // Decoupled Telemetry Dispatcher: Ticks every 250ms with smoothed EMA speed
         val telemetryTicker = launch(Dispatchers.Default) {
             while (isActive) {
@@ -883,6 +931,11 @@ object TurboDownloader {
                 val currentSpeed = speed.sample(currentDone)
                 if (taskId.isNotEmpty()) {
                     HostPolicyRegistry.LaneBudget.reportSpeed(taskId, currentSpeed.toDouble())
+                    val now = System.currentTimeMillis()
+                    if (now - lastAdaptAt >= ADAPT_SAMPLE_MS) {
+                        lastAdaptAt = now
+                        adaptFromGoodput(currentSpeed.toDouble())
+                    }
                 }
                 onProgress(committed(), total, currentSpeed)
             }
@@ -966,6 +1019,7 @@ object TurboDownloader {
                         if (attempt >= MAX_ATTEMPTS) break
                         var completed = false
                         var rateLimited = false
+                        var hostBackoff = false
                         var dropped = false
                         var connStartedAt = System.currentTimeMillis()
                         var dropWindowStart = connStartedAt
@@ -1156,6 +1210,12 @@ object TurboDownloader {
                                 } else {
                                     failureStatus.compareAndSet(0, res.code)
                                     if (res.code == 429 || res.code == 503) rateLimited = true
+                                    // B2 fast backoff on a hard rejection too:
+                                    // 403s from a CDN are address/pattern
+                                    // rejections; repeating the same width
+                                    // deepens them. (Token-expiry 403s still
+                                    // end in the engine's re-resolve.)
+                                    if (res.code == 403) hostBackoff = true
                                 }
                                 }
                                 } finally {
@@ -1176,6 +1236,24 @@ object TurboDownloader {
                                     // a corpse in share-5.
                                     enterRateLimit()
                                     continue
+                                }
+                                if (hostBackoff) {
+                                    // 403: halve the host's occupancy for the
+                                    // rest of the session and trim the live
+                                    // counters to it at the next claim. No
+                                    // cooldown ladder — the attempt policy stays
+                                    // unchanged (a 403 may be a token expiry
+                                    // that the engine resolves afresh).
+                                    val occupancy = HostPolicyRegistry.HostSocketOccupancy
+                                        .recordBackoff(url, hostCeiling)
+                                    val ceiling = workerCeiling()
+                                    maxWorkers.set(minOf(maxWorkers.get(), ceiling))
+                                    activeWorkers.set(minOf(activeWorkers.get(), ceiling))
+                                    if (taskId.isNotEmpty()) {
+                                        com.anonrode.downloader.util.DebugLog.backend(
+                                            "task=$taskId host backoff 403: occupancy→$occupancy workers→$ceiling"
+                                        )
+                                    }
                                 }
                                 if (dropped) {
                                     // Drop-and-replace: the next attempt resumes from
@@ -1226,60 +1304,12 @@ object TurboDownloader {
 
                 coroutineScope {
                     fun workRemains(): Boolean = plan.any { it.current <= it.end }
-                    suspend fun rampWait(ms: Long) {
-                        var left = ms
-                        while (left > 0 && isActive && !failed.get() && workRemains()) {
-                            val slice = minOf(100L, left)
-                            delay(slice)
-                            left -= slice
-                        }
-                    }
-                    // Startup ramp controller: additive-only, 3.5s measurement,
-                    // then a step every 3s while aggregate throughput improves
-                    // by >5%. A regression ends the ramp (lanes are never
-                    // dropped mid-run; the global controller owns shrink).
-                    launch(Dispatchers.Default) {
-                        if (!freshStart || hostCeiling <= rampStart) return@launch
-                        var stepIdx = RAMP_STEPS.indexOfFirst { it >= rampStart }.coerceAtLeast(0)
-                        var lastDone = done.get()
-                        var lastMs = System.currentTimeMillis()
-                        var lastBps = 0.0
-                        rampWait(RAMP_MEASURE_MS)
-                        while (isActive && !failed.get() && workRemains()) {
-                            val grant = laneGrant()
-                            val now = System.currentTimeMillis()
-                            val cur = done.get()
-                            val bps = (cur - lastDone) * 1000.0 /
-                                (now - lastMs).coerceAtLeast(1L)
-                            if (lastBps > 0.0 && bps < lastBps * RAMP_REGRESSION_RATIO) {
-                                if (taskId.isNotEmpty()) {
-                                    com.anonrode.downloader.util.DebugLog.backend(
-                                        "task=$taskId lane ramp hold ${activeWorkers.get()} " +
-                                            "total=${(bps / 1024).toInt()}KB/s regression"
-                                    )
-                                }
-                                break
-                            }
-                            val improved = lastBps == 0.0 || bps > lastBps * RAMP_IMPROVE_RATIO
-                            if (!improved) break
-                            stepIdx = (stepIdx + 1).coerceAtMost(RAMP_STEPS.lastIndex)
-                            val target = minOf(RAMP_STEPS[stepIdx], workerCeiling())
-                            if (target > activeWorkers.get()) {
-                                val prev = activeWorkers.getAndSet(target)
-                                if (taskId.isNotEmpty()) {
-                                    com.anonrode.downloader.util.DebugLog.backend(
-                                        "task=$taskId lane ramp $prev->$target " +
-                                            "total=${(bps / 1024).toInt()}KB/s"
-                                    )
-                                }
-                            }
-                            lastBps = bps
-                            lastDone = cur
-                            lastMs = now
-                            if (activeWorkers.get() >= minOf(sockets, grant, workerCeiling())) break
-                            rampWait(RAMP_INTERVAL_MS)
-                        }
-                    }
+                    // Occupancy growth is owned by the telemetry-side adaptive
+                    // controller (B2): +1 lane only after two consecutive
+                    // improving goodput samples, clamped by host cap, lane
+                    // grant and the standby slot. The old additive startup
+                    // ramp is gone — a task now STARTS at its allowed width,
+                    // and every subsequent change passes the same hysteresis.
                     // Warm-standby keeper (board row 5): keeps exactly one
                     // pre-dialed connection ready for the next drop. It sits
                     // out rate-limit cooldowns and backs off on a refused

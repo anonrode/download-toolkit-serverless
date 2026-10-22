@@ -326,6 +326,106 @@ object HostPolicyRegistry {
         }
     }
 
+    /**
+     * Per-host adaptive socket occupancy (board rows 5/29, 2026-10-21).
+     *
+     * The static cap answers "how many sockets MAY this host take"; this
+     * controller answers "how many is this host ACTUALLY giving us goodput
+     * with right now", per process session:
+     *  - START at the host cap (the owner's speed-first policy),
+     *  - FAST multiplicative backoff on 429/403/503 (halve immediately; a
+     *    rejected request pattern must not be repeated at the old width),
+     *  - SLOW additive recovery with hysteresis: +1 only after
+     *    [RECOVERY_CONFIRMATIONS] consecutive improving goodput samples.
+     *    This is the two-sample rule 188aa09 added for lane SHRINK, applied
+     *    symmetrically here so one noisy sample can neither grow nor shrink;
+     *  - clamp 1..hostCap at every entry point.
+     *
+     * Session memory is the point: a host that tripped at 16 sockets starts
+     * the NEXT task on that host at 8 instead of re-tripping, then climbs back
+     * only while goodput keeps improving. Keyed by host, so one hot CDN never
+     * inherits another host's penalty.
+     */
+    object HostSocketOccupancy {
+        const val MIN_SOCKETS = 1
+        const val RECOVERY_CONFIRMATIONS = 2
+        const val RECOVERY_IMPROVE_RATIO = 1.05
+
+        private data class State(
+            var sockets: Int,
+            var lastBps: Double = 0.0,
+            var improvingSamples: Int = 0
+        )
+
+        private val hosts = LinkedHashMap<String, State>()
+
+        private fun keyFor(url: String): String {
+            val host = UrlClassifier.extractHost(url)
+            return host.ifBlank { url.take(120) }
+        }
+
+        private fun stateFor(url: String, hostCap: Int): Pair<State, Int> {
+            val cap = hostCap.coerceIn(MIN_SOCKETS, 16)
+            val key = keyFor(url)
+            val state = hosts.getOrPut(key) { State(sockets = cap) }
+            if (state.sockets !in MIN_SOCKETS..cap) {
+                state.sockets = state.sockets.coerceIn(MIN_SOCKETS, cap)
+            }
+            return state to cap
+        }
+
+        /** Occupancy a new task on this host should start at (session memory;
+         *  first use of a host starts at its cap). */
+        @Synchronized
+        fun currentForUrl(url: String, hostCap: Int): Int = stateFor(url, hostCap).first.sockets
+
+        /** 429/403/503: halve NOW, forget any recovery progress. */
+        @Synchronized
+        fun recordBackoff(url: String, hostCap: Int): Int {
+            val (state, _) = stateFor(url, hostCap)
+            state.sockets = maxOf(MIN_SOCKETS, state.sockets / 2)
+            state.improvingSamples = 0
+            state.lastBps = 0.0
+            return state.sockets
+        }
+
+        /**
+         * Goodput sample (aggregate bytes/s). Sockets grow by ONE only after
+         * two consecutive samples improve by [RECOVERY_IMPROVE_RATIO]; a flat
+         * or regressing sample resets the run (hysteresis). Returns the
+         * occupancy the caller should run at.
+         */
+        @Synchronized
+        fun recordGoodput(url: String, hostCap: Int, bps: Double): Int {
+            val (state, cap) = stateFor(url, hostCap)
+            if (!bps.isFinite() || bps <= 0.0) {
+                state.improvingSamples = 0
+                return state.sockets
+            }
+            val improving = state.lastBps > 0.0 && bps >= state.lastBps * RECOVERY_IMPROVE_RATIO
+            state.lastBps = bps
+            if (state.sockets >= cap) {
+                state.improvingSamples = 0
+                return state.sockets
+            }
+            if (improving) {
+                state.improvingSamples++
+                if (state.improvingSamples >= RECOVERY_CONFIRMATIONS) {
+                    state.sockets = minOf(cap, state.sockets + 1)
+                    state.improvingSamples = 0
+                }
+            } else {
+                state.improvingSamples = 0
+            }
+            return state.sockets
+        }
+
+        @Synchronized
+        fun clearForTest() {
+            hosts.clear()
+        }
+    }
+
     fun allowsPermissiveTlsFallback(url: String): Boolean {
         val host = UrlClassifier.extractHost(url)
         return BROKEN_TLS_INTERMEDIATE_HOSTS.any { domain ->
