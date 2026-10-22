@@ -6,9 +6,12 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Speed
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asAndroidBitmap
@@ -24,6 +27,9 @@ import com.anonrode.downloader.data.WatchHistoryCore
 import com.anonrode.downloader.data.WatchRecord
 import com.anonrode.downloader.data.models.DownloadTask
 import com.anonrode.downloader.data.models.TaskStatus
+import com.anonrode.downloader.ui.components.GestureHudPill
+import com.anonrode.downloader.ui.components.PlayerNextPill
+import com.anonrode.downloader.ui.components.PlayerUpNextCard
 import com.anonrode.downloader.ui.theme.AnonDownloaderTheme
 import org.junit.Rule
 import org.junit.Test
@@ -186,7 +192,7 @@ class WatchUiScreenshotTest {
                             isWatched = true,
                             onDownloadSingle = {}
                         )
-                        else -> EpisodeRow(
+                        8 -> EpisodeRow(
                             episode = com.anonrode.downloader.data.models.EpisodeItem(
                                 title = "Episode 5",
                                 url = "https://source/ep5",
@@ -199,6 +205,25 @@ class WatchUiScreenshotTest {
                             onToggle = {},
                             watchTimeLeft = "23m left",
                             onDownloadSingle = {}
+                        )
+                        9 -> PlayerNextPill(nextTag = "S01E05", onClick = {})
+                        10 -> PlayerUpNextCard(
+                            modifier = Modifier.align(Alignment.BottomEnd),
+                            nextTag = "S01E05",
+                            actionLabel = "Play now",
+                            onAction = {},
+                            onDismiss = {}
+                        )
+                        11 -> PlayerUpNextCard(
+                            modifier = Modifier.align(Alignment.BottomEnd),
+                            nextTag = null,
+                            actionLabel = "Get next episodes",
+                            onAction = {},
+                            onDismiss = {}
+                        )
+                        else -> GestureHudPill(
+                            icon = Icons.Rounded.Speed,
+                            label = "2× speed"
                         )
                     }
                 }
@@ -269,5 +294,25 @@ class WatchUiScreenshotTest {
         composeRule.waitForIdle()
         composeRule.onNodeWithText("23m left").assertExists()
         capture("18_drawer_row_in_progress")
+
+        scenario = 9
+        composeRule.waitForIdle()
+        composeRule.onNodeWithText("Next: S01E05").assertExists()
+        capture("19_player_next_pill")
+
+        scenario = 10
+        composeRule.waitForIdle()
+        composeRule.onNodeWithText("UP NEXT · S01E05").assertExists()
+        capture("20_player_up_next_card")
+
+        scenario = 11
+        composeRule.waitForIdle()
+        composeRule.onNodeWithText("Finished downloaded episodes").assertExists()
+        capture("21_player_up_next_fetch")
+
+        scenario = 12
+        composeRule.waitForIdle()
+        composeRule.onNodeWithText("2× speed").assertExists()
+        capture("22_player_gesture_hud")
     }
 }

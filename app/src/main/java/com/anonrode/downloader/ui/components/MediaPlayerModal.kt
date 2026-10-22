@@ -1806,28 +1806,10 @@ private fun MediaPlayerModalImpl(
                         if (hasNext && nextTag != null) {
                             // Directive §5.2: an explicit "Next: E05" chip so
                             // the user always sees what is queued next.
-                            Row(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(Radius.pill))
-                                    .background(Color.White.copy(alpha = 0.14f))
-                                    .clickable { touchControls(); playNext() }
-                                    .padding(horizontal = 8.dp, vertical = 7.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Rounded.SkipNext,
-                                    contentDescription = "Next: $nextTag",
-                                    tint = Color.White,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                                Spacer(modifier = Modifier.width(3.dp))
-                                Text(
-                                    text = "Next: $nextTag",
-                                    color = Color.White,
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.SemiBold
-                                )
-                            }
+                            PlayerNextPill(
+                                nextTag = nextTag,
+                                onClick = { touchControls(); playNext() }
+                            )
                         } else {
                             PlayerCircleButton(
                                 icon = Icons.Rounded.SkipNext,
@@ -2011,76 +1993,25 @@ private fun MediaPlayerModalImpl(
             // 12 seconds. Plays the next downloaded file, or routes to the
             // drawer with Remaining preselected when the queue is exhausted.
             if (showUpNextCard) {
-                val seriesTask = upNextSeriesTask
-                Row(
+                PlayerUpNextCard(
                     modifier = Modifier
                         .align(Alignment.BottomEnd)
-                        .padding(end = 16.dp, bottom = 96.dp)
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(Color(0xE6141419))
-                        .border(1.dp, Color.White.copy(alpha = 0.14f), RoundedCornerShape(12.dp))
-                        .padding(horizontal = 12.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f, fill = false)) {
-                        Text(
-                            text = if (nextPeerPath != null) {
-                                "UP NEXT" + (nextTag?.let { " · $it" } ?: "")
-                            } else {
-                                "Finished downloaded episodes"
-                            },
-                            color = Color.White,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        Spacer(modifier = Modifier.height(2.dp))
-                        Text(
-                            text = if (nextPeerPath != null) {
-                                "Plays automatically when this ends"
-                            } else {
-                                "Get the next episodes"
-                            },
-                            color = Color.White.copy(alpha = 0.7f),
-                            fontSize = 10.sp,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                    Spacer(modifier = Modifier.width(10.dp))
-                    Text(
-                        text = if (nextPeerPath != null) "Play now" else "Get next episodes",
-                        color = PlayerAccent,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier
-                            .clickable {
-                                touchControls()
-                                if (nextPeerPath != null) {
-                                    ctx.onPlayFile(nextPeerPath)
-                                } else {
-                                    seriesTask?.let { t ->
-                                        ctx.openRemaining?.invoke(
-                                            t.showTitle,
-                                            t.seriesUrl,
-                                            t.site
-                                        )
-                                    }
-                                    onDismiss()
-                                }
+                        .padding(end = 16.dp, bottom = 96.dp),
+                    nextTag = nextTag.takeIf { nextPeerPath != null },
+                    actionLabel = if (nextPeerPath != null) "Play now" else "Get next episodes",
+                    onAction = {
+                        touchControls()
+                        if (nextPeerPath != null) {
+                            ctx.onPlayFile(nextPeerPath)
+                        } else {
+                            upNextSeriesTask?.let { t ->
+                                ctx.openRemaining?.invoke(t.showTitle, t.seriesUrl, t.site)
                             }
-                            .padding(horizontal = 4.dp, vertical = 6.dp)
-                    )
-                    Text(
-                        text = "✕",
-                        color = Color.White.copy(alpha = 0.6f),
-                        fontSize = 13.sp,
-                        modifier = Modifier
-                            .clickable { upNextDismissed = true }
-                            .padding(start = 6.dp, end = 2.dp)
-                    )
-                }
+                            onDismiss()
+                        }
+                    },
+                    onDismiss = { upNextDismissed = true }
+                )
             }
         }
         // (formerly the Dialog's closing brace — the overlay Box now closes
@@ -2645,7 +2576,102 @@ private fun AudioOptionsSheet(
 }
 
 @Composable
-private fun GestureHudPill(
+internal fun PlayerNextPill(nextTag: String, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(Radius.pill))
+            .background(Color.White.copy(alpha = 0.14f))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 8.dp, vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            imageVector = Icons.Rounded.SkipNext,
+            contentDescription = "Next: $nextTag",
+            tint = Color.White,
+            modifier = Modifier.size(18.dp)
+        )
+        Spacer(modifier = Modifier.width(3.dp))
+        Text(
+            text = "Next: $nextTag",
+            color = Color.White,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.SemiBold
+        )
+    }
+}
+
+/**
+ * End-of-episode card (directive §5.2). With a downloaded peer it offers
+ * Play now; with only a known series it offers the fetch-next route. The
+ * player places it bottom-end over the video — the composable itself owns no
+ * alignment so the render harness can place it anywhere.
+ */
+@Composable
+internal fun PlayerUpNextCard(
+    modifier: Modifier = Modifier,
+    nextTag: String?,
+    actionLabel: String,
+    onAction: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    Row(
+        modifier = modifier
+            .clip(RoundedCornerShape(12.dp))
+            .background(Color(0xE6141419))
+            .border(1.dp, Color.White.copy(alpha = 0.14f), RoundedCornerShape(12.dp))
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f, fill = false)) {
+            Text(
+                text = if (nextTag != null) {
+                    "UP NEXT · $nextTag"
+                } else {
+                    "Finished downloaded episodes"
+                },
+                color = Color.White,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = if (nextTag != null) {
+                    "Plays automatically when this ends"
+                } else {
+                    "Get the next episodes"
+                },
+                color = Color.White.copy(alpha = 0.7f),
+                fontSize = 10.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        Spacer(modifier = Modifier.width(10.dp))
+        Text(
+            text = actionLabel,
+            color = PlayerAccent,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier
+                .clickable(onClick = onAction)
+                .padding(horizontal = 4.dp, vertical = 6.dp)
+        )
+        Text(
+            text = "✕",
+            color = Color.White.copy(alpha = 0.6f),
+            fontSize = 13.sp,
+            modifier = Modifier
+                .clickable(onClick = onDismiss)
+                .padding(start = 6.dp, end = 2.dp)
+        )
+    }
+}
+
+@Composable
+internal fun GestureHudPill(
     icon: ImageVector,
     label: String
 ) {
