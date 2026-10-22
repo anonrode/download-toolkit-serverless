@@ -324,8 +324,8 @@ fun EpisodeDrawer(
     val watchByUrl = remember(watchRecords) {
         watchRecords.filter { it.sourceUrl.isNotBlank() }.associateBy { it.sourceUrl }
     }
-    fun epSeason(ep: EpisodeItem): Int = if (ep.season > 0) ep.season else 0
-    fun epEpisode(ep: EpisodeItem): Int = if (ep.episode > 0) ep.episode else ep.episodeNum
+    fun epSeason(ep: EpisodeItem): Int = SeasonEpisode.seasonOf(ep)
+    fun epEpisode(ep: EpisodeItem): Int = SeasonEpisode.episodeOf(ep)
     fun watchFor(ep: EpisodeItem): WatchRecord? =
         watchByUrl[ep.url] ?: watchRecords.firstOrNull { r ->
             r.season > 0 && r.season == epSeason(ep) && r.episode == epEpisode(ep) &&
@@ -1097,6 +1097,16 @@ fun EpisodeDrawer(
                                         (card.positionMs.toFloat() / card.durationMs.toFloat())
                                             .coerceIn(0.03f, 0.98f)
                                     } else 0f
+                                    // Directive §4: tapping the banner OR the
+                                    // play circle resumes playback and closes
+                                    // the drawer. The whole surface is the
+                                    // target, matching the shelf cards.
+                                    val playBanner: () -> Unit = {
+                                        card.task?.let { target ->
+                                            viewModel.activePlayingTaskId.value = target.id
+                                            onDismiss()
+                                        }
+                                    }
 
                                     Row(
                                         modifier = Modifier
@@ -1109,6 +1119,7 @@ fun EpisodeDrawer(
                                                 AccentViolet.copy(alpha = 0.4f),
                                                 RoundedCornerShape(12.dp)
                                             )
+                                            .clickable(onClickLabel = "Play") { playBanner() }
                                             .padding(horizontal = 12.dp, vertical = 8.dp),
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
@@ -1153,13 +1164,7 @@ fun EpisodeDrawer(
                                             modifier = Modifier
                                                 .size(32.dp)
                                                 .clip(CircleShape)
-                                                .background(Color.White)
-                                                .clickable(onClickLabel = "Play") {
-                                                    card.task?.let { target ->
-                                                        viewModel.activePlayingTaskId.value = target.id
-                                                        onDismiss()
-                                                    }
-                                                },
+                                                .background(Color.White),
                                             contentAlignment = Alignment.Center
                                         ) {
                                             Icon(

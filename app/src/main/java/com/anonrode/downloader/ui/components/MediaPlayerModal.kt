@@ -1304,8 +1304,10 @@ private fun MediaPlayerModalImpl(
                     },
                     onDoubleTap = { offset ->
                         // Directive §5.3: left/right 35% seek ∓10s, center 30%
-                        // toggles play/pause. The HUD pill reports the action
-                        // without bringing the whole chrome back.
+                        // toggles play/pause. The HUD pill reports the action.
+                        // Do not hide already-visible controls: a seek while
+                        // the overlay is open must keep the seek bar visible.
+                        showVolumeHud = false
                         when (playerTapZone(offset.x, size.width.toFloat())) {
                             PlayerTapZone.REWIND -> {
                                 val target = clampedSeekTarget(
@@ -1317,7 +1319,6 @@ private fun MediaPlayerModalImpl(
                                 currentPosition = target
                                 gestureHudIcon = Icons.Rounded.FastRewind
                                 gestureHudText = formatSeekHud(-10_000L)
-                                showControls = false
                                 touchControls()
                             }
                             PlayerTapZone.FORWARD -> {
@@ -1330,7 +1331,6 @@ private fun MediaPlayerModalImpl(
                                 currentPosition = target
                                 gestureHudIcon = Icons.Rounded.FastForward
                                 gestureHudText = formatSeekHud(10_000L)
-                                showControls = false
                                 touchControls()
                             }
                             PlayerTapZone.PLAY_PAUSE -> {
@@ -1351,6 +1351,7 @@ private fun MediaPlayerModalImpl(
                     onLongPress = {
                         // Hold for 2x: the user's chosen speed is untouched —
                         // release restores it from playbackSpeed.
+                        showVolumeHud = false
                         isSpeedBoosting = true
                         exoPlayer.playbackParameters = PlaybackParameters(2.0f)
                         view.tick()
@@ -1392,6 +1393,9 @@ private fun MediaPlayerModalImpl(
                             if (offset.x >= size.width / 2f) {
                                 isVolumeDragging = true
                                 showVolumeHud = true
+                                // One HUD slot: a lingering seek/brightness
+                                // caption must not sit under the volume pill.
+                                gestureHudText = null
                                 volumeHudTick++
                                 overdragDistance = 0f
                                 boostDetentBroken = (currentVolumePercent > 100)
@@ -1401,6 +1405,7 @@ private fun MediaPlayerModalImpl(
                                 // same dead zone as volume so accidental
                                 // vertical wobble never dims the screen.
                                 isBrightnessDragging = true
+                                showVolumeHud = false
                                 brightnessArmed = false
                                 pendingBrightnessPx = 0f
                                 gestureHudIcon = Icons.Rounded.BrightnessMedium
@@ -1642,7 +1647,7 @@ private fun MediaPlayerModalImpl(
             // Volume & Boost HUD Pill — fade on the app's nav tokens, not the
             // stock spring defaults every other surface here has moved off.
             AnimatedVisibility(
-                visible = showVolumeHud && !inPip,
+                visible = showVolumeHud && gestureHudText == null && !inPip,
                 enter = fadeIn(animationSpec = tween(Motion.DurationFast)),
                 exit = fadeOut(animationSpec = tween(Motion.DurationNavExit)),
                 modifier = Modifier
