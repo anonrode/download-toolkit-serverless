@@ -331,8 +331,13 @@ fun EpisodeDrawer(
             r.season > 0 && r.season == epSeason(ep) && r.episode == epEpisode(ep) &&
                 ShowIdentity.normalizeShowKey(r.showTitle) == ShowIdentity.normalizeShowKey(show.title)
         }
-    val watchedUrls = remember(watchRecords, episodes, show.title) {
-        episodes.filter { watchFor(it)?.isWatched == true }.map { it.url }.toSet()
+    // Resolve once per episode list, not once per visible row per scroll
+    // frame: watchFor's fallback is a linear scan with normalization.
+    val watchByEpisodeUrl = remember(watchRecords, episodes, show.title) {
+        episodes.associate { it.url to watchFor(it) }
+    }
+    val watchedUrls = remember(watchByEpisodeUrl, episodes) {
+        episodes.filter { watchByEpisodeUrl[it.url]?.isWatched == true }.map { it.url }.toSet()
     }
     // Remaining = not completed AND not in flight AND not watched: PAUSED and
     // FAILED episodes stay here so they can be resumed/retried in one tap.
@@ -1387,7 +1392,7 @@ fun EpisodeDrawer(
                                                     isSelected = isSelected,
                                                     isDownloaded = isDownloaded,
                                                     isWatched = watchedUrls.contains(ep.url),
-                                                    watchTimeLeft = watchFor(ep)
+                                                    watchTimeLeft = watchByEpisodeUrl[ep.url]
                                                         ?.takeIf { !it.isWatched && it.positionMs > 0L }
                                                         ?.let {
                                                             WatchHistoryCore.formatTimeLeft(

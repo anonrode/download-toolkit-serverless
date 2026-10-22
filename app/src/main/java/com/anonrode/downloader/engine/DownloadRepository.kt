@@ -5,6 +5,8 @@ import com.anonrode.downloader.data.models.TaskStatus
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -104,29 +106,44 @@ class DownloadRepository {
     }
 
     private val persistMutex = kotlinx.coroutines.sync.Mutex()
+    // Burst coalescing: batch enqueue / pause-all / reconnect sweeps call
+    // persist() dozens of times in a row. CONFLATED holds at most one pending
+    // wake-up, and the short debounce lets one snapshot cover the burst
+    // instead of serializing identical JSON + MediaStore mirrors back-to-back.
+    private val persistWake = Channel<Unit>(Channel.CONFLATED)
+    private val persistCoalesceMs = 120L
 
-    fun persist() {
-        val f = stateFile ?: return
+    init {
         scope.launch {
-            persistMutex.withLock {
-                try {
-                    val encoded = json.encodeToString(_tasks.value)
-                    val tmp = File(f.parentFile, "${f.name}.tmp")
-                    tmp.writeText(encoded)
-                    if (!tmp.renameTo(f)) {
-                        // Engine-audit: the rename result was unchecked — the
-                        // one write path with no failure handling. A direct
-                        // rewrite keeps the newest state on disk even when the
-                        // rename fails (FUSE volumes, transient EBUSY).
-                        f.writeText(encoded)
-                        tmp.delete()
-                    }
-                    // Mirror only on meaningful writes (this runs on status
-                    // transitions, adds, removes — not per progress tick).
-                    appContext?.let { HistoryBackup.save(it, encoded) }
-                } catch (_: Throwable) {}
+            for (unused in persistWake) {
+                delay(persistCoalesceMs)
+                persistMutex.withLock { writeSnapshot() }
             }
         }
+    }
+
+    fun persist() {
+        persistWake.trySend(Unit)
+    }
+
+    private fun writeSnapshot() {
+        val f = stateFile ?: return
+        try {
+            val encoded = json.encodeToString(_tasks.value)
+            val tmp = File(f.parentFile, "${f.name}.tmp")
+            tmp.writeText(encoded)
+            if (!tmp.renameTo(f)) {
+                // Engine-audit: the rename result was unchecked — the
+                // one write path with no failure handling. A direct
+                // rewrite keeps the newest state on disk even when the
+                // rename fails (FUSE volumes, transient EBUSY).
+                f.writeText(encoded)
+                tmp.delete()
+            }
+            // Mirror only on meaningful writes (this runs on status
+            // transitions, adds, removes — not per progress tick).
+            appContext?.let { HistoryBackup.save(it, encoded) }
+        } catch (_: Throwable) {}
     }
 
     fun snapshot(): List<DownloadTask> = _tasks.value
