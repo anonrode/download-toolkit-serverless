@@ -424,6 +424,17 @@ object HostPolicyRegistry {
         fun clearForTest() {
             hosts.clear()
         }
+
+        /**
+         * In-run recovery of the post-throttle worker cap. The throttle
+         * ladder halves the live cap; it may only be restored to [target]
+         * when the host's occupancy ACTUALLY GREW in this sample. Without
+         * the growth gate a flat sample would silently undo the rate-limit
+         * backoff; without this helper the cap would never be restored at
+         * all (active workers were not lowered by the throttle).
+         */
+        fun recoveryMaxWorkers(currentMax: Int, target: Int, occupancyGrew: Boolean): Int =
+            if (occupancyGrew && target > currentMax) target else currentMax
     }
 
     fun allowsPermissiveTlsFallback(url: String): Boolean {

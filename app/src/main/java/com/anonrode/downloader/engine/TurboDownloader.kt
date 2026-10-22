@@ -908,16 +908,32 @@ object TurboDownloader {
         var lastAdaptAt = System.currentTimeMillis()
         fun adaptFromGoodput(bps: Double) {
             if (taskId.isBlank()) return
+            val previous = HostPolicyRegistry.HostSocketOccupancy.currentForUrl(url, hostCeiling)
             val occupancy = HostPolicyRegistry.HostSocketOccupancy.recordGoodput(url, hostCeiling, bps)
             val total = minOf(hostCeiling, laneGrant(), occupancy)
             val target = StandbyPolicy.activeWorkerBudgetForTotal(total, standbyEnabled)
-            if (target > activeWorkers.get()) {
-                activeWorkers.set(target)
-                // A recovery may undo the rate-limit worker halving; the
-                // throttle ladder itself (cooldown deadline) is untouched.
-                maxWorkers.set(maxOf(maxWorkers.get(), target))
+            val targetAboveWidth = target > activeWorkers.get()
+            val occupancyGrew = occupancy > previous
+            if (targetAboveWidth) activeWorkers.set(target)
+            // A recovery may undo the rate-limit worker halving — but ONLY on
+            // evidence that the host's occupancy actually grew. Comparing
+            // against activeWorkers alone never restores maxWorkers after a
+            // throttle cycle (active was not lowered by it), which would pin
+            // the task at the halved width for the rest of the run. The
+            // throttle ladder's cooldown deadline is untouched.
+            if (occupancyGrew && target > maxWorkers.get()) {
+                maxWorkers.set(
+                    HostPolicyRegistry.HostSocketOccupancy.recoveryMaxWorkers(
+                        currentMax = maxWorkers.get(),
+                        target = target,
+                        occupancyGrew = true
+                    )
+                )
+            }
+            if (targetAboveWidth || occupancyGrew) {
                 com.anonrode.downloader.util.DebugLog.backend(
                     "task=$taskId lane adapt occupancy=$occupancy target=$target " +
+                        "workers=${activeWorkers.get()}/${maxWorkers.get()} " +
                         "total=${(bps / 1024).toInt()}KB/s"
                 )
             }

@@ -100,4 +100,23 @@ class HostSocketOccupancyTest {
         assertEquals(8, occupancy.recordGoodput(hostA, 16, -5.0))
         assertTrue(occupancy.currentForUrl(hostA, 16) >= 1)
     }
+
+    @Test
+    fun postThrottleWorkerCapOnlyRestoresOnRealOccupancyGrowth() {
+        // Throttle halved the live cap to 3; a flat sample must NOT undo it.
+        assertEquals(
+            3,
+            occupancy.recoveryMaxWorkers(currentMax = 3, target = 7, occupancyGrew = false)
+        )
+        // A real occupancy growth sample restores the in-run width.
+        assertEquals(
+            7,
+            occupancy.recoveryMaxWorkers(currentMax = 3, target = 7, occupancyGrew = true)
+        )
+        // Recovery never lowers the cap below where it already is.
+        assertEquals(
+            9,
+            occupancy.recoveryMaxWorkers(currentMax = 9, target = 7, occupancyGrew = true)
+        )
+    }
 }
