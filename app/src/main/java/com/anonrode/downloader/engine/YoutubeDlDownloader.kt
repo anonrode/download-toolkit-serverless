@@ -158,6 +158,29 @@ object YoutubeDlDownloader {
         return TERMINAL_YTDLP_MARKERS.any { low.contains(it) }
     }
 
+    /**
+     * P-3 (rows 35/8, 2026-10-21): monolith fragment patience for the HLS
+     * yt-dlp ladder. The Python monolith never died at a throttle wall
+     * because its fragment ladder backed off EXPONENTIALLY through short
+     * replenishment windows — `--retries 10 --fragment-retries 10
+     * --retry-sleep 10 --retry-sleep fragment:exp=1:20`
+     * (download-toolkit/src/downloader.py:3576-3579) — while the 5×1s ladder
+     * here produced the literal "Giving up after 5 retries" stderr on the
+     * Demon's Ascension parks (c6710cfb, 8 parks at the frozen 89,794 KiB).
+     * Return shape: flattened [flag, value] pairs, one list for both HLS
+     * branches and for the config-builder fixture.
+     */
+    internal fun hlsFragmentPatienceFlags(): List<String> = listOf(
+        "--socket-timeout", "15",
+        "--retries", "10",
+        "--fragment-retries", "10",
+        "--retry-sleep", "10",
+        "--retry-sleep", "fragment:exp=1:20",
+        // Fail loudly instead of letting yt-dlp skip missing fragments and
+        // silently produce a video with gaps in it.
+        "--abort-on-unavailable-fragments"
+    )
+
     // Task-level retry counts are now AppSettings-backed (pref_magnet_retries /
     // pref_ytdlp_retries), threaded in via download()'s maxAttempts params.
 
@@ -485,17 +508,9 @@ object YoutubeDlDownloader {
                 // request per fragment, so a 2M chunk was inert at best and
                 // an extra range-split at worst. Kept on the direct-HTTP
                 // branch below where HttpFD actually consumes it.
-                addOption("--socket-timeout", "15")
-                addOption("--retries", "5")
-                addOption("--fragment-retries", "5")
-                addOption("--retry-sleep", "3")
-                // 1s between fragment retries: a token/quota 403 either clears
-                // immediately on a fresh attempt or not at all; 3s only stalls
-                // the whole lane.
-                addOption("--retry-sleep", "fragment:1")
-                // Fail loudly instead of letting yt-dlp skip missing fragments
-                // and silently produce a video with gaps in it.
-                addOption("--abort-on-unavailable-fragments")
+                // P-3: monolith fragment patience (exp backoff through
+                // replenishment windows instead of the old 5×1s ladder).
+                hlsFragmentPatienceFlags().forEach { addOption(it) }
                 if (speedLimitKbs > 0) addOption("--limit-rate", "${speedLimitKbs}K")
             } else if (isM3u8) {
                 // HLS m3u8 stream variant selection with multi-fragment parallel downloading
@@ -530,15 +545,9 @@ object YoutubeDlDownloader {
                 // request per fragment, so a 2M chunk was inert at best and
                 // an extra range-split at worst. Kept on the direct-HTTP
                 // branch below where HttpFD actually consumes it.
-                addOption("--socket-timeout", "15")
-                addOption("--retries", "5")
-                addOption("--fragment-retries", "5")
-                addOption("--retry-sleep", "3")
-                // 1s between fragment retries: a token/quota 403 either clears
-                // immediately on a fresh attempt or not at all; 3s only stalls
-                // the whole lane.
-                addOption("--retry-sleep", "fragment:1")
-                addOption("--abort-on-unavailable-fragments")
+                // P-3: monolith fragment patience (see
+                // hlsFragmentPatienceFlags / downloader.py:3576-3579).
+                hlsFragmentPatienceFlags().forEach { addOption(it) }
                 if (speedLimitKbs > 0) addOption("--limit-rate", "${speedLimitKbs}K")
             } else {
                 // Direct CDN HTTP fallback via yt-dlp native chunked engine
