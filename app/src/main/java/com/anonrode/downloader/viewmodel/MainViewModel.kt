@@ -14,6 +14,7 @@ import com.anonrode.downloader.providers.ProviderRegistry
 import com.anonrode.downloader.providers.PosterNetwork
 import com.anonrode.downloader.providers.PosterStore
 import com.anonrode.downloader.providers.RelevanceScorer
+import com.anonrode.downloader.util.SearchQueryGuard
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
@@ -28,13 +29,6 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
-
-/** Hard cap for search input. Multi-paragraph pastes were reaching provider
- *  search endpoints as nonsense and produced invalid-JSON crawl failures. */
-private const val SEARCH_QUERY_MAX = 120
-
-private fun normalizeSearchQuery(raw: String): String =
-    raw.replace(Regex("""\s+"""), " ").trim().take(SEARCH_QUERY_MAX)
 
 data class HomeUiState(
     val query: String = "",
@@ -1177,33 +1171,36 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun onQueryChanged(newQuery: String) {
-        val normalized = normalizeSearchQuery(newQuery)
+        // The field always shows the normalized, capped text; the guard's
+        // decision is measured on the RAW input so a dictated 1,700-char
+        // paste cannot silently become a 120-char provider fan-out.
+        val normalized = SearchQueryGuard.normalize(newQuery)
         _uiState.update { it.copy(query = normalized) }
         debounceJob?.cancel()
-        // Never submit an empty, whitespace-only or oversized paste. The
-        // field shows the capped text, but a 12-paragraph blob must not turn
-        // into provider queries.
-        if (normalized.length > SEARCH_QUERY_MAX) {
-            searchJob?.cancel()
-            com.anonrode.downloader.data.net.HttpClient.cancelTagged("search")
-            com.anonrode.downloader.data.net.HttpClient.cancelTagged("search-strategy")
-            _uiState.update { it.copy(isSearching = false, searchError = null) }
-            return
-        }
-        val q = normalized
-        if (q.length >= 2) {
-            debounceJob = viewModelScope.launch {
-                delay(350)
-                search(q)
+        when (val decision = SearchQueryGuard.decide(newQuery)) {
+            is SearchQueryGuard.Decision.Refuse -> {
+                // Oversized paste: keep the capped field text, kill in-flight
+                // tagged searches and fan out to NOTHING (row 12).
+                searchJob?.cancel()
+                com.anonrode.downloader.data.net.HttpClient.cancelTagged("search")
+                com.anonrode.downloader.data.net.HttpClient.cancelTagged("search-strategy")
+                _uiState.update { it.copy(isSearching = false, searchError = null) }
             }
-        } else {
-            searchJob?.cancel()
-            // Same rule as search(): the dead coroutine stops instantly, but
-            // its blocking search HTTP keeps draining until it finishes.
-            // Killing the tagged calls keeps a cleared search from trailing.
-            com.anonrode.downloader.data.net.HttpClient.cancelTagged("search")
-            com.anonrode.downloader.data.net.HttpClient.cancelTagged("search-strategy")
-            _uiState.update { it.copy(isSearching = false, searchResults = emptyList(), searchError = null) }
+            is SearchQueryGuard.Decision.Debounce -> {
+                debounceJob = viewModelScope.launch {
+                    delay(SearchQueryGuard.DEBOUNCE_MS)
+                    search(decision.query)
+                }
+            }
+            SearchQueryGuard.Decision.Clear -> {
+                searchJob?.cancel()
+                // Same rule as search(): the dead coroutine stops instantly, but
+                // its blocking search HTTP keeps draining until it finishes.
+                // Killing the tagged calls keeps a cleared search from trailing.
+                com.anonrode.downloader.data.net.HttpClient.cancelTagged("search")
+                com.anonrode.downloader.data.net.HttpClient.cancelTagged("search-strategy")
+                _uiState.update { it.copy(isSearching = false, searchResults = emptyList(), searchError = null) }
+            }
         }
     }
 
@@ -1288,13 +1285,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun search(query: String = _uiState.value.query) {
-        if (query.trim().length > SEARCH_QUERY_MAX) return
-        val q = normalizeSearchQuery(query)
+        // Refuse fan-out for an oversized RAW paste (row 12). The state query
+        // is capped already, but paste/search-query routing can call search()
+        // with an unbounded string directly.
+        if (SearchQueryGuard.isOversized(query)) return
+        val q = SearchQueryGuard.normalize(query)
         if (q.isBlank()) return
         // Dedupe: the log showed the same query+filter re-fired seconds apart
         // (double keystroke), doubling the whole crawl. Skip when an identical
         // search is already running — its results will land.
-        val key = "${q.lowercase()}::${_uiState.value.selectedFilter}"
+        val key = SearchQueryGuard.submissionKey(q, _uiState.value.selectedFilter)
         if (searchJob?.isActive == true && lastSearchKey == key) return
         lastSearchKey = key
         // A genuinely NEW query must not keep displaying the previous query's
