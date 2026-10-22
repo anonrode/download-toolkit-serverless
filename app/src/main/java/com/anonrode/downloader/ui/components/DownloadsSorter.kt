@@ -2,7 +2,7 @@ package com.anonrode.downloader.ui.components
 
 import com.anonrode.downloader.data.models.DownloadTask
 import com.anonrode.downloader.data.models.TaskStatus
-import com.anonrode.downloader.util.SeasonEpisode
+import com.anonrode.downloader.util.ShowIdentity
 
 /**
  * Pure sort / bucket logic for the Downloads tab. Lives in `ui/components`
@@ -141,22 +141,7 @@ object DownloadsSorter {
             .toList()
     }
 
-    fun normalizeShowKey(raw: String): String {
-        var s = raw.trim()
-        if (s.isBlank()) return "Unknown"
-        // Strip site watermarks in brackets or parens: [9jaRocks.Com], [NaijaPrey], (NetNaija), etc.
-        s = s.replace(Regex("""\[[^\]]*\]"""), "")
-        s = s.replace(Regex("""\([^\)]*(?:rocks|prey|naija|netnaija|nkiri)[^\)]*\)""", RegexOption.IGNORE_CASE), "")
-        // Strip release/codec/resolution noise: 540p, 720p, 1080p, x265, x264, WEBRip, etc.
-        s = s.replace(Regex("""\b(?:\d{3,4}p|x26[45]|hevc|h26[45]|aac|web-?rip|dvd-?rip|bluray|hdrip)\b""", RegexOption.IGNORE_CASE), "")
-        // Strip trailing season markers so all seasons of the same show group into one show card:
-        // "The Pitt S02" -> "The Pitt", "President Curtis - S01" -> "President Curtis"
-        s = s.replace(Regex("""[-–—._\s]+S\d{1,2}(?:E\d{1,3})?.*""", RegexOption.IGNORE_CASE), "")
-        s = s.replace(Regex("""[-–—._\s]+Season\s*\d{1,2}.*""", RegexOption.IGNORE_CASE), "")
-        // Clean trailing separators
-        s = s.replace(Regex("""[._\-–—\s]+$"""), "").trim()
-        return if (s.isBlank()) raw.trim() else s
-    }
+    fun normalizeShowKey(raw: String): String = ShowIdentity.normalizeShowKey(raw)
 
     private fun groupLibrary(tasks: List<DownloadTask>): List<Pair<String, List<DownloadTask>>> {
         // Group by normalized show key; order shows by count of COMPLETED tasks
@@ -183,16 +168,11 @@ object DownloadsSorter {
      * them in enqueue order. Stable sort, so equal keys keep the engine
      * snapshot's order — same result as the old insertion order for a
      * movie-only show, numeric for a series.
+     *
+     * Delegates to [ShowIdentity.episodeOrder] so data layers share one
+     * ordering contract.
      */
-    internal val EPISODE_ORDER: Comparator<DownloadTask> =
-        compareBy<DownloadTask> {
-            if (it.episodeNum > 0 || it.season > 0 || it.episode > 0) {
-                SeasonEpisode.sortKey(SeasonEpisode.seasonOf(it), SeasonEpisode.episodeOf(it))
-            } else {
-                Int.MAX_VALUE
-            }
-        }
-            .thenBy { it.createdAt }
+    internal val EPISODE_ORDER: Comparator<DownloadTask> = ShowIdentity.episodeOrder
 
     /**
      * The Next/Previous playlist the in-app player steps through when a task
