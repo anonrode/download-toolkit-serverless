@@ -2404,11 +2404,17 @@ class DownloadEngine(
         if (active.isNotEmpty()) {
             val first = active.first()
             val pct = if (first.totalBytes > 0) (first.downloadedBytes * 100 / first.totalBytes).toInt().coerceIn(0, 100) else 0
-            val speedMb = first.speedBytesPerSec / (1024.0 * 1024.0)
-            val speedStr = if (speedMb > 0.05) " • %.1f MB/s".format(java.util.Locale.US, speedMb) else ""
+            // Board row 4: the notification is the card's SECOND face, not a
+            // second pipeline. Bind the same repository-windowed value the
+            // card prints; the raw backend speed is only the fallback while
+            // the window warms up (~3 s) or while the backend reports none.
+            val speed = com.anonrode.downloader.service.notificationSpeedBytesPerSec(
+                first.displaySpeedBytesPerSec,
+                first.speedBytesPerSec
+            )
             DownloadService.updateProgress(
                 context,
-                title = "${first.episodeTitle}$speedStr",
+                title = com.anonrode.downloader.service.buildOngoingNotificationTitle(first.episodeTitle, speed),
                 progress = pct,
                 activeCount = active.size
             )

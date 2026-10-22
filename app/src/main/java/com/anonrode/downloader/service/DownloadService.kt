@@ -16,6 +16,34 @@ import androidx.core.app.NotificationCompat
 import com.anonrode.downloader.MainActivity
 import com.anonrode.downloader.R
 
+/**
+ * Speed the ongoing notification should print. The card binds the
+ * repository's windowed [com.anonrode.downloader.data.models.DownloadTask.displaySpeedBytesPerSec];
+ * the raw backend value (250 ms EMA on Turbo, verbatim parsed line on
+ * yt-dlp/aria) stays in `speedBytesPerSec` for the progress watchdog and is
+ * only a fallback while the display window is still warming up. Both faces
+ * therefore show the same windowed number whenever one exists (board row 4,
+ * engine-side binding).
+ */
+internal fun notificationSpeedBytesPerSec(
+    displaySpeedBytesPerSec: Double?,
+    rawSpeedBytesPerSec: Double
+): Double = displaySpeedBytesPerSec ?: rawSpeedBytesPerSec
+
+/**
+ * The only place the ongoing notification's title line is assembled. Kept
+ * pure and top-level so a JVM test can pin the binding without an Android
+ * Service instance. Formatting matches the card: " • %.1f MB/s", suppressed
+ * below 0.05 MB/s and for non-finite samples (a NaN/Infinity must never
+ * reach NotificationCompat).
+ */
+internal fun buildOngoingNotificationTitle(episodeTitle: String, speedBytesPerSec: Double): String {
+    val safe = if (speedBytesPerSec.isFinite() && speedBytesPerSec > 0.0) speedBytesPerSec else 0.0
+    val speedMb = safe / (1024.0 * 1024.0)
+    val speedStr = if (speedMb > 0.05) " • %.1f MB/s".format(java.util.Locale.US, speedMb) else ""
+    return "$episodeTitle$speedStr"
+}
+
 class DownloadService : Service() {
 
     private var wakeLock: PowerManager.WakeLock? = null
