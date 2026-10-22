@@ -80,6 +80,7 @@ import com.anonrode.downloader.data.models.EpisodeItem
 import com.anonrode.downloader.data.models.ShowCard
 import com.anonrode.downloader.data.models.ShowDetails
 import com.anonrode.downloader.data.models.TaskStatus
+import com.anonrode.downloader.ui.components.DownloadsShelfPolicy
 import com.anonrode.downloader.ui.components.DownloadsSorter
 import com.anonrode.downloader.ui.components.PlaybackPositions
 import com.anonrode.downloader.ui.components.PosterImageOrFallback
@@ -645,9 +646,13 @@ fun DownloadsScreen(
     }
     // Directive §2.2: the shelf carries completed media, so it only shows
     // under All / Done — never while the user is focused on transfers.
-    val shelfUnderFilter = statusFilter == FILTER_ALL || statusFilter == FILTER_DONE
+    val shelfUnderFilter = DownloadsShelfPolicy.isShelfVisible(
+        statusFilter = statusFilter,
+        hasSeriesContinue = continueCards.isNotEmpty(),
+        hasShelfTiles = orderedShelf.isNotEmpty()
+    )
     val visibleShelf = if (shelfUnderFilter) orderedShelf else emptyList()
-    val shelfVisible = shelfUnderFilter && (continueCards.isNotEmpty() || visibleShelf.isNotEmpty())
+    val shelfVisible = shelfUnderFilter
     val shelfCount = continueCards.size + visibleShelf.size
 
     // Header meta counts (mock: "26.4 GB of 112 GB · 45 done · 0 active · 1
@@ -1811,7 +1816,7 @@ private fun cardProgressMetrics(task: DownloadTask): String {
  *  CENTER: 3-line column (Line 1 = Title, Line 2 = Source pill + status, Line 3 = Metrics or multi-line error);
  *  RIGHT: 36dp action + kebab. */
 @Composable
-private fun ActivityRow(
+internal fun ActivityRow(
     task: DownloadTask,
     onPlay: () -> Unit,
     onPause: () -> Unit,
@@ -2527,7 +2532,7 @@ private fun shelfBadge(task: DownloadTask): String {
  *  border, RESUME / UP NEXT / NEXT EP ⬇ pill, SxxEyy tag, play or download
  *  circle, title + subtitle, [Eps ▾] and a flush 3 dp progress bar. */
 @Composable
-private fun SeriesContinueTile(
+internal fun SeriesContinueTile(
     card: SeriesContinueCard,
     posterUrl: String,
     onPlay: (DownloadTask) -> Unit,
@@ -2676,7 +2681,7 @@ private fun SeriesContinueTile(
  *  an active watch record carries the directive's CONTINUE pill, resume line
  *  and a flush 3 dp progress bar. Tap = play; long-press = actions. */
 @Composable
-private fun SocialShelfTile(
+internal fun SocialShelfTile(
     task: DownloadTask,
     watchRecord: WatchRecord? = null,
     onPlay: () -> Unit,
@@ -2795,7 +2800,7 @@ private fun shelfMetaText(task: DownloadTask): String {
 }
 
 @Composable
-private fun ShowFolderCard(
+internal fun ShowFolderCard(
     showTitle: String,
     items: List<DownloadTask>,
     isExpanded: Boolean,
