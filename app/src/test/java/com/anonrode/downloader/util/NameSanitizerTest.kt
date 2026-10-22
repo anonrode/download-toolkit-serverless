@@ -236,4 +236,21 @@ class NameSanitizerTest {
         assertEquals("All American S02E05",
             NameSanitizer.formatEpisodeTitle("All American", 205, "S02E05"))
     }
+
+    @Test
+    fun legacyPackedNumberingDecodesOnlyWithoutAnExplicitProvider() {
+        // Persisted legacy tasks carry no site id: the historical 100-base
+        // decode must survive (810 -> S08E10).
+        assertEquals("All American S08E10",
+            NameSanitizer.formatEpisodeTitle("All American", 810, "Episode 10", site = ""))
+        assertEquals("All American S08E10",
+            NameSanitizer.formatEpisodeTitle("All American", 810, "Episode 10", site = "unknown"))
+        // Explicit providers keep their current rules: 9jaRocks is flat ...
+        assertEquals("The General's Daughter S01E810",
+            NameSanitizer.formatEpisodeTitle(
+                "The General's Daughter", 810, "Episode 810", site = "9jarocks"))
+        // ... while a legacy packed provider still decodes its packed token.
+        assertEquals("All American S08E10",
+            NameSanitizer.formatEpisodeTitle("All American", 810, "Episode 10", site = "dramakey"))
+    }
 }

@@ -70,13 +70,20 @@ object SeasonEpisode {
             val e = episodeNum % 1000
             if (s in 1..200 && e >= 1) return s to e
         }
-        if (episodeNum >= 100 && site.lowercase() in LEGACY_PACKED_SITES) {
+        // Blank/unknown site = a task persisted before provider ids were
+        // stored: keep the historical 100-base decode (810 -> S08E10).
+        // Explicit providers below are the only ones allowed to unpack.
+        if (episodeNum >= 100 && (isUnscopedSite(site) || site.lowercase() in LEGACY_PACKED_SITES)) {
             val s = episodeNum / 100
             val e = episodeNum % 100
             if (s in 1..99 && e in 1..99) return s to e
         }
         return 1 to episodeNum
     }
+
+    /** No provider id means a legacy/persisted task (site was added later). */
+    private fun isUnscopedSite(site: String): Boolean =
+        site.isBlank() || site.trim().equals("unknown", ignoreCase = true)
 
     /**
      * Collision-free episodeNum for NEW parses. Explicit [season]/[episode]
