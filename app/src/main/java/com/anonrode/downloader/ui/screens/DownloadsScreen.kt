@@ -1652,6 +1652,33 @@ internal fun displaySpeedTextForCards(task: DownloadTask): String? {
     }
 }
 
+/**
+ * LEGACY card/detail speed text (frozen contract). Rows persisted before the
+ * windowed display fields existed (and the legacy DownloadCard/statusDetailText
+ * tests) carry only the raw speedBytesPerSec; a null display field must keep
+ * the old raw formatting instead of the warm-up "Starting…". Only a populated
+ * but empty window renders "Starting…" here. The v6 row keeps using
+ * [displaySpeedTextForCards] through [cardProgressMetrics].
+ */
+private fun legacySpeedTextForCards(task: DownloadTask): String? {
+    if (task.status != TaskStatus.DOWNLOADING) return null
+    val display = task.displaySpeedBytesPerSec ?: return rawSpeedTextForCards(task)
+    if (display <= 0.0) return "Starting…"
+    return displaySpeedTextForCards(task)
+}
+
+/** Pre-window raw formatting, exactly as the legacy card/detail shipped it. */
+private fun rawSpeedTextForCards(task: DownloadTask): String? {
+    val speed = task.speedBytesPerSec
+    val mb = speed / (1024.0 * 1024.0)
+    return when {
+        mb >= 0.1 -> "%.1f MB/s".format(java.util.Locale.US, mb)
+        speed >= 1024.0 -> "%.0f KB/s".format(java.util.Locale.US, speed / 1024.0)
+        speed > 0.0 -> "%.0f B/s".format(java.util.Locale.US, speed)
+        else -> null
+    }
+}
+
 /** ETA preference for every card face: the window-derived value whenever
  *  the window knows a rate and a remaining size (it is only populated
  *  then), else the raw sticky etaSeconds exactly as before. */
@@ -2244,7 +2271,9 @@ internal fun statusDetailText(task: DownloadTask): String {
     else formatBytes(task.downloadedBytes)
 
     val transferring = task.status == TaskStatus.DOWNLOADING
-    val speedText = displaySpeedTextForCards(task)
+    // Frozen legacy detail contract: raw-speed fallback when the display
+    // window field is absent (persisted/legacy rows).
+    val speedText = legacySpeedTextForCards(task)
     val etaText = if (transferring) {
         displayEtaSecondsOf(task).takeIf { it > 0 }?.let { formatEta(it) }
     } else null
@@ -2936,8 +2965,10 @@ fun DownloadCard(
                 // hidden on stalls/merge tails, never rendered on paused or
                 // queued rows. The raw parsed value (kept in
                 // speedBytesPerSec for the engine watchdog) could print a
-                // bogus 2.4 TB/s resume burst here before the fix.
-                val speedStr = displaySpeedTextForCards(task)
+                // bogus 2.4 TB/s resume burst here before the fix. The legacy
+                // card keeps the frozen raw-speed fallback for rows persisted
+                // before the display fields existed.
+                val speedStr = legacySpeedTextForCards(task)
                 val etaStr = displayEtaSecondsOf(task).takeIf { it > 0 }?.let { formatEta(it) }
                 // "Estimating..." applies to any in-flight state where we
                 // have downloaded bytes but no total + no ETA.  Previously
