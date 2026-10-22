@@ -30,15 +30,15 @@ internal fun clampedSeekTarget(positionMs: Long, durationMs: Long, deltaMs: Long
 
 /**
  * Brightness after a vertical drag: up (negative dragPx) brightens. Never
- * goes fully black — 0.02 keeps the video visible, matching the window floor.
+ * goes fully black — 0.05 keeps the video visible, matching the window floor.
  */
 internal fun brightnessPercentAfterDrag(
     startPercent: Float,
     dragPx: Float,
     heightPx: Float
 ): Float {
-    if (heightPx <= 0f) return startPercent.coerceIn(2f, 100f)
-    return (startPercent - (dragPx / heightPx) * 100f).coerceIn(2f, 100f)
+    if (heightPx <= 0f) return startPercent.coerceIn(5f, 100f)
+    return (startPercent - (dragPx / heightPx) * 100f).coerceIn(5f, 100f)
 }
 
 /** HUD caption for a double-tap seek, e.g. "-10s" / "+10s". */

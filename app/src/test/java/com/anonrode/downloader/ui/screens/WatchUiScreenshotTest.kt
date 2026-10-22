@@ -210,20 +210,20 @@ class WatchUiScreenshotTest {
                         10 -> PlayerUpNextCard(
                             modifier = Modifier.align(Alignment.BottomEnd),
                             nextTag = "S01E05",
-                            actionLabel = "Play now",
+                            actionLabel = "▶ Play now",
                             onAction = {},
                             onDismiss = {}
                         )
                         11 -> PlayerUpNextCard(
                             modifier = Modifier.align(Alignment.BottomEnd),
                             nextTag = null,
-                            actionLabel = "Get next episodes",
+                            actionLabel = "⬇ Download Next Episodes",
                             onAction = {},
                             onDismiss = {}
                         )
                         else -> GestureHudPill(
                             icon = Icons.Rounded.Speed,
-                            label = "2× speed"
+                            label = "2.0× Speed"
                         )
                     }
                 }
@@ -312,7 +312,7 @@ class WatchUiScreenshotTest {
 
         scenario = 12
         composeRule.waitForIdle()
-        composeRule.onNodeWithText("2× speed").assertExists()
+        composeRule.onNodeWithText("2.0× Speed").assertExists()
         capture("22_player_gesture_hud")
     }
 }

@@ -54,7 +54,7 @@ object MediaPlayerPrefs {
     /**
      * Player window brightness (directive §5.3), persisted so the level the
      * user dragged to is restored on the next open. -1 means "never chosen,
-     * follow the system"; the player only applies values in 0.02..1.0 and
+     * follow the system"; the player only applies values in 0.05..1.0 and
      * clears the window override on dispose.
      */
     fun getWindowBrightness(context: Context): Float =
@@ -63,7 +63,7 @@ object MediaPlayerPrefs {
 
     fun setWindowBrightness(context: Context, brightness: Float) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            .putFloat(KEY_WINDOW_BRIGHTNESS, brightness.coerceIn(0.02f, 1f))
+            .putFloat(KEY_WINDOW_BRIGHTNESS, brightness.coerceIn(0.05f, 1f))
             .apply()
     }
 

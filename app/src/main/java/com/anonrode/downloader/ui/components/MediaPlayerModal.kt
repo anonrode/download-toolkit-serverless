@@ -607,7 +607,7 @@ private fun MediaPlayerModalImpl(
     // the choice into the next session.
     val initialBrightnessPercent = remember {
         val saved = MediaPlayerPrefs.getWindowBrightness(context)
-        if (saved in 0.02f..1f) {
+        if (saved in 0.05f..1f) {
             saved * 100f
         } else {
             val system = runCatching {
@@ -616,21 +616,21 @@ private fun MediaPlayerModalImpl(
                     android.provider.Settings.System.SCREEN_BRIGHTNESS
                 )
             }.getOrDefault(255)
-            (system / 255f * 100f).coerceIn(2f, 100f)
+            (system / 255f * 100f).coerceIn(5f, 100f)
         }
     }
     val applyWindowBrightness: (Float) -> Unit = { fraction ->
         activity?.let { act ->
             runCatching {
                 val attrs = act.window.attributes
-                attrs.screenBrightness = fraction.coerceIn(0.02f, 1f)
+                attrs.screenBrightness = fraction.coerceIn(0.05f, 1f)
                 act.window.attributes = attrs
             }
         }
     }
     LaunchedEffect(activity) {
         val saved = MediaPlayerPrefs.getWindowBrightness(context)
-        if (saved in 0.02f..1f) applyWindowBrightness(saved)
+        if (saved in 0.05f..1f) applyWindowBrightness(saved)
     }
     DisposableEffect(activity) {
         onDispose {
@@ -1345,8 +1345,9 @@ private fun MediaPlayerModalImpl(
                         // release restores it from playbackSpeed.
                         isSpeedBoosting = true
                         exoPlayer.playbackParameters = PlaybackParameters(2.0f)
+                        view.tick()
                         gestureHudIcon = Icons.Rounded.Speed
-                        gestureHudText = "2× speed"
+                        gestureHudText = "2.0× Speed"
                         gestureHudTick++
                         touchControls()
                     },
@@ -1998,7 +1999,7 @@ private fun MediaPlayerModalImpl(
                         .align(Alignment.BottomEnd)
                         .padding(end = 16.dp, bottom = 96.dp),
                     nextTag = nextTag.takeIf { nextPeerPath != null },
-                    actionLabel = if (nextPeerPath != null) "Play now" else "Get next episodes",
+                    actionLabel = if (nextPeerPath != null) "▶ Play now" else "⬇ Download Next Episodes",
                     onAction = {
                         touchControls()
                         if (nextPeerPath != null) {
@@ -2059,8 +2060,8 @@ private fun MediaPlayerModalImpl(
             val tag = episodeTagFromPath(p) ?: File(p).nameWithoutExtension
             val rec = watchRecords.firstOrNull { it.filePath == p }
             val prefix = when {
-                p == ctx.filePath -> "Playing · "
-                rec?.isWatched == true -> "Watched ✓ · "
+                p == ctx.filePath -> "▶ Playing · "
+                rec?.isWatched == true -> "✓ Watched · "
                 rec != null && rec.positionMs > 0L ->
                     WatchHistoryCore.formatTimeLeft(rec.positionMs, rec.durationMs) + " · "
                 else -> ""
@@ -2068,7 +2069,9 @@ private fun MediaPlayerModalImpl(
             val sizeMb = runCatching {
                 "%.0f MB".format(File(p).length() / (1024.0 * 1024.0))
             }.getOrDefault("")
-            val baseLabel = "$prefix$tag · ${File(p).nameWithoutExtension.take(30)} · $sizeMb"
+            val episodeTitle = ctx.taskForPath(p)?.episodeTitle?.takeIf { it.isNotBlank() }
+                ?: File(p).nameWithoutExtension
+            val baseLabel = "$prefix$tag · ${episodeTitle.take(30)} · $sizeMb"
             var label = baseLabel
             var suffix = 2
             while (byLabel.containsKey(label)) {
@@ -2641,7 +2644,7 @@ internal fun PlayerUpNextCard(
                 text = if (nextTag != null) {
                     "Plays automatically when this ends"
                 } else {
-                    "Get the next episodes"
+                    "No more downloaded episodes"
                 },
                 color = Color.White.copy(alpha = 0.7f),
                 fontSize = 10.sp,

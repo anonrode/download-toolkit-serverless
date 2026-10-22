@@ -43,8 +43,8 @@ class PlayerGestureLogicTest {
     fun upwardDragBrightensAndNeverGoesBlack() {
         // Full-screen upward drag adds 100 points.
         assertEquals(100f, brightnessPercentAfterDrag(40f, -1000f, 1000f), 0.001f)
-        // Full-screen downward drag subtracts 100, floored at 2.
-        assertEquals(2f, brightnessPercentAfterDrag(40f, 1000f, 1000f), 0.001f)
+        // Full-screen downward drag subtracts 100, floored at 5.
+        assertEquals(5f, brightnessPercentAfterDrag(40f, 1000f, 1000f), 0.001f)
         // Half a screen up from 30 = 80.
         assertEquals(80f, brightnessPercentAfterDrag(30f, -500f, 1000f), 0.001f)
     }
@@ -52,7 +52,7 @@ class PlayerGestureLogicTest {
     @Test
     fun brightnessDragWithoutHeightIsStable() {
         assertEquals(55f, brightnessPercentAfterDrag(55f, -100f, 0f), 0.001f)
-        assertEquals(2f, brightnessPercentAfterDrag(0f, 0f, 0f), 0.001f)
+        assertEquals(5f, brightnessPercentAfterDrag(0f, 0f, 0f), 0.001f)
     }
 
     @Test
