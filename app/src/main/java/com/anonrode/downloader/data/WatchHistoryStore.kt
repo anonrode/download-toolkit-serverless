@@ -3,7 +3,6 @@ package com.anonrode.downloader.data
 import android.content.Context
 import com.anonrode.downloader.data.models.DownloadTask
 import com.anonrode.downloader.data.models.TaskStatus
-import com.anonrode.downloader.util.ShowIdentity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -163,28 +162,8 @@ object WatchHistoryStore {
 
     // --------------------------------------------------------------- internals
 
-    private fun seedFor(task: DownloadTask?, filePath: String, title: String): WatchRecord {
-        val fromTask = task?.let { WatchHistoryCore.seedFromTask(it) }
-        if (fromTask != null) {
-            return fromTask.copy(
-                id = filePath,
-                filePath = filePath,
-                showKey = ShowIdentity.normalizeShowKey(title.ifBlank { fromTask.showTitle }),
-                showTitle = title.ifBlank { fromTask.showTitle }
-            )
-        }
-        val fallbackTitle = title.ifBlank {
-            File(filePath).nameWithoutExtension.ifBlank { "Unknown" }
-        }
-        return WatchRecord(
-            id = filePath,
-            showKey = ShowIdentity.normalizeShowKey(fallbackTitle),
-            showTitle = fallbackTitle,
-            kind = WatchHistoryCore.kindForTitle(fallbackTitle),
-            filePath = filePath,
-            episodeTitle = fallbackTitle
-        )
-    }
+    private fun seedFor(task: DownloadTask?, filePath: String, title: String): WatchRecord =
+        WatchHistoryCore.seedForRecord(task, filePath, title)
 
     private fun mutate(transform: (List<WatchRecord>) -> List<WatchRecord>) {
         var toPersist: List<WatchRecord>? = null

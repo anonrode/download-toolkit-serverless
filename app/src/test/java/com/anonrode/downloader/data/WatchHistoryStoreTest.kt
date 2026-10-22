@@ -2,6 +2,7 @@ package com.anonrode.downloader.data
 
 import com.anonrode.downloader.data.models.DownloadTask
 import com.anonrode.downloader.data.models.TaskStatus
+import com.anonrode.downloader.util.ShowIdentity
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -76,6 +77,21 @@ class WatchHistoryStoreTest {
     }
 
     // ---------------------------------------------------------------- recording
+
+    @Test
+    fun task_backed_seed_keeps_show_identity_when_title_is_episode_title() {
+        // Regression: the player passes task.episodeTitle as `title`; that
+        // must never replace the show's title/key, or every episode of one
+        // show becomes a separate show on the shelf.
+        val seed = WatchHistoryCore.seedForRecord(
+            task = task(id = "ep4", filePath = path, episode = 4),
+            filePath = path,
+            title = "Episode 4"
+        )
+        assertEquals("Crystal Lake", seed.showTitle)
+        assertEquals(ShowIdentity.normalizeShowKey("Crystal Lake"), seed.showKey)
+        assertEquals("Episode 4", seed.episodeTitle)
+    }
 
     @Test
     fun brief_open_is_ignored_when_no_record_exists() {

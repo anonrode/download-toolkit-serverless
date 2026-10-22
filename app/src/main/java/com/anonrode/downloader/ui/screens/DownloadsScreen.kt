@@ -339,7 +339,9 @@ internal suspend fun loadRemainingAcrossSources(
 /** One show's slice of a mixed non-library sort group. */
 internal data class ShowSlice(
     val showTitle: String,
-    val tasks: List<DownloadTask>
+    val tasks: List<DownloadTask>,
+    /** Normalized identity used for series maps; display title stays raw. */
+    val showKey: String = ShowIdentity.normalizeShowKey(showTitle)
 )
 
 /**
@@ -360,13 +362,19 @@ internal fun mixedGroupShowSlices(
     groupItems: List<DownloadTask>,
     chipEligible: (String) -> Boolean
 ): List<ShowSlice>? {
-    val shows = groupItems.map { it.showTitle }.distinct()
-    if (shows.size <= 1) return null
-    if (shows.none { chipEligible(it) }) return null
-    return shows.map { title ->
+    // Group by the SAME normalized key the series maps use; raw showTitle
+    // equality split "Crystal Lake" from "Crystal Lake [9jaRocks]" and made
+    // the per-show chip disappear in mixed buckets.
+    val byShow = groupItems.groupBy {
+        ShowIdentity.normalizeShowKey(it.showTitle.ifBlank { "Unknown" })
+    }
+    if (byShow.size <= 1) return null
+    if (byShow.keys.none(chipEligible)) return null
+    return byShow.map { (key, tasks) ->
         ShowSlice(
-            showTitle = title,
-            tasks = groupItems.filter { it.showTitle == title }
+            showTitle = tasks.firstOrNull { it.showTitle.isNotBlank() }?.showTitle ?: key,
+            tasks = tasks,
+            showKey = key
         )
     }
 }
@@ -687,10 +695,17 @@ fun DownloadsScreen(
     // exact live set from the provider when the chip opens it; this count is
     // the card-level hint, keyed on the same clean show title the drawer uses
     // for its folder name.
+    // The episode drawer and the By-Show grouping both identify a show by
+    // its normalized key. Every map below must use the same key; raw
+    // showTitle equality silently missed titles carrying a site watermark
+    // or a season suffix.
+    fun showKeyOf(raw: String): String =
+        ShowIdentity.normalizeShowKey(raw.ifBlank { "Unknown" })
+
     val seriesRemaining = remember(structureSig) {
         val byShow = viewModel.engine.tasks.value
             .filter { it.seriesUrl.isNotBlank() }
-            .groupBy { it.showTitle }
+            .groupBy { showKeyOf(it.showTitle) }
         byShow.mapValues { (_, items) ->
             // Only COMPLETED or genuinely in-flight tasks count against the
             // remaining total. PAUSED is NOT in flight (it is remaining work
@@ -706,7 +721,7 @@ fun DownloadsScreen(
     val seriesInfo = remember(structureSig) {
         val byShow = viewModel.engine.tasks.value
             .filter { it.seriesUrl.isNotBlank() }
-            .groupBy { it.showTitle }
+            .groupBy { showKeyOf(it.showTitle) }
         byShow.mapValues { (_, items) ->
             val url = items.firstOrNull { it.seriesUrl.isNotBlank() }?.seriesUrl.orEmpty()
             val site = items.firstOrNull { it.site.isNotBlank() }?.site.orEmpty()
@@ -725,10 +740,13 @@ fun DownloadsScreen(
     // header gate EXACTLY where it was — a new guess must never make an
     // existing chip disappear from a mixed non-library group.
     val seriesSources = remember(structureSig) {
-        val byShow = viewModel.engine.tasks.value.groupBy { it.showTitle }
-        byShow.mapNotNull { (title, items) ->
-            val sources = folderSeriesSources(title, items)
-            if (sources.isEmpty()) null else title to sources
+        val byShow = viewModel.engine.tasks.value.groupBy { showKeyOf(it.showTitle) }
+        byShow.mapNotNull { (key, items) ->
+            // The pseudo source carries a human title into the drawer, so
+            // derive it from the tasks rather than the normalized key.
+            val displayTitle = items.firstOrNull { it.showTitle.isNotBlank() }?.showTitle ?: key
+            val sources = folderSeriesSources(displayTitle, items)
+            if (sources.isEmpty()) null else key to sources
         }.toMap()
     }
     val folderSeriesInfo = remember(structureSig, seriesSources) {
@@ -1061,38 +1079,46 @@ fun DownloadsScreen(
 
                 if (sortMode == DownloadsSorter.SORT_LIBRARY) {
                     items(filteredGroups, key = { "show-${it.first}" }) { (showTitle, showItems) ->
-                        val isExpanded = expandedShows[showTitle] ?: (showItems.size == 1 || showItems.any {
+                        // In By-Show mode showTitle is groupLibrary's
+                        // normalized key; keep it as the identity and derive
+                        // a human display title from the tasks.
+                        val groupKey = showKeyOf(showTitle)
+                        val displayTitle = showItems.firstOrNull { it.showTitle.isNotBlank() }
+                            ?.showTitle ?: showTitle
+                        val isExpanded = expandedShows[groupKey] ?: (showItems.size == 1 || showItems.any {
                             it.status == TaskStatus.DOWNLOADING || it.status == TaskStatus.RESOLVING
                         })
                         // Folder-card info includes the legacy pseudo source
                         // (guessed=true) so pre-stamp folders keep a
                         // "Check remaining" path; the group-header gate keeps
                         // its stamped-only seriesInfo map.
-                        val info = folderSeriesInfo[showTitle]
-                        val live = liveSeriesRemaining[showTitle]
-                        val explicitlyExpanded = expandedShows[showTitle] == true
+                        val info = folderSeriesInfo[groupKey]
+                        val live = liveSeriesRemaining[groupKey]
+                        val explicitlyExpanded = expandedShows[groupKey] == true
                         // Statuses for the live count must come from ALL tasks
                         // of the show, not the status-filtered list, or a
                         // filter inflates "remaining". The effect runs only on
                         // an explicit expand; ProviderRegistry.loadEpisodes has
                         // its own 5-minute cache, so the local TTL is gone and
                         // a completion updates the count immediately.
-                        val allShowItems = viewModel.engine.tasks.value.filter { it.showTitle == showTitle }
+                        val allShowItems = viewModel.engine.tasks.value.filter {
+                            showKeyOf(it.showTitle) == groupKey
+                        }
                         // All distinct series sources behind the folder (>= 1
                         // once any task is stamped). The live count aggregates
                         // across all of them; info stays the first source,
                         // which is where the drawer opens.
-                        val folderSources = seriesSources[showTitle].orEmpty()
+                        val folderSources = seriesSources[groupKey].orEmpty()
                         LaunchedEffect(explicitlyExpanded, info?.first, folderSources, structureSig) {
                             if (!explicitlyExpanded || folderSources.isEmpty()) return@LaunchedEffect
                             val count = loadRemainingAcrossSources(
                                 sources = folderSources,
                                 tasks = allShowItems,
-                                showTitle = showTitle
+                                showTitle = displayTitle
                             ) { card ->
                                 com.anonrode.downloader.providers.ProviderRegistry.loadEpisodes(card)
                             }
-                            liveSeriesRemaining[showTitle] = LiveSeriesRemaining(
+                            liveSeriesRemaining[groupKey] = LiveSeriesRemaining(
                                 known = count != null,
                                 // count == null keeps the "Check remaining"
                                 // path — nothing known, never a fake zero.
@@ -1102,13 +1128,13 @@ fun DownloadsScreen(
                         }
                         val liveCount = live?.takeIf { it.known }?.count
                         ShowFolderCard(
-                            showTitle = showTitle,
+                            showTitle = displayTitle,
                             items = showItems,
                             isExpanded = isExpanded,
                             onToggleExpand = {
-                                expandedShows[showTitle] = !isExpanded
+                                expandedShows[groupKey] = !isExpanded
                             },
-                            remainingCount = liveCount ?: (seriesRemaining[showTitle] ?: 0),
+                            remainingCount = liveCount ?: (seriesRemaining[groupKey] ?: 0),
                             showRemainingAction = shouldShowRemainingAction(
                                 hasSeriesUrl = info != null,
                                 hasTasks = showItems.isNotEmpty(),
@@ -1116,7 +1142,7 @@ fun DownloadsScreen(
                             ),
                             onDownloadRemaining = if (info != null) {
                                 {
-                                    viewModel.openRemainingEpisodes(showTitle, info.first, info.second)
+                                    viewModel.openRemainingEpisodes(displayTitle, info.first, info.second)
                                 }
                             } else null,
                             onPlayTask = onPlayTask,
@@ -1126,9 +1152,9 @@ fun DownloadsScreen(
                             onRequestActions = { pendingActionsTask = it },
                             watchByPath = watchByPath,
                             continueCard = continueCards.firstOrNull {
-                                it.showKey == ShowIdentity.normalizeShowKey(showTitle)
+                                it.showKey == groupKey
                             },
-                            onShowActions = { showActionsTitle = showTitle }
+                            onShowActions = { showActionsTitle = groupKey }
                         )
                     }
                 } else {
@@ -1137,8 +1163,8 @@ fun DownloadsScreen(
                         // show with its own chip (mixedGroupShowSlices); the
                         // old singleOrNull gate only survives as the
                         // single-show rendering.
-                        val showSlices = mixedGroupShowSlices(groupItems) { title ->
-                            seriesInfo[title] != null
+                        val showSlices = mixedGroupShowSlices(groupItems) { key ->
+                            seriesInfo[key] != null
                         }
                         item(key = "h-$header") {
                             if (showSlices == null) {
@@ -1148,11 +1174,15 @@ fun DownloadsScreen(
                                 // multi-show group has no single unambiguous target.
                                 // (Library mode keeps the per-show action on the
                                 // folder, so the shortcut never depends on the sort.)
-                                val remainingShow = groupItems.map { it.showTitle }
+                                val remainingShow = groupItems.map { showKeyOf(it.showTitle) }
                                     .distinct()
                                     .filter { seriesInfo[it] != null }
                                     .singleOrNull()
                                 val info = remainingShow?.let { seriesInfo[it] }
+                                val remainingDisplay = remainingShow?.let { key ->
+                                    groupItems.firstOrNull { showKeyOf(it.showTitle) == key }
+                                        ?.showTitle ?: key
+                                }
                                 val liveCount = remainingShow
                                     ?.let { liveSeriesRemaining[it] }
                                     ?.takeIf { it.known }
@@ -1168,8 +1198,16 @@ fun DownloadsScreen(
                                         hasTasks = groupItems.isNotEmpty(),
                                         liveRemaining = liveCount
                                     ),
-                                    onDownloadRemaining = if (remainingShow != null && info != null) {
-                                        { viewModel.openRemainingEpisodes(remainingShow, info.first, info.second) }
+                                    onDownloadRemaining = if (
+                                        remainingShow != null && remainingDisplay != null && info != null
+                                    ) {
+                                        {
+                                            viewModel.openRemainingEpisodes(
+                                                remainingDisplay,
+                                                info.first,
+                                                info.second
+                                            )
+                                        }
                                     } else null
                                 )
                             } else {
@@ -1204,15 +1242,15 @@ fun DownloadsScreen(
                             }
                         } else {
                             showSlices.forEach { slice ->
-                                item(key = "sh-$header-${slice.showTitle}") {
-                                    val sliceInfo = seriesInfo[slice.showTitle]
-                                    val sliceLiveCount = liveSeriesRemaining[slice.showTitle]
+                                item(key = "sh-$header-${slice.showKey}") {
+                                    val sliceInfo = seriesInfo[slice.showKey]
+                                    val sliceLiveCount = liveSeriesRemaining[slice.showKey]
                                         ?.takeIf { it.known }?.count
                                     DownloadsGroupHeader(
                                         title = slice.showTitle,
                                         count = slice.tasks.size,
                                         remainingCount = sliceLiveCount
-                                            ?: seriesRemaining[slice.showTitle]
+                                            ?: seriesRemaining[slice.showKey]
                                             ?: 0,
                                         showRemainingAction = shouldShowRemainingAction(
                                             hasSeriesUrl = sliceInfo != null,
@@ -1296,11 +1334,11 @@ fun DownloadsScreen(
                     // Directive §3.3: the show-level sheet must be reachable
                     // from the date/status/size views too, where a task's ⋮ is
                     // the only entry point.
-                    if (tasks.count { it.showTitle == target.showTitle } >= 2) {
+                    if (tasks.count { showKeyOf(it.showTitle) == showKeyOf(target.showTitle) } >= 2) {
                         TextButton(
                             onClick = {
                                 pendingActionsTask = null
-                                showActionsTitle = target.showTitle
+                                showActionsTitle = showKeyOf(target.showTitle)
                             }
                         ) {
                             Text(
@@ -1394,7 +1432,12 @@ fun DownloadsScreen(
     // ═══ SHOW ACTIONS (directive §3.3) ═══════════════════════════════════
     if (showDeleteMode == null) {
         showActionsTitle?.let { title ->
-            val showTasks = tasks.filter { it.showTitle == title }
+            val showKey = showKeyOf(title)
+            val showTasks = tasks.filter { showKeyOf(it.showTitle) == showKey }
+            // `title` is the normalized identity (library groups use it);
+            // the dialog must still show the user's casing, not the key.
+            val displayTitle = showTasks.firstOrNull { it.showTitle.isNotBlank() }
+                ?.showTitle ?: title
             val completedTasks = showTasks.filter {
                 it.status == TaskStatus.COMPLETED && it.filePath.isNotBlank()
             }
@@ -1411,7 +1454,7 @@ fun DownloadsScreen(
             val seriesUrl = showTasks.firstOrNull { it.seriesUrl.isNotBlank() }?.seriesUrl.orEmpty()
             val seriesSite = showTasks.firstOrNull { it.seriesUrl.isNotBlank() }?.site.orEmpty()
             val card = continueCards.firstOrNull {
-                it.showKey == ShowIdentity.normalizeShowKey(title)
+                it.showKey == showKey
             }
 
             AlertDialog(
@@ -1420,7 +1463,7 @@ fun DownloadsScreen(
                 containerColor = SurfaceCard,
                 titleContentColor = TextPrimary,
                 textContentColor = TextSecondary,
-                title = { Text(title) },
+                title = { Text(displayTitle) },
                 text = {
                     Column {
                         Text(
@@ -1458,7 +1501,7 @@ fun DownloadsScreen(
                         if (seriesUrl.isNotBlank()) {
                             TextButton(onClick = {
                                 showActionsTitle = null
-                                viewModel.openRemainingEpisodes(title, seriesUrl, seriesSite)
+                                viewModel.openRemainingEpisodes(displayTitle, seriesUrl, seriesSite)
                             }) { Text("Download remaining episodes", color = AccentViolet) }
                         }
                         TextButton(
@@ -1495,7 +1538,8 @@ fun DownloadsScreen(
     showDeleteMode?.let { mode ->
         val title = showActionsTitle.orEmpty()
         if (title.isNotBlank()) {
-            val showTasks = tasks.filter { it.showTitle == title }
+            val showKey = showKeyOf(title)
+            val showTasks = tasks.filter { showKeyOf(it.showTitle) == showKey }
             val completedTasks = showTasks.filter {
                 it.status == TaskStatus.COMPLETED && it.filePath.isNotBlank()
             }

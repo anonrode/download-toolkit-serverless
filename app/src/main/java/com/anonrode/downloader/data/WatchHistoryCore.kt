@@ -111,6 +111,46 @@ object WatchHistoryCore {
             KIND_SERIES
         }
 
+    /**
+     * Seed for a player progress event. [title] is the player's display title
+     * and is usually the EPISODE title; for a task-backed record the show
+     * identity must always come from [DownloadTask.showTitle]. Using the
+     * player title here split one show into one record per episode and broke
+     * Continue/ShowFolder/Drawer matching.
+     */
+    fun seedForRecord(task: DownloadTask?, filePath: String, title: String): WatchRecord {
+        val fromTask = task?.let { seedFromTask(it) }
+        if (fromTask != null) {
+            return fromTask.copy(
+                id = filePath,
+                filePath = filePath,
+                episodeTitle = fromTask.episodeTitle.ifBlank { title }
+            )
+        }
+        // A task can be present without passing seedFromTask (e.g. status no
+        // longer COMPLETED but the file still plays). Its showTitle is still
+        // authoritative; never let the episode title become the show identity.
+        val taskTitle = task?.showTitle?.takeIf { it.isNotBlank() }
+        val fallbackTitle = title.ifBlank {
+            File(filePath).nameWithoutExtension.ifBlank { "Unknown" }
+        }
+        val showTitle = taskTitle ?: fallbackTitle
+        return WatchRecord(
+            id = filePath,
+            showKey = ShowIdentity.normalizeShowKey(showTitle),
+            showTitle = showTitle,
+            kind = kindForTitle(showTitle),
+            filePath = filePath,
+            sourceUrl = task?.sourceUrl.orEmpty(),
+            seriesUrl = task?.seriesUrl.orEmpty(),
+            site = task?.site.orEmpty(),
+            posterUrl = task?.posterUrl.orEmpty(),
+            episodeTitle = title.ifBlank { showTitle },
+            season = task?.let { SeasonEpisode.seasonOf(it) } ?: 0,
+            episode = task?.let { SeasonEpisode.episodeOf(it) } ?: 0
+        )
+    }
+
     // -------------------------------------------------------------- recording
 
     /**

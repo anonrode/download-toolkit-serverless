@@ -2,6 +2,7 @@ package com.anonrode.downloader.ui.screens
 
 import com.anonrode.downloader.data.models.DownloadTask
 import com.anonrode.downloader.data.models.TaskStatus
+import com.anonrode.downloader.util.ShowIdentity
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -72,6 +73,23 @@ class MixedGroupRemainingTest {
             ),
             mixedGroupShowSlices(group) { title -> title != "Torrents" }
         )
+    }
+
+    @Test
+    fun taggedTitlesForOneShowSliceTogether() {
+        // Regression: a watermarked title and a clean title are the same show.
+        // Raw equality used to make two slices and split the remaining chip.
+        val a1 = task("a1", "Crystal Lake")
+        val a2 = task("a2", "Crystal Lake [9jaRocks]")
+        val b1 = task("b1", "Other Show")
+        val slices = mixedGroupShowSlices(listOf(a1, a2, b1)) { true }
+        assertEquals(2, slices?.size)
+        assertEquals(listOf(a1, a2), slices?.first()?.tasks)
+        assertEquals(
+            ShowIdentity.normalizeShowKey("Crystal Lake"),
+            slices?.first()?.showKey
+        )
+        assertEquals("Crystal Lake", slices?.first()?.showTitle)
     }
 
     @Test
