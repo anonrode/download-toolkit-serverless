@@ -3,6 +3,7 @@ package com.anonrode.downloader.pipeline
 import com.anonrode.downloader.data.net.HttpClient
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import java.net.URI
+import java.net.URLDecoder
 
 object UrlClassifier {
 
@@ -87,6 +88,41 @@ object UrlClassifier {
     }
 
     /**
+     * A player/bridge URL can hide the real manifest in a query parameter:
+     *   https://bridge.example/?url=https%3A%2F%2Fcdn%2Fmaster.m3u8
+     * Path-only classification called that a direct `.mp4` and downloaders
+     * saved the playlist text as a video (NEPU 10-22 15:39). Decode query
+     * values recursively (bounded) and return the first embedded manifest URL.
+     */
+    fun embeddedStreamingUrl(rawUrl: String, depth: Int = 0): String? {
+        if (depth > 2) return null
+        val query = rawUrl.substringAfter('?', "")
+        if (query.isBlank()) return null
+        for (pair in query.split('&')) {
+            val value = pair.substringAfter('=', "")
+            if (value.isBlank()) continue
+            val decoded = try {
+                URLDecoder.decode(value, "UTF-8")
+            } catch (_: Exception) {
+                value
+            }
+            if (decoded.isBlank() || decoded == rawUrl) continue
+            if (!decoded.startsWith("http", ignoreCase = true) && !decoded.startsWith("/")) continue
+            val low = decoded.lowercase()
+            val path = low.substringBefore('?').substringBefore('#')
+            if (STREAMING_EXTENSIONS.any { path.endsWith(".$it") } ||
+                path.endsWith("/manifest") ||
+                path.contains("/manifest.") ||
+                path.contains("/hls/")
+            ) {
+                return decoded
+            }
+            embeddedStreamingUrl(decoded, depth + 1)?.let { return it }
+        }
+        return null
+    }
+
+    /**
      * Strict adaptive-streaming manifest check.
      * Fixes the bug where a direct video file named "Manifest.S01E01.mp4" matched `low.contains("manifest")`.
      */
@@ -101,7 +137,8 @@ object UrlClassifier {
         // "/hls/master.jpg" style extension-obfuscated manifests must stay streaming.
         if (ext in DIRECT_MEDIA_EXTENSIONS && ext != "ts" && ext !in IMAGE_EXTENSIONS) {
             val query = low.substringAfter('?', "")
-            return STREAMING_QUERY_REGEX.containsMatchIn(query)
+            return STREAMING_QUERY_REGEX.containsMatchIn(query) ||
+                embeddedStreamingUrl(rawUrl) != null
         }
 
         if (ext in STREAMING_EXTENSIONS) return true
@@ -120,6 +157,7 @@ object UrlClassifier {
         // direct MP4 byte-range when it is the real stream). Classification
         // is evidence-based now — see inspectTerminal() — so no URL-name
         // heuristic for it remains.
+        if (embeddedStreamingUrl(rawUrl) != null) return true
         val query = low.substringAfter('?', "")
         return STREAMING_QUERY_REGEX.containsMatchIn(query)
     }
@@ -164,10 +202,14 @@ object UrlClassifier {
 
     private val evidenceCache = java.util.concurrent.ConcurrentHashMap<String, EvidenceEntry>()
 
-    /** Cache key: origin + path, query deliberately excluded (tokens rotate). */
+    /** Cache key: origin + path, query deliberately excluded (tokens rotate).
+     *  Bridge URLs are the exception: the embedded `url=` IS the media plan,
+     *  so different episodes on one bridge path must not share evidence. */
     internal fun evidenceKey(rawUrl: String): String {
         val parsed = rawUrl.trim().toHttpUrlOrNull() ?: return rawUrl.substringBefore('?').lowercase()
-        return "${parsed.scheme}://${parsed.host}${parsed.port.let { if (it == 80 || it == 443) "" else ":$it" }}${parsed.encodedPath}"
+        val base = "${parsed.scheme}://${parsed.host}${parsed.port.let { if (it == 80 || it == 443) "" else ":$it" }}${parsed.encodedPath}"
+        val embedded = embeddedStreamingUrl(rawUrl) ?: return base
+        return "$base?embedded=${Integer.toHexString(embedded.hashCode())}"
     }
 
     fun cachedTerminalEvidence(rawUrl: String): TerminalEvidence? {
@@ -201,6 +243,7 @@ object UrlClassifier {
     fun isManifestShaped(rawUrl: String, contentType: String = ""): Boolean {
         val ct = contentType.lowercase()
         if (ct.contains("mpegurl") || ct.contains("dash+xml")) return true
+        if (embeddedStreamingUrl(rawUrl) != null) return true
         val path = rawUrl.substringBefore('?').substringBefore('#').lowercase()
         if (path.endsWith(".m3u8") || path.endsWith(".m3u") || path.endsWith(".mpd") || path.endsWith(".f4m")) return true
         return path.contains("/manifest") || path.contains("playlist")
@@ -324,10 +367,15 @@ object UrlClassifier {
             ""
         }
         val trimmed = body.trimStart('\uFEFF', ' ', '\r', '\n', '\t')
+        val isM3u = trimmed.startsWith("#EXTM3U")
+        val isDash = trimmed.startsWith("<MPD") ||
+            (trimmed.startsWith("<?xml") && trimmed.contains("<MPD", ignoreCase = true))
         val ev = when {
             trimmed.isBlank() ->
                 TerminalEvidence(TerminalKind.UNKNOWN, probe.code, ct, total, "manifest body unreadable")
-            !trimmed.startsWith("#EXTM3U") ->
+            isDash ->
+                TerminalEvidence(TerminalKind.HLS_PLAYLIST, probe.code, ct, total, "genuine DASH manifest")
+            !isM3u ->
                 TerminalEvidence(TerminalKind.STUB, probe.code, ct, total, "mpegurl body is not an M3U document")
             isTinyManifest(trimmed, ct, total) ->
                 TerminalEvidence(TerminalKind.STUB, probe.code, ct, total, "tiny mpegurl (${total}B) with no variants/segments")
@@ -352,6 +400,33 @@ object UrlClassifier {
         val value = rawUrl.trim()
         val firstScheme = value.indexOf("://")
         if (firstScheme < 0) return value
+        val authorityStart = firstScheme + 3
+        val authorityEnd = value.indexOfAny(charArrayOf('/', '?', '#'), authorityStart)
+            .let { if (it < 0) value.length else it }
+        val authority = value.substring(authorityStart, authorityEnd)
+        // Host-suffix concatenation: the device log produced
+        // `vidsrc.buzzhttps:/…` and `vidsrc.buzzhttps://…`, where OkHttp
+        // parsed the whole glued token as the HOST (`vidsrc.buzzhttps`).
+        val embeddedInAuthority = authority.indexOf("http", ignoreCase = true)
+        if (embeddedInAuthority > 0) {
+            val prefixOrigin = value.substring(0, authorityStart) +
+                authority.substring(0, embeddedInAuthority)
+            val rest = authority.substring(embeddedInAuthority) + value.substring(authorityEnd)
+            val normalizedRest = if (rest.startsWith("https:/") && !rest.startsWith("https://")) {
+                "https://" + rest.removePrefix("https:/")
+            } else if (rest.startsWith("http:/") && !rest.startsWith("http://")) {
+                "http://" + rest.removePrefix("http:/")
+            } else {
+                rest
+            }
+            if ((normalizedRest.startsWith("http://", true) ||
+                    normalizedRest.startsWith("https://", true)) &&
+                extractHost(prefixOrigin).isNotBlank() &&
+                extractHost(prefixOrigin) == extractHost(normalizedRest)
+            ) {
+                return normalizedRest
+            }
+        }
         val second = value.indexOf("://", firstScheme + 3)
         if (second < 0) return value
         val start = value.lastIndexOf("http", second)

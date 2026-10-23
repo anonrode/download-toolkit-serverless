@@ -2,6 +2,7 @@ package com.anonrode.downloader.pipeline
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -15,6 +16,24 @@ import org.junit.Test
  * bounded probe/body decides.
  */
 class UrlClassifierEvidenceTest {
+
+    @Test
+    fun `bridge with an encoded master m3u8 is streaming`() {
+        val one = "https://dash-hls-bridge.johndoesemc.workers.dev/?url=" +
+            "https%3A%2F%2Fsacdn.example%2Fdash%2F1433768473347377952_1_1%2Fmaster.m3u8&Policy=abc"
+        assertTrue(UrlClassifier.isStreamingLink(one))
+        assertTrue(UrlClassifier.isManifestShaped(one, "application/octet-stream"))
+        // Different episodes on the same bridge path must not share evidence.
+        val two = "https://dash-hls-bridge.johndoesemc.workers.dev/?url=" +
+            "https%3A%2F%2Fsacdn.example%2Fdash%2F9999999999999999999_1_1%2Fmaster.m3u8&Policy=abc"
+        assertNotEquals(UrlClassifier.evidenceKey(one), UrlClassifier.evidenceKey(two))
+    }
+
+    @Test
+    fun `direct mp4 remains direct`() {
+        assertFalse(UrlClassifier.isStreamingLink("https://cdn.example/episode.mp4?sign=x"))
+        assertTrue(UrlClassifier.isDirectMediaPath("https://cdn.example/episode.mp4?sign=x"))
+    }
 
     @Test
     fun `stream-proxy is neither streaming nor provably direct by name`() {
@@ -99,6 +118,14 @@ class UrlClassifierEvidenceTest {
         assertEquals(
             "https://vidsrc.buzz/_stream?id=abc",
             UrlClassifier.repairConcatenatedUrl("https://vidsrc.buzzhttps://vidsrc.buzz/_stream?id=abc")
+        )
+        assertEquals(
+            "https://vidsrc.buzz/_stream?id=abc",
+            UrlClassifier.repairConcatenatedUrl("https://vidsrc.buzzhttps:/vidsrc.buzz/_stream?id=abc")
+        )
+        assertEquals(
+            "http://vidsrc.buzz/_stream?id=abc",
+            UrlClassifier.repairConcatenatedUrl("https://vidsrc.buzzhttp://vidsrc.buzz/_stream?id=abc")
         )
         // A legitimate embedded URL parameter must be untouched.
         val bridge = "https://dash-hls-bridge.x.workers.dev/?url=https%3A%2F%2Fsacdn.example%2Fmaster.m3u8"
