@@ -2,10 +2,20 @@ package com.anonrode.downloader.pipeline
 
 object HostPolicyRegistry {
 
-    val ASIAN_DRAMA_CLUSTER = setOf("asianc", "dramarain", "dramakey", "pluto", "nepu")
+    val ASIAN_DRAMA_CLUSTER = setOf("asianc", "dramarain", "dramakey", "pluto", "nepu", "anitaku")
     val WESTERN_CLUSTER = setOf("nkiri", "9jarocks", "naijavault", "naijaprey")
-    val DEDICATED_ASIAN_SITES = setOf("asianc", "dramarain", "dramakey")
+    val DEDICATED_ASIAN_SITES = setOf("asianc", "dramarain", "dramakey", "anitaku", "gogoanime")
     val SECONDARY_ASIAN_FALLBACK = setOf("nkiri", "9jarocks")
+
+    /** Site-level half of the failover cluster decision (country/title checks
+     *  live in DownloadEngine). Anime providers must never be treated as
+     *  Western: 10-22 “Mayonaka Punch” failover searched the Western cluster
+     *  and reported no provider, so anitaku/gogo never received the retry. */
+    fun isAsianSite(site: String): Boolean {
+        val s = site.trim().lowercase()
+        if (s.isBlank()) return false
+        return s in DEDICATED_ASIAN_SITES || (s in ASIAN_DRAMA_CLUSTER && s !in WESTERN_CLUSTER)
+    }
 
     // Built-in per-host socket caps. Speed-first policy (2026-10, 1DM batch):
     // start wide and let TurboDownloader's 429 ladder + drop-and-replace adapt

@@ -1906,13 +1906,11 @@ class DownloadEngine(
     }
 
     internal fun isAsianDramaContext(task: DownloadTask): Boolean {
-        val site = task.site.lowercase()
-        if (site in DEDICATED_ASIAN_SITES) return true
+        if (com.anonrode.downloader.pipeline.HostPolicyRegistry.isAsianSite(task.site)) return true
         val country = extractCountry("${task.showTitle} ${task.episodeTitle} ${task.sourceUrl}", task.site)
         if (country in setOf(DramaCountry.KOREAN, DramaCountry.CHINESE, DramaCountry.JAPANESE, DramaCountry.THAI, DramaCountry.TAIWANESE)) {
             return true
         }
-        if (site in ASIAN_DRAMA_CLUSTER && site !in WESTERN_CLUSTER) return true
         return false
     }
 
@@ -3638,7 +3636,9 @@ class DownloadEngine(
                 val isHlsByEvidence = terminalEvidence?.kind ==
                     com.anonrode.downloader.pipeline.UrlClassifier.TerminalKind.HLS_PLAYLIST
                 val isHlsStream = isHlsByEvidence ||
-                    (terminalEvidence == null && com.anonrode.downloader.pipeline.UrlClassifier.isStreamingLink(streamUrl))
+                    (terminalEvidence?.kind !=
+                        com.anonrode.downloader.pipeline.UrlClassifier.TerminalKind.DIRECT_MEDIA &&
+                        com.anonrode.downloader.pipeline.UrlClassifier.isStreamingLink(streamUrl))
                 val isDirectByEvidence = terminalEvidence?.kind ==
                     com.anonrode.downloader.pipeline.UrlClassifier.TerminalKind.DIRECT_MEDIA
                 val isProvablyDirect = isDirectByEvidence || isProvablyDirectFile(streamUrl) ||
@@ -4759,8 +4759,15 @@ class DownloadEngine(
                     // refuses when a real .part/.aria2 or >1 MB artifact exists.
                     val garbageOutput = producedFile != null && producedFile.exists() &&
                         isGarbageArtifact(producedFile)
-                    if ((producedFile == null || garbageOutput) && live.downloadedBytes == 0L &&
-                        attemptCrossProviderFailover(live, producedFile)) {
+                    // Garbage output is NOT banked progress — even when the
+                    // garbage itself incremented downloadedBytes (the 10-22
+                    // 3.3 KB bridge-manifest saved as .mp4 did exactly that).
+                    // Let the failover helper's own partial/large-artifact
+                    // guard protect real bytes; only a clean missing-file
+                    // case additionally requires zero bytes.
+                    val failoverEligible = garbageOutput ||
+                        (producedFile == null && live.downloadedBytes == 0L)
+                    if (failoverEligible && attemptCrossProviderFailover(live, producedFile)) {
                         return@launch
                     }
                     val parked = producedFile == null &&
