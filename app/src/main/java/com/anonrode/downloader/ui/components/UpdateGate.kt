@@ -57,6 +57,12 @@ fun UpdateGate() {
     val policy = DynamicRulesManager.getUpdatePolicy()
 
     var snoozeUntil by remember { mutableStateOf(prefs.getLong("update_snooze_until_ms", 0L)) }
+    val snoozeResetTick by UpdateManager.snoozeResetTick.collectAsState()
+    LaunchedEffect(snoozeResetTick) {
+        if (snoozeResetTick > 0L) {
+            snoozeUntil = prefs.getLong("update_snooze_until_ms", 0L)
+        }
+    }
     var bypassUntil by remember { mutableStateOf(prefs.getLong("update_gate_bypass_ms", 0L)) }
     var busy by remember { mutableStateOf(false) }
     var progress by remember { mutableStateOf("") }

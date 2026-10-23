@@ -155,15 +155,17 @@ object HostHealth {
     fun clearIfAlive(hostOrUrl: String) {
         val h = hostOf(hostOrUrl)
         if (h.isBlank()) return
+        var changed = false
         records.compute(h) { _, v -> (v ?: return@compute v).apply {
-            if (consecutiveFails > 0) {
+            if (consecutiveFails > 0 || lastRate429Ms > 0L || !lastEventOk) {
                 consecutiveFails = 0
+                lastRate429Ms = 0L
+                lastEventOk = true
+                changed = true
             }
-            lastRate429Ms = 0L
             lastOkMs = System.currentTimeMillis()
-            lastEventOk = true
         } }
-        persist()
+        if (changed) persist()
     }
 
     /**
@@ -373,12 +375,21 @@ object HostHealth {
         }
     }
 
+    private val persistLock = Any()
+
     private fun persist() {
-        try {
-            val f = file ?: return
-            val obj = JSONObject()
-            records.entries.take(500).forEach { (k, v) -> obj.put(k, v.toJson()) }
-            f.writeText(obj.toString())
-        } catch (_: Exception) {}
+        synchronized(persistLock) {
+            try {
+                val f = file ?: return
+                val obj = JSONObject()
+                records.entries.take(500).forEach { (k, v) -> obj.put(k, v.toJson()) }
+                val tmp = File(f.parentFile, f.name + ".tmp")
+                tmp.writeText(obj.toString())
+                if (!tmp.renameTo(f)) {
+                    f.delete()
+                    tmp.renameTo(f)
+                }
+            } catch (_: Exception) {}
+        }
     }
 }

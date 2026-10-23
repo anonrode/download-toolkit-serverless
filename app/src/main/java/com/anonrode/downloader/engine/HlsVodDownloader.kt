@@ -1,5 +1,7 @@
 package com.anonrode.downloader.engine
 
+import com.anonrode.downloader.data.net.HttpClient
+import com.anonrode.downloader.pipeline.HostPolicyRegistry
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -432,6 +434,9 @@ object HlsVodDownloader {
             }
             if (!appended) throw java.io.IOException("HLS segment $idx failed (status $lastStatus)")
         }
+        try {
+            java.io.RandomAccessFile(dest, "rw").use { it.setLength(cumulative) }
+        } catch (_: Exception) {}
         dest
     }
 
@@ -470,9 +475,17 @@ object HlsVodDownloader {
         maxHeight: Int,
         estimatedTotalBytes: Long,
         onProgress: (downloaded: Long, total: Long, speed: Long, eta: Long) -> Unit,
-        isCancelled: () -> Boolean
+        isCancelled: () -> Boolean,
+        prefetchedMasterBody: String? = null,
+        prefetchedVariantBody: String? = null,
+        prefetchedVariantUrl: String? = null
     ): File? = withContext(Dispatchers.IO) {
-        val client = OkHttpClient.Builder()
+        val baseClient = if (com.anonrode.downloader.pipeline.HostPolicyRegistry.allowsPermissiveTlsFallback(masterUrl)) {
+            HttpClient.permissiveDownloadClient
+        } else {
+            HttpClient.downloadClient
+        }
+        val client = baseClient.newBuilder()
             // ONE pooled connection by design: the limiter counts bytes per
             // window; a single keep-alive connection is the browser shape.
             .connectionPool(ConnectionPool(2, 5, TimeUnit.MINUTES))
@@ -481,12 +494,12 @@ object HlsVodDownloader {
             .retryOnConnectionFailure(false)
             .build()
 
-        // Manifest lifecycle (1/2): master, fetched once.
-        val masterBody = fetchText(client, masterUrl, headers) ?: return@withContext null
-        val variantUrl = parseMaster(masterBody, masterUrl, maxHeight) ?: masterUrl
-        // Manifest lifecycle (2/2): the chosen variant, fetched exactly once.
+        // Manifest lifecycle (1/2): master, fetched once (or reused from preflight).
+        val masterBody = prefetchedMasterBody ?: fetchText(client, masterUrl, headers) ?: return@withContext null
+        val variantUrl = prefetchedVariantUrl ?: parseMaster(masterBody, masterUrl, maxHeight) ?: masterUrl
+        // Manifest lifecycle (2/2): the chosen variant, fetched exactly once (or reused from preflight).
         val variantBody = if (variantUrl == masterUrl) masterBody
-        else fetchText(client, variantUrl, headers) ?: return@withContext null
+        else prefetchedVariantBody ?: fetchText(client, variantUrl, headers) ?: return@withContext null
         val variant = parseVariant(variantBody, variantUrl)
         // RC-5: a master/variant that DECLARES subtitle media must be served
         // by the yt-dlp path (which requests --write-subs), never by this raw
@@ -577,18 +590,16 @@ object HlsVodDownloader {
         return try {
             val context = appContextRef?.get() ?: return false
             val ff = resolveFfmpegBinary(context) ?: return false
-            val listFile = File(outPath.parentFile, outPath.nameWithoutExtension + ".concat.m3u")
-            val escaped = staging.absolutePath.replace("'", "'\\''")
-            listFile.writeText("ffconcat version 1.0\nfile '$escaped'\n")
-            val tmpOut = File(outPath.absolutePath + ".remux")
+            val tmpOut = File(outPath.parentFile, outPath.nameWithoutExtension + ".remux.mp4")
             try { tmpOut.delete() } catch (_: Exception) {}
             val cmd = mutableListOf(
                 ff.absolutePath,
                 "-y", "-loglevel", "error",
-                "-f", "concat", "-safe", "0",
-                "-i", listFile.absolutePath,
+                "-i", staging.absolutePath,
                 "-c", "copy",
+                "-bsf:a", "aac_adtstoasc",
                 "-movflags", "+faststart",
+                "-f", "mp4",
                 tmpOut.absolutePath
             )
             val pb = ProcessBuilder(cmd)
@@ -610,7 +621,6 @@ object HlsVodDownloader {
             }.apply { isDaemon = true; start() }
             val ok = p.waitFor(10, TimeUnit.MINUTES) && p.exitValue() == 0 && tmpOut.length() > 0
             try { p.destroyForcibly() } catch (_: Exception) {}
-            try { listFile.delete() } catch (_: Exception) {}
             if (!ok) {
                 try { tmpOut.delete() } catch (_: Exception) {}
                 return false

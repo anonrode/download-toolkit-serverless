@@ -15,9 +15,13 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.net.URLDecoder
+import java.util.regex.Pattern
+import java.util.regex.PatternSyntaxException
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
+import com.anonrode.downloader.pipeline.HostPolicyRegistry
 
 data class SiteRuleConfig(
     val searchPattern: String = "",
@@ -38,6 +42,106 @@ data class HostPolicyRule(
     val referer: String,   // "" | "exact:<url>" resolved value | "none"
     val ua: String = ""
 )
+
+data class DownloaderRoute(
+    val pattern: Pattern,
+    val engine: String, // "hls_paced" | "ytdlp_only" | "turbo_aria2" | "aria2_only"
+    val profile: String,
+    val keepReferer: Boolean? = null
+)
+
+data class EngineProfile(
+    val args: List<List<String>>,
+    val headers: Map<String, String> = emptyMap()
+)
+
+data class ProxyUnwrapper(
+    val pattern: Pattern,
+    val group: Int = 1,
+    val decode: String = "url" // "url" | "base64" | "hex" | "none"
+)
+
+data class CryptoKeySpec(
+    val cipher: String = "AES/CBC/PKCS5Padding",
+    val keyBytes: ByteArray,
+    val ivBytes: ByteArray
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is CryptoKeySpec) return false
+        return cipher == other.cipher && keyBytes.contentEquals(other.keyBytes) && ivBytes.contentEquals(other.ivBytes)
+    }
+
+    override fun hashCode(): Int {
+        var result = cipher.hashCode()
+        result = 31 * result + keyBytes.contentHashCode()
+        result = 31 * result + ivBytes.contentHashCode()
+        return result
+    }
+}
+
+data class FailoverClusters(
+    val asianCluster: Set<String> = HostPolicyRegistry.ASIAN_DRAMA_CLUSTER,
+    val westernCluster: Set<String> = HostPolicyRegistry.WESTERN_CLUSTER,
+    val dedicatedAsian: Set<String> = HostPolicyRegistry.DEDICATED_ASIAN_SITES,
+    val secondaryAsianFallback: Set<String> = HostPolicyRegistry.SECONDARY_ASIAN_FALLBACK,
+    val animeSecondPass: Set<String> = setOf("anitaku", "gogoanime")
+)
+
+val DEFAULT_UNWRAPPERS: List<ProxyUnwrapper> = listOf(
+    ProxyUnwrapper(Pattern.compile("""/pl/api\.php.*?[?&]url=([^&]+)"""), 1, "url"),
+    ProxyUnwrapper(Pattern.compile("""stream-proxy.*?target=([^&]+)"""), 1, "base64")
+)
+
+val DEFAULT_RESOLVER_EXCLUSIONS: Map<String, List<String>> = mapOf(
+    "vidsrc" to listOf("/_stream", "/pl/api.php", "stream-proxy"),
+    "loadedfiles" to listOf("/token/download/", "/d/"),
+    "streamtape" to listOf("/get_video"),
+    "doodstream" to listOf("/pass_md5/"),
+    "pixeldrain" to listOf("/api/file/")
+)
+
+val DEFAULT_CRYPTO_RINGS: Map<String, List<CryptoKeySpec>> = mapOf(
+    "megaplay" to listOf(
+        CryptoKeySpec(
+            cipher = "AES/CBC/PKCS5Padding",
+            keyBytes = "i?LMTAx0Q6,:}50U".toByteArray(Charsets.UTF_8).let { src ->
+                ByteArray(32).also { System.arraycopy(src, 0, it, 0, minOf(32, src.size)) }
+            },
+            ivBytes = "W0;27ToaUpl_P%'c".toByteArray(Charsets.UTF_8)
+        )
+    )
+)
+
+val DEFAULT_PERMISSIVE_TLS_HOSTS: Set<String> = setOf("wafficloud.com", "streamwish.to", "loadedfiles.xyz")
+
+val DEFAULT_HLS_REFERER_HOSTS: Set<String> = setOf(
+    "megaplay.buzz", "watching.onl", "anivideo.sbs",
+    "anitaku", "gogoanime", "2anime.xyz"
+)
+
+val DEFAULT_STREAMING_MARKERS: List<String> = listOf("kickassanime", "playlist.php", "/api/orion/")
+
+val DEFAULT_DECOY_SIGNATURES: List<String> = listOf(
+    "<!doctype html", "<html", "Attention Required! | Cloudflare",
+    "Just a moment...", "Video Not Available", "File Not Found"
+)
+
+data class OtaRuntimeSnapshot(
+    val routes: List<DownloaderRoute> = emptyList(),
+    val ytdlpProfiles: Map<String, EngineProfile> = emptyMap(),
+    val aria2Profiles: Map<String, EngineProfile> = emptyMap(),
+    val unwrappers: List<ProxyUnwrapper> = DEFAULT_UNWRAPPERS,
+    val resolverExclusions: Map<String, List<String>> = DEFAULT_RESOLVER_EXCLUSIONS,
+    val cryptoRings: Map<String, List<CryptoKeySpec>> = DEFAULT_CRYPTO_RINGS,
+    val permissiveTlsHosts: Set<String> = DEFAULT_PERMISSIVE_TLS_HOSTS,
+    val hlsExplicitRefererHosts: Set<String> = DEFAULT_HLS_REFERER_HOSTS,
+    val streamingUrlMarkers: List<String> = DEFAULT_STREAMING_MARKERS,
+    val preflightPassthroughMarkers: List<String> = listOf("megaplays.se/api/playlist.php"),
+    val decoySignatures: List<String> = DEFAULT_DECOY_SIGNATURES,
+    val failoverClusters: FailoverClusters = FailoverClusters()
+)
+
 
 /**
  * OTA-tunable content/download policy (optional top-level "contentPolicy").
@@ -392,6 +496,194 @@ object DynamicRulesManager {
     @Volatile private var activeTamperPolicy: TamperPolicy? = null
     @Volatile private var activeFcmConfig: FcmConfig? = null
 
+    // v3.4.0 OTA Runtime Snapshot: atomic immutable state holder
+    @Volatile private var currentSnapshot: OtaRuntimeSnapshot = OtaRuntimeSnapshot()
+
+    val DEFAULT_YTDLP_CLI_ARGS: List<List<String>> = listOf(
+        listOf("--continue"),
+        listOf("--no-check-certificates"),
+        listOf("--no-warnings"),
+        listOf("--no-call-home"),
+        listOf("--socket-timeout", "15"),
+        listOf("--retries", "10"),
+        listOf("--fragment-retries", "10"),
+        listOf("--concurrent-fragments", "{concurrent_fragments}"),
+        listOf("--user-agent", "{user_agent}"),
+        listOf("--referer", "{referer}"),
+        listOf("--add-header", "Origin:{origin}")
+    )
+
+    fun getSnapshot(): OtaRuntimeSnapshot = currentSnapshot
+
+    fun resolveEngine(url: String): DownloaderRoute? {
+        val low = url.lowercase()
+        return currentSnapshot.routes.firstOrNull { it.pattern.matcher(low).find() }
+    }
+
+    /**
+     * Resolves CLI tokens. If any variable placeholder in a token-group resolves
+     * to a blank string, the entire token group is omitted.
+     */
+    fun resolveCliArgs(profileArgs: List<List<String>>, vars: Map<String, String>): List<String> {
+        val out = mutableListOf<String>()
+        outer@ for (group in profileArgs) {
+            val resolvedGroup = ArrayList<String>(group.size)
+            for (token in group) {
+                var s = token
+                for ((k, v) in vars) {
+                    val placeholder = "{$k}"
+                    if (s.contains(placeholder)) {
+                        if (v.isBlank()) continue@outer
+                        s = s.replace(placeholder, v)
+                    }
+                }
+                resolvedGroup.add(s)
+            }
+            out.addAll(resolvedGroup)
+        }
+        return out
+    }
+
+    /**
+     * URL-safe multi-pass unwrapper up to depth 3 with exception shielding.
+     */
+    fun unwrapProxyUrl(rawUrl: String): String? {
+        var current = rawUrl
+        var unwrappedAny = false
+        repeat(3) {
+            val next = unwrapOnce(current) ?: return@repeat
+            if (next == current || !next.startsWith("http", ignoreCase = true)) return@repeat
+            current = next
+            unwrappedAny = true
+        }
+        return if (unwrappedAny) current else null
+    }
+
+    private fun unwrapOnce(url: String): String? {
+        for (u in currentSnapshot.unwrappers) {
+            val m = u.pattern.matcher(url)
+            if (m.find() && m.groupCount() >= u.group) {
+                val rawVal = m.group(u.group) ?: continue
+                return runCatching {
+                    when (u.decode.lowercase()) {
+                        "url" -> URLDecoder.decode(rawVal, "UTF-8")
+                        "base64" -> safeBase64Decode(URLDecoder.decode(rawVal, "UTF-8")).let { String(it, Charsets.UTF_8) }
+                        "hex" -> String(rawVal.chunked(2).map { it.toInt(16).toByte() }.toByteArray(), Charsets.UTF_8)
+                        else -> rawVal
+                    }
+                }.getOrNull()
+            }
+        }
+        return null
+    }
+
+    private fun ByteArray.startsWith(prefix: ByteArray): Boolean {
+        if (this.size < prefix.size) return false
+        for (i in prefix.indices) {
+            if (this[i] != prefix[i]) return false
+        }
+        return true
+    }
+
+    private fun safeBase64Decode(str: String): ByteArray {
+        val clean = str.replace('-', '+').replace('_', '/').replace(Regex("""\s"""), "")
+        val pad = (4 - (clean.length % 4)) % 4
+        val padded = clean + "=".repeat(pad)
+        return try {
+            java.util.Base64.getDecoder().decode(padded)
+        } catch (_: Throwable) {
+            android.util.Base64.decode(padded, android.util.Base64.DEFAULT)
+        }
+    }
+
+    fun isPermissiveTls(hostOrUrl: String): Boolean {
+        val raw = hostOrUrl.trim()
+        if (raw.isBlank()) return false
+        val h = (if (raw.contains("://") || raw.contains("/")) {
+            com.anonrode.downloader.pipeline.UrlClassifier.extractHost(raw)
+        } else {
+            raw.substringBefore(':').substringBefore('/')
+        }).lowercase().removePrefix("www.").trimEnd('.')
+        if (h.isBlank()) return false
+        return currentSnapshot.permissiveTlsHosts.any { rawDomain ->
+            val d = rawDomain.trim().lowercase().removePrefix("www.").trimEnd('.')
+            d.isNotBlank() && (h == d || h.endsWith(".$d"))
+        }
+    }
+
+    fun requiresHlsExplicitReferer(referer: String): Boolean {
+        val low = referer.lowercase()
+        return currentSnapshot.hlsExplicitRefererHosts.any { low.contains(it.lowercase()) }
+    }
+
+    fun isResolverExcluded(resolver: String, url: String): Boolean {
+        val exclusions = currentSnapshot.resolverExclusions[resolver.lowercase()] ?: return false
+        val low = url.lowercase()
+        return exclusions.any { low.contains(it) }
+    }
+
+    fun getCryptoKeys(resolver: String): List<CryptoKeySpec> =
+        currentSnapshot.cryptoRings[resolver.lowercase()].orEmpty()
+
+    /**
+     * Binary container magic check: Never flag valid media containers as decoys.
+     */
+    fun isDecoyBody(contentBytes: ByteArray): Boolean {
+        if (contentBytes.isEmpty()) return true
+        val n = contentBytes.size
+        if (n >= 8) {
+            val box = String(contentBytes, 4, 4, Charsets.US_ASCII).lowercase()
+            if (box in setOf("ftyp", "moov", "mdat", "free", "wide", "skip", "moof", "styp", "uuid", "pnot")) return false
+        }
+        if (n >= 4) {
+            // Matroska / WebM (1A 45 DF A3)
+            if (contentBytes[0] == 0x1A.toByte() && contentBytes[1] == 0x45.toByte() &&
+                contentBytes[2] == 0xDF.toByte() && contentBytes[3] == 0xA3.toByte()) return false
+            // RIFF (AVI, WAV, WebP)
+            if (contentBytes[0] == 0x52.toByte() && contentBytes[1] == 0x49.toByte() &&
+                contentBytes[2] == 0x46.toByte() && contentBytes[3] == 0x46.toByte()) return false
+            // OggS
+            if (contentBytes[0] == 0x4F.toByte() && contentBytes[1] == 0x67.toByte() &&
+                contentBytes[2] == 0x67.toByte() && contentBytes[3] == 0x53.toByte()) return false
+            // fLaC
+            if (contentBytes[0] == 0x66.toByte() && contentBytes[1] == 0x4C.toByte() &&
+                contentBytes[2] == 0x61.toByte() && contentBytes[3] == 0x43.toByte()) return false
+            // PNG
+            if (contentBytes[0] == 0x89.toByte() && contentBytes[1] == 0x50.toByte() &&
+                contentBytes[2] == 0x4E.toByte() && contentBytes[3] == 0x47.toByte()) return false
+        }
+        if (n >= 3) {
+            // ID3 (MP3)
+            if (contentBytes[0] == 0x49.toByte() && contentBytes[1] == 0x44.toByte() && contentBytes[2] == 0x33.toByte()) return false
+            // JPEG (FF D8 FF)
+            if (contentBytes[0] == 0xFF.toByte() && contentBytes[1] == 0xD8.toByte() && contentBytes[2] == 0xFF.toByte()) return false
+        }
+        if (n >= 1) {
+            // MPEG-TS sync byte 0x47
+            if (contentBytes[0] == 0x47.toByte() && (n < 189 || contentBytes[188] == 0x47.toByte())) return false
+        }
+        val headLen = minOf(n, 4096)
+        val headText = String(contentBytes, 0, headLen, Charsets.UTF_8).lowercase()
+        return currentSnapshot.decoySignatures.any { headText.contains(it.lowercase()) }
+    }
+
+    fun isDecoyBodyText(text: String): Boolean {
+        val low = text.lowercase()
+        return currentSnapshot.decoySignatures.any { low.contains(it.lowercase()) }
+    }
+
+    fun isStreamingUrlMarker(url: String): Boolean {
+        val low = url.lowercase()
+        return currentSnapshot.streamingUrlMarkers.any { low.contains(it.lowercase()) }
+    }
+
+    fun isPreflightPassthrough(url: String): Boolean {
+        val low = url.lowercase()
+        return currentSnapshot.preflightPassthroughMarkers.any { low.contains(it.lowercase()) }
+    }
+
+    fun getFailoverClusters(): FailoverClusters = currentSnapshot.failoverClusters
+
     /** Resolved flag for one family id (see RulesFlags.FAMILY_IDS), or the
      *  safe default when the active payload carried no flag for it. */
     fun getFamilyFlag(family: String): FamilyFlag =
@@ -610,6 +902,268 @@ object DynamicRulesManager {
             appId = f.optString("appId").trim(),
             senderId = f.optString("senderId").trim(),
             projectId = f.optString("projectId").trim()
+        )
+    }
+
+    private fun safeHexToBytes(hex: String): ByteArray? {
+        val clean = hex.trim()
+        if (clean.length % 2 != 0) return null
+        return runCatching {
+            ByteArray(clean.length / 2) { i ->
+                clean.substring(i * 2, i * 2 + 2).toInt(16).toByte()
+            }
+        }.getOrNull()
+    }
+
+    private fun buildOtaSnapshot(
+        obj: JSONObject,
+        familyFlags: Map<String, FamilyFlag> = emptyMap(),
+        deviceUuid: String = "",
+        ver: String = ""
+    ): OtaRuntimeSnapshot {
+        fun isFamilyActive(family: String): Boolean {
+            val flag = familyFlags[family] ?: return true
+            val active = RulesFlags.isFamilyActiveForDevice(flag, family, deviceUuid)
+            if (!active) {
+                com.anonrode.downloader.util.DebugLog.engine(
+                    "OTA rules[$ver] family \"$family\" inactive for device — publishing compiled control/empty"
+                )
+            }
+            return active
+        }
+
+        val routes = mutableListOf<DownloaderRoute>()
+        if (isFamilyActive("downloader_routing")) {
+            obj.optJSONArray("downloader_routing")?.let { arr ->
+                val maxEntries = minOf(arr.length(), 64)
+                for (i in 0 until maxEntries) {
+                    val r = arr.optJSONObject(i) ?: continue
+                    val patStr = r.optString("pattern").trim()
+                    if (patStr.isBlank() || patStr.length > RuleCaps.MAX_REGEX_CHARS) continue
+                    val pat = runCatching { Pattern.compile(patStr, Pattern.CASE_INSENSITIVE) }.getOrNull() ?: continue
+                    val engine = r.optString("engine", "").trim()
+                    val profile = r.optString("profile", "default").trim()
+                    val keepReferer = if (r.has("keep_referer")) r.optBoolean("keep_referer") else null
+                    routes.add(DownloaderRoute(pat, engine, profile, keepReferer))
+                }
+            }
+        }
+
+        val ytdlpProfiles = mutableMapOf<String, EngineProfile>()
+        val aria2Profiles = mutableMapOf<String, EngineProfile>()
+        if (isFamilyActive("engine_profiles")) {
+            obj.optJSONObject("engine_profiles")?.let { epObj ->
+                fun parseProfiles(subObj: JSONObject?): Map<String, EngineProfile> {
+                    if (subObj == null) return emptyMap()
+                    val out = mutableMapOf<String, EngineProfile>()
+                    val it = subObj.keys()
+                    while (it.hasNext()) {
+                        val name = it.next()
+                        val profObj = subObj.optJSONObject(name) ?: continue
+                        val argsArr = profObj.optJSONArray("args") ?: continue
+                        val argsList = mutableListOf<List<String>>()
+                        for (i in 0 until argsArr.length()) {
+                            val groupArr = argsArr.optJSONArray(i)
+                            if (groupArr != null) {
+                                val group = mutableListOf<String>()
+                                for (j in 0 until groupArr.length()) {
+                                    group.add(groupArr.optString(j))
+                                }
+                                if (group.isNotEmpty()) argsList.add(group)
+                            } else {
+                                val single = argsArr.optString(i)
+                                if (single.isNotBlank()) argsList.add(listOf(single))
+                            }
+                        }
+                        val hdrs = mutableMapOf<String, String>()
+                        profObj.optJSONObject("headers")?.let { hObj ->
+                            val hKeys = hObj.keys()
+                            while (hKeys.hasNext()) {
+                                val hk = hKeys.next()
+                                hdrs[hk] = hObj.optString(hk)
+                            }
+                        }
+                        out[name] = EngineProfile(argsList, hdrs)
+                    }
+                    return out
+                }
+                ytdlpProfiles.putAll(parseProfiles(epObj.optJSONObject("ytdlp")))
+                aria2Profiles.putAll(parseProfiles(epObj.optJSONObject("aria2")))
+            }
+        }
+
+        val unwrappers = mutableListOf<ProxyUnwrapper>()
+        if (isFamilyActive("proxy_unwrappers")) {
+            obj.optJSONArray("proxy_unwrappers")?.let { arr ->
+                val maxEntries = minOf(arr.length(), 32)
+                for (i in 0 until maxEntries) {
+                    val u = arr.optJSONObject(i) ?: continue
+                    val patStr = u.optString("pattern").trim()
+                    if (patStr.isBlank() || patStr.length > RuleCaps.MAX_REGEX_CHARS) continue
+                    val pat = runCatching { Pattern.compile(patStr, Pattern.CASE_INSENSITIVE) }.getOrNull() ?: continue
+                    val group = u.optInt("group", 1)
+                    val decode = u.optString("decode", "url").trim()
+                    unwrappers.add(ProxyUnwrapper(pat, group, decode))
+                }
+            }
+        }
+
+        val resolverExclusions = mutableMapOf<String, List<String>>()
+        if (isFamilyActive("resolver_gates")) {
+            obj.optJSONObject("resolver_gates")?.let { rgObj ->
+                rgObj.optJSONObject("exclusions")?.let { exObj ->
+                    val it = exObj.keys()
+                    while (it.hasNext()) {
+                        val resName = it.next().lowercase()
+                        val arr = exObj.optJSONArray(resName)
+                        if (arr != null) {
+                            val list = (0 until arr.length()).mapNotNull { idx ->
+                                arr.optString(idx).trim().lowercase().ifBlank { null }
+                            }
+                            if (list.isNotEmpty()) resolverExclusions[resName] = list
+                        }
+                    }
+                }
+            }
+        }
+
+        val cryptoRings = mutableMapOf<String, List<CryptoKeySpec>>()
+        if (isFamilyActive("resolver_crypto")) {
+            obj.optJSONObject("resolver_crypto")?.let { rcObj ->
+                rcObj.optJSONObject("rings")?.let { ringsObj ->
+                    val it = ringsObj.keys()
+                    while (it.hasNext()) {
+                        val resName = it.next().lowercase()
+                        val arr = ringsObj.optJSONArray(resName) ?: continue
+                        val specs = mutableListOf<CryptoKeySpec>()
+                        for (i in 0 until arr.length()) {
+                            val item = arr.optJSONObject(i) ?: continue
+                            val cipher = item.optString("cipher", item.optString("algo", "AES/CBC/PKCS5Padding"))
+                            val keyHex = item.optString("key_hex").trim()
+                            val ivHex = item.optString("iv_hex").trim()
+                            val keyStr = item.optString("key").trim()
+                            val ivStr = item.optString("iv").trim()
+                            val keyBytes = when {
+                                keyHex.isNotBlank() -> safeHexToBytes(keyHex)
+                                keyStr.isNotBlank() -> {
+                                    val src = keyStr.toByteArray(Charsets.UTF_8)
+                                    val padTo = item.optInt("pad_to", 0)
+                                    if (padTo == 32 || (src.size != 16 && src.size != 24 && src.size != 32)) {
+                                        ByteArray(32).also { System.arraycopy(src, 0, it, 0, minOf(32, src.size)) }
+                                    } else {
+                                        src
+                                    }
+                                }
+                                else -> null
+                            }
+                            val ivBytes = when {
+                                ivHex.isNotBlank() -> safeHexToBytes(ivHex)
+                                ivStr.isNotBlank() -> ivStr.toByteArray(Charsets.UTF_8)
+                                else -> null
+                            }
+                            if (keyBytes != null && ivBytes != null) {
+                                specs.add(CryptoKeySpec(cipher, keyBytes, ivBytes))
+                            }
+                        }
+                        if (specs.isNotEmpty()) cryptoRings[resName] = specs
+                    }
+                }
+            }
+        }
+
+        val permissiveTlsHosts = mutableSetOf<String>()
+        if (isFamilyActive("permissive_tls_hosts")) {
+            obj.optJSONArray("permissive_tls_hosts")?.let { arr ->
+                for (i in 0 until arr.length()) {
+                    val h = arr.optString(i).trim().lowercase()
+                    if (h.isNotBlank()) permissiveTlsHosts.add(h)
+                }
+            }
+        }
+
+        val hlsKeepRefererHosts = mutableSetOf<String>()
+        if (isFamilyActive("hls_keep_referer_hosts")) {
+            obj.optJSONArray("hls_keep_referer_hosts")?.let { arr ->
+                for (i in 0 until arr.length()) {
+                    val h = arr.optString(i).trim().lowercase()
+                    if (h.isNotBlank()) hlsKeepRefererHosts.add(h)
+                }
+            }
+        }
+
+        val streamingUrlMarkers = mutableListOf<String>()
+        if (isFamilyActive("streaming_url_markers")) {
+            obj.optJSONArray("streaming_url_markers")?.let { arr ->
+                for (i in 0 until arr.length()) {
+                    val m = arr.optString(i).trim().lowercase()
+                    if (m.isNotBlank()) streamingUrlMarkers.add(m)
+                }
+            }
+        }
+
+        val preflightMarkers = mutableListOf<String>()
+        if (isFamilyActive("preflight_passthrough_markers")) {
+            obj.optJSONArray("preflight_passthrough_markers")?.let { arr ->
+                for (i in 0 until arr.length()) {
+                    val m = arr.optString(i).trim().lowercase()
+                    if (m.isNotBlank()) preflightMarkers.add(m)
+                }
+            }
+        }
+
+        val decoySignatures = mutableListOf<String>()
+        if (isFamilyActive("decoy_signatures")) {
+            obj.optJSONArray("decoy_signatures")?.let { arr ->
+                for (i in 0 until arr.length()) {
+                    val s = arr.optString(i).trim()
+                    if (s.isNotBlank()) decoySignatures.add(s)
+                }
+            }
+        }
+
+        var failoverClusters = FailoverClusters()
+        if (isFamilyActive("failover_clusters")) {
+            obj.optJSONObject("failover_clusters")?.let { fcObj ->
+                val animeSecondPass = fcObj.optJSONArray("animeSecondPass")?.let { arr ->
+                    (0 until arr.length()).mapNotNull { arr.optString(it).trim().lowercase().ifBlank { null } }.toSet()
+                } ?: setOf("anitaku", "gogoanime")
+                val clusters = mutableMapOf<String, Set<String>>()
+                fcObj.optJSONObject("clusters")?.let { cObj ->
+                    val it = cObj.keys()
+                    while (it.hasNext()) {
+                        val key = it.next().lowercase()
+                        val arr = cObj.optJSONArray(key) ?: continue
+                        val list = (0 until arr.length()).mapNotNull { arr.optString(it).trim().lowercase().ifBlank { null } }.toSet()
+                        clusters[key] = list
+                    }
+                }
+                failoverClusters = FailoverClusters(
+                    asianCluster = clusters["asian"] ?: HostPolicyRegistry.ASIAN_DRAMA_CLUSTER,
+                    westernCluster = clusters["western"] ?: HostPolicyRegistry.WESTERN_CLUSTER,
+                    dedicatedAsian = clusters["dedicated_asian"] ?: HostPolicyRegistry.DEDICATED_ASIAN_SITES,
+                    secondaryAsianFallback = clusters["secondary_asian"] ?: HostPolicyRegistry.SECONDARY_ASIAN_FALLBACK,
+                    animeSecondPass = animeSecondPass
+                )
+            }
+        }
+
+        return OtaRuntimeSnapshot(
+            routes = routes,
+            ytdlpProfiles = ytdlpProfiles,
+            aria2Profiles = aria2Profiles,
+            unwrappers = if (unwrappers.isNotEmpty()) unwrappers else DEFAULT_UNWRAPPERS,
+            resolverExclusions = if (resolverExclusions.isNotEmpty()) {
+                DEFAULT_RESOLVER_EXCLUSIONS.toMutableMap().apply { putAll(resolverExclusions) }
+            } else DEFAULT_RESOLVER_EXCLUSIONS,
+            cryptoRings = if (cryptoRings.isNotEmpty()) {
+                DEFAULT_CRYPTO_RINGS.toMutableMap().apply { putAll(cryptoRings) }
+            } else DEFAULT_CRYPTO_RINGS,
+            permissiveTlsHosts = if (permissiveTlsHosts.isNotEmpty()) permissiveTlsHosts else DEFAULT_PERMISSIVE_TLS_HOSTS,
+            hlsExplicitRefererHosts = if (hlsKeepRefererHosts.isNotEmpty()) hlsKeepRefererHosts else DEFAULT_HLS_REFERER_HOSTS,
+            streamingUrlMarkers = if (streamingUrlMarkers.isNotEmpty()) streamingUrlMarkers else DEFAULT_STREAMING_MARKERS,
+            preflightPassthroughMarkers = if (preflightMarkers.isNotEmpty()) preflightMarkers else listOf("megaplays.se/api/playlist.php"),
+            decoySignatures = if (decoySignatures.isNotEmpty()) decoySignatures else DEFAULT_DECOY_SIGNATURES,
+            failoverClusters = failoverClusters
         )
     }
 
@@ -1915,6 +2469,8 @@ object DynamicRulesManager {
             val prevHostPolicies = activeHostPolicies
             val prevPipelines = activePipelines
 
+            val newSnapshot = buildOtaSnapshot(obj, familyFlags, deviceUuid, ver)
+
             // Atomic publish — readers see either the old playbook or the new
             // one, never a mix.
             activeDomains = domains
@@ -1939,6 +2495,7 @@ object DynamicRulesManager {
             activeFcmConfig = fcmConfig
             remoteLoggingUrl = remoteLogSink
             tokenTtlMinutes = ttl
+            currentSnapshot = newSnapshot
             // P2-2: a payload that carries a rev and survived the gate becomes
             // the new activation floor. Rev-less (legacy) payloads never move
             // the pointer — they must stay able to run on any install.
@@ -1980,7 +2537,18 @@ object DynamicRulesManager {
                     "pipelines" to pipelines.size,
                     "pipelines_shadow_armed" to pipelinesShadowArmed,
                     "dynamic_providers" to dynProviders.size,
-                    "disabled_sites" to contentPolicy.disabledSites.size
+                    "disabled_sites" to contentPolicy.disabledSites.size,
+                    "downloader_routing" to newSnapshot.routes.size,
+                    "engine_profiles" to (newSnapshot.ytdlpProfiles.size + newSnapshot.aria2Profiles.size),
+                    "proxy_unwrappers" to newSnapshot.unwrappers.size,
+                    "resolver_gates" to newSnapshot.resolverExclusions.size,
+                    "resolver_crypto" to newSnapshot.cryptoRings.size,
+                    "permissive_tls_hosts" to newSnapshot.permissiveTlsHosts.size,
+                    "hls_keep_referer_hosts" to newSnapshot.hlsExplicitRefererHosts.size,
+                    "streaming_url_markers" to newSnapshot.streamingUrlMarkers.size,
+                    "preflight_passthrough_markers" to newSnapshot.preflightPassthroughMarkers.size,
+                    "decoy_signatures" to newSnapshot.decoySignatures.size,
+                    "failover_clusters" to (if (newSnapshot.failoverClusters != FailoverClusters()) 1 else 0)
                 ),
                 skippedEntries = skippedPipelines + skippedDynProviders
             )
@@ -2002,6 +2570,7 @@ object DynamicRulesManager {
             // NoSourceLedger: new payload may add platforms — hidden titles
             // get re-judged against the new playbook.
             com.anonrode.downloader.pipeline.NoSourceLedger.clear()
+            com.anonrode.downloader.providers.ProviderRegistry.clearEpisodeCache()
             _version.value = ver
             if (ver != prevVer || activeRev != prevActiveRev) {
                 val revForDiff = rev

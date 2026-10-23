@@ -1,6 +1,7 @@
 package com.anonrode.downloader.pipeline
 
 import com.anonrode.downloader.data.net.HttpClient
+import com.anonrode.downloader.data.rules.DynamicRulesManager
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import java.net.URI
 import java.net.URLDecoder
@@ -95,6 +96,9 @@ object UrlClassifier {
      * values recursively (bounded) and return the first embedded manifest URL.
      */
     fun embeddedStreamingUrl(rawUrl: String, depth: Int = 0): String? {
+        if (depth == 0) {
+            DynamicRulesManager.unwrapProxyUrl(rawUrl)?.let { return it }
+        }
         if (depth > 2) return null
         val query = rawUrl.substringAfter('?', "")
         if (query.isBlank()) return null
@@ -143,6 +147,9 @@ object UrlClassifier {
 
         if (ext in STREAMING_EXTENSIONS) return true
         if (path.endsWith("/manifest") || path.contains("/manifest.") || path.contains("/hls/") || path.contains(".m3u8")) {
+            return true
+        }
+        if (DynamicRulesManager.isStreamingUrlMarker(rawUrl)) {
             return true
         }
         if (low.contains("kickassanime") || low.contains("playlist.php") ||
@@ -293,9 +300,15 @@ object UrlClassifier {
         }
     }
 
-    /** host+path canonical form; null when unparseable. Query/hash dropped. */
+    /** host+path canonical form; null when unparseable. Query/hash dropped.
+     *  When the URL is a streaming proxy worker (dash-hls-bridge / ?url=), canonicalizes
+     *  the embedded target stream so proxy worker manifests are not falsely flagged
+     *  as self-referential loops. */
     internal fun canonicalMediaPath(rawUrl: String): String? {
-        val parsed = rawUrl.trim().toHttpUrlOrNull() ?: return null
+        val target = DynamicRulesManager.unwrapProxyUrl(rawUrl)
+            ?: embeddedStreamingUrl(rawUrl)
+            ?: rawUrl
+        val parsed = target.trim().toHttpUrlOrNull() ?: return null
         val port = if (parsed.port == 80 || parsed.port == 443) "" else ":${parsed.port}"
         return "${parsed.host.lowercase()}$port${parsed.encodedPath}"
     }
@@ -331,9 +344,48 @@ object UrlClassifier {
             return TerminalEvidence(TerminalKind.DIRECT_MEDIA, reason = "media path extension")
         }
         cachedTerminalEvidence(rawUrl)?.let { return it }
+
+        val effectiveReferer = if (!referer.isNullOrBlank()) referer
+        else ResolvedHints.refererFor(rawUrl) ?: com.anonrode.downloader.data.rules.DynamicRulesManager.resolveReferer(rawUrl)
+
+        if (isManifestShaped(rawUrl)) {
+            // M3U8-1: Manifest-shaped URLs skip the no-redirect probeTerminal call
+            // and do one bounded GET (maxBytes = 32 KB) that follows redirects,
+            // checks status/Content-Type/body, and caches the verdict.
+            val body = try {
+                com.anonrode.downloader.data.net.HttpClient.getText(
+                    rawUrl, referer = effectiveReferer, tag = tag, maxBytes = MANIFEST_BODY_MAX_BYTES
+                ).orEmpty()
+            } catch (_: Exception) {
+                ""
+            }
+            val trimmed = body.trimStart('\uFEFF', ' ', '\r', '\n', '\t')
+            val isM3u = trimmed.startsWith("#EXTM3U")
+            val isDash = trimmed.startsWith("<MPD") ||
+                (trimmed.startsWith("<?xml") && trimmed.contains("<MPD", ignoreCase = true))
+            val ct = if (isDash) "application/dash+xml" else "application/vnd.apple.mpegurl"
+            val bodyBytes = body.toByteArray(Charsets.UTF_8).size.toLong()
+            val ev = when {
+                trimmed.isBlank() ->
+                    TerminalEvidence(TerminalKind.UNKNOWN, 0, ct, null, "manifest body unreadable")
+                isDash ->
+                    TerminalEvidence(TerminalKind.HLS_PLAYLIST, 200, ct, bodyBytes, "genuine DASH manifest")
+                !isM3u ->
+                    TerminalEvidence(TerminalKind.STUB, 200, ct, bodyBytes, "mpegurl body is not an M3U document")
+                isTinyManifest(trimmed, ct, bodyBytes) ->
+                    TerminalEvidence(TerminalKind.STUB, 200, ct, bodyBytes, "tiny mpegurl (${bodyBytes}B) with no variants/segments")
+                isSelfReferentialManifest(trimmed, rawUrl) ->
+                    TerminalEvidence(TerminalKind.SELF_REFERENTIAL, 200, ct, bodyBytes, "every playlist URI points back to the playlist itself")
+                else ->
+                    TerminalEvidence(TerminalKind.HLS_PLAYLIST, 200, ct, bodyBytes, "genuine playlist")
+            }
+            rememberTerminalEvidence(rawUrl, ev)
+            return ev
+        }
+
         val probe = try {
             com.anonrode.downloader.data.net.HttpClient.probeTerminal(
-                rawUrl, referer = referer, timeoutMs = 6_000L, tag = tag
+                rawUrl, referer = effectiveReferer, timeoutMs = 6_000L, tag = tag
             )
         } catch (_: Exception) {
             null
@@ -361,7 +413,7 @@ object UrlClassifier {
         // host-gated by the caller.
         val body = try {
             com.anonrode.downloader.data.net.HttpClient.getText(
-                rawUrl, referer = referer, tag = tag, maxBytes = MANIFEST_BODY_MAX_BYTES
+                rawUrl, referer = effectiveReferer, tag = tag, maxBytes = MANIFEST_BODY_MAX_BYTES
             ).orEmpty()
         } catch (_: Exception) {
             ""

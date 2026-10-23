@@ -6,6 +6,7 @@ import android.os.StatFs
 import com.anonrode.downloader.data.models.DownloadTask
 import com.anonrode.downloader.data.models.TaskStatus
 import com.anonrode.downloader.data.net.HttpClient
+import com.anonrode.downloader.data.rules.DynamicRulesManager
 import com.anonrode.downloader.pipeline.PipelineError
 import com.anonrode.downloader.pipeline.StreamValidator
 import com.anonrode.downloader.providers.ProviderRegistry
@@ -443,9 +444,12 @@ class DownloadEngine(
     private val repository: DownloadRepository,
     private val networkObserver: NetworkObserver = NetworkObserver(context)
 ) {
-    private val ASIAN_DRAMA_CLUSTER = com.anonrode.downloader.pipeline.HostPolicyRegistry.ASIAN_DRAMA_CLUSTER
-    private val WESTERN_CLUSTER = com.anonrode.downloader.pipeline.HostPolicyRegistry.WESTERN_CLUSTER
-    private val DEDICATED_ASIAN_SITES = com.anonrode.downloader.pipeline.HostPolicyRegistry.DEDICATED_ASIAN_SITES
+    private val ASIAN_DRAMA_CLUSTER: Set<String>
+        get() = com.anonrode.downloader.data.rules.DynamicRulesManager.getFailoverClusters().asianCluster
+    private val WESTERN_CLUSTER: Set<String>
+        get() = com.anonrode.downloader.data.rules.DynamicRulesManager.getFailoverClusters().westernCluster
+    private val DEDICATED_ASIAN_SITES: Set<String>
+        get() = com.anonrode.downloader.data.rules.DynamicRulesManager.getFailoverClusters().dedicatedAsian
     // Secondary Asian-failover targets: mixed Western-cluster sites with PROVEN
     // Asian catalogs (coverage probe 2026-09-20: 50 random Asian series,
     // search-only — 9jarocks 98%, nkiri 62%, and a 6/6 rescue rate on titles
@@ -453,7 +457,8 @@ class DownloadEngine(
     // EQUAL RANK with Asian-cluster cards: exact title match + HostHealth
     // decide (deliberate choice — no secondary-tier penalty). Western tasks
     // never touch the dedicated sites; that one-way door stays shut.
-    private val SECONDARY_ASIAN_FALLBACK = com.anonrode.downloader.pipeline.HostPolicyRegistry.SECONDARY_ASIAN_FALLBACK
+    private val SECONDARY_ASIAN_FALLBACK: Set<String>
+        get() = com.anonrode.downloader.data.rules.DynamicRulesManager.getFailoverClusters().secondaryAsianFallback
     private val YEAR_REGEX = Regex("""\b(19\d\d|20[0-3]\d)\b""")
 
     private val engineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -1123,7 +1128,7 @@ class DownloadEngine(
         quality: String?
     ): Int {
         var queued = 0
-        for (idx in indices) {
+        for (idx in indices.asReversed()) {
             val entry = meta.entries.getOrNull(idx - 1) ?: continue
             enqueue(
                 showTitle = meta.title.ifBlank { "YouTube Playlist" },
@@ -2028,18 +2033,24 @@ class DownloadEngine(
 
     private fun looksLikeHtml(file: File): Boolean {
         return try {
-            val head = file.inputStream().use { ins ->
-                val buf = ByteArray(512)
-                val n = ins.read(buf)
+            val buf = file.inputStream().use { ins ->
+                val b = ByteArray(512)
+                val n = ins.read(b)
                 if (n <= 0) return false
-                // Strip UTF-8 BOM (U+FEFF) before prefix matching so BOM-prefixed
-                // HTML error pages are caught, then decode and normalize.
-                var start = 0
-                if (n >= 3 && buf[0] == 0xEF.toByte() && buf[1] == 0xBB.toByte() && buf[2] == 0xBF.toByte()) {
-                    start = 3
-                }
-                String(buf, start, n - start).trimStart().lowercase()
+                b.copyOf(n)
             }
+            if (buf.size >= 16) {
+                if (buf.copyOfRange(4, 8).contentEquals("ftyp".toByteArray(Charsets.US_ASCII))) return false
+                if (buf[0] == 0x1A.toByte() && buf[1] == 0x45.toByte() && buf[2] == 0xDF.toByte() && buf[3] == 0xA3.toByte()) return false
+                if (buf[0] == 0x47.toByte() && (buf.size < 189 || buf[188] == 0x47.toByte())) return false
+                if (buf[0] == 0x49.toByte() && buf[1] == 0x44.toByte() && buf[2] == 0x33.toByte()) return false
+            }
+            if (DynamicRulesManager.isDecoyBody(buf)) return true
+            var start = 0
+            if (buf.size >= 3 && buf[0] == 0xEF.toByte() && buf[1] == 0xBB.toByte() && buf[2] == 0xBF.toByte()) {
+                start = 3
+            }
+            val head = String(buf, start, buf.size - start).trimStart().lowercase()
             head.startsWith("<!doctype html") || head.startsWith("<html") || head.startsWith("<head") ||
                 head.startsWith("<body") || head.startsWith("<!--") || head.startsWith("<script") ||
                 head.startsWith("<svg") || head.startsWith("<?xml") || head.startsWith("<style") ||
@@ -2051,6 +2062,7 @@ class DownloadEngine(
     }
 
     private fun looksLikeHtml(text: String): Boolean {
+        if (DynamicRulesManager.isDecoyBodyText(text)) return true
         val head = text.trimStart().lowercase()
         return head.startsWith("<!doctype html") || head.startsWith("<html") || head.startsWith("<head") ||
             head.startsWith("<body") || head.startsWith("<!--") || head.startsWith("<script") ||
@@ -2586,7 +2598,8 @@ class DownloadEngine(
         // regular Asian cluster produced no plausible title match (Servamp on
         // nepu, 2026-10-19). Their cards bypass the Layer-1 cluster filter
         // only for that pass.
-        private val ANIME_SECOND_PASS_SITES = setOf("anitaku")
+        private val ANIME_SECOND_PASS_SITES: Set<String>
+            get() = DynamicRulesManager.getFailoverClusters().animeSecondPass
 
         // URI="..." inside HLS tags (EXT-X-KEY, EXT-X-MAP, EXT-X-MEDIA) — the
         // URI value may be scheme-relative or relative and needs the same
@@ -2894,7 +2907,10 @@ class DownloadEngine(
         requestedQuality: String? = null,
         resolutionOut: Array<String?> = arrayOfNulls(1),
         segmentUrlOut: Array<String?> = arrayOfNulls(1),
-        fingerprintOut: Array<String?> = arrayOfNulls(1)
+        fingerprintOut: Array<String?> = arrayOfNulls(1),
+        preflightedMasterOut: Array<String?> = arrayOfNulls(1),
+        preflightedVariantOut: Array<String?> = arrayOfNulls(1),
+        preflightedVariantUrlOut: Array<String?> = arrayOfNulls(1)
     ): File? {
         val cacheDir = File(context.cacheDir, "hls").apply { mkdirs() }
         val created = mutableListOf<File>()
@@ -2915,13 +2931,10 @@ class DownloadEngine(
                             staleToken = true
                         } else {
                             val trimmed = text.trimStart('\uFEFF', ' ', '\r', '\n', '\t')
-                            // Display-ads playlist endpoint is handed to yt-dlp
-                            // verbatim (live-proven working, 2026-10-19): its body
-                            // is not a plain #EXTM3U document, so the HLS-shape
-                            // gate below must not reject it.
-                            val megaplaysPlaylist = currentUrl.contains(
-                                "megaplays.se/api/playlist.php", ignoreCase = true
-                            )
+                            // Preflight passthrough endpoints (e.g. megaplays display-ads playlist)
+                            // are handed to yt-dlp verbatim (live-proven working): their body
+                            // is not a plain #EXTM3U document, so the HLS-shape gate must not reject it.
+                            val isPreflightPassthrough = DynamicRulesManager.isPreflightPassthrough(currentUrl)
                             val declaresHls = currentUrl.contains(".m3u8", true) ||
                                 currentUrl.contains(".m3u", true) ||
                                 currentUrl.contains(".mpegurl", true) ||
@@ -2930,7 +2943,7 @@ class DownloadEngine(
                                 text.contains("<!doctype", ignoreCase = true) ||
                                 text.contains("<html", ignoreCase = true)
                             when {
-                                megaplaysPlaylist -> playlist = text
+                                isPreflightPassthrough -> playlist = text
                                 // A 1-byte (or near-empty) body is the known
                                 // vidrift/terminal stub, never a playlist.
                                 trimmed.length < 7 -> staleToken = true
@@ -2949,6 +2962,7 @@ class DownloadEngine(
         if (staleToken) throw StaleStreamLinkException("Stream link expired — fetching a fresh one")
         val playlistText: String = playlist
             ?: throw Exception("Stream server unreachable — the playlist did not load. Try again later.")
+        preflightedMasterOut[0] = playlistText
         // Live-by-default: only upgrade absolute http->https if the https
         // twin actually answers. A blind upgrade breaks http-only CDNs.
         // Find ANY absolute http URI (segment or tag attribute), not just the
@@ -3004,71 +3018,38 @@ class DownloadEngine(
         if (mediaLines.isNotEmpty()) {
             var firstResolved = resolveSegmentUrl(currentUrl, mediaLines[0])
             if (firstResolved != null && firstResolved.contains(".m3u8")) {
-                // Fetch every variant playlist CONCURRENTLY: the old sequential
-                // loop let one slow variant stall the whole preflight. Each
-                // result keeps its original index so the first-variant probe /
-                // size-estimate logic still runs in stream order afterwards.
-                // Bound the variant fan-out: 20-variant masters × 4 tasks
-                // would otherwise recreate the connection storm the lane
-                // controller exists to prevent. Preflight probes are not
-                // counted against LaneBudget, so cap them here.
-                val variantGate = kotlinx.coroutines.sync.Semaphore(4)
-                val variantResults = coroutineScope {
-                    mediaLines.mapIndexedNotNull { idx, line ->
-                        val vUrl = resolveSegmentUrl(currentUrl, line) ?: return@mapIndexedNotNull null
-                        if (!vUrl.contains(".m3u8")) return@mapIndexedNotNull null
-                        async {
-                            variantGate.acquire()
-                            try {
-                            var variant: String? = null
-                            var variantStale = false
-                            try {
-                                HttpClient.get(vUrl, referer = referer, tag = "preflight").use { res ->
-                                    when {
-                                        res.code == 401 || res.code == 403 || res.code == 451 -> variantStale = true
-                                        res.isSuccessful -> variant = HttpClient.cappedText(res)
-                                    }
-                                }
-                            } catch (_: Exception) {}
-                            idx to Triple(vUrl, variant, variantStale)
-                            } finally {
-                                variantGate.release()
-                            }
+                // M3U8-3: Only fetch/probe the single variant matching requestedQuality
+                val targetHeight = (requestedQuality ?: "720p").filter { it.isDigit() }.toIntOrNull() ?: 720
+                val chosenVariantUrl = HlsVodDownloader.parseMaster(playlistText, currentUrl, targetHeight)
+                val chosenLine = mediaLines.firstOrNull { resolveSegmentUrl(currentUrl, it) == chosenVariantUrl } ?: mediaLines[0]
+                val chosenIdx = mediaLines.indexOf(chosenLine).coerceAtLeast(0)
+                val vUrl = resolveSegmentUrl(currentUrl, chosenLine) ?: firstResolved
+                preflightedVariantUrlOut[0] = vUrl
+
+                var variant: String? = null
+                var variantStale = false
+                try {
+                    HttpClient.get(vUrl, referer = referer, tag = "preflight").use { res ->
+                        when {
+                            res.code == 401 || res.code == 403 || res.code == 451 -> variantStale = true
+                            res.isSuccessful -> variant = HttpClient.cappedText(res)
                         }
                     }
-                }.awaitAll()
-                // All fetches complete: a stale token surfaces first (in stream
-                // order), then the variant-level rewrite/repoint/estimate runs.
-                for ((idx, res) in variantResults) {
-                    val (vUrl, variant, variantStale) = res
-                    if (variantStale) throw StaleStreamLinkException("Stream link expired — fetching a fresh one")
-                    if (variant == null) {
-                        variantsComplete = false
-                        continue
-                    }
+                } catch (_: Exception) {}
+
+                if (variantStale) throw StaleStreamLinkException("Stream link expired — fetching a fresh one")
+                if (variant != null) {
+                    preflightedVariantOut[0] = variant
                     planTexts.add(variant)
-                    // Per-variant upgrade decision: a variant can carry http
-                    // segments even when the master is fully https.
                     val variantUpgrade = upgradeInsecureHttp ||
                         shouldUpgradeInsecureHttp(variant, vUrl, referer)
                     val vFile = rewriteHlsMaster(
-                        variant, vUrl, "hls-$taskId-v$idx.m3u8", cacheDir, variantUpgrade
+                        variant, vUrl, "hls-$taskId-v$chosenIdx.m3u8", cacheDir, variantUpgrade
                     )
                     if (vFile != null) created.add(vFile)
                     if (vFile != null && masterFile == null) {
-                        // rewriteHlsMaster returns null when nothing needed
-                        // rewriting (fully absolute playlist). Materialize it
-                        // as a local master anyway so the variant repoint below
-                        // still runs and preflight returns a usable local
-                        // master — otherwise the variant files created just
-                        // above are orphaned and the engine falls back to the
-                        // remote master.
                         masterFile = try {
                             val f = File(cacheDir, "hls-$taskId.m3u8")
-                            // forceLocal: a local master resolves against
-                            // file://, so ordinary relative variant URIs must
-                            // be absolutized even though they alone did not
-                            // trigger the rewrite.
                             f.writeText(
                                 HlsPlaylist.rewrite(
                                     playlistText, currentUrl, upgradeInsecureHttp, forceLocal = true
@@ -3081,28 +3062,27 @@ class DownloadEngine(
                         if (masterFile != null) created.add(masterFile)
                     }
                     if (vFile != null && masterFile != null) {
-                        // Repoint this variant's URI in the local master at the
-                        // local variant file (same directory → relative name).
                         try {
                             masterFile.writeText(
                                 masterFile.readText().replace(vUrl, vFile.name)
                             )
                         } catch (_: Exception) {}
                     }
-                    if (idx == 0) {
-                        val vSeg = variant.lineSequence().map { it.trim() }
-                            .firstOrNull { it.isNotBlank() && !it.startsWith("#") }
-                        if (vSeg != null) probeUrl = resolveSegmentUrl(vUrl, vSeg)
-                        // Segment-Sampling Estimator: runs asynchronously in the
-                        // background without blocking yt-dlp's launch.
-                        triggerAsyncHlsSizeEstimate(taskId, playlistText, currentUrl, vUrl, referer)
-                    }
+                    val vSeg = variant.lineSequence().map { it.trim() }
+                        .firstOrNull { it.isNotBlank() && !it.startsWith("#") }
+                    if (vSeg != null) probeUrl = resolveSegmentUrl(vUrl, vSeg)
+                    // M3U8-4: Segment-Sampling Estimator: runs asynchronously in background,
+                    // passing the already-fetched variant text!
+                    triggerAsyncHlsSizeEstimate(taskId, playlistText, currentUrl, vUrl, referer, variant)
+                } else {
+                    variantsComplete = false
                 }
             } else {
                 probeUrl = firstResolved
+                preflightedVariantUrlOut[0] = currentUrl
+                preflightedVariantOut[0] = playlistText
                 // The URL is a media playlist itself (single-variant stream):
-                // estimate asynchronously in the background.
-                triggerAsyncHlsSizeEstimate(taskId, playlistText, currentUrl, currentUrl, referer)
+                triggerAsyncHlsSizeEstimate(taskId, playlistText, currentUrl, currentUrl, referer, playlistText)
             }
         }
 
@@ -3218,11 +3198,12 @@ class DownloadEngine(
         masterText: String,
         masterUrl: String,
         variantUrl: String,
-        referer: String?
+        referer: String?,
+        prefetchedVariantText: String? = null
     ) {
         engineScope.launch(kotlinx.coroutines.Dispatchers.IO) {
             val estimate = try {
-                HlsSizeEstimator.estimate(masterText, masterUrl, variantUrl, referer)
+                HlsSizeEstimator.estimate(masterText, masterUrl, variantUrl, referer, prefetchedVariantText)
             } catch (_: kotlinx.coroutines.CancellationException) {
                 null
             } catch (_: Exception) {
@@ -3632,9 +3613,11 @@ class DownloadEngine(
                 // inspectTerminal() is a bounded probe: direct MP4 -> Turbo/
                 // aria2c, genuine m3u8 -> yt-dlp, decoy -> rejected here.
                 val terminalEvidence = if (!isMagnet && !isSocial) {
+                    val taskRef = task.headers.entries.firstOrNull { it.key.equals("referer", ignoreCase = true) }?.value?.takeIf { it.isNotBlank() }
+                    val hintedRef = com.anonrode.downloader.pipeline.ResolvedHints.refererFor(streamUrl)
                     com.anonrode.downloader.pipeline.UrlClassifier.inspectTerminal(
                         streamUrl,
-                        referer = getRefererForUrl(streamUrl),
+                        referer = taskRef ?: hintedRef ?: getRefererForUrl(streamUrl),
                         tag = "engine-route"
                     )
                 } else null
@@ -3665,7 +3648,22 @@ class DownloadEngine(
                 val isEmbedOrPage = !isMagnet && !isSocial && !isProvablyDirect &&
                     terminalEvidence?.kind == com.anonrode.downloader.pipeline.UrlClassifier.TerminalKind.UNKNOWN &&
                     !com.anonrode.downloader.pipeline.UrlClassifier.isDirectMediaPath(streamUrl)
-                val finalBackend = if (isSocial || isHlsStream || isEmbedOrPage || task.audioOnly) "yt-dlp" else "aria2c"
+                val route = DynamicRulesManager.resolveEngine(streamUrl)
+                val finalBackend = if (task.audioOnly) {
+                    "yt-dlp"
+                } else if (isMagnet) {
+                    "aria2c"
+                } else if (route != null) {
+                    when (route.engine) {
+                        "ytdlp_only" -> "yt-dlp"
+                        "aria2_only" -> "aria2c"
+                        "hls_paced" -> "yt-dlp"
+                        "turbo_aria2" -> "aria2c"
+                        else -> if (isSocial || isHlsStream || isEmbedOrPage) "yt-dlp" else "aria2c"
+                    }
+                } else {
+                    if (isSocial || isHlsStream || isEmbedOrPage) "yt-dlp" else "aria2c"
+                }
                 var isExtractor = isSocial || task.audioOnly || isEmbedOrPage
                 // A stale-link re-resolve can change the stream type (HLS ->
                 // direct MP4). Keep the extractor flag honest for subtitles
@@ -3812,11 +3810,15 @@ class DownloadEngine(
                 // structural media-plan fingerprint.
                 val hlsSegmentUrl = arrayOfNulls<String>(1)
                 val hlsFingerprint = arrayOfNulls<String>(1)
+                val preflightedMaster = arrayOfNulls<String>(1)
+                val preflightedVariant = arrayOfNulls<String>(1)
+                val preflightedVariantUrl = arrayOfNulls<String>(1)
                 if (finalBackend == "yt-dlp" && com.anonrode.downloader.pipeline.UrlClassifier.isStreamingLink(streamUrl)) {
                     try {
                         hlsMasterFile = preflightHls(
                             context, task.id, streamUrl, refererToPass, hlsSizeEstimate,
-                            task.quality ?: defaultQuality, hlsResolution, hlsSegmentUrl, hlsFingerprint
+                            task.quality ?: defaultQuality, hlsResolution, hlsSegmentUrl, hlsFingerprint,
+                            preflightedMaster, preflightedVariant, preflightedVariantUrl
                         )
                     } catch (e: StaleStreamLinkException) {
                         // A persisted HLS URL carries a token that dies within
@@ -3845,7 +3847,8 @@ class DownloadEngine(
                             preflightHls(
                                 context, task.id, streamUrl, refererToPass,
                                 hlsSizeEstimate, task.quality ?: defaultQuality, hlsResolution,
-                                hlsSegmentUrl, hlsFingerprint
+                                hlsSegmentUrl, hlsFingerprint,
+                                preflightedMaster, preflightedVariant, preflightedVariantUrl
                             )
                         } else null
                     }
@@ -4032,7 +4035,8 @@ class DownloadEngine(
                         updateServiceState(force = false)
                     }
 
-                    if (!alreadyCompleteOnDisk && !hasExistingAria2Partial) {
+                    val allowTurbo = (DynamicRulesManager.resolveEngine(streamUrl)?.engine ?: route?.engine) != "aria2_only"
+                    if (allowTurbo && !alreadyCompleteOnDisk && !hasExistingAria2Partial) {
                         // Step 1: Primary execution via TurboDownloader
                         com.anonrode.downloader.util.DebugLog.engine(
                             "task=${task.id} turbo primary start sockets=${grantedLanes.coerceAtLeast(1)} url=${streamUrl.take(110)}"
@@ -4303,7 +4307,8 @@ class DownloadEngine(
                     // Unsupported shapes (AES, byterange, live windows)
                     // return null here and the yt-dlp chain below runs
                     // unchanged as the fallback.
-                    if (isHlsStream && producedFile == null && coroutineContext.isActive) {
+                    val allowPacedHls = (DynamicRulesManager.resolveEngine(streamUrl)?.engine ?: route?.engine) != "ytdlp_only"
+                    if (isHlsStream && allowPacedHls && producedFile == null && coroutineContext.isActive) {
                         HlsVodDownloader.attachContext(context)
                         val hlsSidecar = File(task.filePath + ".hlsrs")
                         val paced = try {
@@ -4326,7 +4331,10 @@ class DownloadEngine(
                                     )
                                     updateServiceState(force = false)
                                 },
-                                isCancelled = { !coroutineContext.isActive }
+                                isCancelled = { !coroutineContext.isActive },
+                                prefetchedMasterBody = preflightedMaster[0],
+                                prefetchedVariantBody = preflightedVariant[0],
+                                prefetchedVariantUrl = preflightedVariantUrl[0]
                             )
                         } catch (e: HlsVodDownloader.RateLimited) {
                             // Byte-quota escape: park with the REAL boundary and
@@ -4358,6 +4366,15 @@ class DownloadEngine(
                         } catch (ce: kotlinx.coroutines.CancellationException) {
                             throw ce
                         } catch (e: Exception) {
+                            val segmentsDone = HlsVodDownloader.readResume(hlsSidecar).segmentsDone
+                            if (e is java.io.IOException && segmentsDone > 0) {
+                                com.anonrode.downloader.util.DebugLog.backend(
+                                    "task=${task.id} paced HLS transient failure with $segmentsDone banked segments: ${e.message} — parking for segment resume"
+                                )
+                                val liveNow = repository.find(task.id) ?: task
+                                parkInsteadOfFail(liveNow, e.message ?: "HLS segment failed", forcePark = true)
+                                return@launch
+                            }
                             com.anonrode.downloader.util.DebugLog.resolve(
                                 "task=${task.id} paced HLS lane unavailable (${e.message}) — falling back to yt-dlp"
                             )
@@ -4365,6 +4382,9 @@ class DownloadEngine(
                         }
                         if (paced != null) {
                             producedFile = paced
+                        } else {
+                            try { File(task.filePath + ".hts").delete() } catch (_: Exception) {}
+                            try { File(task.filePath + ".hlsrs").delete() } catch (_: Exception) {}
                         }
                     }
 
@@ -4568,6 +4588,10 @@ class DownloadEngine(
                     val finalTitle = producedFile.nameWithoutExtension
                     val finalBytes = producedFile.length()
                     val targetPathBeforeCompletion = task.filePath
+
+                    // Sidecars before completion so player and UI discovery find subtitles immediately.
+                    try { downloadSubtitleSidecars(task, producedFile) } catch (_: Throwable) {}
+
                     repository.update(task.id) {
                         it.copy(
                             filePath = producedFile.absolutePath,
@@ -4678,11 +4702,6 @@ class DownloadEngine(
                     // inline scanFile never bound the scanner service and
                     // silently no-opped — downloads stayed invisible to the
                     // gallery until a system rescan (user report 2026-09-13).
-                    // Sidecars before the media scan so the player's
-                    // <videoStem>* discovery sees them immediately. Never
-                    // fails the video.
-                    try { downloadSubtitleSidecars(task, producedFile) } catch (_: Throwable) {}
-
                     com.anonrode.downloader.util.MediaScan.notifyFile(context, producedFile)
 
                     if (completionNotifications) {
@@ -4708,6 +4727,10 @@ class DownloadEngine(
                     coroutineContext.ensureActive()
                     val finalTitle = producedFile.nameWithoutExtension
                     val finalBytes = producedFile.length()
+
+                    // Sidecars before completion
+                    try { downloadSubtitleSidecars(task, producedFile) } catch (_: Throwable) {}
+
                     repository.update(task.id) {
                         it.copy(
                             filePath = producedFile.absolutePath,
@@ -4725,11 +4748,6 @@ class DownloadEngine(
                     // inline scanFile never bound the scanner service and
                     // silently no-opped — downloads stayed invisible to the
                     // gallery until a system rescan (user report 2026-09-13).
-                    // Sidecars before the media scan so the player's
-                    // <videoStem>* discovery sees them immediately. Never
-                    // fails the video.
-                    try { downloadSubtitleSidecars(task, producedFile) } catch (_: Throwable) {}
-
                     com.anonrode.downloader.util.MediaScan.notifyFile(context, producedFile)
                     com.anonrode.downloader.util.DebugLog.write("completed-unverified task=${task.id} file=${producedFile.absolutePath} bytes=$finalBytes validation=none")
                     val selfJob = coroutineContext[Job]

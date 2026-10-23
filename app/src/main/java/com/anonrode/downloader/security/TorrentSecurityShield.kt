@@ -384,7 +384,7 @@ object TorrentSecurityShield {
                     }
                 } catch (_: Exception) {}
             }
-            return Pair(true, "Torrent directory ($dirFiles.size files)")
+            return Pair(true, "Torrent directory (${dirFiles.size} files)")
         }
 
         if (!file.exists() || file.length() < 4) {

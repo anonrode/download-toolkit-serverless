@@ -79,9 +79,17 @@ object HlsSizeEstimator {
      * predicted final file size in bytes, or null when no estimate is
      * possible. Never throws (except coroutine cancellation).
      */
-    suspend fun estimate(masterText: String, masterUrl: String, variantUrl: String, referer: String?): Long? {
+    suspend fun estimate(
+        masterText: String,
+        masterUrl: String,
+        variantUrl: String,
+        referer: String?,
+        prefetchedVariantText: String? = null
+    ): Long? {
         try {
-            val variantText = HttpClient.getText(variantUrl, referer = referer, tag = "hls-estimate") ?: return null
+            val variantText = prefetchedVariantText
+                ?: HttpClient.getText(variantUrl, referer = referer, tag = "hls-estimate")
+                ?: return null
             // Live / sliding-window playlists have no ENDLIST: the segment
             // count keeps changing, so no estimate.
             if (!variantText.contains("#EXT-X-ENDLIST")) return null
