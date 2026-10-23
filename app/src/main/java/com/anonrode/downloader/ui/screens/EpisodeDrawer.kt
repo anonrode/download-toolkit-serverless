@@ -747,9 +747,13 @@ fun EpisodeDrawer(
             // then the 48dp fade into the sheet color.
             val artBandH = (posterTop - artTop) + posterH + 14.dp        // was fixed 104dp
             val artFadeH = 48.dp                                         // CONTRACT: bottom 48dp fade
-            // List column top: chips row top. HALF mock y=166 · FULL y=176 (kept;
-            // the Selection/Range chips now PIN here instead of scrolling away — §2.3).
-            val listTop = if (isFull) 176.dp else 166.dp
+            // List column top: chips row top. HALF mock y=166 · FULL y=176 on
+            // a 34dp status bar, but never above the real art band end on
+            // deeper cutouts (statusBarDp > 40dp used to overlap by 8–14dp).
+            val listTop = maxOf(
+                if (isFull) 176.dp else 166.dp,
+                artTop + artBandH + 6.dp
+            )
 
             val scrimAlphaMax = 0.32f  // M3 modal default, kept where the spec is silent
             val sheetShape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)  // mock: 24px top corners
@@ -1313,7 +1317,11 @@ fun EpisodeDrawer(
                                             modifier = Modifier
                                                 .fillMaxWidth()
                                                 .padding(start = gutter, end = gutter, bottom = 8.dp)
-                                                .height(42.dp),
+                                                // Never force a 42dp height: M3 reserves
+                                                // 16dp top + 16dp bottom, which clipped typed
+                                                // range text. Let the field keep its normal
+                                                // intrinsic height (>=48dp).
+                                                .heightIn(min = 48.dp),
                                             colors = OutlinedTextFieldDefaults.colors(
                                                 focusedContainerColor = pal.card,
                                                 unfocusedContainerColor = pal.card,

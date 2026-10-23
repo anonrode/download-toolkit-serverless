@@ -2006,6 +2006,8 @@ private fun InlineRemainingAction(count: Int, onClick: () -> Unit) {
 
 /** Extract video frame thumbnail for social/local downloads when poster is absent. */
 @Composable
+private val videoThumbGate = Semaphore(2)
+
 private fun rememberVideoThumbnail(task: DownloadTask): String? {
     val context = LocalContext.current
     var thumbPath by remember(task.id, task.status) { mutableStateOf<String?>(null) }
@@ -2021,20 +2023,39 @@ private fun rememberVideoThumbnail(task: DownloadTask): String? {
             return@LaunchedEffect
         }
         withContext(Dispatchers.IO) {
-            try {
-                thumbFile.parentFile?.mkdirs()
-                val retriever = android.media.MediaMetadataRetriever()
-                retriever.setDataSource(file.absolutePath)
-                val bitmap = retriever.getFrameAtTime(1_000_000, android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-                    ?: retriever.frameAtTime
-                if (bitmap != null) {
-                    java.io.FileOutputStream(thumbFile).use { out ->
-                        bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, out)
-                    }
+            // Fast scroll used to launch one hardware decoder per posterless
+            // row at once. Gate the retriever so at most two frames decode
+            // concurrently; rows waiting here re-check the cache first.
+            videoThumbGate.withPermit {
+                if (thumbFile.exists()) {
                     thumbPath = thumbFile.absolutePath
+                    return@withPermit
                 }
-                retriever.release()
-            } catch (_: Throwable) {}
+                var retriever: android.media.MediaMetadataRetriever? = null
+                try {
+                    thumbFile.parentFile?.mkdirs()
+                    val r = android.media.MediaMetadataRetriever()
+                    retriever = r
+                    r.setDataSource(file.absolutePath)
+                    val bitmap = r.getFrameAtTime(
+                        1_000_000,
+                        android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC
+                    ) ?: r.frameAtTime
+                    if (bitmap != null) {
+                        try {
+                            java.io.FileOutputStream(thumbFile).use { out ->
+                                bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, out)
+                            }
+                        } finally {
+                            bitmap.recycle()
+                        }
+                        thumbPath = thumbFile.absolutePath
+                    }
+                } catch (_: Throwable) {
+                } finally {
+                    runCatching { retriever?.release() }
+                }
+            }
         }
     }
     return thumbPath
