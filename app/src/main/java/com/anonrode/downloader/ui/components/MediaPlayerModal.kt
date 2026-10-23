@@ -149,6 +149,8 @@ import com.anonrode.downloader.ui.theme.Spacing
 import com.anonrode.downloader.data.WatchHistoryCore
 import com.anonrode.downloader.ui.util.tick
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.UUID
 
@@ -790,79 +792,72 @@ private fun MediaPlayerModalImpl(
     // MediaItem for the current file. Embedded subtitle tracks (MKV multi-
     // language subs) and sidecar .srt/.vtt siblings are attached together as
     // SubtitleConfigurations so ExoPlayer treats them uniformly.
-    val mediaItem = remember(ctx.filePath) {
-        val builder = MediaItem.Builder()
-            .setUri(Uri.fromFile(file))
-            .setMediaId(ctx.filePath)
-            .setMediaMetadata(
-                MediaMetadata.Builder()
-                    .setTitle(ctx.title)
-                    .setArtist(file.parentFile?.name ?: "")
-                    .build()
-            )
-        // Subtitle sidecars found by [isSidecarSubtitleSibling]: yt-dlp writes
-        // "Name.en.srt" (language-tagged), the engine's move-along renames
-        // them to the sanitized video stem + lang, and third-party writers
-        // (manual VLC-style copies) use exact "Name.srt" — all three shapes
-        // plus any letter case in stem/tag/ext now discover. A stem-anchored
-        // rule (not plain prefix) so "Showtime.en.srt" is never a sidecar of
-        // "Show.mkv". Language still via sidecarLanguageHint.
-        val videoStem = file.nameWithoutExtension
-        val sidecarFiles = file.parentFile?.listFiles { s ->
-            s.isFile && s.canRead() && isSidecarSubtitleSibling(s.name, videoStem)
-        }?.sortedBy { it.name } ?: emptyList()
-        val sidecars = sidecarFiles.mapNotNull { sibling ->
-            val extName = sibling.extension.lowercase()
-            val head = readSubtitleHead(sibling)
-            val spec = sidecarSpec(extName, head)
-            // Mislabeled container: an .srt that is really WebVTT is
-            // converted (headered VTT is rejected by the SubRip parser);
-            // an .vtt that is really SRT is attached as SubRip as-is.
-            // Conversion failure never falls back to the original under the
-            // guessed SubRip mime — that head is WebVTT, the SubRip parser
-            // rejects it, and the track ships as a silent zero-cue entry.
-            // [failedConversionMime] re-sniffs: attach the original as real
-            // WebVTT when it still reads as one (e.g. the cache write was
-            // the failing step — the original itself is fine), else drop
-            // the track entirely; the drop is logged.
-            val attach: Pair<File, String> = if (spec.convertVttToSrt) {
-                try {
-                    val converted = SubtitleSurfaces.vttToSrt(sibling.readText())
-                    val outDir = File(context.cacheDir, "player_subs").apply { mkdirs() }
-                    val convertedFile = File(outDir, sibling.name.substringBeforeLast('.') + ".converted.srt").apply {
-                        writeText(converted)
-                    }
-                    convertedFile to spec.mimeType
-                } catch (t: Throwable) {
-                    android.util.Log.w(
-                        "MediaPlayerModal",
-                        "sidecar vtt->srt conversion failed for " +
-                            "${sibling.name} (${t.javaClass.simpleName}: ${t.message}) — re-sniffing"
-                    )
-                    val rescueMime = failedConversionMime(head)
-                    if (rescueMime == null) {
+    // Offloaded to Dispatchers.IO so directory scanning and VTT-to-SRT conversion
+    // never block the main thread during composition.
+    var mediaItem by remember { mutableStateOf<MediaItem?>(null) }
+    LaunchedEffect(ctx.filePath, ctx.title) {
+        val item = withContext(Dispatchers.IO) {
+            val builder = MediaItem.Builder()
+                .setUri(Uri.fromFile(file))
+                .setMediaId(ctx.filePath)
+                .setMediaMetadata(
+                    MediaMetadata.Builder()
+                        .setTitle(ctx.title)
+                        .setArtist(file.parentFile?.name ?: "")
+                        .build()
+                )
+            // Subtitle sidecars found by [isSidecarSubtitleSibling]: yt-dlp writes
+            // "Name.en.srt" (language-tagged), the engine's move-along renames
+            // them to the sanitized video stem + lang, and third-party writers
+            // (manual VLC-style copies) use exact "Name.srt" — all three shapes
+            // plus any letter case in stem/tag/ext now discover. A stem-anchored
+            // rule (not plain prefix) so "Showtime.en.srt" is never a sidecar of
+            // "Show.mkv". Language still via sidecarLanguageHint.
+            val videoStem = file.nameWithoutExtension
+            val sidecarFiles = file.parentFile?.listFiles { s ->
+                s.isFile && s.canRead() && isSidecarSubtitleSibling(s.name, videoStem)
+            }?.sortedBy { it.name } ?: emptyList()
+            val sidecars = sidecarFiles.mapNotNull { sibling ->
+                val extName = sibling.extension.lowercase()
+                val head = readSubtitleHead(sibling)
+                val spec = sidecarSpec(extName, head)
+                val attach: Pair<File, String> = if (spec.convertVttToSrt) {
+                    try {
+                        val converted = SubtitleSurfaces.vttToSrt(sibling.readText())
+                        val outDir = File(context.cacheDir, "player_subs").apply { mkdirs() }
+                        val convertedFile = File(outDir, sibling.name.substringBeforeLast('.') + ".converted.srt").apply {
+                            writeText(converted)
+                        }
+                        convertedFile to spec.mimeType
+                    } catch (t: Throwable) {
                         android.util.Log.w(
                             "MediaPlayerModal",
-                            "sidecar ${sibling.name} dropped: unreadable body would present a dead track"
+                            "sidecar vtt->srt conversion failed for " +
+                                "${sibling.name} (${t.javaClass.simpleName}: ${t.message}) — re-sniffing"
                         )
-                        return@mapNotNull null
+                        val rescueMime = failedConversionMime(head)
+                        if (rescueMime == null) {
+                            android.util.Log.w(
+                                "MediaPlayerModal",
+                                "sidecar ${sibling.name} dropped: unreadable body would present a dead track"
+                            )
+                            return@mapNotNull null
+                        }
+                        sibling to rescueMime
                     }
-                    sibling to rescueMime
-                }
-            } else sibling to spec.mimeType
-            val (attachedFile, attachMime) = attach
-            MediaItem.SubtitleConfiguration.Builder(Uri.fromFile(attachedFile))
-                .setMimeType(attachMime)
-                // "movie.en.srt" carries a real language tag: feeding it
-                // lets the auto-pick rule below treat a sidecar exactly
-                // like an embedded EN track instead of "und".
-                .setLanguage(sidecarLanguageHint(sibling.name, videoStem))
-                .setLabel(sibling.name)
-                .setSelectionFlags(0)
-                .build()
+                } else sibling to spec.mimeType
+                val (attachedFile, attachMime) = attach
+                MediaItem.SubtitleConfiguration.Builder(Uri.fromFile(attachedFile))
+                    .setMimeType(attachMime)
+                    .setLanguage(sidecarLanguageHint(sibling.name, videoStem))
+                    .setLabel(sibling.name)
+                    .setSelectionFlags(0)
+                    .build()
+            }
+            if (sidecars.isNotEmpty()) builder.setSubtitleConfigurations(sidecars)
+            builder.build()
         }
-        if (sidecars.isNotEmpty()) builder.setSubtitleConfigurations(sidecars)
-        builder.build()
+        mediaItem = item
     }
 
     // File switch: point the SAME player at the new item. PlayerView never
@@ -870,6 +865,7 @@ private fun MediaPlayerModalImpl(
     // state resets here so nothing leaks across files.
     var lastLoadedPath by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(mediaItem) {
+        val currentMediaItem = mediaItem ?: return@LaunchedEffect
         // The player still holds the PREVIOUS item at this point, so its
         // position/duration are the leaving file's — persist them before the
         // swap overwrites them.
@@ -909,7 +905,7 @@ private fun MediaPlayerModalImpl(
                 PlaybackPositions.get(context, leaving)?.positionMs ?: 0L
             else -> 0L
         }
-        if (resumeMs > 0) exoPlayer.setMediaItem(mediaItem, resumeMs) else exoPlayer.setMediaItem(mediaItem)
+        if (resumeMs > 0) exoPlayer.setMediaItem(currentMediaItem, resumeMs) else exoPlayer.setMediaItem(currentMediaItem)
         exoPlayer.prepare()
         lastLoadedPath = ctx.filePath
         currentPosition = resumeMs

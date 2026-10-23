@@ -1,6 +1,7 @@
 package com.anonrode.downloader.engine
 
 import android.content.Context
+import com.anonrode.downloader.data.rules.DynamicRulesManager
 import com.anonrode.downloader.data.settings.AppSettings
 import com.anonrode.downloader.pipeline.HostPolicyRegistry
 import com.anonrode.downloader.security.TorrentSecurityShield
@@ -373,8 +374,10 @@ object YoutubeDlDownloader {
         // must apply to a LIVE m3u8 too. Hosts on the explicit allowlist keep
         // their referer; every other HLS referer is stripped exactly as the
         // rewritten-master path always did.
+        val route = DynamicRulesManager.resolveEngine(sourceUrl)
+        val keepRefererByRoute = route?.keepReferer == true
         val effReferer = if ((hlsMasterFile != null || isM3u8) &&
-            !explicitReferer && !requiresExplicitReferer(referer)
+            !explicitReferer && !keepRefererByRoute && !requiresExplicitReferer(referer)
         ) "" else referer
 
         val height = quality.filter { it.isDigit() }.toIntOrNull() ?: when (quality.lowercase()) {
@@ -532,7 +535,7 @@ object YoutubeDlDownloader {
                     addOption("--embed-metadata")
                     addOption("--convert-thumbnails", "jpg")
                 } else {
-                    hlsFormatOptions(height, hlsSeparateAudio).forEach { addOption(it) }
+                    addCommands(hlsFormatOptions(height, hlsSeparateAudio))
                     addOption("-S", "height~$height,+size,+br,abr")
                     addOption("--merge-output-format", "mp4")
                     if (downloadSubs) {
@@ -574,7 +577,7 @@ object YoutubeDlDownloader {
                 // branch below where HttpFD actually consumes it.
                 // P-3: monolith fragment patience (exp backoff through
                 // replenishment windows instead of the old 5×1s ladder).
-                hlsFragmentPatienceFlags().forEach { addOption(it) }
+                addCommands(hlsFragmentPatienceFlags())
                 if (speedLimitKbs > 0) addOption("--limit-rate", "${speedLimitKbs}K")
             } else if (isM3u8) {
                 // HLS m3u8 stream variant selection with multi-fragment parallel downloading
@@ -591,7 +594,7 @@ object YoutubeDlDownloader {
                     addOption("--convert-thumbnails", "jpg")
                 } else {
                     addOption("-o", "$stem.$safeExt")
-                    hlsFormatOptions(height, hlsSeparateAudio).forEach { addOption(it) }
+                    addCommands(hlsFormatOptions(height, hlsSeparateAudio))
                     addOption("-S", "height~$height,+size,+br")
                     addOption("--merge-output-format", "mp4")
                 }
@@ -611,7 +614,7 @@ object YoutubeDlDownloader {
                 // branch below where HttpFD actually consumes it.
                 // P-3: monolith fragment patience (see
                 // hlsFragmentPatienceFlags / downloader.py:3576-3579).
-                hlsFragmentPatienceFlags().forEach { addOption(it) }
+                addCommands(hlsFragmentPatienceFlags())
                 if (speedLimitKbs > 0) addOption("--limit-rate", "${speedLimitKbs}K")
             } else {
                 // Direct CDN HTTP fallback via yt-dlp native chunked engine
@@ -640,7 +643,9 @@ object YoutubeDlDownloader {
 
             addOption("--no-mtime")
             addOption("--no-warnings")
-            if (HostPolicyRegistry.allowsPermissiveTlsFallback(sourceUrl)) {
+            if (HostPolicyRegistry.allowsPermissiveTlsFallback(sourceUrl) ||
+                DynamicRulesManager.isPermissiveTls(sourceUrl)
+            ) {
                 addOption("--no-check-certificate")
             }
             // --no-restrict-filenames: yt-dlp refuses "unusual" extensions like
@@ -693,9 +698,6 @@ object YoutubeDlDownloader {
                 "--progress-template",
                 "download:@@DLP@@ %(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s|%(progress.fragment_index)s|%(progress.fragment_count)s|%(progress._downloaded_bytes_str)s|%(progress._total_bytes_str)s|%(progress._total_bytes_estimate_str)s"
             )
-            if (effReferer.isNotBlank()) addOption("--referer", effReferer)
-            if (ua.isNotBlank()) addOption("--user-agent", ua)
-
             // Origin header from the referer's base domain, like the monolith's
             // HLS path always sends it.
             val originToPass = origin.ifBlank {
@@ -703,12 +705,57 @@ object YoutubeDlDownloader {
                     Regex("""https?://[^/]+""").find(r)?.value ?: ""
                 } ?: ""
             }
-            if (originToPass.isNotBlank()) {
-                val cleanOrig = originToPass.replace("\r", "").replace("\n", "").trim()
-                if (cleanOrig.isNotBlank()) addOption("--add-header", "Origin: $cleanOrig")
+
+            val snapshot = DynamicRulesManager.getSnapshot()
+            val profileName = route?.profile ?: "default"
+            val profileArgs = snapshot.ytdlpProfiles[profileName]?.args
+                ?: snapshot.ytdlpProfiles["default"]?.args
+
+            val isHlsOrExtractor = isExtractorTask || isM3u8
+            val effectiveFrags = if (isHlsOrExtractor) {
+                val hostCap = HostPolicyRegistry.effectiveSocketsForUrl(sourceUrl, 16)
+                val rawFrags = if (hlsFragments > 0) hlsFragments else parallelSockets
+                minOf(rawFrags.coerceIn(1, 16), hostCap)
+            } else {
+                parallelSockets.coerceIn(1, 16)
             }
 
-            for ((k, v) in customHeaders) {
+            if (profileArgs != null && profileArgs.isNotEmpty()) {
+                val vars = mapOf(
+                    "user_agent" to ua.trim(),
+                    "referer" to effReferer.trim(),
+                    "origin" to originToPass.trim(),
+                    "concurrent_fragments" to effectiveFrags.toString()
+                )
+                for (group in profileArgs) {
+                    val resolved = DynamicRulesManager.resolveCliArgs(listOf(group), vars)
+                    val filtered = if (isHlsOrExtractor) {
+                        resolved.filter { arg ->
+                            arg != "--skip-unavailable-fragments" &&
+                            arg != "--no-part" &&
+                            arg != "--hls-use-mpegts"
+                        }
+                    } else {
+                        resolved.filter { arg -> arg != "--no-part" }
+                    }
+                    if (filtered.isNotEmpty()) {
+                        addCommands(filtered)
+                    }
+                }
+            } else {
+                if (effReferer.isNotBlank()) addOption("--referer", effReferer)
+                if (ua.isNotBlank()) addOption("--user-agent", ua)
+                if (originToPass.isNotBlank()) {
+                    val cleanOrig = originToPass.replace("\r", "").replace("\n", "").trim()
+                    if (cleanOrig.isNotBlank()) addOption("--add-header", "Origin: $cleanOrig")
+                }
+            }
+
+            val profileHeaders = snapshot.ytdlpProfiles[profileName]?.headers.orEmpty()
+            val mergedHeaders = customHeaders.toMutableMap()
+            profileHeaders.forEach { (k, v) -> mergedHeaders.putIfAbsent(k, v) }
+
+            for ((k, v) in mergedHeaders) {
                 if (k.equals("user-agent", ignoreCase = true) ||
                     k.equals("referer", ignoreCase = true) ||
                     k.equals("origin", ignoreCase = true)) continue
@@ -833,11 +880,15 @@ object YoutubeDlDownloader {
                 // kill marker makes a teardown terminal for THIS run: abort
                 // the ladder so the engine can re-resolve a fresh URL instead
                 // of replaying the same dead one.
-                if (isNativeBackendInterruption(e) && (killRequested.containsKey(taskId) || !coroutineContext.isActive)) {
-                    throw BackendInterruptedException(
-                        "The source server stopped sending video data (the stream stalled). " +
-                            "Tap retry to fetch a fresh link."
-                    )
+                if (isNativeBackendInterruption(e)) {
+                    if (!coroutineContext.isActive) {
+                        throw BackendInterruptedException(
+                            "The source server stopped sending video data (the stream stalled). " +
+                                "Tap retry to fetch a fresh link."
+                        )
+                    }
+                    // Mid-run watchdog nudge: consume the kill marker so subsequent attempts can run.
+                    killRequested.remove(taskId)
                 }
                 errors.append("run ").append(attempts).append(": ").append(e.message ?: e.javaClass.simpleName).append('\n')
                 lastErrorMessage = e.message ?: e.javaClass.simpleName
@@ -1467,8 +1518,19 @@ object YoutubeDlDownloader {
         if (!selectIndexes.isNullOrEmpty()) {
             cmd += "--select-file=" + selectIndexes.joinToString(",")
         }
-        if (speedLimitKbs > 0) {
-            cmd += "--max-download-limit=${speedLimitKbs}K"
+        val snapshot = DynamicRulesManager.getSnapshot()
+        val ariaProfile = snapshot.aria2Profiles["default"]
+        if (ariaProfile != null && ariaProfile.args.isNotEmpty()) {
+            val vars = mapOf(
+                "user_agent" to "",
+                "referer" to "",
+                "origin" to "",
+                "concurrent_fragments" to "16"
+            )
+            for (group in ariaProfile.args) {
+                val resolved = DynamicRulesManager.resolveCliArgs(listOf(group), vars)
+                cmd.addAll(resolved)
+            }
         }
         // Single magnet URI, always last: aria2c binds options to the downloads
         // that follow them, so the URI must come after --select-file etc. (it
@@ -1700,6 +1762,20 @@ object YoutubeDlDownloader {
         if (speedLimitKbs > 0) {
             cmd += "--max-download-limit=${speedLimitKbs}K"
         }
+        val snapshot = DynamicRulesManager.getSnapshot()
+        val ariaProfile = snapshot.aria2Profiles["default"]
+        if (ariaProfile != null && ariaProfile.args.isNotEmpty()) {
+            val vars = mapOf(
+                "user_agent" to ua.trim(),
+                "referer" to referer.trim(),
+                "origin" to origin.trim(),
+                "concurrent_fragments" to "$sockets"
+            )
+            for (group in ariaProfile.args) {
+                val resolved = DynamicRulesManager.resolveCliArgs(listOf(group), vars)
+                cmd.addAll(resolved)
+            }
+        }
         cmd += url
 
         val errors = StringBuilder()
@@ -1854,6 +1930,7 @@ object YoutubeDlDownloader {
      *  disabled the strip: every rewritten-master run kept its referer and
      *  the vidsrc-family path sent exactly the header those CDNs reject. */
     private fun requiresExplicitReferer(referer: String): Boolean {
+        if (DynamicRulesManager.requiresHlsExplicitReferer(referer)) return true
         val low = referer.lowercase()
         return low.contains("megaplay.buzz") || low.contains("watching.onl") ||
             low.contains("anivideo.sbs") || low.contains("anitaku") ||

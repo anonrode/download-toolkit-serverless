@@ -175,6 +175,10 @@ FAMILY_IDS = [
     "hostPolicies", "urlTemplates", "knownDead", "lockerHosts",
     "searchStrategies", "pipelines", "dynamic_providers", "contentPolicy",
     "announcements", "update", "ads", "engagement",
+    "downloader_routing", "engine_profiles", "proxy_unwrappers",
+    "resolver_gates", "resolver_crypto", "permissive_tls_hosts",
+    "hls_keep_referer_hosts", "streaming_url_markers",
+    "preflight_passthrough_markers", "decoy_signatures", "failover_clusters",
 ]
 FLAG_SUBKEYS = ("enabled", "percent", "minApp", "expiresMs", "shadow")
 REQUIRED_TOP_KEYS_VERSIONED = ("version",)
@@ -849,6 +853,193 @@ def _check_int_range(val, where, problems, lo, hi, required=False):
         problems.append(f"{where}: must be an int {lo}..{hi}")
 
 
+ENGINE_ROUTING_TARGETS = ("ytdlp_only", "aria2_only", "hls_paced", "turbo_aria2")
+UNWRAPPER_DECODES = ("url", "uri", "base64", "none", "")
+
+
+def validate_engine_sections(obj) -> list:
+    """v3.4.0 OTA engine decoupling surfaces: downloader_routing, engine_profiles,
+    proxy_unwrappers, resolver_gates, resolver_crypto, permissive_tls_hosts,
+    hls_keep_referer_hosts, streaming_url_markers, preflight_passthrough_markers,
+    decoy_signatures, failover_clusters."""
+    problems = []
+
+    dr = obj.get("downloader_routing")
+    if dr is not None:
+        if not isinstance(dr, list) or len(dr) > 64:
+            problems.append("downloader_routing: list <= 64 entries")
+        else:
+            for i, r in enumerate(dr):
+                w = f"downloader_routing[{i}]"
+                if not isinstance(r, dict):
+                    problems.append(f"{w}: must be an object")
+                    continue
+                for key in r:
+                    if key not in ("pattern", "engine", "profile", "keep_referer"):
+                        problems.append(f"{w}.{key}: unknown field")
+                _check_regex(r.get("pattern"), f"{w}.pattern", problems, max_len=300)
+                eng = r.get("engine")
+                if eng not in ENGINE_ROUTING_TARGETS:
+                    problems.append(f"{w}.engine: one of {'|'.join(ENGINE_ROUTING_TARGETS)}")
+                if "profile" in r and (not isinstance(r["profile"], str) or len(r["profile"]) > 64):
+                    problems.append(f"{w}.profile: string <= 64")
+                if "keep_referer" in r and not isinstance(r["keep_referer"], bool):
+                    problems.append(f"{w}.keep_referer: must be a bool")
+
+    ep = obj.get("engine_profiles")
+    if ep is not None:
+        if not isinstance(ep, dict):
+            problems.append("engine_profiles: must be an object")
+        else:
+            for eng_name in ep:
+                if eng_name not in ("ytdlp", "aria2"):
+                    problems.append(f"engine_profiles.{eng_name}: unknown engine (allowed: ytdlp, aria2)")
+                    continue
+                prof_map = ep[eng_name]
+                if not isinstance(prof_map, dict):
+                    problems.append(f"engine_profiles.{eng_name}: must be an object")
+                    continue
+                for prof_name, pcfg in prof_map.items():
+                    pw = f"engine_profiles.{eng_name}.{prof_name}"
+                    if not isinstance(pcfg, dict):
+                        problems.append(f"{pw}: must be an object")
+                        continue
+                    for key in pcfg:
+                        if key not in ("args", "headers"):
+                            problems.append(f"{pw}.{key}: unknown field")
+                    args = pcfg.get("args")
+                    if args is not None:
+                        if not isinstance(args, list) or len(args) > 64:
+                            problems.append(f"{pw}.args: list <= 64")
+                        else:
+                            for idx, grp in enumerate(args):
+                                if isinstance(grp, list):
+                                    if not all(isinstance(x, str) and len(x) <= 200 for x in grp):
+                                        problems.append(f"{pw}.args[{idx}]: list of strings <= 200")
+                                elif isinstance(grp, str):
+                                    if len(grp) > 200:
+                                        problems.append(f"{pw}.args[{idx}]: string <= 200")
+                                else:
+                                    problems.append(f"{pw}.args[{idx}]: string or list of strings")
+                    hdrs = pcfg.get("headers")
+                    if hdrs is not None:
+                        if not isinstance(hdrs, dict) or len(hdrs) > 32:
+                            problems.append(f"{pw}.headers: object <= 32 entries")
+                        else:
+                            for hk, hv in hdrs.items():
+                                if not isinstance(hk, str) or not isinstance(hv, str) or len(hk) > 100 or len(hv) > 500:
+                                    problems.append(f"{pw}.headers.{hk}: string key/value")
+
+    pu = obj.get("proxy_unwrappers")
+    if pu is not None:
+        if not isinstance(pu, list) or len(pu) > 64:
+            problems.append("proxy_unwrappers: list <= 64")
+        else:
+            for i, u in enumerate(pu):
+                w = f"proxy_unwrappers[{i}]"
+                if not isinstance(u, dict):
+                    problems.append(f"{w}: must be an object")
+                    continue
+                for key in u:
+                    if key not in ("pattern", "decode", "group"):
+                        problems.append(f"{w}.{key}: unknown field")
+                _check_regex(u.get("pattern"), f"{w}.pattern", problems, max_len=300)
+                if "decode" in u and u["decode"] not in UNWRAPPER_DECODES:
+                    problems.append(f"{w}.decode: one of {'|'.join(UNWRAPPER_DECODES)}")
+                if "group" in u and (isinstance(u["group"], bool) or not isinstance(u["group"], int) or not 1 <= u["group"] <= 10):
+                    problems.append(f"{w}.group: int in 1..10")
+
+    rg = obj.get("resolver_gates")
+    if rg is not None:
+        if not isinstance(rg, dict):
+            problems.append("resolver_gates: must be an object")
+        else:
+            for key in rg:
+                if key not in ("exclusions",):
+                    problems.append(f"resolver_gates.{key}: unknown field")
+            excl = rg.get("exclusions")
+            if excl is not None:
+                if not isinstance(excl, dict):
+                    problems.append("resolver_gates.exclusions: must be an object")
+                else:
+                    for rname, arr in excl.items():
+                        if not isinstance(arr, list) or len(arr) > 64:
+                            problems.append(f"resolver_gates.exclusions.{rname}: list <= 64")
+                        elif not all(isinstance(x, str) and 0 < len(x) <= 200 for x in arr):
+                            problems.append(f"resolver_gates.exclusions.{rname}: non-empty strings <= 200")
+
+    rc = obj.get("resolver_crypto")
+    if rc is not None:
+        if not isinstance(rc, dict):
+            problems.append("resolver_crypto: must be an object")
+        else:
+            for key in rc:
+                if key not in ("rings",):
+                    problems.append(f"resolver_crypto.{key}: unknown field")
+            rings = rc.get("rings")
+            if rings is not None:
+                if not isinstance(rings, dict):
+                    problems.append("resolver_crypto.rings: must be an object")
+                else:
+                    for rname, arr in rings.items():
+                        if not isinstance(arr, list) or len(arr) > 16:
+                            problems.append(f"resolver_crypto.rings.{rname}: list <= 16")
+                        else:
+                            for idx, item in enumerate(arr):
+                                w = f"resolver_crypto.rings.{rname}[{idx}]"
+                                if not isinstance(item, dict):
+                                    problems.append(f"{w}: must be an object")
+                                    continue
+                                for key in item:
+                                    if key not in ("cipher", "algo", "key_hex", "iv_hex", "key", "iv"):
+                                        problems.append(f"{w}.{key}: unknown field")
+                                has_hex = "key_hex" in item and "iv_hex" in item
+                                has_str = "key" in item and "iv" in item
+                                if not (has_hex or has_str):
+                                    problems.append(f"{w}: requires (key_hex + iv_hex) or (key + iv)")
+
+    for name, cap in (
+        ("permissive_tls_hosts", 128),
+        ("hls_keep_referer_hosts", 128),
+        ("streaming_url_markers", 128),
+        ("preflight_passthrough_markers", 128),
+        ("decoy_signatures", 128)
+    ):
+        arr = obj.get(name)
+        if arr is not None:
+            if not isinstance(arr, list) or len(arr) > cap:
+                problems.append(f"{name}: list <= {cap}")
+            elif not all(isinstance(x, str) and 0 < len(x) <= 300 for x in arr):
+                problems.append(f"{name}: non-empty strings <= 300")
+
+    fc = obj.get("failover_clusters")
+    if fc is not None:
+        if not isinstance(fc, dict):
+            problems.append("failover_clusters: must be an object")
+        else:
+            for key in fc:
+                if key not in ("animeSecondPass", "clusters"):
+                    problems.append(f"failover_clusters.{key}: unknown field")
+            asp = fc.get("animeSecondPass")
+            if asp is not None:
+                if not isinstance(asp, list) or len(asp) > 64:
+                    problems.append("failover_clusters.animeSecondPass: list <= 64")
+                elif not all(isinstance(x, str) and 0 < len(x) <= 64 for x in asp):
+                    problems.append("failover_clusters.animeSecondPass: non-empty strings <= 64")
+            cl = fc.get("clusters")
+            if cl is not None:
+                if not isinstance(cl, dict) or len(cl) > 32:
+                    problems.append("failover_clusters.clusters: object <= 32 entries")
+                else:
+                    for cname, carr in cl.items():
+                        if not isinstance(carr, list) or len(carr) > 64:
+                            problems.append(f"failover_clusters.clusters.{cname}: list <= 64")
+                        elif not all(isinstance(x, str) and 0 < len(x) <= 64 for x in carr):
+                            problems.append(f"failover_clusters.clusters.{cname}: non-empty strings <= 64")
+
+    return problems
+
+
 def validate_platform_sections(obj) -> list:
     """v3.3.0 platform-surface sections (docs/FINAL_BUILD_EXECUTION_PLAN.md
     §4.1): announcements / update / ads / engagement / tamper / fcm. Same
@@ -1277,7 +1468,12 @@ def validate_schema(plain: bytes) -> list:
                        "minAppVersion", "pipelines", "remote_logging_url",
                        "rev", "flags", "contentPolicy",
                        "announcements", "update", "ads", "engagement",
-                       "tamper", "fcm"):
+                       "tamper", "fcm",
+                       "downloader_routing", "engine_profiles", "proxy_unwrappers",
+                       "resolver_gates", "resolver_crypto", "permissive_tls_hosts",
+                       "hls_keep_referer_hosts", "streaming_url_markers",
+                       "preflight_passthrough_markers", "decoy_signatures",
+                       "failover_clusters"):
             problems.append(f"unknown top-level field '{key}' (add it to the "
                             "allow-list in encrypt_rules.py AND DynamicRulesManager)")
 
@@ -1353,6 +1549,9 @@ def validate_schema(plain: bytes) -> list:
     # v3.3.0 platform surfaces (plan §4.1) — announcements / update / ads /
     # engagement / tamper / fcm, strict like contentPolicy above.
     problems.extend(validate_platform_sections(obj))
+
+    # v3.4.0 OTA engine decoupling surfaces
+    problems.extend(validate_engine_sections(obj))
 
     problems.extend(validate_pipelines(obj))
     return problems

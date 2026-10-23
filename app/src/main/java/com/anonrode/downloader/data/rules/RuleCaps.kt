@@ -173,7 +173,8 @@ object RuleCaps {
     /** One field check: regex-pattern length, then URL-scheme shape. */
     private fun checkString(key: String, value: String, path: String, out: MutableList<String>) {
         if (out.size >= MAX_VIOLATIONS) return
-        val isRegex = key == REGEX_KEY || key.endsWith(REGEX_SUFFIX)
+        val isRegex = key == REGEX_KEY || key.endsWith(REGEX_SUFFIX) ||
+            (key == "pattern" && (path.startsWith("downloader_routing") || path.startsWith("proxy_unwrappers")))
         if (isRegex && value.length > MAX_REGEX_CHARS) {
             out.add("$path/$key: regex pattern ${value.length} chars > $MAX_REGEX_CHARS")
             return

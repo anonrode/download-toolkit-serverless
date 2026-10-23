@@ -115,7 +115,6 @@ class AnonApp : Application(), ImageLoaderFactory {
         // so announcements/gates land promptly instead of waiting for the
         // 24h floor.
         registerActivityLifecycleCallbacks(foregroundTracker)
-        com.anonrode.downloader.update.EngagementScheduler.noteAppOpen(this)
         appScope.launch {
             // Cache reads gate the ViewModel's initial hydrate. Keep them in
             // their own block so a rules/AES failure still releases the UI.
@@ -206,10 +205,11 @@ class AnonApp : Application(), ImageLoaderFactory {
         try { com.anonrode.downloader.update.AnnouncementManager.refresh(context) } catch (_: Throwable) {}
         try { com.anonrode.downloader.update.UpdateManager.evaluate(context) } catch (_: Throwable) {}
         try { com.anonrode.downloader.update.EngagementScheduler.arm(context) } catch (_: Throwable) {}
-        // QA-V3 F3: the cold-start noteAppOpen runs pre-init (cfg null -> it
-        // bails without stamping); THIS is the payload-aware call that stamps
-        // the return and evaluates the welcome-back window.
-        try { com.anonrode.downloader.update.EngagementScheduler.noteAppOpen(context) } catch (_: Throwable) {}
+        // QA-V3 F3 / OTA-5: Only stamp last-open on genuine foreground activations;
+        // headless background process starts (boot/alarms/FCM) arm the scheduler without resetting the clock.
+        if (hasEnteredForeground) {
+            try { com.anonrode.downloader.update.EngagementScheduler.noteAppOpen(context) } catch (_: Throwable) {}
+        }
         try { com.anonrode.downloader.util.IntegrityCheck.evaluate(context) } catch (_: Throwable) {}
         try { com.anonrode.downloader.update.FcmRegistrar.maybeRegister(context) } catch (_: Throwable) {}
         try { com.anonrode.downloader.update.IntegrityAttestor.maybeAttest(context) } catch (_: Throwable) {}
@@ -218,6 +218,8 @@ class AnonApp : Application(), ImageLoaderFactory {
         // activation half — vendor ad VIEWS remain a follow-up).
         try { com.anonrode.downloader.ads.Ads.activeBridge(context) } catch (_: Throwable) {}
     }
+
+    @Volatile private var hasEnteredForeground = false
 
     /** Manual-sync path (Settings "Sync Now", QA-V3 F5): run the same
      *  post-activation hooks the auto-sync runs, so a manually pulled payload
@@ -230,6 +232,7 @@ class AnonApp : Application(), ImageLoaderFactory {
         private var startedCount = 0
 
         override fun onActivityStarted(activity: Activity) {
+            hasEnteredForeground = true
             if (startedCount == 0) onAppForegrounded()
             startedCount++
         }

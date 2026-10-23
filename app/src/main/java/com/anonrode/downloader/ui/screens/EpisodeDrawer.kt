@@ -235,17 +235,19 @@ fun EpisodeDrawer(
     // The ViewModel is not edited and no new state is added there: this is a
     // read-only presentation cache over data the drawer already received.
     val freshEpisodes = uiState.drawerEpisodes
-    LaunchedEffect(freshEpisodes, show.url) {
+    val rulesVer = com.anonrode.downloader.data.rules.DynamicRulesManager.version.collectAsState().value
+    val drawerCacheKey = "$rulesVer|${show.site}|${show.url}"
+    LaunchedEffect(freshEpisodes, show.url, rulesVer) {
         if (freshEpisodes.isNotEmpty()) {
-            cachedEpisodeLists[show.site + "|" + show.url] = CachedEpisodeList(
+            cachedEpisodeLists[drawerCacheKey] = CachedEpisodeList(
                 episodes = freshEpisodes,
                 synopsis = uiState.drawerSynopsis,
                 savedAtMs = System.currentTimeMillis()
             )
         }
     }
-    val cachedHit = remember(show.site, show.url) {
-        cachedEpisodeLists[show.site + "|" + show.url]
+    val cachedHit = remember(drawerCacheKey) {
+        cachedEpisodeLists[drawerCacheKey]
             ?.takeIf { System.currentTimeMillis() - it.savedAtMs <= EPISODE_CACHE_TTL_MS }
             ?.episodes
             .orEmpty()
@@ -253,8 +255,8 @@ fun EpisodeDrawer(
     val episodes = if (freshEpisodes.isNotEmpty()) freshEpisodes else cachedHit
     val isLoading = uiState.isEpisodesLoading && episodes.isEmpty()
     val showSynopsis = if (uiState.drawerSynopsis.isNotBlank()) uiState.drawerSynopsis
-        else remember(show.site, show.url) {
-            cachedEpisodeLists[show.site + "|" + show.url]
+        else remember(drawerCacheKey) {
+            cachedEpisodeLists[drawerCacheKey]
                 ?.takeIf { System.currentTimeMillis() - it.savedAtMs <= EPISODE_CACHE_TTL_MS }
                 ?.synopsis
                 .orEmpty()
@@ -295,11 +297,13 @@ fun EpisodeDrawer(
         val rawLower = show.title.trim().lowercase()
         val folderLower = com.anonrode.downloader.util.NameSanitizer
             .cleanShowFolder(show.title).trim().lowercase()
+        val normKey = com.anonrode.downloader.data.models.ShowIdentity.normalizeShowKey(show.title)
         allTasks.filter { task ->
             val t = task.showTitle.trim().lowercase()
             (task.seriesUrl.isNotBlank() && task.seriesUrl.equals(show.url, ignoreCase = true)) ||
                 t == rawLower ||
                 (folderLower.isNotBlank() && t == folderLower) ||
+                (normKey.isNotBlank() && com.anonrode.downloader.data.models.ShowIdentity.normalizeShowKey(task.showTitle) == normKey) ||
                 (rawLower.isNotBlank() && task.showTitle.contains(show.title, ignoreCase = true))
         }
     }
@@ -2320,6 +2324,10 @@ private data class CachedEpisodeList(
 
 private const val EPISODE_CACHE_TTL_MS = 30L * 60L * 1000L   // §4.4: 30-minute TTL
 private val cachedEpisodeLists = ConcurrentHashMap<String, CachedEpisodeList>()
+
+fun clearCachedEpisodeLists() {
+    cachedEpisodeLists.clear()
+}
 
 private const val STAGE_FINDING = "Step 1/2 · Finding episode pages…"
 private const val STAGE_UNLOCKING = "Step 2/2 · Unlocking stream links…"

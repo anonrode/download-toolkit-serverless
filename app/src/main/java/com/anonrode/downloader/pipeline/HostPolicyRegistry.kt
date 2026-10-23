@@ -14,7 +14,8 @@ object HostPolicyRegistry {
     fun isAsianSite(site: String): Boolean {
         val s = site.trim().lowercase()
         if (s.isBlank()) return false
-        return s in DEDICATED_ASIAN_SITES || (s in ASIAN_DRAMA_CLUSTER && s !in WESTERN_CLUSTER)
+        val clusters = com.anonrode.downloader.data.rules.DynamicRulesManager.getFailoverClusters()
+        return s in clusters.dedicatedAsian || (s in clusters.asianCluster && s !in clusters.westernCluster)
     }
 
     // Built-in per-host socket caps. Speed-first policy (2026-10, 1DM batch):
@@ -484,9 +485,12 @@ object HostPolicyRegistry {
     }
 
     fun allowsPermissiveTlsFallback(url: String): Boolean {
-        val host = UrlClassifier.extractHost(url)
-        return BROKEN_TLS_INTERMEDIATE_HOSTS.any { domain ->
-            host == domain || host.endsWith(".$domain")
-        }
+        val host = UrlClassifier.extractHost(url).removePrefix("www.").trimEnd('.')
+        if (host.isBlank()) return false
+        return com.anonrode.downloader.data.rules.DynamicRulesManager.isPermissiveTls(host) ||
+            BROKEN_TLS_INTERMEDIATE_HOSTS.any { domain ->
+                val d = domain.lowercase().removePrefix("www.").trimEnd('.')
+                host == d || host.endsWith(".$d")
+            }
     }
 }

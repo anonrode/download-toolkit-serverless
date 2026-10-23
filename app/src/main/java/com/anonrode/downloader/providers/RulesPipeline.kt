@@ -549,6 +549,18 @@ object RulesPipeline {
     private fun JsoupXml(body: String): Document =
         org.jsoup.Jsoup.parse(body, "", org.jsoup.parser.Parser.xmlParser())
 
+    private fun parseJsonRoot(text: String): Any? {
+        val trimmed = text.trim()
+        if (trimmed.isEmpty()) return null
+        return try {
+            if (trimmed.startsWith("{")) JSONObject(trimmed)
+            else if (trimmed.startsWith("[")) JSONArray(trimmed)
+            else try { JSONObject(trimmed) } catch (_: Exception) { JSONArray(trimmed) }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     private fun applyBinds(step: PipelineStep, outcome: StepOutcome, vars: MutableMap<String, String>, capture: ResolveCapture? = null) {
         val (powBinds, regularBinds) = step.bind.partition { it.powSha256 != null }
         for (bind in regularBinds) {
@@ -594,7 +606,14 @@ object RulesPipeline {
                     val m = try { Regex(bind.regex).find(target) } catch (_: Exception) { null }
                     m?.let { regexBindValue(it, bind.group) }
                 }
-                bind.jsonPath.isNotBlank() -> walkJson(outcome.json, bind.jsonPath).firstOrNull()?.let { jsonToString(it) }
+                bind.jsonPath.isNotBlank() -> {
+                    val jsonRoot = if (bind.sourceVar.isNotBlank() || bind.unpackJs) {
+                        parseJsonRoot(targetText)
+                    } else {
+                        outcome.json ?: parseJsonRoot(targetText)
+                    }
+                    walkJson(jsonRoot, bind.jsonPath).firstOrNull()?.let { jsonToString(it) }
+                }
                 bind.selector.isNotBlank() -> outcome.doc?.selectFirst(bind.selector)?.let { el ->
                     when {
                         bind.attr.equals("html", true) -> el.html()
@@ -659,7 +678,12 @@ object RulesPipeline {
         try {
             when {
                 bind.jsonPath.isNotBlank() -> {
-                    walkJson(outcome.json, bind.jsonPath).forEach { node ->
+                    val jsonRoot = if (bind.sourceVar.isNotBlank() || bind.unpackJs) {
+                        parseJsonRoot(targetText)
+                    } else {
+                        outcome.json ?: parseJsonRoot(targetText)
+                    }
+                    walkJson(jsonRoot, bind.jsonPath).forEach { node ->
                         jsonToString(node)?.let { v -> if (v.isNotBlank()) out.add(v.trim()) }
                     }
                 }

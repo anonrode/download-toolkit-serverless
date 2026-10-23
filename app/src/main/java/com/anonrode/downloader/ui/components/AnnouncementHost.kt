@@ -103,6 +103,7 @@ private fun AnnouncementOverlay(ann: AnnouncementManager.Active) {
             }
             "update" -> {
                 dismiss()
+                UpdateManager.clearSnooze(context)
                 // Promotes the state so UpdateGate renders the prompt/gate.
                 UpdateManager.evaluate(context)
             }
@@ -247,6 +248,7 @@ private fun AnnouncementDialog(ann: AnnouncementManager.Active) {
             }
             "update" -> {
                 dismiss()
+                UpdateManager.clearSnooze(context)
                 // Promotes the state so UpdateGate renders the prompt/gate.
                 UpdateManager.evaluate(context)
             }

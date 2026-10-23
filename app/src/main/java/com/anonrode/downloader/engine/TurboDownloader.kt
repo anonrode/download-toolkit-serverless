@@ -392,11 +392,16 @@ object TurboDownloader {
                         // reusable; anything else (403, 200 full body, HTML)
                         // closes it and either backs off or disables the
                         // standby for this task.
-                        if (res.code == 206 && body != null && body.contentLength() == 1L) {
-                            body.source().readByteArray(1)
-                            consecutiveFailures.set(0)
-                            preparedAtMs.set(System.currentTimeMillis())
-                            ready.set(true)
+                        if (res.code == 206 && body != null) {
+                            val b = body.source().readByteArray(minOf(2L, body.contentLength().let { if (it > 0) it else 2L }))
+                            if (b.size == 1) {
+                                consecutiveFailures.set(0)
+                                preparedAtMs.set(System.currentTimeMillis())
+                                ready.set(true)
+                            } else {
+                                ready.set(false)
+                                fail(res.code)
+                            }
                         } else {
                             ready.set(false)
                             fail(res.code)

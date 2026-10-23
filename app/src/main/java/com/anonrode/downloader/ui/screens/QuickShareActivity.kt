@@ -302,14 +302,15 @@ class QuickShareActivity : ComponentActivity() {
             }
             is ParsedUrl.DramaUrl -> {
                 engine.enqueue(
-                    showTitle = parsed.showCard.title,
+                    showTitle = com.anonrode.downloader.util.NameSanitizer.cleanShowFolder(parsed.showCard.title),
                     episodeNum = 1,
                     episodeTitle = parsed.showCard.title,
                     sourceUrl = parsed.showCard.url,
                     isDirect = false,
                     backend = backend,
                     parallelSockets = engine.parallelSocketsPerFile,
-                    quality = if (audioOnly) null else quality
+                    quality = if (audioOnly) null else quality,
+                    site = parsed.site
                 )
             }
             else -> {

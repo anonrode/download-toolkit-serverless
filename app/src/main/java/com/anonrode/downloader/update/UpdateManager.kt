@@ -59,6 +59,17 @@ object UpdateManager {
      *  writes). MutableStateFlow is thread-safe for cross-thread updates. */
     val state: MutableStateFlow<State> = MutableStateFlow(State.UNKNOWN)
     val message: MutableStateFlow<String> = MutableStateFlow("")
+    val snoozeResetTick: MutableStateFlow<Long> = MutableStateFlow(0L)
+
+    fun clearSnooze(context: Context) {
+        try {
+            context.getSharedPreferences("downloader_settings", Context.MODE_PRIVATE)
+                .edit()
+                .remove("update_snooze_until_ms")
+                .apply()
+            snoozeResetTick.value = System.currentTimeMillis()
+        } catch (_: Exception) {}
+    }
 
     private const val STALE_RAIL_MS = 14L * 24 * 60 * 60 * 1000  // plan §4.5 rail 1
     private const val ARTIFACT_DIR = "apk"
@@ -263,6 +274,9 @@ object UpdateManager {
                 tmp.outputStream().use { output ->
                     val buf = ByteArray(64 * 1024)
                     while (true) {
+                        if (Thread.currentThread().isInterrupted) {
+                            throw kotlinx.coroutines.CancellationException("APK download interrupted/cancelled")
+                        }
                         val n = input.read(buf)
                         if (n < 0) break
                         downloaded += n
@@ -277,6 +291,9 @@ object UpdateManager {
                 return "rename_failed"
             }
             null
+        } catch (ce: kotlinx.coroutines.CancellationException) {
+            tmp.delete()
+            throw ce
         } catch (t: Throwable) {
             tmp.delete()
             t.javaClass.simpleName

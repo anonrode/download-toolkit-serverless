@@ -94,7 +94,19 @@ object RulesFlags {
         "announcements",
         "update",
         "ads",
-        "engagement"
+        "engagement",
+        // v3.4.0 engine decoupling surfaces
+        "downloader_routing",
+        "engine_profiles",
+        "proxy_unwrappers",
+        "resolver_gates",
+        "resolver_crypto",
+        "permissive_tls_hosts",
+        "hls_keep_referer_hosts",
+        "streaming_url_markers",
+        "preflight_passthrough_markers",
+        "decoy_signatures",
+        "failover_clusters"
     )
 
     /** Allowed per-family flag sub-keys; anything else voids that family's

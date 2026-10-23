@@ -92,7 +92,8 @@ object HttpClient {
                     val domain = parts[0]
                     val path = parts[2]
                     val secure = parts[3].equals("TRUE", ignoreCase = true)
-                    val expiresAt = parts[4].toLongOrNull()?.let { it * 1000L } ?: (System.currentTimeMillis() + 86400000L)
+                    val rawExp = parts[4].toLongOrNull() ?: 0L
+                    val expiresAt = if (rawExp > 0L) rawExp * 1000L else (System.currentTimeMillis() + 86_400_000L)
                     val name = parts[5]
                     val value = parts[6]
                     try {
@@ -280,7 +281,7 @@ object HttpClient {
      */
     private fun requestScope(tag: String?): String = when (tag?.lowercase()) {
         "search", "search-strategy", "trending", "feed", "home" -> RetryAfterCooldown.SCOPE_SEARCH
-        "verify" -> RetryAfterCooldown.SCOPE_VERIFY
+        "verify", "hls-estimate", "preflight", "terminal-evidence", "mint-verify" -> RetryAfterCooldown.SCOPE_VERIFY
         else -> RetryAfterCooldown.SCOPE_DOWNLOAD
     }
 

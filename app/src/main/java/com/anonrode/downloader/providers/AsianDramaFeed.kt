@@ -168,7 +168,7 @@ object AsianDramaFeed {
         page: Int,
         filterExplicit: Boolean
     ): List<ShowCard> {
-        val base = "https://dramakey.cc"
+        val base = DynamicRulesManager.getBaseUrl("dramakey").ifBlank { "https://dramakey.com" }.trimEnd('/')
         val pagePrefix = if (page > 1) "page/$page/" else ""
         val url = when {
             era == DramaEra.HISTORICAL -> "$base/genre/historical/$pagePrefix"

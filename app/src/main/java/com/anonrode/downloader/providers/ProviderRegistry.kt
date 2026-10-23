@@ -408,6 +408,11 @@ object ProviderRegistry {
      *  inject a counting fake (ResultVerifier.chain pattern). */
     internal var loadEpisodesProviderForTest: SiteProvider? = null
 
+    fun clearEpisodeCache() {
+        episodesCache.clear()
+        loadLocks.clear()
+    }
+
     /** Resets all episode-cache state between tests
      *  (SubtitleSurfaces.clearForTest pattern). */
     internal fun clearEpisodeCachesForTest() {

@@ -159,6 +159,7 @@ class DownloadRepository {
     }
 
     fun remove(taskId: String) {
+        displayWindows.remove(taskId)
         _tasks.update { list -> list.filterNot { it.id == taskId } }
         persist()
     }
@@ -168,13 +169,26 @@ class DownloadRepository {
     fun removeAll(taskIds: Collection<String>) {
         if (taskIds.isEmpty()) return
         val ids = taskIds.toSet()
+        ids.forEach { displayWindows.remove(it) }
         _tasks.update { list -> list.filterNot { it.id in ids } }
         persist()
     }
 
     fun update(taskId: String, transform: (DownloadTask) -> DownloadTask) {
+        var clearWindow = false
         _tasks.update { list ->
-            list.map { if (it.id == taskId) transform(it) else it }
+            list.map {
+                if (it.id == taskId) {
+                    val updated = transform(it)
+                    if (updated.totalBytes == 0L || updated.status != TaskStatus.DOWNLOADING) {
+                        clearWindow = true
+                    }
+                    updated
+                } else it
+            }
+        }
+        if (clearWindow) {
+            displayWindows.remove(taskId)
         }
         persist()
     }

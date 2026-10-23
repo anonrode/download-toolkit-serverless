@@ -28,6 +28,7 @@ import java.net.URI
 import java.net.URLDecoder
 import java.net.URLEncoder
 import com.anonrode.downloader.data.rules.DynamicRulesManager
+import com.anonrode.downloader.data.rules.CryptoKeySpec
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.regex.Matcher
@@ -706,6 +707,12 @@ object ResolverRegistry {
                     val repaired = com.anonrode.downloader.pipeline.UrlClassifier.repairConcatenatedUrl(result)
                     if (episodeResultAllowed(repaired, episode)) {
                         collected.add(pair.first to repaired)
+                        // M3U8-2: If candidate #0 (primary mirror) succeeded and passes screenTerminalEvidence,
+                        // no subsequent mirror can beat it (later indices are penalized). Break immediately
+                        // without waiting 1,200ms.
+                        if (pair.first == 0 && screenTerminalEvidence(repaired, null)) {
+                            break
+                        }
                         if (settleDeadline == 0L) {
                             settleDeadline = System.currentTimeMillis() + settleMs.coerceIn(0L, 10_000L)
                         }
@@ -983,28 +990,25 @@ object VidbasicResolver : BaseResolver {
             return null
         }
         if (b64.isBlank()) return null
-        return try {
-            // android.util.Base64 on device; java.util fallback keeps the
-            // decrypt JVM-testable (decryptMegaplayEnc pattern). Plain JVM
-            // tests run with returnDefaultValues=true, where the Android stub
-            // returns null instead of throwing — treat null as "not decoded"
-            // and fall through to the JDK decoder.
-            val cipherBytes = try {
-                android.util.Base64.decode(b64, android.util.Base64.DEFAULT)
-                    ?.takeIf { it.isNotEmpty() }
-                    ?: java.util.Base64.getDecoder().decode(b64)
-            } catch (_: Exception) {
-                java.util.Base64.getDecoder().decode(b64)
-            }
-            val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
-            cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(KEY, "AES"), IvParameterSpec(IV))
-            val decrypted = String(cipher.doFinal(cipherBytes), Charsets.UTF_8).trim()
-            if (decrypted.startsWith("http") && !decrypted.contains(" ")) decrypted else null
-        } catch (_: Exception) {
-            // Wrong key/payload shape → no captions for this episode. A
-            // subtitle loss must never fail the stream (recipe contract).
-            null
+        val otaKeys = DynamicRulesManager.getCryptoKeys("vidbasic")
+        val defaultSpec = CryptoKeySpec("AES/CBC/PKCS5Padding", KEY, IV)
+        val candidateKeys = (otaKeys + defaultSpec).distinct()
+        for (kSpec in candidateKeys) {
+            try {
+                val cipherBytes = try {
+                    android.util.Base64.decode(b64, android.util.Base64.DEFAULT)
+                        ?.takeIf { it.isNotEmpty() }
+                        ?: java.util.Base64.getDecoder().decode(b64)
+                } catch (_: Exception) {
+                    java.util.Base64.getDecoder().decode(b64)
+                }
+                val cipher = Cipher.getInstance(kSpec.cipher)
+                cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(kSpec.keyBytes, "AES"), IvParameterSpec(kSpec.ivBytes))
+                val decrypted = String(cipher.doFinal(cipherBytes), Charsets.UTF_8).trim()
+                if (decrypted.startsWith("http") && !decrypted.contains(" ")) return decrypted
+            } catch (_: Exception) {}
         }
+        return null
     }
 
     /**
@@ -1042,17 +1046,22 @@ object VidbasicResolver : BaseResolver {
             if (!m.find()) return null
         }
         val b64 = m.group(1) ?: return null
-        try {
-            val cipherBytes = android.util.Base64.decode(b64, android.util.Base64.DEFAULT)
-            val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
-            val keySpec = SecretKeySpec(KEY, "AES")
-            val ivSpec = IvParameterSpec(IV)
-            cipher.init(Cipher.DECRYPT_MODE, keySpec, ivSpec)
-            val decrypted = String(cipher.doFinal(cipherBytes), Charsets.UTF_8).trim()
-            if (decrypted.startsWith("http") && !decrypted.contains(" ")) {
-                return decrypted
-            }
-        } catch (_: Exception) {}
+        val otaKeys = DynamicRulesManager.getCryptoKeys("vidbasic")
+        val defaultSpec = CryptoKeySpec("AES/CBC/PKCS5Padding", KEY, IV)
+        val candidateKeys = (otaKeys + defaultSpec).distinct()
+        for (kSpec in candidateKeys) {
+            try {
+                val cipherBytes = android.util.Base64.decode(b64, android.util.Base64.DEFAULT)
+                val cipher = Cipher.getInstance(kSpec.cipher)
+                val keySpec = SecretKeySpec(kSpec.keyBytes, "AES")
+                val ivSpec = IvParameterSpec(kSpec.ivBytes)
+                cipher.init(Cipher.DECRYPT_MODE, keySpec, ivSpec)
+                val decrypted = String(cipher.doFinal(cipherBytes), Charsets.UTF_8).trim()
+                if (decrypted.startsWith("http") && !decrypted.contains(" ")) {
+                    return decrypted
+                }
+            } catch (_: Exception) {}
+        }
         return null
     }
 }
@@ -1125,6 +1134,17 @@ object KisskhMegaplayResolver : BaseResolver {
     override fun lastResolveFailure(): String? = lastFailure
 
     private fun decryptMegaplayEnc(enc: String): String? {
+        val otaKeys = DynamicRulesManager.getCryptoKeys("megaplay")
+        val defaultSpec = CryptoKeySpec("AES/CBC/PKCS5Padding", MEGAPLAY_KEY, MEGAPLAY_IV)
+        val candidateKeys = (otaKeys + defaultSpec).distinct()
+        for (kSpec in candidateKeys) {
+            val res = tryDecryptMegaplay(enc, kSpec)
+            if (res != null) return res
+        }
+        return null
+    }
+
+    private fun tryDecryptMegaplay(enc: String, kSpec: CryptoKeySpec): String? {
         return try {
             val clean = enc.replace('-', '+').replace('_', '/').replace(Regex("""\s"""), "")
             val pad = clean.length % 4
@@ -1134,9 +1154,9 @@ object KisskhMegaplayResolver : BaseResolver {
             } catch (_: Exception) {
                 java.util.Base64.getDecoder().decode(padded)
             }
-            val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
-            val keySpec = SecretKeySpec(MEGAPLAY_KEY, "AES")
-            val ivSpec = IvParameterSpec(MEGAPLAY_IV)
+            val cipher = Cipher.getInstance(kSpec.cipher)
+            val keySpec = SecretKeySpec(kSpec.keyBytes, "AES")
+            val ivSpec = IvParameterSpec(kSpec.ivBytes)
             cipher.init(Cipher.DECRYPT_MODE, keySpec, ivSpec)
             val decryptedBytes = cipher.doFinal(cipherBytes)
             val jsonStr = String(decryptedBytes, Charsets.UTF_8)
@@ -1580,10 +1600,36 @@ object VidsrcResolver : BaseResolver {
     internal val missingTmdb = ConcurrentHashMap<String, Long>()
     internal val availableTmdb = ConcurrentHashMap<String, Long>()
     internal val transientMissingTmdb = ConcurrentHashMap<String, Long>()
+
+    /** Cross-mirror buzz cooldown. Every mirror host runs the SAME
+     *  vidsrc.buzz embed/mint backend, so a failed fill (wait timeout / empty
+     *  ssr) is identical for all 17 mirrors. Without this, one title walked
+     *  the whole list at 8-12s each and hit the engine's 90s resolve timeout
+     *  (share-46: 8 tasks). Keyed by media identity, cleared on success. */
+    private val buzzCooldown = ConcurrentHashMap<String, Long>()
+    private const val BUZZ_COOLDOWN_MS = 20_000L
+
+    internal fun buzzKey(mediaType: String, tmdb: String, season: String?, episode: String?): String =
+        "$mediaType:$tmdb:${season.orEmpty()}:${episode.orEmpty()}"
+
+    internal fun noteBuzzFailure(key: String, now: Long = System.currentTimeMillis()) {
+        buzzCooldown[key] = now + BUZZ_COOLDOWN_MS
+        if (buzzCooldown.size > 256) buzzCooldown.clear()
+    }
+
+    internal fun buzzCoolingDown(key: String, now: Long = System.currentTimeMillis()): Boolean =
+        (buzzCooldown[key] ?: 0L) > now
+
+    internal fun clearBuzzCooldownForTest() {
+        buzzCooldown.clear()
+    }
+
     private const val MISSING_TMDB_TTL_MS = 15 * 60_000L
     private const val AVAILABLE_TMDB_TTL_MS = 60 * 60_000L
     private const val TRANSIENT_BACKOFF_TTL_MS = 30_000L
     @Volatile private var lastFailure: String? = null
+
+    override fun lastResolveFailure(): String? = lastFailure
 
     // ------------------------------------------------------------------
     // LIVE vidsrc extraction path — recreated from the working site
@@ -1661,6 +1707,17 @@ object VidsrcResolver : BaseResolver {
      * without a content verdict so network hiccups re-walk next pass.
      */
     private suspend fun resolveViaBuzz(mediaType: String, tmdb: String, season: String?, episode: String?): String? {
+        val key = buzzKey(mediaType, tmdb, season, episode)
+        if (buzzCoolingDown(key)) {
+            lastFailure = "Vidsrc: buzz backend cooling down for tmdb=$tmdb after an identical failure"
+            return null
+        }
+        val result = resolveViaBuzzInner(mediaType, tmdb, season, episode)
+        if (result == null) noteBuzzFailure(key) else buzzCooldown.remove(key)
+        return result
+    }
+
+    private suspend fun resolveViaBuzzInner(mediaType: String, tmdb: String, season: String?, episode: String?): String? {
         val embedBase = otaEmbedBase()
         val mintBase = otaMintBase()
         val pageUrl = if (mediaType == "tv")
@@ -1738,7 +1795,7 @@ object VidsrcResolver : BaseResolver {
                     servers = fillObj?.optJSONArray("servers")
                     fillSaidWait = fillObj?.optString("status") == "wait"
                     if ((servers?.length() ?: 0) > 0 || !fillSaidWait) break
-                    if (waitRetries >= 2) break
+                    if (waitRetries >= 1) break
                     waitRetries++
                     delay(3000)
                 }
@@ -1996,10 +2053,22 @@ object VidsrcResolver : BaseResolver {
         if (segVerdict == MintHeadVerdict.STUB) return MintHeadVerdict.STUB
         // A nested playlist at the segment slot is the same media-ish
         // beginning class the direct case already accepts.
-        return if (segVerdict == MintHeadVerdict.MANIFEST) MintHeadVerdict.MEDIA else segVerdict
+        val finalVerdict = if (segVerdict == MintHeadVerdict.MANIFEST) MintHeadVerdict.MEDIA else segVerdict
+        if (finalVerdict == MintHeadVerdict.MEDIA || finalVerdict == MintHeadVerdict.MANIFEST) {
+            com.anonrode.downloader.pipeline.UrlClassifier.rememberTerminalEvidence(
+                streamUrl,
+                com.anonrode.downloader.pipeline.TerminalEvidence(
+                    com.anonrode.downloader.pipeline.TerminalKind.HLS_PLAYLIST,
+                    head.first,
+                    head.second,
+                    head.third.size.toLong(),
+                    "mint-verified"
+                )
+            )
+        }
+        return finalVerdict
     }
 
-    override fun lastResolveFailure(): String? = lastFailure
 
     fun isKnownUnavailable(mediaType: String, tmdbId: String, season: String = "", episode: String = ""): Boolean {
         val cacheKey = "$mediaType:$tmdbId:$season:$episode"
@@ -2069,6 +2138,11 @@ object VidsrcResolver : BaseResolver {
     }
 
     override fun canResolve(url: String): Boolean {
+        if (DynamicRulesManager.isResolverExcluded("vidsrc", url)) return false
+        val low = url.lowercase()
+        if (low.contains("/_stream") || low.contains("/pl/api.php") || low.contains("stream-proxy")) {
+            return false
+        }
         return hostClaim(url, HOSTS)
     }
 
@@ -2103,7 +2177,7 @@ object VidsrcResolver : BaseResolver {
                             ?: doc.selectFirst("iframe[src*=vidsrc]")
                             ?: doc.selectFirst("iframe[src*=vsembed]")
                             ?: doc.selectFirst("iframe[src]")
-                        if (iframe != null && iframe.attr("src").isNotBlank()) {
+                        if (iframe != null && navigableEmbedSrc(iframe.attr("src"))) {
                             embedUrl = HttpClient.safeResolveUri(embedUrl, iframe.attr("src"))
                         }
                     }
@@ -2143,7 +2217,7 @@ object VidsrcResolver : BaseResolver {
                         val buzzIframe = twoDoc.selectFirst("iframe[src*=vidsrc]")
                             ?: twoDoc.selectFirst("iframe[src*=vsembed]")
                             ?: twoDoc.selectFirst("iframe[src]")
-                        if (buzzIframe != null && buzzIframe.attr("src").isNotBlank()) {
+                        if (buzzIframe != null && navigableEmbedSrc(buzzIframe.attr("src"))) {
                             embedUrl = HttpClient.safeResolveUri(embedUrl, buzzIframe.attr("src"))
                         }
                     }
@@ -3122,9 +3196,12 @@ object LoadedfilesResolver : BaseResolver {
     }
 
     override fun canResolve(url: String): Boolean {
+        if (DynamicRulesManager.isResolverExcluded("loadedfiles", url)) return false
+        val low = url.lowercase()
+        if (low.contains("/token/download/") || low.contains("/d/")) return false
         val host = HttpClient.parsedHost(url)
         return if (host != null) HOST_RE.matcher(host).find()
-        else HOST_RE.matcher(url.lowercase()).find()
+        else HOST_RE.matcher(low).find()
     }
 
     override suspend fun resolve(url: String, quality: String, depth: Int): String? =
@@ -3767,6 +3844,8 @@ object DoodstreamResolver : BaseResolver {
     override fun lastResolveFailure(): String? = lastFailure
 
     override fun canResolve(url: String): Boolean {
+        if (DynamicRulesManager.isResolverExcluded("doodstream", url)) return false
+        if (url.lowercase().contains("/pass_md5/")) return false
         return hostClaim(url, HOSTS)
     }
 
@@ -3895,6 +3974,8 @@ object StreamtapeResolver : BaseResolver {
     override fun lastResolveFailure(): String? = lastFailure
 
     override fun canResolve(url: String): Boolean {
+        if (DynamicRulesManager.isResolverExcluded("streamtape", url)) return false
+        if (url.lowercase().contains("/get_video")) return false
         return hostClaim(url, HOSTS)
     }
 
@@ -3942,6 +4023,8 @@ object PixelDrainResolver : BaseResolver {
     override fun lastResolveFailure(): String? = lastFailure
 
     override fun canResolve(url: String): Boolean {
+        if (DynamicRulesManager.isResolverExcluded("pixeldrain", url)) return false
+        if (url.lowercase().contains("/api/file/")) return false
         return hostClaim(url, listOf("pixeldrain.com"))
     }
 
