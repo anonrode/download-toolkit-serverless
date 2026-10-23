@@ -295,6 +295,20 @@ class InstagramPhotoMuxerTest {
     // ---- filename ----------------------------------------------------------
 
     @Test
+    fun pickMuxable_matchesGraphqlShortcodeKey() {
+        // REST uses "code"; xdt_shortcode_media GraphQL uses "shortcode".
+        val other = photoMusicMedia()
+        other.put("code", "OTHER_CODE")
+        val target = photoMusicMedia()
+        target.remove("code")
+        target.put("shortcode", "TARGET_CODE")
+        target.getJSONObject("caption").put("text", "GraphQL target")
+        val parts = InstagramPhotoMuxer.pickMuxable(listOf(other, target), shortcode = "TARGET_CODE")
+        assertNotNull(parts)
+        assertEquals("GraphQL target", parts!!.caption)
+    }
+
+    @Test
     fun buildFilename_sanitizesAndCaps() {
         val parts = InstagramPhotoMuxer.pickMuxable(listOf(photoMusicMedia()))!!
         val name = InstagramPhotoMuxer.buildFilename("DV50JOdjR-P", parts)

@@ -4568,6 +4568,8 @@ class DownloadEngine(
                         File(producedFile.absolutePath + ".part").delete()
                         File(producedFile.absolutePath + ".aria2").delete()
                         File(producedFile.absolutePath + ".hlsfp").delete()
+                        File(producedFile.absolutePath + ".hlsrs").delete()
+                        File(producedFile.absolutePath + ".hts").delete()
                         deletePartFragFiles(
                             producedFile.parentFile ?: File("."),
                             producedFile.nameWithoutExtension,
@@ -4591,6 +4593,8 @@ class DownloadEngine(
                             File(targetPathBeforeCompletion + ".aria2").delete()
                             File(targetPathBeforeCompletion + ".ytdl").delete()
                             File(targetPathBeforeCompletion + ".hlsfp").delete()
+                            File(targetPathBeforeCompletion + ".hlsrs").delete()
+                            File(targetPathBeforeCompletion + ".hts").delete()
                         }
                         // The extension sync may have renamed the task's target
                         // (.mp4 → .mkv) before download start: the ORIGINAL path's
@@ -4603,6 +4607,8 @@ class DownloadEngine(
                             File(originalFilePath + ".aria2").delete()
                             File(originalFilePath + ".ytdl").delete()
                             File(originalFilePath + ".hlsfp").delete()
+                            File(originalFilePath + ".hlsrs").delete()
+                            File(originalFilePath + ".hts").delete()
                         }
                         // O3: bounded stem-family sweep — one directory listing
                         // clears every abandoned sidecar generation (a task whose

@@ -7,6 +7,7 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.RectF
+import android.media.MediaMetadataRetriever
 import com.anonrode.downloader.data.net.HttpClient
 import com.anonrode.downloader.util.DebugLog
 import com.yausername.youtubedl_android.YoutubeDL
@@ -478,7 +479,7 @@ object InstagramPhotoMuxer {
     internal fun pickMuxable(objects: List<JSONObject>, shortcode: String? = null): MediaParts? {
         var fallback: MediaParts? = null
         for (o in objects) {
-            val code = o.optString("code")
+            val code = o.optString("code").ifBlank { o.optString("shortcode") }
             val matchesShortcode = shortcode != null && code.equals(shortcode, ignoreCase = true)
             val parts = mediaToParts(o) ?: continue
             if (parts.hasVideo) continue
@@ -639,7 +640,9 @@ object InstagramPhotoMuxer {
             if (candidate == null) return
             accumulated = accumulated?.let { mergeParts(it, candidate) } ?: candidate
         }
-        fun hasAudio(): Boolean = accumulated?.audioUrl?.isNotBlank() == true
+        fun hasPhotoAndAudio(): Boolean =
+            accumulated?.photoUrl?.isNotBlank() == true &&
+                accumulated?.audioUrl?.isNotBlank() == true
 
         // 1) Mobile-style REST detail.
         if (pk != null) {
@@ -659,7 +662,7 @@ object InstagramPhotoMuxer {
             if (!rest.isNullOrBlank() && rest.trimStart().startsWith("{")) {
                 try {
                     accumulate(pickMuxable(findMediaObjects(JSONObject(rest)), shortcode))
-                    if (hasAudio()) return accumulated
+                    if (hasPhotoAndAudio()) return accumulated
                 } catch (_: Exception) {}
             }
         }
@@ -690,11 +693,11 @@ object InstagramPhotoMuxer {
                     }
                 } catch (_: Exception) {}
             }
-            if (hasAudio()) return accumulated
+            if (hasPhotoAndAudio()) return accumulated
 
             // 2B) Shortcode GraphQL carries clips_music_attribution_info and
             // the sidecar children on many posts where media_id does not.
-            if (!hasAudio()) {
+            if (!hasPhotoAndAudio()) {
                 val scHeaders = LinkedHashMap(headers).apply {
                     put("X-FB-Friendly-Name", SHORTCODE_FRIENDLY)
                 }
@@ -710,7 +713,7 @@ object InstagramPhotoMuxer {
                     } catch (_: Exception) {}
                 }
             }
-            if (hasAudio()) return accumulated
+            if (hasPhotoAndAudio()) return accumulated
         }
 
         // 3) RelayPrefetched data-sjs blobs in either HTML shape.
@@ -725,10 +728,10 @@ object InstagramPhotoMuxer {
             extractRawAudioHintsFromText(page)?.let { accumulate(it) }
             if (isCancelled()) throw CancellationException("IG mux cancelled after sjs")
         }
-        if (hasAudio()) return accumulated
+        if (hasPhotoAndAudio()) return accumulated
 
         // 4) Public embed page: contextJSON plus the rendered music ticker.
-        if (!hasAudio() || accumulated?.carouselPhotoUrls.isNullOrEmpty()) {
+        if (!hasPhotoAndAudio() || accumulated?.carouselPhotoUrls.isNullOrEmpty()) {
             try {
                 val embedHeaders = mapOf(
                     "Accept" to "text/html,application/xhtml+xml",
@@ -1004,6 +1007,7 @@ object InstagramPhotoMuxer {
                 isCancelled = isCancelled
             )
             val effectiveDurationMs = parts.durationMs.takeIf { it > 0L }
+                ?: probeAudioDurationMs(audio)
                 ?: (if (audio?.name == "audio.m4a") parts.carouselVideoDurationMs else 0L)
 
             // ---------- slideshow path: 2+ carousel photos
@@ -1080,7 +1084,16 @@ object InstagramPhotoMuxer {
                     return deliverStillPhotos(outDir, shortcode, parts)
                 }
                 if (isCancelled()) throw CancellationException("IG mux cancelled after cover fetch")
-                ffmpegVariants(lib.absolutePath, cover.absolutePath, audio?.absolutePath, produced.absolutePath)
+                // Single-photo posts can also be WebP; normalize to baseline
+                // JPEG exactly like the carousel path so ffmpeg never decodes
+                // an unexpected format.
+                val normalizedCover = normalizeSlidesForFfmpeg(work, listOf(cover)).firstOrNull() ?: cover
+                ffmpegVariants(
+                    lib.absolutePath,
+                    normalizedCover.absolutePath,
+                    audio?.absolutePath,
+                    produced.absolutePath
+                )
             }
 
             for (cmd in variants) {
@@ -1231,6 +1244,23 @@ object InstagramPhotoMuxer {
         val title: String? = null,
         val artist: String? = null
     )
+
+    private fun probeAudioDurationMs(audio: File?): Long? {
+        if (audio == null || !audio.exists() || audio.length() <= 0L) return null
+        return try {
+            val retriever = MediaMetadataRetriever()
+            try {
+                retriever.setDataSource(audio.absolutePath)
+                retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+                    ?.toLongOrNull()
+                    ?.takeIf { it > 0L }
+            } finally {
+                runCatching { retriever.release() }
+            }
+        } catch (_: Throwable) {
+            null
+        }
+    }
 
     /**
      * Audio waterfall: Instagram direct → mixed-carousel video sibling →

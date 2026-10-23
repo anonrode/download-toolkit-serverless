@@ -381,7 +381,7 @@ object HlsVodDownloader {
                             max(estimatedTotalBytes, cumulative)
                         else
                             max(cumulative + avgSegment * remaining, cumulative + 1)
-                        val eta = if (spd > 0) (total - cumulative) * 1000L / spd else 0L
+                        val eta = if (spd > 0) (total - cumulative) / spd else 0L
                         onProgress(cumulative, total, spd, eta)
                     }
                     break

@@ -116,8 +116,11 @@ class DownloadRepository {
     init {
         scope.launch {
             for (unused in persistWake) {
-                delay(persistCoalesceMs)
+                // Write immediately, then hold a short coalescing window: a
+                // burst of follow-up mutations lands in the next conflated
+                // iteration instead of delaying the first durable write.
                 persistMutex.withLock { writeSnapshot() }
+                delay(persistCoalesceMs)
             }
         }
     }
