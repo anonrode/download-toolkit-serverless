@@ -216,7 +216,7 @@ class WatchUiScreenshotTest {
                         11 -> PlayerUpNextCard(
                             modifier = Modifier.align(Alignment.BottomEnd),
                             nextTag = null,
-                            actionLabel = "⬇ Download Next Episodes",
+                            actionLabel = "↓ Download Next Episodes",
                             onAction = {},
                             onDismiss = {}
                         )
@@ -266,7 +266,7 @@ class WatchUiScreenshotTest {
         scenario = 1
         composeRule.waitForIdle()
         composeRule.onNodeWithText("Resume").assertExists()
-        capture("11_row_resume_23m")
+        capture("11_row_resume_16m")
 
         scenario = 2
         composeRule.waitForIdle()
@@ -285,7 +285,7 @@ class WatchUiScreenshotTest {
 
         scenario = 5
         composeRule.waitForIdle()
-        composeRule.onNodeWithText("NEXT EP ⬇").assertExists()
+        composeRule.onNodeWithText("NEXT EP ↓").assertExists()
         capture("15_shelf_fetch_next")
 
         scenario = 6

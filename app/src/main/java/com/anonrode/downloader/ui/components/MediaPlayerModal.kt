@@ -2015,7 +2015,7 @@ private fun MediaPlayerModalImpl(
                         .align(Alignment.BottomEnd)
                         .padding(end = 16.dp, bottom = 96.dp),
                     nextTag = nextTag.takeIf { nextPeerPath != null },
-                    actionLabel = if (nextPeerPath != null) "▶ Play now" else "⬇ Download Next Episodes",
+                    actionLabel = if (nextPeerPath != null) "▶ Play now" else "↓ Download Next Episodes",
                     onAction = {
                         touchControls()
                         if (nextPeerPath != null) {

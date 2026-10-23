@@ -2885,7 +2885,7 @@ private fun episodeLabel(season: Int, episode: Int): String =
     if (season > 0 || episode > 0) "S%02dE%02d".format(season, episode) else "Ep $episode"
 
 /** Directive §2.2 series Continue tile: 210×118, poster backdrop, violet
- *  border, RESUME / UP NEXT / NEXT EP ⬇ pill, SxxEyy tag, play or download
+ *  border, RESUME / UP NEXT / NEXT EP ↓ pill, SxxEyy tag, play or download
  *  circle, title + subtitle, [Eps ▾] and a flush 3 dp progress bar. */
 @Composable
 internal fun SeriesContinueTile(
@@ -2899,13 +2899,13 @@ internal fun SeriesContinueTile(
     val pill = when (card.state) {
         ContinueState.RESUME -> "RESUME"
         ContinueState.UP_NEXT -> "UP NEXT"
-        ContinueState.FETCH_NEXT -> "NEXT EP ⬇"
+        ContinueState.FETCH_NEXT -> "NEXT EP ↓"
     }
     val subtitle = when (card.state) {
         ContinueState.RESUME ->
             "Ep ${card.episode} · ${WatchHistoryCore.formatTimeLeft(card.positionMs, card.durationMs)}"
         ContinueState.UP_NEXT -> "Ep ${card.episode} · Ready to play"
-        ContinueState.FETCH_NEXT -> "Finished E${card.episode} · Get E${card.episode + 1} ⬇"
+        ContinueState.FETCH_NEXT -> "Finished E${card.episode} · Get E${card.episode + 1} ↓"
     }
     val fraction = when {
         card.state == ContinueState.RESUME && card.durationMs > 0L ->

@@ -1508,9 +1508,9 @@ fun EpisodeDrawer(
                                         val queueSrc = remember { MutableInteractionSource() }
                                         val isDownloadAll = uniqueSelectedCount == 0
                                         val ctaLabel = when {
-                                            isDownloadAll && isSingleMovie -> "⬇ Download Movie"
-                                            isDownloadAll -> "⬇ Download All (${episodes.size})"
-                                            else -> "⬇ Download Selected ($uniqueSelectedCount)"
+                                            isDownloadAll && isSingleMovie -> "↓ Download Movie"
+                                            isDownloadAll -> "↓ Download All (${episodes.size})"
+                                            else -> "↓ Download Selected ($uniqueSelectedCount)"
                                         }
 
                                         Button(
