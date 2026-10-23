@@ -526,4 +526,24 @@ object NaijaVaultProvider : SiteProvider {
             parallelSockets = 16
         )
     }
+
+    /** Pipeline episodes carry labels but not always normalized coordinates;
+     *  stamp both so SeasonEpisode ordering and Remaining agree. Same contract
+     *  as the DramaKey/DramaRain/Nkiri providers. */
+    private fun stampPipelineSeasons(episodes: List<EpisodeItem>): List<EpisodeItem> =
+        episodes.map { ep ->
+            if (ep.season > 0 && ep.episode > 0) {
+                ep.copy(
+                    episodeNum = com.anonrode.downloader.util.SeasonEpisode
+                        .encode(ep.season, ep.episode)
+                )
+            } else {
+                val (s, e) = com.anonrode.downloader.util.SeasonEpisode.of(ep)
+                ep.copy(
+                    season = s,
+                    episode = e,
+                    episodeNum = com.anonrode.downloader.util.SeasonEpisode.encode(s, e)
+                )
+            }
+        }
 }
