@@ -4297,12 +4297,12 @@ class DownloadEngine(
                                 estimatedTotalBytes = if (hlsSizeEstimate[0] > 0L) hlsSizeEstimate[0] else 0L,
                                 onProgress = { dl, tot, spd, eta ->
                                     com.anonrode.downloader.pipeline.HostPolicyRegistry.LaneBudget
-                                        .reportSpeed(task.id, spd)
+                                        .reportSpeed(task.id, spd.toDouble())
                                     repository.updateProgress(
                                         taskId = task.id,
                                         downloaded = dl,
                                         total = tot,
-                                        speed = spd,
+                                        speed = spd.toDouble(),
                                         eta = eta
                                     )
                                     updateServiceState(force = false)

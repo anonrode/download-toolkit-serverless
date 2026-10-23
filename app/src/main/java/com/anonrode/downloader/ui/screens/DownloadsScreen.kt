@@ -2005,9 +2005,9 @@ private fun InlineRemainingAction(count: Int, onClick: () -> Unit) {
 }
 
 /** Extract video frame thumbnail for social/local downloads when poster is absent. */
-@Composable
 private val videoThumbGate = Semaphore(2)
 
+@Composable
 private fun rememberVideoThumbnail(task: DownloadTask): String? {
     val context = LocalContext.current
     var thumbPath by remember(task.id, task.status) { mutableStateOf<String?>(null) }

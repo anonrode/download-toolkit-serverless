@@ -265,7 +265,7 @@ object HlsVodDownloader {
         var startIndex = resume.segmentsDone.coerceIn(0, segments.size)
         val alreadyBytes = if (startIndex > 0) resume.bytes else 0L
         var cumulative = alreadyBytes
-        val speedMeter = SpeedMeter(alreadyBytes)
+        var speedMeter = SpeedMeter(alreadyBytes)
         var avgSegment = 0L
         dest.parentFile?.mkdirs()
 

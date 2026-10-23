@@ -686,7 +686,7 @@ object ResolverRegistry {
         try {
             repeat(minOf(candidates.size, window)) { launchNext() }
             while (pending.isNotEmpty()) {
-                val pair: Pair<Int, String?>? = if (settleDeadline > 0L) {
+                val pair = (if (settleDeadline > 0L) {
                     val remaining = settleDeadline - System.currentTimeMillis()
                     if (remaining <= 0L) break
                     withTimeoutOrNull(remaining) {
@@ -698,7 +698,7 @@ object ResolverRegistry {
                     select<Pair<Int, String?>> {
                         pending.forEach { work -> work.onAwait { it } }
                     }
-                } ?: break
+                }) ?: break
                 val done = pending.firstOrNull { it.isCompleted && it.getCompleted() == pair }
                 if (done != null) pending.remove(done)
                 val result = pair.second
