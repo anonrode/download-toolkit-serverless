@@ -35,7 +35,10 @@ class HttpClientGetTimeoutTest {
 
     @Before
     fun setUp() {
-        HttpClient.dnsForTest = Dns { listOf(InetAddress.getByName("127.0.0.1")) }
+        HttpClient.dnsForTest = object : Dns {
+            override fun lookup(hostname: String): List<InetAddress> =
+                listOf(InetAddress.getByName("127.0.0.1"))
+        }
         server = MockWebServer()
         server.start()
     }

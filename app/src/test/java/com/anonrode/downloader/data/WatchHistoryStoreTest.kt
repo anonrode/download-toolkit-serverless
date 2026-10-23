@@ -83,9 +83,10 @@ class WatchHistoryStoreTest {
         // Regression: the player passes task.episodeTitle as `title`; that
         // must never replace the show's title/key, or every episode of one
         // show becomes a separate show on the shelf.
+        val epPath = "/files/crystal_lake_s01e04.mp4"
         val seed = WatchHistoryCore.seedForRecord(
-            task = task(id = "ep4", filePath = path, episode = 4),
-            filePath = path,
+            task = task(id = "ep4", filePath = epPath, episode = 4),
+            filePath = epPath,
             title = "Episode 4"
         )
         assertEquals("Crystal Lake", seed.showTitle)
