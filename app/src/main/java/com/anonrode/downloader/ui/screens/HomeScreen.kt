@@ -101,19 +101,7 @@ fun HomeScreen(
     // broken payload => every provider enabled (isSiteEnabled default true).
     val rulesVersion by DynamicRulesManager.version.collectAsState()
     val filters = remember(rulesVersion) {
-        listOf("all" to "All Sites", "torrents" to "Torrents (TPB)") +
-            listOf(
-                "nkiri" to "NKiri",
-                "9jarocks" to "9jaRocks",
-                "asianc" to "AsianC",
-                "dramakey" to "DramaKey",
-                "anitaku" to "Anitaku Anime",
-                "pluto" to "Pluto Movies",
-                "nepu" to "Nepu HD",
-                "naijavault" to "NaijaVault",
-                "naijaprey" to "NaijaPrey",
-                "dramarain" to "DramaRain"
-            ).filter { SiteGate.isEnabled(it.first) }
+        homeSiteFilters { SiteGate.isEnabled(it) }
     }
 
     // A payload that disables the currently selected site must not leave the
