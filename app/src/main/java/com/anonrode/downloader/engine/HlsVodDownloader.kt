@@ -565,11 +565,14 @@ object HlsVodDownloader {
             )
             val pb = ProcessBuilder(cmd)
             pb.environment()["TMPDIR"] = outPath.parentFile?.absolutePath ?: "."
-            val nativeDir = ff.parentFile?.absolutePath
-            if (!nativeDir.isNullOrBlank()) {
+            // Same extracted-runtime layout as the photo muxer: versioned
+            // libav*.so.* live in usr/lib, not beside the executable.
+            val ldLibraryPath = InstagramPhotoMuxer.buildFfmpegLdLibraryPath(context, ff)
+            if (ldLibraryPath.isNotBlank()) {
                 val existing = pb.environment()["LD_LIBRARY_PATH"]
                 pb.environment()["LD_LIBRARY_PATH"] =
-                    if (existing.isNullOrBlank()) nativeDir else "$nativeDir:$existing"
+                    if (existing.isNullOrBlank()) ldLibraryPath
+                    else "$ldLibraryPath${File.pathSeparator}$existing"
             }
             pb.redirectErrorStream(true)
             val p = pb.start()
