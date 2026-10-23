@@ -177,7 +177,13 @@ object ProviderRegistry {
             Stats(hits.get(), misses.get(), stores.get(), evictions.get(), lru.size)
         }
 
-        internal fun clear() = synchronized(lock) { lru.clear() }
+        internal fun clear() = synchronized(lock) {
+            lru.clear()
+            hits.set(0)
+            misses.set(0)
+            stores.set(0)
+            evictions.set(0)
+        }
     }
 
     /** Test seam: the provider fan-out used by [searchStreaming]. Production
@@ -365,8 +371,7 @@ object ProviderRegistry {
             // source makes that whole failure class impossible regardless of caller.
             val fetched = withContext(Dispatchers.IO) { provider.loadEpisodes(show.url) }
             val atMs = System.currentTimeMillis()
-            val ttl = if (fetched.episodes.isNotEmpty()) episodesTtlMs else emptyEpisodesTtlMs
-            episodesCache[cacheKey] = CacheEntry(atMs, fetched, ttl)
+            episodesCache[cacheKey] = CacheEntry(atMs, fetched)
             return@withLock fetched
         }
         return details
@@ -376,17 +381,22 @@ object ProviderRegistry {
      *  TTL; empty drawers get [emptyEpisodesTtlMs] so a 0-episode page
      *  (a-certain-dark-item-2026 class — site serves the post with an empty
      *  list) stops being re-fetched on every drawer open and verify wave
-     *  while still healing itself within minutes when the site backfills. */
-    private class CacheEntry(val atMs: Long, val details: ShowDetails, val ttlMs: Long)
+     *  while still healing itself within minutes when the site backfills.
+     *  The TTL itself is read from the live policy in [freshEpisodes]. */
+    private class CacheEntry(val atMs: Long, val details: ShowDetails)
     private val episodesCache = java.util.concurrent.ConcurrentHashMap<String, CacheEntry>()
     private val loadLocks = java.util.concurrent.ConcurrentHashMap<String, Mutex>()
     internal var episodesTtlMs = 300_000L
     internal var emptyEpisodesTtlMs = 600_000L
 
-    /** Cache hit only when present and inside its own TTL. */
+    /** Cache hit only when present and inside the CURRENT ttl policy.
+     *  The TTL is deliberately not snapshotted into the entry: an OTA/settings
+     *  flip (or the test seam setting it to 0) must invalidate immediately,
+     *  not after the previous window expires. */
     private fun freshEpisodes(cacheKey: String, now: Long): CacheEntry? {
         val entry = episodesCache[cacheKey] ?: return null
-        if (now - entry.atMs >= entry.ttlMs) {
+        val ttl = if (entry.details.episodes.isNotEmpty()) episodesTtlMs else emptyEpisodesTtlMs
+        if (now - entry.atMs >= ttl) {
             episodesCache.remove(cacheKey, entry)
             return null
         }

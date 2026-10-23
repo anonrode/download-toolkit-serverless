@@ -26,6 +26,13 @@ object PostContentSanitizer {
         ".related-meta", ".related-wrap", ".entry-related",
         ".mh-related", ".mh-related-bottom",
         ".single-related", ".post-related", ".similar-posts",
+        // WordPress magazine themes (9jaRocks live 2026-10-22): the related
+        // carousel lives inside .entry-content as
+        // `#inline-related-post.mag-box.mini-posts-box`; none of the class
+        // names above match it, so its "Dark Desire Season 2" caption became
+        // a SEASON 2 marker and every Link Click row was stamped S2.
+        "#inline-related-post", "[id*='related-post']", "[id*='related_post']",
+        "[class*='related-post']", "[class*='related_post']", ".mini-posts-box",
         "#episode_related", ".episodes-related", ".series-related", ".drama-related",
         ".relat", ".relate", ".relatedlist",
         // Sidebars, widgets, navigation, footers, headers

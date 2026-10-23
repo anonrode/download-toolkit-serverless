@@ -1839,6 +1839,21 @@ object RulesPipeline {
 
         val builtList = mutableListOf<EpisodeItem>()
         val seasonPositions = HashMap<Int, Int>()
+        // Specials such as TPN.S02E5.5 keep episode 5 (the identity the
+        // season/episode codec can represent) but must not collide with the
+        // plain E5 row: the fraction is appended to the title so the
+        // duplicate-title net keeps both cards.
+        val fractionRe = Regex("""(?i)\bS\d{1,2}E(\d{1,3})[.\-](\d{1,2})\b""")
+        fun fractionOfAnchor(ctx: AnchorCtx, expectedEpisode: Int?): String? {
+            for (target in listOf(ctx.href, ctx.text)) {
+                val m = fractionRe.find(target) ?: continue
+                val ep = m.groupValues.getOrNull(1)?.toIntOrNull() ?: continue
+                if (expectedEpisode == null || ep == expectedEpisode) {
+                    return m.groupValues.getOrNull(2)?.trim()?.takeIf { it.isNotBlank() }
+                }
+            }
+            return null
+        }
         kept.forEachIndexed { index, pair ->
             val ctx = pair.first.ctx
             val legacyNums = pair.second
@@ -1868,8 +1883,20 @@ object RulesPipeline {
                 }.filter { it > 0 }
                 else -> listOf(token.episode ?: deriveNum(ctx, position).coerceAtLeast(1))
             }
+            val fraction = if (!grouped) fractionOfAnchor(ctx, token.episode) else null
             episodes.forEach { rawEpisode ->
-                val episode = rawEpisode.coerceAtLeast(1)
+                var episode = rawEpisode.coerceAtLeast(1)
+                // Two anchors naming the same episode but carrying different
+                // files are not the same card: an explicit "Episode 1 File"
+                // after an already-identified E1 is a positional row (the
+                // live nkiri shape). Fractional specials keep their episode.
+                if (fraction == null && token.episode != null &&
+                    builtList.any { it.season == season && it.episode == episode }
+                ) {
+                    var fallback = deriveNum(ctx, position).coerceAtLeast(1)
+                    while (builtList.any { it.season == season && it.episode == fallback }) fallback++
+                    episode = fallback
+                }
                 // A grouped page whose section header carries no parseable
                 // season keeps its plain chain label (the season identity
                 // still defaults to 1 for the codec).
@@ -1883,6 +1910,7 @@ object RulesPipeline {
                 if (seasonScoped && !Regex("""(?i)s\d{1,2}\s*e\d{1,3}""").containsMatchIn(title)) {
                     title = "S%02d E%02d".format(season, episode)
                 }
+                if (fraction != null) title = "$title.$fraction"
                 // Transparency: a remapped/overridden token keeps its raw text.
                 val tokenContradicts = token.raw.isNotBlank() && (
                     (token.season != null && token.season != season) ||

@@ -124,7 +124,12 @@ object HostHealth {
         val h = hostOf(hostOrUrl)
         if (h.isBlank()) return
         records.compute(h) { _, v -> (v ?: Rec()).apply {
-            ok++; consecutiveFails = 0; lastRate429Ms = 0L; lastOkMs = System.currentTimeMillis()
+            ok++; consecutiveFails = 0; lastRate429Ms = 0L
+            // Success must sort strictly after the rejection it overrules:
+            // both events can land in the same millisecond, and
+            // hardBlockActive's lastOkMs <= lastFailMs would then keep the
+            // block alive despite proof of life.
+            lastOkMs = System.currentTimeMillis().coerceAtLeast(lastFailMs + 1L)
         } }
         persist()
     }
@@ -151,7 +156,7 @@ object HostHealth {
                 consecutiveFails = 0
             }
             lastRate429Ms = 0L
-            lastOkMs = System.currentTimeMillis()
+            lastOkMs = System.currentTimeMillis().coerceAtLeast(lastFailMs + 1L)
         } }
         persist()
     }

@@ -2076,7 +2076,9 @@ internal fun displaySpeedTextForCards(task: DownloadTask): String? {
     val display = task.displaySpeedBytesPerSec ?: return "Starting…"
     val mb = display / (1024.0 * 1024.0)
     return when {
-        mb >= 0.1 -> "%.1f MB/s".format(java.util.Locale.US, mb)
+        // Whole MB only: 500 KB/s must read "488 KB/s", not the less precise
+        // "0.5 MB/s" (card contract pinned by DownloadSpeedTextTest).
+        mb >= 1.0 -> "%.1f MB/s".format(java.util.Locale.US, mb)
         display >= 1024.0 -> "%.0f KB/s".format(java.util.Locale.US, display / 1024.0)
         display > 0.0 -> "%.0f B/s".format(java.util.Locale.US, display)
         else -> null
@@ -2103,7 +2105,7 @@ private fun rawSpeedTextForCards(task: DownloadTask): String? {
     val speed = task.speedBytesPerSec
     val mb = speed / (1024.0 * 1024.0)
     return when {
-        mb >= 0.1 -> "%.1f MB/s".format(java.util.Locale.US, mb)
+        mb >= 1.0 -> "%.1f MB/s".format(java.util.Locale.US, mb)
         speed >= 1024.0 -> "%.0f KB/s".format(java.util.Locale.US, speed / 1024.0)
         speed > 0.0 -> "%.0f B/s".format(java.util.Locale.US, speed)
         else -> null
