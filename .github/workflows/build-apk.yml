@@ -392,13 +392,16 @@ jobs:
         # Default Gradle split naming is app-<abi>-release.apk (e.g.
         # app-arm64-v8a-release.apk). Rename to AnonDownloader-<version>-<abi>.apk
         # so GitHub artifact/release downloads are self-explanatory. <version>
-        # is the git ref (v3.0.2 on tags, branch name on branch pushes).
+        # is the git ref (v3.0.2 on tags, branch name on branch pushes). A
+        # branch ref can contain '/' (fix/overnight-331), which would turn the
+        # destination into a nonexistent subdirectory — sanitize it first.
         run: |
+          ref_name="${GITHUB_REF_NAME//\//-}"
           for f in app/build/outputs/apk/release/*.apk; do
             base=$(basename "$f")
             abi="${base#app-}"
             abi="${abi%-release.apk}"
-            mv "$f" "app/build/outputs/apk/release/AnonDownloader-${{ github.ref_name }}-${abi}.apk"
+            mv "$f" "app/build/outputs/apk/release/AnonDownloader-${ref_name}-${abi}.apk"
           done
 
       - name: Upload APK Artifacts
