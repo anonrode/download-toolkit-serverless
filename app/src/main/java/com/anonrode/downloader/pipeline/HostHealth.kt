@@ -24,7 +24,11 @@ object HostHealth {
         var lastFailMs: Long = 0,
         var rate429: Int = 0,
         var lastRate429Ms: Long = 0,
-        var lastReason: String? = null
+        var lastReason: String? = null,
+        // Millisecond timestamps cannot order two events in the same tick;
+        // this flag records which one happened LAST (persisted so a restart
+        // does not resurrect a rejection the host already answered).
+        var lastEventOk: Boolean = false
     ) {
         fun toJson(): JSONObject = JSONObject()
             .put("ok", ok).put("fail", fail)
@@ -32,6 +36,7 @@ object HostHealth {
             .put("lastOk", lastOkMs).put("lastFail", lastFailMs)
             .put("rate429", rate429)
             .put("lastRate429", lastRate429Ms)
+            .put("lastEventOk", lastEventOk)
             .apply { if (lastReason != null) put("lastReason", lastReason) }
 
         companion object {
@@ -41,7 +46,9 @@ object HostHealth {
                 lastOkMs = o.optLong("lastOk"), lastFailMs = o.optLong("lastFail"),
                 rate429 = o.optInt("rate429"),
                 lastRate429Ms = o.optLong("lastRate429"),
-                lastReason = o.optString("lastReason").takeIf { it.isNotBlank() }
+                lastReason = o.optString("lastReason").takeIf { it.isNotBlank() },
+                // Legacy records carry only the timestamps.
+                lastEventOk = o.optBoolean("lastEventOk", o.optLong("lastOk") > o.optLong("lastFail"))
             )
         }
     }
@@ -125,11 +132,8 @@ object HostHealth {
         if (h.isBlank()) return
         records.compute(h) { _, v -> (v ?: Rec()).apply {
             ok++; consecutiveFails = 0; lastRate429Ms = 0L
-            // Success must sort strictly after the rejection it overrules:
-            // both events can land in the same millisecond, and
-            // hardBlockActive's lastOkMs <= lastFailMs would then keep the
-            // block alive despite proof of life.
-            lastOkMs = System.currentTimeMillis().coerceAtLeast(lastFailMs + 1L)
+            lastOkMs = System.currentTimeMillis()
+            lastEventOk = true
         } }
         persist()
     }
@@ -156,7 +160,8 @@ object HostHealth {
                 consecutiveFails = 0
             }
             lastRate429Ms = 0L
-            lastOkMs = System.currentTimeMillis().coerceAtLeast(lastFailMs + 1L)
+            lastOkMs = System.currentTimeMillis()
+            lastEventOk = true
         } }
         persist()
     }
@@ -275,6 +280,7 @@ object HostHealth {
                 consecutiveFails = (consecutiveFails + 1).coerceAtMost(20)
             }
             lastFailMs = System.currentTimeMillis()
+            lastEventOk = false
         } }
         persist()
     }
@@ -351,8 +357,10 @@ object HostHealth {
         if (HARD_BLOCK_REASONS.none { reason.contains(it) }) return false
         val sinceFail = System.currentTimeMillis() - r.lastFailMs
         if (sinceFail < 0L || sinceFail >= HARD_BLOCK_TTL_MS) return false
-        // A proven sign of life AFTER the rejection lifts the block.
-        return r.lastOkMs <= r.lastFailMs
+        // A proven sign of life AFTER the rejection lifts the block. The
+        // boolean (not lastOkMs <= lastFailMs) keeps same-millisecond
+        // ordering correct in both directions.
+        return !r.lastEventOk
     }
 
     private const val HARD_BLOCK_TTL_MS = 15 * 60_000L

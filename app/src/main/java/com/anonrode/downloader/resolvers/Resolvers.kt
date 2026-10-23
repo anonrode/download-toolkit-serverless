@@ -985,9 +985,14 @@ object VidbasicResolver : BaseResolver {
         if (b64.isBlank()) return null
         return try {
             // android.util.Base64 on device; java.util fallback keeps the
-            // decrypt JVM-testable (decryptMegaplayEnc pattern).
+            // decrypt JVM-testable (decryptMegaplayEnc pattern). Plain JVM
+            // tests run with returnDefaultValues=true, where the Android stub
+            // returns null instead of throwing — treat null as "not decoded"
+            // and fall through to the JDK decoder.
             val cipherBytes = try {
                 android.util.Base64.decode(b64, android.util.Base64.DEFAULT)
+                    ?.takeIf { it.isNotEmpty() }
+                    ?: java.util.Base64.getDecoder().decode(b64)
             } catch (_: Exception) {
                 java.util.Base64.getDecoder().decode(b64)
             }
