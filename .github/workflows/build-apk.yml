@@ -103,6 +103,18 @@ jobs:
             app/build/reports/tests/testDebugUnitTest/
             app/build/test-results/testDebugUnitTest/*.xml
 
+      - name: Upload Robolectric UI screenshots
+        # Visual receipts from WatchUiScreenshotTest (rows, shelf tiles,
+        # drawer badges, player next-pill/up-next/gesture HUD). This is the
+        # render gate the owner reviews BEFORE any push to master.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: robolectric-ui-screenshots
+          path: app/build/reports/screenshots/
+          if-no-files-found: warn
+          retention-days: 14
+
   emulator-test:
     name: Emulator Smoke Tests (Tier 2 + ledger)
     runs-on: ubuntu-latest

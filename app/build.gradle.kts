@@ -13,10 +13,10 @@ android {
         applicationId = "com.anonrode.downloader"
         minSdk = 26
         targetSdk = 34
-        // v3.3.0 — platform surfaces (announcements / update flow + gate /
-        // engagement / ads readiness) + hardening (R8) + audit-fix batch.
-        versionCode = 331
-        versionName = "3.3.0"
+        // v3.3.1 — overnight reliability batch (HLS bridge classification,
+        // garbage-output failover, anime/Asian failover, UI fixes).
+        versionCode = 332
+        versionName = "3.3.1"
 
         // Manual-runtime FCM defaults (2026-10-19 un-park). These are the
         // NON-SECRET Firebase Android client identifiers; there is deliberately
