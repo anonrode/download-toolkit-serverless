@@ -231,11 +231,12 @@ class WatchUiScreenshotTest {
     }
 
     private fun capture(name: String) {
-        // The components carry indefinite animations (pulse/progress), so the
-        // auto-advancing clock never reports idle and Robolectric's capture
-        // waits out its 2 s timeout. The test clock stays manual; one frame
-        // is enough to settle layout before the bitmap grab.
-        composeRule.mainClock.advanceTimeBy(32L)
+        // The components carry indefinite animations (pulse/progress), so an
+        // auto-advancing clock keeps Robolectric's capture waiting until its
+        // 2 s timeout. Freeze only for the bitmap grab, then restore the clock
+        // so the next scenario composes normally.
+        composeRule.mainClock.autoAdvance = false
+        composeRule.mainClock.advanceTimeByFrame()
         try {
             val dir = File(System.getProperty("user.dir"), "build/reports/screenshots")
                 .apply { mkdirs() }
@@ -246,76 +247,77 @@ class WatchUiScreenshotTest {
             println("SHOT ${File(dir, "$name.png").absolutePath}")
         } catch (t: Throwable) {
             println("SHOT-FAILED $name: ${t.message}")
+        } finally {
+            composeRule.mainClock.autoAdvance = true
         }
     }
 
     @Test
     fun render_watch_states_and_shelf_tiles() {
-        composeRule.mainClock.autoAdvance = false
         content()
-        composeRule.mainClock.advanceTimeBy(100L)
+        composeRule.waitForIdle()
 
         scenario = 0
-        composeRule.mainClock.advanceTimeBy(100L)
+        composeRule.waitForIdle()
         capture("10_row_unwatched_done")
 
         scenario = 1
-        composeRule.mainClock.advanceTimeBy(100L)
+        composeRule.waitForIdle()
         composeRule.onNodeWithText("Resume").assertExists()
         capture("11_row_resume_23m")
 
         scenario = 2
-        composeRule.mainClock.advanceTimeBy(100L)
+        composeRule.waitForIdle()
         composeRule.onNodeWithText("Watched ✓").assertExists()
         capture("12_row_watched_muted")
 
         scenario = 3
-        composeRule.mainClock.advanceTimeBy(100L)
+        composeRule.waitForIdle()
         composeRule.onNodeWithText("RESUME").assertExists()
         capture("13_shelf_resume")
 
         scenario = 4
-        composeRule.mainClock.advanceTimeBy(100L)
+        composeRule.waitForIdle()
         composeRule.onNodeWithText("UP NEXT").assertExists()
         capture("14_shelf_up_next")
 
         scenario = 5
-        composeRule.mainClock.advanceTimeBy(100L)
+        composeRule.waitForIdle()
         composeRule.onNodeWithText("NEXT EP ⬇").assertExists()
         capture("15_shelf_fetch_next")
 
         scenario = 6
-        composeRule.mainClock.advanceTimeBy(100L)
+        composeRule.waitForIdle()
         composeRule.onNodeWithText("CONTINUE").assertExists()
         capture("16_social_continue")
 
         scenario = 7
-        composeRule.mainClock.advanceTimeBy(100L)
+        composeRule.waitForIdle()
         composeRule.onNodeWithText("✓ Watched").assertExists()
         capture("17_drawer_row_watched")
 
         scenario = 8
-        composeRule.mainClock.advanceTimeBy(100L)
+        composeRule.waitForIdle()
         composeRule.onNodeWithText("23m left").assertExists()
         capture("18_drawer_row_in_progress")
 
         scenario = 9
-        composeRule.mainClock.advanceTimeBy(100L)
+        composeRule.waitForIdle()
         composeRule.onNodeWithText("Next: S01E05").assertExists()
         capture("19_player_next_pill")
 
         scenario = 10
-        composeRule.mainClock.advanceTimeBy(100L)
+        composeRule.waitForIdle()
         composeRule.onNodeWithText("UP NEXT · S01E05").assertExists()
         capture("20_player_up_next_card")
 
         scenario = 11
-        composeRule.mainClock.advanceTimeBy(100L)
+        composeRule.waitForIdle()
         composeRule.onNodeWithText("Finished downloaded episodes").assertExists()
         capture("21_player_up_next_fetch")
 
         scenario = 12
-        composeRule.mainClock.advanceTimeBy(100L)
+        composeRule.waitForIdle()
         composeRule.onNodeWithText("2.0× Speed").assertExists()
         capture("22_player_gesture_hud")
     }
