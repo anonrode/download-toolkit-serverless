@@ -100,6 +100,44 @@ class HlsVodDownloaderTest {
     }
 
     @Test
+    fun `separate audio media group is handed to yt-dlp`() {
+        val master = """
+            #EXTM3U
+            #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="Audio",URI="a.m3u8"
+            #EXT-X-STREAM-INF:BANDWIDTH=740984,RESOLUTION=1920x1080,AUDIO="audio"
+            v0.m3u8
+        """.trimIndent()
+        val variant = "#EXTM3U\n#EXTINF:5,\nseg1.m4s\n#EXT-X-ENDLIST\n"
+        assertEquals(
+            "separate audio media group",
+            HlsVodDownloader.unsupportedShapeForPacedLane(master, variant)
+        )
+    }
+
+    @Test
+    fun `init map segment is handed to yt-dlp`() {
+        val master = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1,RESOLUTION=1920x1080\nv0.m3u8\n"
+        val variant = """
+            #EXTM3U
+            #EXT-X-MAP:URI="init-stream0.m4s"
+            #EXTINF:5,
+            chunk-1.m4s
+            #EXT-X-ENDLIST
+        """.trimIndent()
+        assertEquals(
+            "EXT-X-MAP init segment",
+            HlsVodDownloader.unsupportedShapeForPacedLane(master, variant)
+        )
+        assertNull(
+            "a plain VOD still uses the paced one-connection lane",
+            HlsVodDownloader.unsupportedShapeForPacedLane(
+                master,
+                "#EXTM3U\n#EXTINF:5,\nchunk-1.ts\n#EXT-X-ENDLIST\n"
+            )
+        )
+    }
+
+    @Test
     fun `variant parses segments and flags`() {
         val body = """
             #EXTM3U

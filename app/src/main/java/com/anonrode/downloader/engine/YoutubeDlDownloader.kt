@@ -204,6 +204,37 @@ object YoutubeDlDownloader {
         "--abort-on-unavailable-fragments"
     )
 
+    /**
+     * DASH-derived HLS masters (vidbolt bridge class, 2026-10-22) declare a
+     * separate `EXT-X-MEDIA:TYPE=AUDIO` rendition and leave the video variants
+     * with UNKNOWN codecs. yt-dlp cannot classify those variants as
+     * video-only, so its usual `bestvideo+bestaudio` selector keeps only the
+     * video format and the audio rendition is silently dropped. With
+     * `--audio-multistreams` + `best+bestaudio`, the same selector picks
+     * `<video>+<audio>` and ffmpeg muxes both (simulate-verified against the
+     * live bridge master on yt-dlp 2026.10.21).
+     */
+    internal fun masterDeclaresSeparateAudio(masterFile: String?): Boolean {
+        if (masterFile.isNullOrBlank()) return false
+        return try {
+            val re = Regex(
+                """#EXT-X-MEDIA\s*:[^\r\n]*TYPE\s*=\s*AUDIO""",
+                RegexOption.IGNORE_CASE
+            )
+            re.containsMatchIn(File(masterFile).readText())
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    /** Format flags for a video HLS task (see [masterDeclaresSeparateAudio]). */
+    internal fun hlsFormatOptions(height: Int, separateAudio: Boolean): List<String> =
+        if (separateAudio) {
+            listOf("--audio-multistreams", "-f", "best+bestaudio/best")
+        } else {
+            listOf("-f", "bestvideo[height<=$height]+bestaudio/best[height<=$height]/best")
+        }
+
     // Task-level retry counts are now AppSettings-backed (pref_magnet_retries /
     // pref_ytdlp_retries), threaded in via download()'s maxAttempts params.
 
@@ -329,6 +360,7 @@ object YoutubeDlDownloader {
         // (file:// + --enable-file-urls) — the m3u8 branch still applies.
         val inputUrl = if (hlsMasterFile != null) "file://$hlsMasterFile" else sourceUrl
         val isM3u8 = inputUrl.lowercase().contains(".m3u8")
+        val hlsSeparateAudio = masterDeclaresSeparateAudio(hlsMasterFile)
         // Token-locked HLS CDNs (vidsrc family, live-verified) reject segment
         // requests that carry ANY Referer with 403 while serving them fine
         // without one — and the rewritten playlist was validated exactly that
@@ -500,7 +532,7 @@ object YoutubeDlDownloader {
                     addOption("--embed-metadata")
                     addOption("--convert-thumbnails", "jpg")
                 } else {
-                    addOption("-f", "bestvideo[height<=$height]+bestaudio/best[height<=$height]/best")
+                    hlsFormatOptions(height, hlsSeparateAudio).forEach { addOption(it) }
                     addOption("-S", "height~$height,+size,+br,abr")
                     addOption("--merge-output-format", "mp4")
                     if (downloadSubs) {
@@ -559,7 +591,7 @@ object YoutubeDlDownloader {
                     addOption("--convert-thumbnails", "jpg")
                 } else {
                     addOption("-o", "$stem.$safeExt")
-                    addOption("-f", "bestvideo[height<=$height]+bestaudio/best[height<=$height]/best")
+                    hlsFormatOptions(height, hlsSeparateAudio).forEach { addOption(it) }
                     addOption("-S", "height~$height,+size,+br")
                     addOption("--merge-output-format", "mp4")
                 }

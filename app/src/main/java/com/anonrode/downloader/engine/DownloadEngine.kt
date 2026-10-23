@@ -3106,6 +3106,25 @@ class DownloadEngine(
             }
         }
 
+        // Always materialize a local master for a multi-variant playlist, even
+        // when every URI is already absolute and no rewrite was needed. yt-dlp
+        // needs the local .m3u8 input both to classify the bridge URL as HLS
+        // and for [YoutubeDlDownloader.masterDeclaresSeparateAudio] to see the
+        // EXT-X-MEDIA audio rendition (vidbolt bridge, 2026-10-22).
+        if (masterFile == null && playlistText.contains("#EXT-X-STREAM-INF", ignoreCase = true)) {
+            masterFile = try {
+                val f = File(cacheDir, "hls-$taskId.m3u8")
+                f.writeText(
+                    HlsPlaylist.rewrite(playlistText, currentUrl, upgradeInsecureHttp, forceLocal = true)
+                        ?: playlistText
+                )
+                f
+            } catch (_: Exception) {
+                null
+            }
+            if (masterFile != null) created.add(masterFile)
+        }
+
         // Fingerprint the media plan BEFORE any probe failure can throw: the
         // caller uses it to decide whether the banked .part belongs to this
         // plan. It is structural (basenames/durations), so rotating tokens do

@@ -42,9 +42,10 @@ import kotlin.math.min
  *      youtubedl-android ffmpeg binary (InstagramPhotoMuxer's extraction
  *      pattern).
  *
- * Anything that is NOT a plain unencrypted VOD (AES keys, byte-range maps,
- * live windows without `#EXT-X-ENDLIST`) returns `null` from [attempt] before
- * a single segment is fetched, and the engine falls back to yt-dlp unchanged.
+ * Anything that is NOT a plain unencrypted single-track VOD (AES keys,
+ * separate audio renditions, EXT-X-MAP init segments, live windows without
+ * `#EXT-X-ENDLIST`, subtitle media) returns `null` from [attempt] before a
+ * single segment is fetched, and the engine falls back to yt-dlp unchanged.
  * The pure parsing/resume helpers and [downloadSegments] carry no Android
  * imports so they are JVM-testable.
  */
@@ -157,6 +158,27 @@ object HlsVodDownloader {
     /** RC-5: any subtitle WEBVTT/text track declared in EXT-X-MEDIA tags. */
     internal fun hasSubtitleMedia(body: String): Boolean =
         Regex("""#EXT-X-MEDIA:TYPE=SUBTITLES""", RegexOption.IGNORE_CASE).containsMatchIn(body)
+
+    private val AUDIO_MEDIA = Regex(
+        """#EXT-X-MEDIA\s*:[^\n]*TYPE\s*=\s*AUDIO""",
+        RegexOption.IGNORE_CASE
+    )
+    private val INIT_MAP = Regex("""#EXT-X-MAP\s*:""", RegexOption.IGNORE_CASE)
+
+    /**
+     * Shapes the paced lane cannot reproduce faithfully. It only concatenates
+     * one unencrypted video segment stream; a separate AUDIO media group
+     * (DASH-derived HLS) would be silently dropped, and an EXT-X-MAP init
+     * segment would be omitted, yielding an unplayable or video-only file.
+     * Return a human reason so [attempt] can log and hand the job to yt-dlp,
+     * which muxes both tracks and honours the init map.
+     */
+    internal fun unsupportedShapeForPacedLane(masterBody: String, variantBody: String): String? = when {
+        hasSubtitleMedia(masterBody) || hasSubtitleMedia(variantBody) -> "subtitle media"
+        AUDIO_MEDIA.containsMatchIn(masterBody) -> "separate audio media group"
+        INIT_MAP.containsMatchIn(masterBody) || INIT_MAP.containsMatchIn(variantBody) -> "EXT-X-MAP init segment"
+        else -> null
+    }
 
     /** Single-variant media playlist → segments, metadata, support flags. */
     internal fun parseVariant(body: String, baseUrl: String): ParsedVariant {
@@ -469,9 +491,15 @@ object HlsVodDownloader {
         // RC-5: a master/variant that DECLARES subtitle media must be served
         // by the yt-dlp path (which requests --write-subs), never by this raw
         // segment lane or the subtitle tracks would be silently dropped.
-        if (hasSubtitleMedia(masterBody) || hasSubtitleMedia(variantBody)) {
+        // The same handoff applies to DASH-derived HLS: a separate audio
+        // media group and/or an EXT-X-MAP init segment cannot be reproduced
+        // by concatenating video fragments (2026-10-22 vidbolt bridge:
+        // master declared AUDIO, every variant carried EXT-X-MAP). Sending
+        // that shape to yt-dlp downloads BOTH tracks and the init segment,
+        // instead of burning bandwidth on a video-only remux or failing.
+        unsupportedShapeForPacedLane(masterBody, variantBody)?.let { reason ->
             com.anonrode.downloader.util.DebugLog.resolve(
-                "paced HLS lane: master declares subtitle media — handing the job to yt-dlp so the tracks are fetched"
+                "paced HLS lane: $reason — handing the job to yt-dlp for a complete mux"
             )
             return@withContext null
         }
