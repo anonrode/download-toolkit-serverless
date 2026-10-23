@@ -707,10 +707,17 @@ object ResolverRegistry {
                     val repaired = com.anonrode.downloader.pipeline.UrlClassifier.repairConcatenatedUrl(result)
                     if (episodeResultAllowed(repaired, episode)) {
                         collected.add(pair.first to repaired)
-                        // M3U8-2: If candidate #0 (primary mirror) succeeded and passes screenTerminalEvidence,
+                        // M3U8-2: If candidate #0 (primary mirror) succeeded with a confirmed high-scoring
+                        // stream (DIRECT_MEDIA or HLS_PLAYLIST) and passes screenTerminalEvidence,
                         // no subsequent mirror can beat it (later indices are penalized). Break immediately
                         // without waiting 1,200ms.
-                        if (pair.first == 0 && screenTerminalEvidence(repaired, null)) {
+                        val isHighQualityStream = com.anonrode.downloader.pipeline.UrlClassifier.isDirectMediaPath(repaired) ||
+                            com.anonrode.downloader.pipeline.UrlClassifier.isStreamingLink(repaired) ||
+                            com.anonrode.downloader.pipeline.UrlClassifier.cachedTerminalEvidence(repaired)?.let {
+                                it.kind == com.anonrode.downloader.pipeline.UrlClassifier.TerminalKind.HLS_PLAYLIST ||
+                                it.kind == com.anonrode.downloader.pipeline.UrlClassifier.TerminalKind.DIRECT_MEDIA
+                            } == true
+                        if (pair.first == 0 && isHighQualityStream && screenTerminalEvidence(repaired)) {
                             break
                         }
                         if (settleDeadline == 0L) {
@@ -2057,8 +2064,8 @@ object VidsrcResolver : BaseResolver {
         if (finalVerdict == MintHeadVerdict.MEDIA || finalVerdict == MintHeadVerdict.MANIFEST) {
             com.anonrode.downloader.pipeline.UrlClassifier.rememberTerminalEvidence(
                 streamUrl,
-                com.anonrode.downloader.pipeline.TerminalEvidence(
-                    com.anonrode.downloader.pipeline.TerminalKind.HLS_PLAYLIST,
+                com.anonrode.downloader.pipeline.UrlClassifier.TerminalEvidence(
+                    com.anonrode.downloader.pipeline.UrlClassifier.TerminalKind.HLS_PLAYLIST,
                     head.first,
                     head.second,
                     head.third.size.toLong(),
@@ -2067,6 +2074,12 @@ object VidsrcResolver : BaseResolver {
             )
         }
         return finalVerdict
+    }
+
+    private fun navigableEmbedSrc(src: String?): Boolean {
+        if (src.isNullOrBlank()) return false
+        val low = src.trim().lowercase()
+        return !low.startsWith("about:") && !low.startsWith("javascript:") && !low.startsWith("data:")
     }
 
 

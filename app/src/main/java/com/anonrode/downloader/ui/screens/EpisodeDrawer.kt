@@ -297,13 +297,13 @@ fun EpisodeDrawer(
         val rawLower = show.title.trim().lowercase()
         val folderLower = com.anonrode.downloader.util.NameSanitizer
             .cleanShowFolder(show.title).trim().lowercase()
-        val normKey = com.anonrode.downloader.data.models.ShowIdentity.normalizeShowKey(show.title)
+        val normKey = com.anonrode.downloader.util.ShowIdentity.normalizeShowKey(show.title)
         allTasks.filter { task ->
             val t = task.showTitle.trim().lowercase()
             (task.seriesUrl.isNotBlank() && task.seriesUrl.equals(show.url, ignoreCase = true)) ||
                 t == rawLower ||
                 (folderLower.isNotBlank() && t == folderLower) ||
-                (normKey.isNotBlank() && com.anonrode.downloader.data.models.ShowIdentity.normalizeShowKey(task.showTitle) == normKey) ||
+                (normKey.isNotBlank() && com.anonrode.downloader.util.ShowIdentity.normalizeShowKey(task.showTitle) == normKey) ||
                 (rawLower.isNotBlank() && task.showTitle.contains(show.title, ignoreCase = true))
         }
     }
