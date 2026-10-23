@@ -34,7 +34,11 @@ class VidbasicCaptionsTest {
     private fun encryptForSub(plaintext: String): String =
         java.util.Base64.getEncoder().encodeToString(
             Cipher.getInstance("AES/CBC/PKCS5Padding").run {
-                init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
+                init(
+                    Cipher.ENCRYPT_MODE,
+                    SecretKeySpec(key, "AES"),
+                    IvParameterSpec(this@VidbasicCaptionsTest.iv)
+                )
                 doFinal(plaintext.toByteArray(Charsets.UTF_8))
             }
         )

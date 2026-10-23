@@ -15,7 +15,11 @@ class SeasonEncodingTest {
     fun decodesSxxEyyPackedNumbers() {
         assertEquals(1 to 13, normalizeSeasonEncodedEpisodeNumber("nepu", 113))
         assertEquals(2 to 1, normalizeSeasonEncodedEpisodeNumber("nepu", 201))
-        assertEquals(3 to 24, normalizeSeasonEncodedEpisodeNumber("9jarocks", 324))
+        // Legacy packed providers keep the historical 100-base decode.
+        assertEquals(3 to 24, normalizeSeasonEncodedEpisodeNumber("dramakey", 324))
+        // New parses use the collision-free 1000-base codec on every site.
+        assertEquals(2 to 1, normalizeSeasonEncodedEpisodeNumber("9jarocks", 2001))
+        assertEquals(3 to 101, normalizeSeasonEncodedEpisodeNumber("9jarocks", 3101))
     }
 
     @Test
@@ -24,7 +28,8 @@ class SeasonEncodingTest {
         assertNull(normalizeSeasonEncodedEpisodeNumber("nepu", 99))
         // Episode 00 is not a valid packed value.
         assertNull(normalizeSeasonEncodedEpisodeNumber("nepu", 100))
-        assertNull(normalizeSeasonEncodedEpisodeNumber("nepu", 3101))
-        assertNull(normalizeSeasonEncodedEpisodeNumber("nepu", 3999))
+        // 9jaRocks numbers flat: 113 is S01E113, never S01E13.
+        assertNull(normalizeSeasonEncodedEpisodeNumber("9jarocks", 113))
+        assertEquals(3 to 999, normalizeSeasonEncodedEpisodeNumber("nepu", 3999))
     }
 }

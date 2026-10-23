@@ -244,9 +244,9 @@ class WatchHistoryStoreTest {
 
     @Test
     fun watched_only_deletion_keeps_watched_memory_without_path() {
-        val watched = record(id = "/files/e1.mp4", filePath = "/files/e1.mp4", isWatched = true)
-        val inProgress = record(id = "/files/e2.mp4", filePath = "/files/e2.mp4", isWatched = false)
-        val untouched = record(id = "/files/e3.mp4", filePath = "/files/e3.mp4", isWatched = true)
+        val watched = record(id = "/files/e1.mp4", filePath = "/files/e1.mp4", sourceUrl = "https://site/e1", isWatched = true)
+        val inProgress = record(id = "/files/e2.mp4", filePath = "/files/e2.mp4", sourceUrl = "https://site/e2", isWatched = false)
+        val untouched = record(id = "/files/e3.mp4", filePath = "/files/e3.mp4", sourceUrl = "https://site/e3", isWatched = true)
         val result = WatchHistoryCore.onFilesDeleted(
             records = listOf(watched, inProgress, untouched),
             deletedPaths = setOf("/files/e1.mp4", "/files/e2.mp4"),

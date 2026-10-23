@@ -39,6 +39,9 @@ class DownloadSpeedDisplayTest {
         val repo = DownloadRepository()
         repo.initPersistence(dir, context = null)
         repo.clockMs = { now }
+        // initPersistence parks every DOWNLOADING row (process-death safety).
+        // These fixtures model a LIVE transfer, so revive the row explicitly.
+        repo.update("t1") { it.copy(status = TaskStatus.DOWNLOADING, errorMessage = null, userPaused = false) }
         return repo
     }
 

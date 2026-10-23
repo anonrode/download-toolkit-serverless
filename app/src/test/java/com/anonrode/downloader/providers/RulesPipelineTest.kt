@@ -157,7 +157,10 @@ class RulesPipelineTest {
         assertEquals(2, cards.size)
         assertEquals("Show A", cards[0].title)
         assertEquals("Anime (Dub)", cards[0].category)
-        assertEquals("i.jpg", cards[0].posterUrl)
+        // Relative poster paths are NOT image URLs: sanitizePosterUrl rejects
+        // them so Coil never receives a file-host request; the provider's
+        // compiled backfill/initials tile owns the card instead.
+        assertEquals("", cards[0].posterUrl)
         assertEquals("Show B", cards[1].title)
         assertEquals("Anime", cards[1].category)
     }

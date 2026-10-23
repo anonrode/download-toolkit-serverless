@@ -60,7 +60,7 @@ class StandbyPolicyTest {
         // Union of what was already on disk and what the promoted request
         // covers is the whole piece, with no overlap.
         val union = writtenBeforeDrop.toList() + promoted.toList()
-        assertEquals(pieceEnd - pieceStart + 1, union.size)
+        assertEquals((pieceEnd - pieceStart + 1).toInt(), union.size)
         assertEquals(union.size, union.toSet().size)
     }
 

@@ -78,7 +78,10 @@ class LinkResolverTest {
         // Dynamic streaming endpoints (HLS manifests) are provably direct:
         assertTrue(LinkResolver.isProvablyDirectFile("https://megaplays.se/api/playlist.php?t=12345"))
         assertTrue(LinkResolver.isProvablyDirectFile("https://embed.vidrift.net/api/orion/abcdef1234567890/master.m3u8"))
-        assertTrue(LinkResolver.isProvablyDirectFile("https://example.com/stream-proxy?url=xyz"))
+        // stream-proxy is evidence-based since 2026-10-20: the BODY decides
+        // (direct MP4 byte-range vs self-referential decoy), so a bare name
+        // must never classify it as direct.
+        assertFalse(LinkResolver.isProvablyDirectFile("https://example.com/stream-proxy?url=xyz"))
     }
 
     @Test

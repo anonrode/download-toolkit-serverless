@@ -231,7 +231,11 @@ class WatchUiScreenshotTest {
     }
 
     private fun capture(name: String) {
-        composeRule.waitForIdle()
+        // The components carry indefinite animations (pulse/progress), so the
+        // auto-advancing clock never reports idle and Robolectric's capture
+        // waits out its 2 s timeout. The test clock stays manual; one frame
+        // is enough to settle layout before the bitmap grab.
+        composeRule.mainClock.advanceTimeBy(32L)
         try {
             val dir = File(System.getProperty("user.dir"), "build/reports/screenshots")
                 .apply { mkdirs() }
@@ -247,70 +251,71 @@ class WatchUiScreenshotTest {
 
     @Test
     fun render_watch_states_and_shelf_tiles() {
+        composeRule.mainClock.autoAdvance = false
         content()
-        composeRule.waitForIdle()
+        composeRule.mainClock.advanceTimeBy(100L)
 
         scenario = 0
-        composeRule.waitForIdle()
+        composeRule.mainClock.advanceTimeBy(100L)
         capture("10_row_unwatched_done")
 
         scenario = 1
-        composeRule.waitForIdle()
+        composeRule.mainClock.advanceTimeBy(100L)
         composeRule.onNodeWithText("Resume").assertExists()
         capture("11_row_resume_23m")
 
         scenario = 2
-        composeRule.waitForIdle()
+        composeRule.mainClock.advanceTimeBy(100L)
         composeRule.onNodeWithText("Watched ✓").assertExists()
         capture("12_row_watched_muted")
 
         scenario = 3
-        composeRule.waitForIdle()
+        composeRule.mainClock.advanceTimeBy(100L)
         composeRule.onNodeWithText("RESUME").assertExists()
         capture("13_shelf_resume")
 
         scenario = 4
-        composeRule.waitForIdle()
+        composeRule.mainClock.advanceTimeBy(100L)
         composeRule.onNodeWithText("UP NEXT").assertExists()
         capture("14_shelf_up_next")
 
         scenario = 5
-        composeRule.waitForIdle()
+        composeRule.mainClock.advanceTimeBy(100L)
         composeRule.onNodeWithText("NEXT EP ⬇").assertExists()
         capture("15_shelf_fetch_next")
 
         scenario = 6
-        composeRule.waitForIdle()
+        composeRule.mainClock.advanceTimeBy(100L)
         composeRule.onNodeWithText("CONTINUE").assertExists()
         capture("16_social_continue")
 
         scenario = 7
-        composeRule.waitForIdle()
+        composeRule.mainClock.advanceTimeBy(100L)
         composeRule.onNodeWithText("✓ Watched").assertExists()
         capture("17_drawer_row_watched")
 
         scenario = 8
-        composeRule.waitForIdle()
+        composeRule.mainClock.advanceTimeBy(100L)
         composeRule.onNodeWithText("23m left").assertExists()
         capture("18_drawer_row_in_progress")
 
         scenario = 9
-        composeRule.waitForIdle()
+        composeRule.mainClock.advanceTimeBy(100L)
         composeRule.onNodeWithText("Next: S01E05").assertExists()
         capture("19_player_next_pill")
 
         scenario = 10
-        composeRule.waitForIdle()
+        composeRule.mainClock.advanceTimeBy(100L)
         composeRule.onNodeWithText("UP NEXT · S01E05").assertExists()
         capture("20_player_up_next_card")
 
         scenario = 11
-        composeRule.waitForIdle()
+        composeRule.mainClock.advanceTimeBy(100L)
         composeRule.onNodeWithText("Finished downloaded episodes").assertExists()
         capture("21_player_up_next_fetch")
 
         scenario = 12
-        composeRule.waitForIdle()
+        composeRule.mainClock.advanceTimeBy(100L)
         composeRule.onNodeWithText("2.0× Speed").assertExists()
         capture("22_player_gesture_hud")
     }

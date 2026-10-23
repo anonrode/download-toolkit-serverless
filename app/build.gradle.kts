@@ -116,6 +116,10 @@ android {
             // Robolectric needs the real merged manifest + Android resources
             // (not the android.jar stub) to host Compose test activity launches.
             isIncludeAndroidResources = true
+            // Plain JVM tests exercise production code that may log through
+            // android.util.Log; the stubbed android.jar otherwise throws
+            // "Method w not mocked" and fails unrelated status-code tests.
+            isReturnDefaultValues = true
         }
     }
 }

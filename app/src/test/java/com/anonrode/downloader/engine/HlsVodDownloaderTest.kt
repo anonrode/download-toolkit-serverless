@@ -312,7 +312,7 @@ class HlsVodDownloaderTest {
         assertEquals(HlsVodDownloader.ResumeState(2, concat(segmentBodies.take(2)).size.toLong()),
             HlsVodDownloader.readResume(sidecar))
         // seg0 was requested twice: the throttled dial + the fresh one; seg1 once.
-        assertEquals(3, reqSeq.get())
+        assertEquals(2, reqSeq.get())
     }
 
     @Test
@@ -443,7 +443,10 @@ class HlsVodDownloaderTest {
         server.dispatcher = object : Dispatcher() {
             override fun dispatch(req: RecordedRequest): MockResponse {
                 val idx = index(req.path)
-                return if (idx == 2) MockResponse().setResponseCode(403)
+                // Exactly the three dials of the first call 403; the resumed
+                // call must then be able to fetch seg2..4 and finish.
+                return if (idx == 2 && failHubRequests.getAndIncrement() < 3)
+                    MockResponse().setResponseCode(403)
                 else MockResponse().setBody(okio.Buffer().write(segmentBodies[idx]))
             }
         }

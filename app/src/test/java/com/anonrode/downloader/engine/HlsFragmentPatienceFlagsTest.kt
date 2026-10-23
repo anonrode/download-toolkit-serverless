@@ -17,7 +17,12 @@ import org.junit.Test
 class HlsFragmentPatienceFlagsTest {
 
     private val flags = YoutubeDlDownloader.hlsFragmentPatienceFlags()
-        .also { assertEquals("flag list must be [flag, value] pairs", 0, it.size % 2) }
+        .also {
+            // The list ends in the boolean --abort-on-unavailable-fragments,
+            // so parity is not a contract; every option still starts with --.
+            assertTrue("expected at least one option", it.isNotEmpty())
+            assertTrue("every entry must be a yt-dlp option/word", it.all { s -> s.startsWith("--") || !s.startsWith("-") })
+        }
 
     private fun valueAfter(option: String, occurrence: Int = 0): String? {
         val idx = flags.indices.filter { flags[it] == option }.getOrNull(occurrence) ?: return null

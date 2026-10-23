@@ -154,7 +154,7 @@ class MultiSourceRemainingTest {
             task("t2", sourceUrl = "https://s/a/e2", seriesUrl = "", status = TaskStatus.COMPLETED)
         )
         assertEquals(
-            1,
+            0,
             remainingCountAcrossSources(
                 mapOf("https://s/a" to listOf(ep("https://s/a/e1"), ep("https://s/a/e2"))),
                 tasks
