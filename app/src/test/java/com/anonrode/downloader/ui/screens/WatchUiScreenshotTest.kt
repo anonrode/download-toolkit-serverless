@@ -2,6 +2,9 @@ package com.anonrode.downloader.ui.screens
 
 import android.app.Application
 import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.view.ViewGroup
+import androidx.activity.ComponentActivity
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -14,11 +17,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.asAndroidBitmap
-import androidx.compose.ui.test.captureToImage
-import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithText
-import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.unit.dp
 import com.anonrode.downloader.data.ContinueState
 import com.anonrode.downloader.data.SeriesContinueCard
@@ -54,7 +54,7 @@ import java.io.FileOutputStream
 class WatchUiScreenshotTest {
 
     @get:Rule
-    val composeRule = createComposeRule()
+    val composeRule = createAndroidComposeRule<ComponentActivity>()
 
     private var scenario by mutableStateOf(0)
 
@@ -231,24 +231,26 @@ class WatchUiScreenshotTest {
     }
 
     private fun capture(name: String) {
-        // The components carry indefinite animations (pulse/progress), so an
-        // auto-advancing clock keeps Robolectric's capture waiting until its
-        // 2 s timeout. Freeze only for the bitmap grab, then restore the clock
-        // so the next scenario composes normally.
-        composeRule.mainClock.autoAdvance = false
-        composeRule.mainClock.advanceTimeByFrame()
+        composeRule.waitForIdle()
         try {
+            // Direct View.draw is the Robolectric-safe raster path: Compose's
+            // captureToImage() waits for a render condition this environment
+            // never satisfies (indefinite progress animations) and times out
+            // at 2 s per shot.
+            val view = composeRule.activity.findViewById<ViewGroup>(android.R.id.content)
+            require(view.width > 0 && view.height > 0) {
+                "root view not laid out (${view.width}x${view.height})"
+            }
+            val bitmap = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
+            view.draw(Canvas(bitmap))
             val dir = File(System.getProperty("user.dir"), "build/reports/screenshots")
                 .apply { mkdirs() }
-            val bitmap = composeRule.onRoot().captureToImage().asAndroidBitmap()
             FileOutputStream(File(dir, "$name.png")).use {
                 bitmap.compress(Bitmap.CompressFormat.PNG, 100, it)
             }
             println("SHOT ${File(dir, "$name.png").absolutePath}")
         } catch (t: Throwable) {
             println("SHOT-FAILED $name: ${t.message}")
-        } finally {
-            composeRule.mainClock.autoAdvance = true
         }
     }
 

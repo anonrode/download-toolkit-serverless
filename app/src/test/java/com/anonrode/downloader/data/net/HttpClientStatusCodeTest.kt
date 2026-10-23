@@ -1,6 +1,7 @@
 package com.anonrode.downloader.data.net
 
 import com.anonrode.downloader.pipeline.HostHealth
+import okhttp3.Dns
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.After
@@ -9,6 +10,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import java.net.InetAddress
 
 /**
  * Typed HTTP statuses at the getText boundary (investigation 11 R1 / fix row
@@ -33,6 +35,12 @@ class HttpClientStatusCodeTest {
 
     @Before
     fun setUp() {
+        // Production's SSRF floor refuses loopback; the test seam maps the
+        // MockWebServer origin to 127.0.0.1 so the REAL getText path runs.
+        HttpClient.dnsForTest = object : Dns {
+            override fun lookup(hostname: String): List<InetAddress> =
+                listOf(InetAddress.getByName("127.0.0.1"))
+        }
         server = MockWebServer()
         server.start()
         baseUrl = server.url("/")
@@ -43,6 +51,7 @@ class HttpClientStatusCodeTest {
         // Lift any hard block this test recorded so later tests on this host
         // start clean (same ledger-host across all MockWebServer URLs).
         HostHealth.recordOk(baseUrl.toString())
+        HttpClient.dnsForTest = null
         server.shutdown()
     }
 
