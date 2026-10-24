@@ -46,6 +46,10 @@ object StrictLinkClassifier {
         "fastupload.io", "gofile.io", "krakenfiles.com", "swish", "lightdl.cc", "5play.cc"
     )
 
+    val PERMANENTLY_DEAD_HOSTS = setOf(
+        "zippyshare.com", "openload.co", "verystream.com", "rapidvideo.com", "vidcloud.co"
+    )
+
     private val NAV_PATH_SEGMENTS = setOf(
         "tag", "category", "categories", "dmca", "menu", "page", "pages",
         "author", "about", "contact", "privacy", "policy", "terms", "sitemap",
@@ -94,6 +98,11 @@ object StrictLinkClassifier {
         val cleanHost = host.removePrefix("www.")
         val cleanSiteHost = siteHost?.lowercase()?.removePrefix("www.")
         val path = uri.path?.lowercase().orEmpty()
+
+        // 0. Permanently dead hosts (e.g. Zippyshare, Openload) dropped immediately without resolver backoff
+        if (isPermanentlyDeadHost(cleanHost)) {
+            return LinkClass.NavigationJunk("permanently_dead_host")
+        }
 
         // 1. Homepage / root path check (empty or "/" path is always nav junk)
         if (path.isBlank() || path == "/") {
@@ -222,5 +231,10 @@ object StrictLinkClassifier {
     fun isCandidateForDownload(url: String, siteHost: String? = null): Boolean {
         val c = classify(url, siteHost)
         return c !is LinkClass.NavigationJunk
+    }
+
+    fun isPermanentlyDeadHost(host: String): Boolean {
+        val clean = host.removePrefix("www.").lowercase()
+        return PERMANENTLY_DEAD_HOSTS.any { clean == it || clean.endsWith(".$it") }
     }
 }

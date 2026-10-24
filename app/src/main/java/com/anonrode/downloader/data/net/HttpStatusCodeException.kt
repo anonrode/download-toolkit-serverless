@@ -14,5 +14,8 @@ package com.anonrode.downloader.data.net
  * nothing ever learned the host rejects us until the task died "chain
  * EMPTY").
  */
-internal class HttpStatusCodeException(val code: Int, url: String) :
-    java.io.IOException("HTTP $code for ${url.take(120)}")
+internal class HttpStatusCodeException(
+    val code: Int,
+    url: String,
+    val isChallenge: Boolean = false
+) : java.io.IOException("HTTP $code for ${url.take(120)}")

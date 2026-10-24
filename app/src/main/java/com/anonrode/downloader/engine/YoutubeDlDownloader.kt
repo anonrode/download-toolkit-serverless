@@ -284,6 +284,7 @@ object YoutubeDlDownloader {
     suspend fun fetchPlaylistJson(context: Context, url: String, cap: Int = 1000): String? =
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
             val out = StringBuilder()
+            val processId = "playlist-meta-${java.util.UUID.randomUUID()}"
             try {
                 val request = YoutubeDLRequest(url).apply {
                     addOption("-J")
@@ -296,7 +297,7 @@ object YoutubeDlDownloader {
                 }
                 withTimeoutOrNull(90_000L) {
                     try {
-                        YoutubeDL.getInstance().execute(request, "playlist-meta") { _, _, line ->
+                        YoutubeDL.getInstance().execute(request, processId) { _, _, line ->
                             out.append(line).append('\n')
                         }
                     } catch (ce: CancellationException) {
@@ -306,6 +307,8 @@ object YoutubeDlDownloader {
                 }
             } catch (_: Throwable) {
                 null
+            } finally {
+                try { YoutubeDL.getInstance().destroyProcessById(processId) } catch (_: Exception) {}
             }
         }
 
@@ -519,9 +522,13 @@ object YoutubeDlDownloader {
                 val isGenericName = isGenericPreferredName(preferredFilename)
                 val outTemplate = if (!isGenericName) {
                     val stem = File(outDir, preferredFilename.substringBeforeLast('.')).absolutePath
-                    val ext = File(preferredFilename).extension.ifBlank { "mp4" }
-                    val safeExt = if (audioOnly) "mp3" else if (ext.equals("matroska", ignoreCase = true)) "mkv" else ext
-                    "$stem.$safeExt"
+                    if (audioOnly) {
+                        "$stem.%(ext)s"
+                    } else {
+                        val ext = File(preferredFilename).extension.ifBlank { "mp4" }
+                        val safeExt = if (ext.equals("matroska", ignoreCase = true)) "mkv" else ext
+                        "$stem.$safeExt"
+                    }
                 } else {
                     File(outDir, "%(title).100s [%(id)s].%(ext)s").absolutePath
                 }
@@ -531,9 +538,10 @@ object YoutubeDlDownloader {
                     addOption("--extract-audio")
                     addOption("--audio-format", "mp3")
                     addOption("--audio-quality", "0")
+                    addOption("--write-thumbnail")
+                    addOption("--convert-thumbnails", "jpg")
                     addOption("--embed-thumbnail")
                     addOption("--embed-metadata")
-                    addOption("--convert-thumbnails", "jpg")
                 } else {
                     addCommands(hlsFormatOptions(height, hlsSeparateAudio))
                     addOption("-S", "height~$height,+size,+br,abr")
@@ -589,9 +597,10 @@ object YoutubeDlDownloader {
                     addOption("--extract-audio")
                     addOption("--audio-format", "mp3")
                     addOption("--audio-quality", "0")
+                    addOption("--write-thumbnail")
+                    addOption("--convert-thumbnails", "jpg")
                     addOption("--embed-thumbnail")
                     addOption("--embed-metadata")
-                    addOption("--convert-thumbnails", "jpg")
                 } else {
                     addOption("-o", "$stem.$safeExt")
                     addCommands(hlsFormatOptions(height, hlsSeparateAudio))
@@ -621,15 +630,18 @@ object YoutubeDlDownloader {
                 val stem = File(outDir, preferredFilename.substringBeforeLast('.')).absolutePath
                 val ext = File(preferredFilename).extension.ifBlank { "mp4" }
                 val safeExt = if (audioOnly) "mp3" else if (ext.equals("matroska", ignoreCase = true)) "mkv" else ext
-                addOption("-o", "$stem.$safeExt")
                 if (audioOnly) {
+                    addOption("-o", "$stem.%(ext)s")
                     addOption("-f", "bestaudio/best")
                     addOption("--extract-audio")
                     addOption("--audio-format", "mp3")
                     addOption("--audio-quality", "0")
+                    addOption("--write-thumbnail")
+                    addOption("--convert-thumbnails", "jpg")
                     addOption("--embed-thumbnail")
                     addOption("--embed-metadata")
-                    addOption("--convert-thumbnails", "jpg")
+                } else {
+                    addOption("-o", "$stem.$safeExt")
                 }
                 val conns = parallelSockets.coerceIn(1, 16)
                 addOption("-N", "$conns")
@@ -922,6 +934,7 @@ object YoutubeDlDownloader {
                 // normally deletes them, a half-finished pass may not) were
                 // never artifacts.
                 f.extension.lowercase() !in SUBTITLE_ARTIFACT_EXTS &&
+                (!audioOnly || f.extension.lowercase() !in setOf("jpg", "jpeg", "png", "webp", "gif")) &&
                 !formatShard.containsMatchIn(f.name) &&
                 !File(f.absolutePath + ".aria2").exists()
 
@@ -959,6 +972,9 @@ object YoutubeDlDownloader {
             com.anonrode.downloader.util.DebugLog.backend("task=$taskId yt-dlp attempt $attempts/$ytdlpMaxAttempts url=${inputUrl.take(110)}")
             produced = attemptOnce()
             if (produced != null) {
+                if (audioOnly) {
+                    produced = embedAudioThumbnailWithFfmpeg(context, produced, outDir, taskId)
+                }
                 val size = produced.length()
                 val sizeLabel = if (size >= 1048576) "${size / 1048576} MiB" else "${size / 1024} KiB"
                 com.anonrode.downloader.util.DebugLog.backend("task=$taskId yt-dlp attempt $attempts produced ${produced.name} ($sizeLabel)")
@@ -1935,5 +1951,104 @@ object YoutubeDlDownloader {
         return low.contains("megaplay.buzz") || low.contains("watching.onl") ||
             low.contains("anivideo.sbs") || low.contains("anitaku") ||
             low.contains("gogoanime") || low.contains("2anime.xyz")
+    }
+
+    internal fun embedAudioThumbnailWithFfmpeg(
+        context: Context,
+        audioFile: File,
+        workDir: File,
+        taskId: String
+    ): File {
+        val stem = audioFile.nameWithoutExtension
+        val coverExtensions = listOf("jpg", "jpeg", "png", "webp")
+        val coverFile = coverExtensions.map { ext -> File(workDir, "$stem.$ext") }
+            .firstOrNull { it.exists() && it.length() > 0L }
+            ?: workDir.listFiles { f ->
+                f.isFile && f.extension.lowercase() in coverExtensions && f.length() > 0L &&
+                    (f.name.startsWith(stem) || f.name.contains(stem) || f.name.contains("thumb"))
+            }?.maxByOrNull { it.lastModified() }
+            ?: return audioFile
+
+        val extractedDir = File(context.noBackupFilesDir, "youtubedl-android/packages/ffmpeg")
+        val nativeDir = File(context.applicationInfo.nativeLibraryDir)
+        val lib = InstagramPhotoMuxer.pickFfmpegBinary(extractedDir, nativeDir) ?: return audioFile
+        try { lib.setExecutable(true) } catch (_: Exception) {}
+        val ldLibraryPath = InstagramPhotoMuxer.buildFfmpegLdLibraryPath(context, lib)
+
+        val ext = audioFile.extension.lowercase()
+        val tempMuxed = File(workDir, "${stem}_embedded.$ext")
+
+        val cmd = if (ext == "mp3") {
+            listOf(
+                lib.absolutePath,
+                "-hide_banner", "-loglevel", "error", "-y",
+                "-i", audioFile.absolutePath,
+                "-i", coverFile.absolutePath,
+                "-map", "0:a",
+                "-map", "1:v",
+                "-c:a", "copy",
+                "-c:v", "mjpeg",
+                "-id3v2_version", "3",
+                "-metadata:s:v", "title=Album cover",
+                "-metadata:s:v", "comment=Cover (front)",
+                tempMuxed.absolutePath
+            )
+        } else if (ext in setOf("m4a", "mp4", "aac")) {
+            listOf(
+                lib.absolutePath,
+                "-hide_banner", "-loglevel", "error", "-y",
+                "-i", audioFile.absolutePath,
+                "-i", coverFile.absolutePath,
+                "-map", "0:a",
+                "-map", "1:v",
+                "-c", "copy",
+                "-disposition:v:0", "attached_pic",
+                tempMuxed.absolutePath
+            )
+        } else {
+            listOf(
+                lib.absolutePath,
+                "-hide_banner", "-loglevel", "error", "-y",
+                "-i", audioFile.absolutePath,
+                "-i", coverFile.absolutePath,
+                "-map", "0:a",
+                "-map", "1:v",
+                "-c", "copy",
+                tempMuxed.absolutePath
+            )
+        }
+
+        var p: Process? = null
+        try {
+            val pb = ProcessBuilder(cmd)
+            pb.environment()["TMPDIR"] = workDir.absolutePath
+            val binDir = lib.parentFile?.absolutePath
+            val existing = pb.environment()["LD_LIBRARY_PATH"]
+            val pieces = listOfNotNull(
+                ldLibraryPath.takeIf { it.isNotBlank() },
+                binDir?.takeIf { it.isNotBlank() },
+                existing?.takeIf { it.isNotBlank() }
+            )
+            if (pieces.isNotEmpty()) {
+                pb.environment()["LD_LIBRARY_PATH"] = pieces.joinToString(File.pathSeparator)
+            }
+            p = pb.start()
+            val finished = p.waitFor(60, java.util.concurrent.TimeUnit.SECONDS)
+            if (finished && p.exitValue() == 0 && tempMuxed.exists() && tempMuxed.length() > 0L) {
+                audioFile.delete()
+                tempMuxed.renameTo(audioFile)
+                coverFile.delete()
+                com.anonrode.downloader.util.DebugLog.backend(
+                    "task=$taskId yt-dlp: successfully embedded artwork (${coverFile.name}) into ${audioFile.name} using ffmpeg"
+                )
+                return audioFile
+            }
+        } catch (e: Exception) {
+            com.anonrode.downloader.util.DebugLog.backend("task=$taskId yt-dlp ffmpeg artwork embedding error: ${e.message}")
+        } finally {
+            p?.destroyForcibly()
+            if (tempMuxed.exists()) runCatching { tempMuxed.delete() }
+        }
+        return audioFile
     }
 }

@@ -33,7 +33,8 @@ data class SiteRuleConfig(
     val episodeSelector: String = "",
     val seriesDescentSelectors: List<String> = emptyList(),
     val downloadAnchorSelector: String = "",
-    val slugSuffixes: List<String> = emptyList()
+    val slugSuffixes: List<String> = emptyList(),
+    val mirrorSelectors: List<String> = emptyList()
 )
 
 /** One ordered host policy from the OTA playbook. First matching rule wins. */
@@ -1061,7 +1062,8 @@ object DynamicRulesManager {
                                 ivStr.isNotBlank() -> ivStr.toByteArray(Charsets.UTF_8)
                                 else -> null
                             }
-                            if (keyBytes != null && ivBytes != null) {
+                            if (keyBytes != null && keyBytes.size in setOf(16, 24, 32) &&
+                                ivBytes != null && ivBytes.size == 16) {
                                 specs.add(CryptoKeySpec(cipher, keyBytes, ivBytes))
                             }
                         }
@@ -1387,6 +1389,10 @@ object DynamicRulesManager {
 
     fun getSiteConfig(site: String): SiteRuleConfig? {
         return activeSiteConfigs[site.lowercase()]
+    }
+
+    fun getMirrorSelectors(site: String): List<String> {
+        return getSiteConfig(site)?.mirrorSelectors.orEmpty()
     }
 
     fun getResolverConfig(resolverName: String): JSONObject? {
@@ -2193,6 +2199,15 @@ object DynamicRulesManager {
                             }
                         }
 
+                        val mirrorList = mutableListOf<String>()
+                        val mirrorArr = sObj.optJSONArray("mirrorSelectors") ?: sObj.optJSONArray("mirror_selectors")
+                        if (mirrorArr != null) {
+                            for (idx in 0 until mirrorArr.length()) {
+                                val s = mirrorArr.optString(idx).trim()
+                                if (s.isNotBlank()) mirrorList.add(s)
+                            }
+                        }
+
                         siteConfigs[k.lowercase()] = SiteRuleConfig(
                             searchPattern = sObj.optString("searchPattern"),
                             searchType = sObj.optString("searchType", "html"),
@@ -2203,7 +2218,8 @@ object DynamicRulesManager {
                             episodeSelector = sObj.optString("episodeSelector"),
                             seriesDescentSelectors = descentList,
                             downloadAnchorSelector = sObj.optString("downloadAnchorSelector"),
-                            slugSuffixes = slugList
+                            slugSuffixes = slugList,
+                            mirrorSelectors = mirrorList
                         )
                     }
                 }
@@ -2468,6 +2484,7 @@ object DynamicRulesManager {
             val prevLockerHosts = activeLockerHosts
             val prevHostPolicies = activeHostPolicies
             val prevPipelines = activePipelines
+            val prevActiveRev = activeRev
 
             val newSnapshot = buildOtaSnapshot(obj, familyFlags, deviceUuid, ver)
 
@@ -2564,9 +2581,6 @@ object DynamicRulesManager {
             // coarse whole-ledger clearing. Both paths drop only the judgment;
             // ok/fail history and 429 cooldowns stay.
             val prevVer = _version.value
-            // F7 (OTA red-team): capture the pre-publish rev — a rev-ONLY bump
-            // must invalidate stale verdicts too, not just version-string bumps.
-            val prevActiveRev = activeRev
             // NoSourceLedger: new payload may add platforms — hidden titles
             // get re-judged against the new playbook.
             com.anonrode.downloader.pipeline.NoSourceLedger.clear()

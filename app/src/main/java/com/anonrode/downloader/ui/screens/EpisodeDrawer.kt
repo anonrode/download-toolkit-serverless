@@ -239,10 +239,13 @@ fun EpisodeDrawer(
     val drawerCacheKey = "$rulesVer|${show.site}|${show.url}"
     LaunchedEffect(freshEpisodes, show.url, rulesVer) {
         if (freshEpisodes.isNotEmpty()) {
-            cachedEpisodeLists[drawerCacheKey] = CachedEpisodeList(
-                episodes = freshEpisodes,
-                synopsis = uiState.drawerSynopsis,
-                savedAtMs = System.currentTimeMillis()
+            putCachedEpisodeList(
+                drawerCacheKey,
+                CachedEpisodeList(
+                    episodes = freshEpisodes,
+                    synopsis = uiState.drawerSynopsis,
+                    savedAtMs = System.currentTimeMillis()
+                )
             )
         }
     }
@@ -2323,7 +2326,22 @@ private data class CachedEpisodeList(
 )
 
 private const val EPISODE_CACHE_TTL_MS = 30L * 60L * 1000L   // §4.4: 30-minute TTL
+private const val MAX_CACHED_EPISODE_LISTS = 64
 private val cachedEpisodeLists = ConcurrentHashMap<String, CachedEpisodeList>()
+
+private fun putCachedEpisodeList(key: String, item: CachedEpisodeList) {
+    val now = System.currentTimeMillis()
+    cachedEpisodeLists.entries.removeIf { now - it.value.savedAtMs > EPISODE_CACHE_TTL_MS }
+    if (cachedEpisodeLists.size >= MAX_CACHED_EPISODE_LISTS) {
+        val oldest = cachedEpisodeLists.entries
+            .sortedBy { it.value.savedAtMs }
+            .take((cachedEpisodeLists.size - MAX_CACHED_EPISODE_LISTS + 1).coerceAtLeast(1))
+        for (e in oldest) {
+            cachedEpisodeLists.remove(e.key)
+        }
+    }
+    cachedEpisodeLists[key] = item
+}
 
 fun clearCachedEpisodeLists() {
     cachedEpisodeLists.clear()

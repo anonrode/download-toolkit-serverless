@@ -363,13 +363,18 @@ object UrlClassifier {
             val isM3u = trimmed.startsWith("#EXTM3U")
             val isDash = trimmed.startsWith("<MPD") ||
                 (trimmed.startsWith("<?xml") && trimmed.contains("<MPD", ignoreCase = true))
-            val ct = if (isDash) "application/dash+xml" else "application/vnd.apple.mpegurl"
-            val bodyBytes = body.toByteArray(Charsets.UTF_8).size.toLong()
+            val rawBytes = body.toByteArray(Charsets.ISO_8859_1)
+            val bodyBytes = rawBytes.size.toLong()
+            val isBinaryMedia = (rawBytes.size >= 8 && String(rawBytes, 4, 4, Charsets.US_ASCII).lowercase() in setOf("ftyp", "moov", "mdat", "styp")) ||
+                (rawBytes.size >= 4 && rawBytes[0] == 0x1A.toByte() && rawBytes[1] == 0x45.toByte()) ||
+                (rawBytes.isNotEmpty() && rawBytes[0] == 0x47.toByte())
             val ev = when {
                 trimmed.isBlank() ->
                     TerminalEvidence(TerminalKind.UNKNOWN, 0, ct, null, "manifest body unreadable")
                 isDash ->
                     TerminalEvidence(TerminalKind.HLS_PLAYLIST, 200, ct, bodyBytes, "genuine DASH manifest")
+                isBinaryMedia ->
+                    TerminalEvidence(TerminalKind.DIRECT_MEDIA, 200, "video/mp4", bodyBytes, "binary media stream")
                 !isM3u ->
                     TerminalEvidence(TerminalKind.STUB, 200, ct, bodyBytes, "mpegurl body is not an M3U document")
                 isTinyManifest(trimmed, ct, bodyBytes) ->

@@ -117,4 +117,18 @@ class PlutoProviderTest {
         assertEquals(1, PlutoProvider.parseSeasonNumber("The Seven Deadly Sins Four Knights of the Apocalypse Season 1"))
         assertEquals(2, PlutoProvider.parseSeasonNumber("The Seven Deadly Sins Four Knights of the Apocalypse Season 2"))
     }
+
+    @Test
+    fun plutoMoviesResolver_xorUnscramble() {
+        val key = "testkey123"
+        val original = "https://kissorgrab.com/dl/movie.mkv"
+        val keyBytes = key.toByteArray(Charsets.UTF_8)
+        val origBytes = original.toByteArray(Charsets.UTF_8)
+        val scrambled = ByteArray(origBytes.size) { i ->
+            (origBytes[i].toInt() xor keyBytes[i % keyBytes.size].toInt()).toByte()
+        }
+        val b64 = java.util.Base64.getEncoder().encodeToString(scrambled)
+        val decrypted = com.anonrode.downloader.resolvers.PlutoMoviesResolver.xorUnscramble(b64, key)
+        assertEquals(original, decrypted)
+    }
 }

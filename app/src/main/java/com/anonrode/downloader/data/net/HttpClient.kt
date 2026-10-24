@@ -20,7 +20,8 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 object HttpClient {
-    const val DEFAULT_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    @Volatile
+    var DEFAULT_UA: String = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
 
     private val pool = okhttp3.ConnectionPool(64, 5, TimeUnit.MINUTES)
     private val dispatcher = okhttp3.Dispatcher().apply {
@@ -136,6 +137,72 @@ object HttpClient {
             }
         }
         return null
+    }
+
+    /**
+     * Store a cookie directly in the shared session cookie jar.
+     * Replaces any existing cookie with the same name, domain, and path.
+     */
+    fun storeCookie(name: String, value: String, domain: String, path: String = "/", maxAgeSec: Long = 43200L) {
+        val cleanDomain = domain.removePrefix(".").substringBefore(':')
+        val expiresAt = System.currentTimeMillis() + (maxAgeSec * 1000L)
+        try {
+            val cookie = Cookie.Builder()
+                .name(name)
+                .value(value)
+                .domain(cleanDomain)
+                .path(path)
+                .expiresAt(expiresAt)
+                .build()
+            synchronized(cookies) {
+                cookies.removeAll { it.name == cookie.name && it.domain == cookie.domain && it.path == cookie.path }
+                cookies.add(cookie)
+            }
+        } catch (e: Exception) {
+            Log.w("HttpClient", "Failed to store cookie $name for $cleanDomain: ${e.message}")
+        }
+    }
+
+    /**
+     * Purge cookies matching the given name and domain from the session store.
+     */
+    fun purgeCookie(name: String, domain: String) {
+        val cleanDomain = domain.removePrefix(".").substringBefore(':').lowercase()
+        synchronized(cookies) {
+            cookies.removeAll {
+                val cd = it.domain.removePrefix(".").lowercase()
+                it.name == name && (cd == cleanDomain || cd.endsWith(".$cleanDomain") || cleanDomain.endsWith(".$cd"))
+            }
+        }
+    }
+
+    /**
+     * Accurate discrimination of Cloudflare Turnstile & Bot-Check challenges.
+     *
+     * Only returns true if cf-mitigated header explicitly signals challenge,
+     * or if an HTML response contains genuine signature markers.
+     * Never returns true solely on Server: cloudflare or cf-ray headers.
+     */
+    fun isCloudflareChallenge(res: Response): Boolean {
+        if (res.code != 403 && res.code != 503) return false
+        val cfMitigated = res.header("cf-mitigated")
+        if (cfMitigated?.equals("challenge", ignoreCase = true) == true) return true
+
+        val contentType = res.header("Content-Type") ?: ""
+        if (contentType.contains("text/html", ignoreCase = true)) {
+            val bodySnippet = try {
+                res.peekBody(4096).string().lowercase()
+            } catch (_: Exception) { "" }
+
+            val hasMarker = bodySnippet.contains("just a moment") ||
+                bodySnippet.contains("cf-challenge") ||
+                bodySnippet.contains("challenge-platform") ||
+                bodySnippet.contains("turnstile") ||
+                bodySnippet.contains("__cf_chl_") ||
+                bodySnippet.contains("__hvtok")
+            if (hasMarker) return true
+        }
+        return false
     }
 
     /**
@@ -776,6 +843,20 @@ object HttpClient {
             .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
             .header("Accept-Language", "en-US,en;q=0.9")
 
+        val isXhrOrJson = headers["X-Requested-With"]?.equals("XMLHttpRequest", ignoreCase = true) == true ||
+            headers["Accept"].orEmpty().contains("json", ignoreCase = true)
+        if (!isXhrOrJson) {
+            reqBuilder.header("Sec-Fetch-Dest", "document")
+            reqBuilder.header("Sec-Fetch-Mode", "navigate")
+            reqBuilder.header("Sec-Fetch-Site", if (referer.isNullOrBlank()) "none" else "same-origin")
+            reqBuilder.header("Sec-Fetch-User", "?1")
+            reqBuilder.header("Upgrade-Insecure-Requests", "1")
+        } else {
+            reqBuilder.header("Sec-Fetch-Dest", "empty")
+            reqBuilder.header("Sec-Fetch-Mode", "cors")
+            reqBuilder.header("Sec-Fetch-Site", "same-origin")
+        }
+
         if (!referer.isNullOrBlank()) {
             reqBuilder.header("Referer", referer)
         }
@@ -830,6 +911,50 @@ object HttpClient {
                     "GET ${safeUrl(url)} retry-after-451 -> ${res.code} in ${System.currentTimeMillis() - started}ms"
                 )
             }
+
+            if (android.os.Looper.myLooper() != android.os.Looper.getMainLooper() &&
+                CloudflareSolver.canAttemptSolve(tag) &&
+                isCloudflareChallenge(res) &&
+                attempt == 0) {
+                val priorReq = res.request
+                val priorProtocol = res.protocol
+                val priorCode = res.code
+                val priorMessage = res.message
+                val priorHeaders = res.headers
+                val challengeUrl = priorReq.url.toString()
+
+                res.close()
+                unregister(call)
+
+                val solved = CloudflareSolver.solveSync(challengeUrl, referer, tag)
+                if (solved) {
+                    com.anonrode.downloader.pipeline.HostHealth.clearIfAlive(challengeUrl)
+                    reqBuilder.header("User-Agent", DEFAULT_UA)
+                    attempt++
+                    call = client.newCall(reqBuilder.build())
+                    register(call)
+                    res = try {
+                        call.execute()
+                    } catch (e: Exception) {
+                        if (call.isCanceled()) {
+                            throw kotlinx.coroutines.CancellationException("HTTP call canceled").apply { initCause(e) }
+                        }
+                        throw e
+                    }
+                    com.anonrode.downloader.util.DebugLog.net(
+                        "GET ${safeUrl(url)} retry-after-challenge -> ${res.code} in ${System.currentTimeMillis() - started}ms"
+                    )
+                } else {
+                    res = Response.Builder()
+                        .request(priorReq)
+                        .protocol(priorProtocol)
+                        .code(priorCode)
+                        .message(priorMessage)
+                        .headers(priorHeaders)
+                        .body(okhttp3.ResponseBody.create(null, ByteArray(0)))
+                        .build()
+                }
+            }
             consume(res)
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
             throw cancelled
@@ -870,16 +995,19 @@ object HttpClient {
         val searchCalls = taggedCalls["search"]
         val strategyCalls = taggedCalls["search-strategy"]
         val trendingCalls = taggedCalls["trending"]
-        for (c in inFlightCalls) {
-            if (searchCalls?.contains(c) == true ||
+        val browseCalls = taggedCalls["browse"]
+        val otaCalls = taggedCalls["ota_rules"]
+        inFlightCalls.removeIf { c ->
+            val keep = searchCalls?.contains(c) == true ||
                 strategyCalls?.contains(c) == true ||
-                trendingCalls?.contains(c) == true
-            ) continue
-            try { c.cancel() } catch (_: Exception) {}
+                trendingCalls?.contains(c) == true ||
+                browseCalls?.contains(c) == true ||
+                otaCalls?.contains(c) == true
+            if (!keep) {
+                try { c.cancel() } catch (_: Exception) {}
+            }
+            !keep
         }
-        inFlightCalls.clear()
-        // Leave taggedCalls intact: surviving search calls still need their tag
-        // so a newer search can supersede them; completed calls self-remove.
     }
 
     /** Cancel only the calls tagged [tag] (a superseded search, etc.). */
@@ -897,16 +1025,20 @@ object HttpClient {
      * Synchronous: registry cancellation only, NOT automatically bound to a coroutine Job.
      * Callers needing Job cancellation must supply a per-call bridge; never cancel globally.
      */
-    internal inline fun <T> executeCancellable(client: OkHttpClient, req: Request, block: (Response) -> T): T {
+    internal inline fun <T> executeCancellable(client: OkHttpClient, req: Request, tag: String? = null, block: (Response) -> T): T {
         val permitUrl = req.url.toString()
-        val permitClass = OriginRequestClass.DOWNLOAD
+        val permitClass = when (requestScope(tag)) {
+            RetryAfterCooldown.SCOPE_SEARCH -> OriginRequestClass.SEARCH
+            RetryAfterCooldown.SCOPE_VERIFY -> OriginRequestClass.VERIFY
+            else -> OriginRequestClass.DOWNLOAD
+        }
         val admitted = OriginLoadScheduler.acquire(permitUrl, permitClass)
         try {
-            val call = registerResolverCall(client, req)
+            val call = registerResolverCall(client, req, tag)
             try {
-                return executeResolverCall(call).use(block)
+                return executeResolverCall(call, tag).use(block)
             } finally {
-                unregisterResolverCall(call)
+                unregisterResolverCall(call, tag)
             }
         } finally {
             if (admitted) OriginLoadScheduler.release(permitUrl, permitClass)
@@ -914,14 +1046,19 @@ object HttpClient {
     }
 
     @PublishedApi
-    internal fun registerResolverCall(client: OkHttpClient, req: Request): okhttp3.Call {
+    internal fun registerResolverCall(client: OkHttpClient, req: Request, tag: String? = null): okhttp3.Call {
         refuseUnsafeTarget(req.url.toString())
         admitRequest(req.url.toString())
-        return client.newCall(req).also { inFlightCalls.add(it) }
+        val call = client.newCall(req)
+        inFlightCalls.add(call)
+        if (tag != null) {
+            taggedCalls.computeIfAbsent(tag) { java.util.concurrent.CopyOnWriteArrayList() }.add(call)
+        }
+        return call
     }
 
     @PublishedApi
-    internal fun executeResolverCall(call: okhttp3.Call): Response {
+    internal fun executeResolverCall(call: okhttp3.Call, tag: String? = null): Response {
         val response = try {
             call.execute()
         } catch (e: Exception) {
@@ -930,7 +1067,7 @@ object HttpClient {
             }
             throw e
         }
-        recordCooldown(response)
+        recordCooldown(response, tag)
         if (response.code == 429 || response.code == 503) {
             val url = response.request.url.toString()
             response.close()
@@ -940,8 +1077,11 @@ object HttpClient {
     }
 
     @PublishedApi
-    internal fun unregisterResolverCall(call: okhttp3.Call) {
+    internal fun unregisterResolverCall(call: okhttp3.Call, tag: String? = null) {
         inFlightCalls.remove(call)
+        if (tag != null) {
+            taggedCalls[tag]?.remove(call)
+        }
     }
 
     /** Remaining per-origin cooldown ms (0 = usable). */
@@ -1092,7 +1232,8 @@ object HttpClient {
                         if (r.code == 429 || r.code == 503) {
                             throw OriginCooldownException(r.request.url.toString())
                         }
-                        throw HttpStatusCodeException(r.code, r.request.url.toString())
+                        val cfChallenge = isCloudflareChallenge(r)
+                        throw HttpStatusCodeException(r.code, r.request.url.toString(), isChallenge = cfChallenge)
                     }
                 }
             }
@@ -1108,7 +1249,7 @@ object HttpClient {
             // ride OriginCooldownException, 451 has its own edge-route failover.
             lastFailure = e.message
             Log.w("HttpClient", e.message ?: "HTTP ${e.code}")
-            if (e.code == 403 || e.code == 436) {
+            if ((e.code == 403 || e.code == 436) && !e.isChallenge) {
                 com.anonrode.downloader.pipeline.HostHealth.recordFail(
                     url,
                     reason = "HTTP ${e.code} ${HttpClient.parsedHost(url) ?: ""}".trim()
@@ -1167,19 +1308,23 @@ object HttpClient {
                 .header("User-Agent", DEFAULT_UA)
                 .header("Accept", "*/*")
                 .header("Accept-Language", "en-US,en;q=0.9")
+                .header("Sec-Fetch-Dest", "empty")
+                .header("Sec-Fetch-Mode", "cors")
+                .header("Sec-Fetch-Site", "same-origin")
             if (!referer.isNullOrBlank()) {
                 reqBuilder.header("Referer", referer)
             }
             headers.forEach { (k, v) -> reqBuilder.header(k, v) }
 
-            val call = client.newCall(reqBuilder.build())
+            var call = client.newCall(reqBuilder.build())
             inFlightCalls.add(call)
             if (tag != null) {
                 taggedCalls.computeIfAbsent(tag) { java.util.concurrent.CopyOnWriteArrayList() }.add(call)
             }
             val started = System.currentTimeMillis()
+            var attempt = 0
             try {
-                val response = try {
+                var response = try {
                     call.execute()
                 } catch (e: java.io.IOException) {
                     if (call.isCanceled()) {
@@ -1187,6 +1332,51 @@ object HttpClient {
                     }
                     throw e
                 }
+
+                if (android.os.Looper.myLooper() != android.os.Looper.getMainLooper() &&
+                    CloudflareSolver.canAttemptSolve(tag) &&
+                    isCloudflareChallenge(response) &&
+                    attempt == 0) {
+                    val priorReq = response.request
+                    val priorProtocol = response.protocol
+                    val priorCode = response.code
+                    val priorMessage = response.message
+                    val priorHeaders = response.headers
+                    val postUrl = priorReq.url.toString()
+                    val solveTarget = CloudflareSolver.resolveChallengeTargetUrl(postUrl, referer)
+
+                    response.close()
+                    inFlightCalls.remove(call)
+                    if (tag != null) taggedCalls[tag]?.remove(call)
+
+                    val solved = CloudflareSolver.solveSync(solveTarget, referer, tag)
+                    if (solved) {
+                        com.anonrode.downloader.pipeline.HostHealth.clearIfAlive(postUrl)
+                        reqBuilder.header("User-Agent", DEFAULT_UA)
+                        attempt++
+                        call = client.newCall(reqBuilder.build())
+                        inFlightCalls.add(call)
+                        if (tag != null) taggedCalls.computeIfAbsent(tag) { java.util.concurrent.CopyOnWriteArrayList() }.add(call)
+                        response = try {
+                            call.execute()
+                        } catch (e: java.io.IOException) {
+                            if (call.isCanceled()) {
+                                throw kotlinx.coroutines.CancellationException("HTTP call canceled").apply { initCause(e) }
+                            }
+                            throw e
+                        }
+                    } else {
+                        response = Response.Builder()
+                            .request(priorReq)
+                            .protocol(priorProtocol)
+                            .code(priorCode)
+                            .message(priorMessage)
+                            .headers(priorHeaders)
+                            .body(okhttp3.ResponseBody.create(null, ByteArray(0)))
+                            .build()
+                    }
+                }
+
                 response.use { res ->
                     com.anonrode.downloader.util.DebugLog.net(
                         "POST ${safeUrl(url)} -> ${res.code} in ${System.currentTimeMillis() - started}ms"

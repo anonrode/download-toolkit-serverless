@@ -393,7 +393,9 @@ object TurboDownloader {
                         // closes it and either backs off or disables the
                         // standby for this task.
                         if (res.code == 206 && body != null) {
-                            val b = body.source().readByteArray(minOf(2L, body.contentLength().let { if (it > 0) it else 2L }))
+                            val src = body.source()
+                            src.request(2L)
+                            val b = src.buffer.readByteArray(minOf(src.buffer.size, 2L))
                             if (b.size == 1) {
                                 consecutiveFailures.set(0)
                                 preparedAtMs.set(System.currentTimeMillis())

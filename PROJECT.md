@@ -39,7 +39,24 @@
 - [x] **Fix HLS Startup Latency & Remux AAC Bitstream Filter (`dfa134a` / `fa48c05`)**: *(implemented)*
 - [x] **Silence 4 Broken Providers via OTA (`contentPolicy.disabledSites`)**: Silenced `pluto`, `nepu`, `anitaku`, `asianc` in search, feed fan-out, and failovers.
 - [x] **Nsrplay / Vimeos Stream Direct Bypass (Rev 8)**: `/api/v1/embed/sources/...` binds direct stream `vimeos.zip` and relaxes mandatory step 3.
+- [x] **Fix PlutoMovies Handshake & Cyclic XOR Decryption**: Implemented in [`PlutoMoviesResolver.kt`](file:///C:/Users/user/Anon/ANON%20TOOLS/download-toolkit-serverless/app/src/main/java/com/anonrode/downloader/resolvers/Resolvers.kt#L2948-L3055) and [`src/resolvers.py`](file:///C:/Users/user/Anon/ANON%20TOOLS/download-toolkit/src/resolvers.py#L1488-L1535); removed from `disabledSites` in Rev 10 (`2026.10.24.3`).
 - [x] **Fix Nkiri Allowlist Episode Count Regression (Rev 9)**: Removed site domains from `urlAllowlist`; restored exact 1-episode counts for movies and correct episode numbers for series.
+- [x] **Zero-Bloat Cloudflare Turnstile & Bot-Check Solver**: Implemented 4-layer solver architecture:
+  - `CloudflareSolver.kt`: Dynamic mobile Chrome UA alignment at boot, SharedPreferences clearance vault (12h TTL), per-host single-flight coalescing (`inFlightByHost`), process-wide 1-WebView cap (`solverMutex`), background tag gate (0ms fail-fast), and AJAX/POST origin root resolution (`resolveChallengeTargetUrl`).
+  - `HttpClient.kt`: Scoped `Sec-Fetch-*` headers, precise `isCloudflareChallenge()` discrimination, and unclosed synthetic response fallback on solve cancellation.
+  - `CloudflareChallengeHost.kt`: Single-window Compose overlay animated via `animateDpAsState` (no `ModalBottomSheet` reparenting crashes), skeleton subresource firewall (dropping media/styles to 204 No Content), and 250ms reactive cookie poller for `cf_clearance` and `hvp`.
+  - `AnonApp.kt` & `MainActivity.kt`: Cold-boot vault hydration and root Compose overlay mounting.
+  - `CloudflareSolverTest.kt`: Unit test suite covering challenge discrimination, background tag gating, origin normalization, token extraction, and subresource firewall.
+- [x] **Gogoanime Multi-Server Base64 Fallback & Dynamic OTA Selectors**:
+  - `AnitakuProvider.kt`: Decodes Base64-encoded `select.mirror option[value]` and `select#mirror-select option[value]` dropdowns to extract all fallback mirror iframes and direct streams across all servers.
+  - `DynamicRulesManager.kt`: Added `mirrorSelectors: List<String>` in `SiteRuleConfig` with JSON parsing and getter `getMirrorSelectors(site)`. Allows mirror selectors to be dynamically patched via signed OTA payloads without requiring APK releases.
+- [x] **YouTube Music / Audio Thumbnail Embedding via Native FFmpeg**:
+- [x] **Dead Locker Fast-Drop & Permanently Dead Host Filtering**:
+  - `StrictLinkClassifier.kt`: Added `PERMANENTLY_DEAD_HOSTS` (`zippyshare.com`, `openload.co`, `verystream.com`, `rapidvideo.com`, `vidcloud.co`). Drops dead locker links immediately as `NavigationJunk("permanently_dead_host")` in 0 ms.
+  - `LinkResolver.kt`: Rejects permanently dead hosts before querying `ResolverRegistry`, preventing 1-minute `HostHealth` backoff stalls and triggering immediate cluster failover on legacy archived posts.
+- [x] **OTA Dynamic XOR Transform & PlutoMovies Key Fallback**:
+  - `RulesPipeline.kt`: Implemented `xor:<key>` transform in `applyTransforms()` to enable declarative, zero-APK XOR unscrambling in signed OTA rules.
+  - `Resolvers.kt`: Wired `DynamicRulesManager.getCryptoKeys("pluto")` fallback into `PlutoMoviesResolver` for instant OTA key rotation.
 
 ---
 
@@ -47,35 +64,22 @@
 
 The following items are unresolved in the codebase and live service:
 
-### 1. PlutoMovies Handshake & Cyclic XOR Decryption (Silenced via OTA)
-- **Status**: Silenced via `contentPolicy.disabledSites = ["pluto"]`.
-- **Live Site Reality**: `dl.plutomovies.com` is 100% operational on `ol3.kissorgrab.com` and `7up.kissorgrab.com`, verified live with `206 Partial Content` Matroska streaming.
-- **Root Cause**: Pluto deprecated their old endpoint and deployed a new POST handshake at `/api/v1/dl-link/{id}` returning encrypted JSON tokens decrypted via cyclic XOR (`data[i] ^ key[i % len(key)]`).
-- **Required Fix**: Implement the new XOR handshake and decryptor in Kotlin (`PlutoProvider.kt` and/or OTA `decrypt` transform step) so PlutoMovies can be re-enabled.
-
-### 2. Nepu Browser Proof-of-Work Challenge (Silenced via OTA)
+### 1. Nepu Browser Proof-of-Work Challenge (Silenced via OTA)
 - **Status**: Silenced via `contentPolicy.disabledSites = ["nepu"]`.
 - **Live Site Reality**: `nepu.gd` deployed a Cloudflare-style `<title>Quick check</title>` verification challenge.
 - **Root Cause**: Plain HTTP requests receive a JavaScript challenge requiring a SHA-256 Proof-of-Work computation and WebGL canvas hardware probe, yielding `Cookie: hv=1; hv2=1; hvp={nonce}`. Without solving the PoW, the client receives HTTP 200 containing challenge HTML rather than media streams.
 - **Required Fix**: Implement a background headless challenge solver (or WebView-assisted challenge pass) to harvest and bank the `hvp` cookie session for subsequent API and stream requests.
 
-### 3. Gogoanime / Anitaku Upstream Outage & Dead Hosts (Silenced via OTA)
+### 2. Gogoanime / Anitaku Upstream Outage & Dead Hosts (Silenced via OTA)
 - **Status**: Silenced via `contentPolicy.disabledSites = ["anitaku"]`.
 - **Live Site Reality**: Upstream streaming host `2anime.xyz` IP `64.190.63.222:443` is unreachable / timing out; Megaplays stream hoster returns `Video Not Available`; backup mirror `s3taku.com` redirects to ad spam.
 - **Required Fix**: Probe for a new, stable, functioning Gogoanime / Anitaku mirror domain with operational embed players and update `scraper_rules.json` and `DynamicRulesManager` fallback domains.
 
-### 4. AsianC Upstream Player Outage (Silenced via OTA)
-- **Status**: Silenced via `contentPolicy.disabledSites = ["asianc"]`.
-- **Live Site Reality**: `asianc.id` and `asianc.sh` embed players (`/streaming.php`) return 404 or empty iframe responses.
-- **Required Fix**: Investigate current active AsianC mirrors and embed parsers.
+### 3. AsianC Silenced per User Request
+- **Status**: Silenced via `contentPolicy.disabledSites = ["asianc"]` per operator instruction.
+- **Live Site Reality**: `asianc.id` catalog search, episode listings, and `vidbasic.top` player embeds are operational. Not a defect. Can be un-silenced at any time.
 
-### 5. Dead Zippyshare Links on Archived Catalog Items
-- **Status**: Unresolved for legacy items.
-- **Symptom**: In `activity-log-share-48.txt`, tasks downloading older series from 9jaRocks / NaijaVault hit `www82.zippyshare.com` which shut down in 2023 (`host in backoff - parking for ~1m`).
-- **Root Cause**: Scraped posts contain hardcoded legacy Zippyshare links with no alternative mirror links present in the HTML.
-- **Required Fix**: Add an immediate rejection / dead-link classifier for `*.zippyshare.com` in `StrictLinkClassifier` so tasks fail over immediately to secondary clusters (e.g. Nkiri / 9jaRocks secondary lockers) rather than entering repeated backoff stalls.
-
-### 6. Subtitle Sidecar Extraction for Locker Direct Media
+### 4. Subtitle Sidecar Extraction for Locker Direct Media
 - **Status**: Open (tracked in `.agents/AGENTS.md` §14).
 - **Symptom**: Direct file downloads from lockers (`downloadwella.com`, `loadedfiles.*`, `wetafiles.com`) do not download external `.srt` / `.vtt` subtitle files unless subtitles are already multiplexed inside the `.mkv` container.
 - **Required Fix**: Add external subtitle provider fallback (e.g. OpenSubtitles API / Kitsu integration or extracting subtitle links from the post HTML if present).

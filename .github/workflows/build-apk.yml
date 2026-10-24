@@ -21,10 +21,10 @@ name: Build Native Android Release APK
 
 on:
   push:
-    branches: [ master, main ]
+    branches: [ master, main, fix/overnight-331 ]
     tags: [ 'v*' ]
   pull_request:
-    branches: [ master, main ]
+    branches: [ master, main, fix/overnight-331 ]
   workflow_dispatch:
 
 permissions:

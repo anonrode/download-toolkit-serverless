@@ -1058,7 +1058,11 @@ object VidbasicResolver : BaseResolver {
         val candidateKeys = (otaKeys + defaultSpec).distinct()
         for (kSpec in candidateKeys) {
             try {
-                val cipherBytes = android.util.Base64.decode(b64, android.util.Base64.DEFAULT)
+                val cipherBytes = try {
+                    android.util.Base64.decode(b64, android.util.Base64.DEFAULT)
+                } catch (_: Throwable) {
+                    java.util.Base64.getDecoder().decode(b64)
+                }
                 val cipher = Cipher.getInstance(kSpec.cipher)
                 val keySpec = SecretKeySpec(kSpec.keyBytes, "AES")
                 val ivSpec = IvParameterSpec(kSpec.ivBytes)
@@ -1959,7 +1963,7 @@ object VidsrcResolver : BaseResolver {
                 .header("User-Agent", HttpClient.DEFAULT_UA)
             if (withRange) builder.header("Range", "bytes=0-512")
             if (referer.isNotBlank()) builder.header("Referer", referer)
-            HttpClient.executeCancellable(client, builder.build()) { res ->
+            HttpClient.executeCancellable(client, builder.build(), tag = "mint-verify") { res ->
                 // A sub-1KB announcement means a stub candidate: never pull a
                 // multi-MB body just to classify a 1-byte decoy. 512B is
                 // enough for "#EXTM3U" plus the first segment URI.
@@ -2946,6 +2950,47 @@ object PlutoMoviesResolver : BaseResolver {
             }
 
             val soup = Jsoup.parse(html, url)
+
+            // 0. New PlutoMovies download ticket handshake (live-verified 2026-10-24)
+            // dl.plutomovies.com embeds a ticket container:
+            // <div id="dl-btn-wrapper" data-md-dl="/api/v1/dl-link/{fileToken}" data-md-t="{ticket}">
+            val dlBox = soup.selectFirst("#dl-btn-wrapper")
+            if (dlBox != null) {
+                val apiPath = dlBox.attr("data-md-dl").ifBlank { null }
+                val ticket = dlBox.attr("data-md-t").ifBlank { null }
+                if (apiPath != null && ticket != null) {
+                    val apiUrl = HttpClient.safeResolveUri(url, apiPath)
+                    val respStr = HttpClient.postForm(
+                        url = apiUrl,
+                        form = mapOf("t" to ticket),
+                        referer = url,
+                        headers = mapOf(
+                            "X-Requested-With" to "XMLHttpRequest",
+                            "Content-Type" to "application/x-www-form-urlencoded"
+                        ),
+                        tag = "pluto-resolve"
+                    )
+                    if (!respStr.isNullOrBlank()) {
+                        val json = try { JSONObject(respStr) } catch (_: Exception) { null }
+                        if (json != null && json.optBoolean("ok", false)) {
+                            val k = json.optString("k", "")
+                            val d = json.optString("d", "")
+                            if (d.isNotEmpty()) {
+                                val otaKeys = com.anonrode.downloader.data.rules.DynamicRulesManager.getCryptoKeys("pluto")
+                                val otaKeyStr = otaKeys.firstOrNull()?.let { String(it.keyBytes, Charsets.UTF_8) }
+                                val effectiveKey = when {
+                                    k.isNotEmpty() -> k
+                                    !otaKeyStr.isNullOrBlank() -> otaKeyStr
+                                    else -> "9589ebdf447855fb"
+                                }
+                                val target = xorUnscramble(d, effectiveKey)
+                                if (target.isNotBlank()) return target
+                            }
+                        }
+                    }
+                }
+            }
+
             // /series/ episode pages embed the download as a plain
             // dl.plutomovies.com anchor (live-verified: Vincenzo S01E05..E20)
             val dlAnchor = soup.selectFirst("a[href*='dl.plutomovies.com']")
@@ -3004,6 +3049,25 @@ object PlutoMoviesResolver : BaseResolver {
             lastFailure = "PlutoMovies: ${e.javaClass.simpleName}: ${e.message}"
         }
         return null
+    }
+
+    internal fun xorUnscramble(b64Cipher: String, key: String): String {
+        return try {
+            val clean = b64Cipher.trim().replace('-', '+').replace('_', '/')
+            val padded = clean + "=".repeat((4 - clean.length % 4) % 4)
+            val cipherBytes = try {
+                android.util.Base64.decode(padded, android.util.Base64.DEFAULT)
+            } catch (_: Throwable) {
+                java.util.Base64.getDecoder().decode(padded)
+            }
+            val keyBytes = key.toByteArray(Charsets.UTF_8)
+            val out = ByteArray(cipherBytes.size) { i ->
+                (cipherBytes[i].toInt() xor keyBytes[i % keyBytes.size].toInt()).toByte()
+            }
+            String(out, Charsets.UTF_8).trim()
+        } catch (_: Exception) {
+            ""
+        }
     }
 }
 

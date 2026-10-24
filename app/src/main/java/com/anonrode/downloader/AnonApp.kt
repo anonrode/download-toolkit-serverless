@@ -55,6 +55,7 @@ class AnonApp : Application(), ImageLoaderFactory {
         instance = this
         repository.initPersistence(filesDir, this)
         com.anonrode.downloader.util.DebugLog.init(this)
+        com.anonrode.downloader.data.net.CloudflareSolver.init(this)
         networkObserver = NetworkObserver(this)
         PosterNetwork.isOnline = networkObserver.status.value.isConnected
         engine = DownloadEngine(this, repository, networkObserver)
@@ -233,12 +234,16 @@ class AnonApp : Application(), ImageLoaderFactory {
 
         override fun onActivityStarted(activity: Activity) {
             hasEnteredForeground = true
+            com.anonrode.downloader.data.net.CloudflareSolver.isAppInForeground = true
             if (startedCount == 0) onAppForegrounded()
             startedCount++
         }
 
         override fun onActivityStopped(activity: Activity) {
             if (startedCount > 0) startedCount--
+            if (startedCount == 0) {
+                com.anonrode.downloader.data.net.CloudflareSolver.isAppInForeground = false
+            }
         }
 
         override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {}

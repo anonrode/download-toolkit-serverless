@@ -44,6 +44,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import kotlinx.coroutines.flow.MutableStateFlow
 import com.anonrode.downloader.ui.components.AnnouncementHost
+import com.anonrode.downloader.ui.components.CloudflareChallengeHost
 import com.anonrode.downloader.ui.components.MainScaffold
 import com.anonrode.downloader.ui.components.MainTab
 import com.anonrode.downloader.ui.components.UpdateGate
@@ -362,6 +363,7 @@ class MainActivity : ComponentActivity() {
                 // timeout, and fell back to downloading the WHOLE torrent —
                 // shield-blocked files included.
                 TorrentFilePickerHost()
+                CloudflareChallengeHost()
 
                 // Platform-surface hosts (v3.3.0 phase 2): announcements and
                 // the update prompt/gate are ROOT overlays like the pickers

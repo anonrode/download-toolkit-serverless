@@ -245,6 +245,15 @@ object LinkResolver {
             }
         }
 
+        // 0. Drop permanently dead locker hosts (e.g. Zippyshare) immediately without polling or backoff
+        val host = HttpClient.parsedHost(permUrl)
+        if (host != null && StrictLinkClassifier.isPermanentlyDeadHost(host)) {
+            com.anonrode.downloader.util.DebugLog.resolve(
+                "LinkResolver: permUrl host $host is permanently dead - dropping immediately without backoff"
+            )
+            return null
+        }
+
         // 1. Try direct resolution via ResolverRegistry.
         if (!allowCacheHit) {
             ResolveCache.invalidate(ResolveCache.keyFor(permUrl, defaultQual))

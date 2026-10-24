@@ -554,7 +554,7 @@ object HlsVodDownloader {
         try {
             client.newCall(buildRequest(url, headers)).execute().use { res ->
                 if (!res.isSuccessful) return@use null
-                res.body?.string()
+                com.anonrode.downloader.data.net.HttpClient.cappedText(res, maxBytes = 2L * 1024 * 1024)
             }
         } catch (_: Exception) {
             null
@@ -586,7 +586,7 @@ object HlsVodDownloader {
      * fails; the caller falls back to yt-dlp with the stage + sidecar intact
      * (progress preserved either way).
      */
-    internal fun remuxTo(staging: File, outPath: File): Boolean {
+        var p: Process? = null
         return try {
             val context = appContextRef?.get() ?: return false
             val ff = resolveFfmpegBinary(context) ?: return false
@@ -614,23 +614,29 @@ object HlsVodDownloader {
                     else "$ldLibraryPath${File.pathSeparator}$existing"
             }
             pb.redirectErrorStream(true)
-            val p = pb.start()
+            p = pb.start()
+            val proc = p
             // Drain stdout so a chatty build cannot block on a full pipe.
             Thread {
-                try { p.inputStream.readBytes() } catch (_: Exception) {}
+                try { proc.inputStream.readBytes() } catch (_: Exception) {}
             }.apply { isDaemon = true; start() }
-            val ok = p.waitFor(10, TimeUnit.MINUTES) && p.exitValue() == 0 && tmpOut.length() > 0
-            try { p.destroyForcibly() } catch (_: Exception) {}
+            val ok = proc.waitFor(10, TimeUnit.MINUTES) && proc.exitValue() == 0 && tmpOut.length() > 0
             if (!ok) {
                 try { tmpOut.delete() } catch (_: Exception) {}
                 return false
             }
             if (outPath.exists()) try { outPath.delete() } catch (_: Exception) {}
             tmpOut.renameTo(outPath)
+        } catch (e: InterruptedException) {
+            try { File(outPath.parentFile, outPath.nameWithoutExtension + ".remux.mp4").delete() } catch (_: Exception) {}
+            Thread.currentThread().interrupt()
+            throw kotlinx.coroutines.CancellationException("HLS remux interrupted").apply { initCause(e) }
         } catch (_: Exception) {
+            try { File(outPath.parentFile, outPath.nameWithoutExtension + ".remux.mp4").delete() } catch (_: Exception) {}
             false
+        } finally {
+            try { p?.destroyForcibly() } catch (_: Exception) {}
         }
-    }
 
     /** Context hand-off set once by the engine (avoids threading a Context
      *  through every call signature; application-scoped, weakly held). */

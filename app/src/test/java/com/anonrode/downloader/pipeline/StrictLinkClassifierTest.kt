@@ -94,4 +94,16 @@ class StrictLinkClassifierTest {
         assertTrue(StrictLinkClassifier.isNavigationJunk("#download-section"))
         assertTrue(StrictLinkClassifier.isNavigationJunk("mailto:admin@example.com"))
     }
+
+    @Test
+    fun classify_permanentlyDeadHosts() {
+        val zippy = StrictLinkClassifier.classify("https://www82.zippyshare.com/v/D3oqfaxN/file.html")
+        assertTrue(zippy is StrictLinkClassifier.LinkClass.NavigationJunk)
+        assertEquals("permanently_dead_host", (zippy as StrictLinkClassifier.LinkClass.NavigationJunk).reason)
+        assertTrue(StrictLinkClassifier.isNavigationJunk("https://zippyshare.com/d/123"))
+        assertFalse(StrictLinkClassifier.isCandidateForDownload("https://www12.zippyshare.com/v/abc/file.html"))
+        assertTrue(StrictLinkClassifier.isPermanentlyDeadHost("www82.zippyshare.com"))
+        assertTrue(StrictLinkClassifier.isPermanentlyDeadHost("openload.co"))
+        assertFalse(StrictLinkClassifier.isPermanentlyDeadHost("downloadwella.com"))
+    }
 }

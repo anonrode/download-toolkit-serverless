@@ -20,8 +20,11 @@ Below is the definitive technical breakdown of all remaining open issues to be i
 ## 1. PlutoMovies: New Handshake Protocol & Cyclic XOR Cipher
 
 ### Current Status
-- **Silenced in OTA**: Present in `contentPolicy.disabledSites`.
-- **Live Site Status**: **100% OPERATIONAL**. High-speed CDN nodes (`ol3.kissorgrab.com`, `7up.kissorgrab.com`) serve full-length Matroska MKVs with `206 Partial Content` support.
+- **Status**: **REPAIRED** (2026-10-24).
+- **Kotlin Implementation**: Implemented in [`PlutoMoviesResolver.kt`](file:///C:/Users/user/Anon/ANON%20TOOLS/download-toolkit-serverless/app/src/main/java/com/anonrode/downloader/resolvers/Resolvers.kt#L2948-L3055) via `#dl-btn-wrapper` ticket detection, POST handshake, and `xorUnscramble`.
+- **Monolith Parity**: Implemented in [`src/resolvers.py`](file:///C:/Users/user/Anon/ANON%20TOOLS/download-toolkit/src/resolvers.py#L1488-L1535).
+- **OTA Status**: Removed from `disabledSites` in OTA Rev 10 (`2026.10.24.3`).
+- **Live Site Status**: **100% OPERATIONAL**. High-speed CDN nodes (`ol3.kissorgrab.com`, `7up.kissorgrab.com`, `ay6t.kissorgrab.com`) serve full-length Matroska MKVs with `206 Partial Content` support.
 
 ### Log Evidence (`activity-log-share-48.txt`)
 ```text
@@ -121,27 +124,18 @@ PlutoMovies deprecated the legacy direct download links previously handled by [`
 
 ---
 
-## 4. AsianC: Broken Embed Streaming Endpoints
+## 4. AsianC: Silenced per User Request
 
 ### Current Status
-- **Silenced in OTA**: Present in `contentPolicy.disabledSites`.
-- **Live Site Status**: Catalog pages load, but video players fail.
+- **Silenced in OTA**: Present in `contentPolicy.disabledSites` per explicit user request.
+- **Live Site Status**: **OPERATIONAL**.
+  - Search API (`https://asianc.id/api?a=search&keyword=...`) answers HTTP 200 with JSON show cards.
+  - Drama detail pages (`https://asianc.id/drama-detail/...`) list full episode catalogs.
+  - Episode pages embed active multi-server players via `https://vidbasic.top/embed/...` offering Standard Server (`3rdplayer.html`), Vidhide, Streamtape, Mixdrop, and Upnshare.
 
-### Log Evidence (`activity-log-share-48.txt`)
-```text
-10-23 14:01:10.129 [RESOLVE] asianc resolver: iframe search for streaming.php returned 0 matches
-10-23 14:01:10.134 [ERROR] task=c879a941-897b-4029-9fa1-018274d81239 could not extract embed player from https://asianc.id/...
-```
-
-### Root Cause
-1. `asianc.id` updated their WordPress / custom theme layout.
-2. The `/streaming.php?id=...` endpoint previously used to extract server options now returns empty responses or redirects to inactive locker stubs.
-3. Direct video embeds previously provided by Vidplay / MyCloud on AsianC are currently broken upstream.
-
-### Required Implementation Blueprint
-1. Probe current AsianC alternative domains (`asianc.to`, `asianc.sh`, `dramacool`) to determine active iframe patterns.
-2. Update iframe extraction selectors in `scraper_rules.json` under `pipelines.asianc`.
-3. Once embed player extraction produces working HLS manifests (`.m3u8`), remove `"asianc"` from `contentPolicy.disabledSites`.
+### Operational Context
+- Disabled intentionally in search and category fan-out per operator instruction.
+- Not an upstream technical failure or defect. Can be un-silenced at any time by removing `"asianc"` from `contentPolicy.disabledSites`.
 
 ---
 

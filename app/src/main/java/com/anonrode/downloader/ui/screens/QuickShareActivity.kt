@@ -210,6 +210,7 @@ class QuickShareActivity : ComponentActivity() {
                             }
                         }
                     )
+                    com.anonrode.downloader.ui.components.CloudflareChallengeHost()
                 }
             }
         }
@@ -238,6 +239,16 @@ class QuickShareActivity : ComponentActivity() {
 
     private fun handleInstantDownload(parsed: ParsedUrl, rawUrl: String) {
         if (!ensureStoragePermission()) return
+        if (parsed is ParsedUrl.SocialUrl && com.anonrode.downloader.pipeline.PlaylistPicker.isYoutubePlaylist(parsed.cleanUrl)) {
+            val intent = Intent(this, com.anonrode.downloader.MainActivity::class.java).apply {
+                action = Intent.ACTION_VIEW
+                data = android.net.Uri.parse(parsed.cleanUrl)
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+            }
+            startActivity(intent)
+            Toast.makeText(this, "Opening playlist in app...", Toast.LENGTH_SHORT).show()
+            return
+        }
         // Honor the user's configured default quality instead of a hardcoded
         // 720p — the in-app SocialModal already seeds from defaultQuality.
         val q = (application as? AnonApp)?.engine?.defaultQuality ?: "720p"
@@ -254,6 +265,16 @@ class QuickShareActivity : ComponentActivity() {
     }
 
     private fun dispatchDownload(parsed: ParsedUrl, rawUrl: String, quality: String, audioOnly: Boolean, engineOverride: String = "auto") {
+        if (parsed is ParsedUrl.SocialUrl && com.anonrode.downloader.pipeline.PlaylistPicker.isYoutubePlaylist(parsed.cleanUrl)) {
+            val intent = Intent(this, com.anonrode.downloader.MainActivity::class.java).apply {
+                action = Intent.ACTION_VIEW
+                data = android.net.Uri.parse(parsed.cleanUrl)
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+            }
+            startActivity(intent)
+            Toast.makeText(this, "Opening playlist in app...", Toast.LENGTH_SHORT).show()
+            return
+        }
         val app = application as? AnonApp ?: return
         val engine = app.engine
         val backend = if (engineOverride != "auto") engineOverride else when (parsed) {

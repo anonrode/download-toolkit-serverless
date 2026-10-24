@@ -420,22 +420,74 @@ object AnitakuProvider : SiteProvider {
             try {
                 val html = HttpClient.getText(episodeUrl, referer = "https://gogoanime.or.at/") ?: ""
 
-                // 1. Direct candidate player embeds on page (newplayer.php, megaplay.buzz, megaplays.se, takuembed)
+                // 1. Direct candidate player embeds on page (newplayer.php, megaplay.buzz, megaplays.se, takuembed, mirror dropdowns)
                 val doc = Jsoup.parse(html, episodeUrl)
                 val subtitleTracks = SubtitleSurfaces.parsePageTracks(doc, episodeUrl)
                 if (subtitleTracks.isNotEmpty()) SubtitleSurfaces.record(episodeUrl, subtitleTracks)
                 val candidates = mutableListOf<String>()
-                for (a in doc.select(".anime_muti_link a[data-video], .servers a[data-video], .anime_muti_link a[href]")) {
-                    val dataVideo = a.attr("data-video").ifEmpty { a.attr("href") }
-                    if (dataVideo.isNotBlank() && !dataVideo.startsWith("javascript:")) candidates.add(dataVideo)
-                }
-                for (iframe in doc.select("iframe[src]")) {
-                    val src = iframe.attr("src")
-                    if (src.isNotBlank() && !src.startsWith("javascript:")) candidates.add(src)
+
+                // Dynamic OTA mirror selectors allow updating mirror/server DOM selectors in future OTA updates
+                val otaSelectors = DynamicRulesManager.getMirrorSelectors(name) +
+                    DynamicRulesManager.getMirrorSelectors("gogoanime") +
+                    DynamicRulesManager.getMirrorSelectors("anitaku")
+                val baseSelectors = listOf(
+                    "select.mirror option[value]",
+                    "select#mirror-select option[value]",
+                    "select[name='mirror'] option[value]",
+                    ".anime_muti_link a[data-video]",
+                    ".servers a[data-video]",
+                    ".anime_muti_link a[href]",
+                    "iframe[src]"
+                )
+                val allSelectors = (otaSelectors + baseSelectors).distinct()
+
+                for (selector in allSelectors) {
+                    for (el in doc.select(selector)) {
+                        val valueAttr = el.attr("value").trim()
+                        if (valueAttr.isNotBlank()) {
+                            // Check if value is base64-encoded iframe or URL
+                            val decoded = if (valueAttr.length >= 16 && (valueAttr.startsWith("PGlm") || valueAttr.startsWith("aHR0") || !valueAttr.contains(" "))) {
+                                try {
+                                    String(android.util.Base64.decode(valueAttr, android.util.Base64.DEFAULT), Charsets.UTF_8).trim()
+                                } catch (_: Throwable) {
+                                    try {
+                                        String(java.util.Base64.getDecoder().decode(valueAttr), Charsets.UTF_8).trim()
+                                    } catch (_: Throwable) { "" }
+                                }
+                            } else ""
+
+                            if (decoded.isNotBlank()) {
+                                val m = Pattern.compile("""src=["']([^"']+)["']""", Pattern.CASE_INSENSITIVE).matcher(decoded)
+                                if (m.find()) {
+                                    val src = m.group(1)?.trim().orEmpty()
+                                    if (src.isNotBlank() && !src.startsWith("javascript:")) candidates.add(src)
+                                } else if (decoded.startsWith("http://") || decoded.startsWith("https://")) {
+                                    candidates.add(decoded)
+                                }
+                            } else if (valueAttr.startsWith("http://") || valueAttr.startsWith("https://")) {
+                                candidates.add(valueAttr)
+                            }
+                        }
+
+                        val dataVideo = el.attr("data-video").trim()
+                        if (dataVideo.isNotBlank() && !dataVideo.startsWith("javascript:")) {
+                            candidates.add(dataVideo)
+                        }
+
+                        val src = el.attr("src").trim()
+                        if (src.isNotBlank() && !src.startsWith("javascript:")) {
+                            candidates.add(src)
+                        }
+
+                        val href = el.attr("href").trim()
+                        if (href.isNotBlank() && !href.startsWith("javascript:") && !href.startsWith("#")) {
+                            candidates.add(href)
+                        }
+                    }
                 }
 
                 if (candidates.isNotEmpty()) {
-                    val fullCandidates = candidates.map { HttpClient.safeResolveUri(episodeUrl, it) }
+                    val fullCandidates = candidates.distinct().map { HttpClient.safeResolveUri(episodeUrl, it) }
                     // Provider-issued fan-out; bypass stale HostHealth pre-judges.
                     val resolved = ResolverRegistry.resolveAny(fullCandidates, quality, bypassHealth = true)
                     if (!resolved.isNullOrBlank()) {

@@ -801,10 +801,29 @@ object RulesPipeline {
                 "lowercase" -> curr.lowercase()
                 "uppercase" -> curr.uppercase()
                 "reverse" -> curr.reversed()
-                else -> curr
+                else -> {
+                    if (t.startsWith("xor:", ignoreCase = true)) {
+                        val key = t.substring(4)
+                        xorTransform(curr, key)
+                    } else curr
+                }
             }
         }
         return curr
+    }
+
+    internal fun xorTransform(input: String, key: String): String {
+        return try {
+            val keyBytes = key.toByteArray(Charsets.UTF_8)
+            if (keyBytes.isEmpty()) return input
+            val inputBytes = input.toByteArray(Charsets.UTF_8)
+            val out = ByteArray(inputBytes.size) { i ->
+                (inputBytes[i].toInt() xor keyBytes[i % keyBytes.size].toInt()).toByte()
+            }
+            String(out, Charsets.UTF_8)
+        } catch (_: Exception) {
+            input
+        }
     }
 
     internal fun solvePow(seed: String, bitsStr: String, format: String, maxIterations: Int, algorithm: String = "sha256"): String? {
