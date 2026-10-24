@@ -3,7 +3,7 @@
 **Target Modules:** Core Network (`com.anonrode.downloader.data.net`), UI Challenge Host (`ui.components`), Engine (`engine`), OTA Pipeline (`data.rules`), Resolvers (`resolvers`), Providers (`providers`), and Security (`security`)
 **Specification Model:** Complete 100% Unabridged Source Code Audit Specification
 **Truncation Status:** ZERO TRUNCATION / ZERO OMISSIONS (All 32 files included line 1 to EOF)
-**Audit Payload Metrics:** 32 Production Files | 32,145 Total Lines | 1,657,349 Total Bytes
+**Audit Payload Metrics:** 32 Production Files | 32,154 Total Lines | 1,657,910 Total Bytes
 
 ---
 
@@ -12,24 +12,25 @@
 ### 1.1 Git Repository Identifiers & Status
 ```shell
 git rev-parse HEAD:
-1f9de39f8ec2e82728306ee9b016ac1bc8dcccc9
+ec0788d006d701a78324d33f4c3dbceeef155987
 
 git status --short:
-M app/src/main/java/com/anonrode/downloader/pipeline/PlaylistPicker.kt
- M app/src/main/java/com/anonrode/downloader/pipeline/UrlClassifier.kt
+M app/src/main/java/com/anonrode/downloader/providers/AnitakuProvider.kt
+ M app/src/main/java/com/anonrode/downloader/resolvers/Resolvers.kt
 ?? CLOUDFLARE_SOLVER_COMPLETE_AUDIT_DUMP.md
 ?? COMPLETE_CODEBASE_AUDIT_DUMP_PART1_ENGINE_OTA_PIPELINE.md
 ?? COMPLETE_CODEBASE_AUDIT_DUMP_PART2_UI_VIEWMODEL_APP.md
 ?? investigation/
 
 git diff --stat:
-app/src/main/java/com/anonrode/downloader/pipeline/PlaylistPicker.kt | 2 ++
- app/src/main/java/com/anonrode/downloader/pipeline/UrlClassifier.kt  | 1 +
- 2 files changed, 3 insertions(+)
+.../java/com/anonrode/downloader/providers/AnitakuProvider.kt | 11 +++++++----
+ .../main/java/com/anonrode/downloader/resolvers/Resolvers.kt  |  6 ++++++
+ 2 files changed, 13 insertions(+), 4 deletions(-)
 ```
 
 ### 1.2 Recent Campaign Commit Ledger
 ```shell
+ec0788d fix(pipeline): add isYoutubePlaylist to PlaylistPicker and restore ct variable in UrlClassifier
 1f9de39 fix(engine): restore remuxTo function signature in HlsVodDownloader
 705d2b7 feat(network): implement Cloudflare Turnstile solver and resolve engine edge cases
 0cd9c3d docs: add register of unresolved issues and deferred repairs
@@ -41,7 +42,6 @@ dfa134a Fix HLS startup latency, downloader engine lifecycles, and cross-subsyst
 3f9223a fix(hls): mux bridge DASH audio instead of downloading video-only
 cdf91b4 fix(ci): sanitize branch refs in APK artifact names
 10174f9 fix(ui): render download glyphs as monochrome arrows
-1bb4c5d test(ci): map mock origin past SSRF floor and rasterize via View.draw
 ```
 
 ### 1.3 Subsystem Modification & File:Line Evidence Matrix
@@ -18957,9 +18957,9 @@ object ResolvedHints {
 ### 2.20 `app/src/main/java/com/anonrode/downloader/resolvers/Resolvers.kt`
 
 - **Path:** `app/src/main/java/com/anonrode/downloader/resolvers/Resolvers.kt`
-- **Line Count:** 4,281 lines
-- **File Size:** 221,618 bytes
-- **MD5 Checksum:** `2313ee37a543636a1b22b591c837cea7`
+- **Line Count:** 4,287 lines
+- **File Size:** 221,980 bytes
+- **MD5 Checksum:** `df2b79bbe864ef82faa5cf160f195d8c`
 
 ```kotlin
 package com.anonrode.downloader.resolvers
@@ -20024,6 +20024,8 @@ object VidbasicResolver : BaseResolver {
             try {
                 val cipherBytes = try {
                     android.util.Base64.decode(b64, android.util.Base64.DEFAULT)
+                        ?.takeIf { it.isNotEmpty() }
+                        ?: java.util.Base64.getDecoder().decode(b64)
                 } catch (_: Throwable) {
                     java.util.Base64.getDecoder().decode(b64)
                 }
@@ -20126,6 +20128,8 @@ object KisskhMegaplayResolver : BaseResolver {
             val padded = if (pad > 0) clean + "=".repeat(4 - pad) else clean
             val cipherBytes = try {
                 android.util.Base64.decode(padded, android.util.Base64.DEFAULT)
+                    ?.takeIf { it.isNotEmpty() }
+                    ?: java.util.Base64.getDecoder().decode(padded)
             } catch (_: Exception) {
                 java.util.Base64.getDecoder().decode(padded)
             }
@@ -22021,6 +22025,8 @@ object PlutoMoviesResolver : BaseResolver {
             val padded = clean + "=".repeat((4 - clean.length % 4) % 4)
             val cipherBytes = try {
                 android.util.Base64.decode(padded, android.util.Base64.DEFAULT)
+                    ?.takeIf { it.isNotEmpty() }
+                    ?: java.util.Base64.getDecoder().decode(padded)
             } catch (_: Throwable) {
                 java.util.Base64.getDecoder().decode(padded)
             }
@@ -27409,9 +27415,9 @@ object AsianDramaFeed {
 ### 2.26 `app/src/main/java/com/anonrode/downloader/providers/AnitakuProvider.kt`
 
 - **Path:** `app/src/main/java/com/anonrode/downloader/providers/AnitakuProvider.kt`
-- **Line Count:** 580 lines
-- **File Size:** 29,673 bytes
-- **MD5 Checksum:** `919c3080b8ade3fbb60f63d81c18e57d`
+- **Line Count:** 583 lines
+- **File Size:** 29,872 bytes
+- **MD5 Checksum:** `0dac321a5be60e8fcc7c3a95b46006c9`
 
 ```kotlin
 package com.anonrode.downloader.providers
@@ -27863,13 +27869,16 @@ object AnitakuProvider : SiteProvider {
                         if (valueAttr.isNotBlank()) {
                             // Check if value is base64-encoded iframe or URL
                             val decoded = if (valueAttr.length >= 16 && (valueAttr.startsWith("PGlm") || valueAttr.startsWith("aHR0") || !valueAttr.contains(" "))) {
-                                try {
-                                    String(android.util.Base64.decode(valueAttr, android.util.Base64.DEFAULT), Charsets.UTF_8).trim()
+                                val b = try {
+                                    android.util.Base64.decode(valueAttr, android.util.Base64.DEFAULT)
+                                        ?.takeIf { it.isNotEmpty() }
+                                        ?: java.util.Base64.getDecoder().decode(valueAttr)
                                 } catch (_: Throwable) {
                                     try {
-                                        String(java.util.Base64.getDecoder().decode(valueAttr), Charsets.UTF_8).trim()
-                                    } catch (_: Throwable) { "" }
+                                        java.util.Base64.getDecoder().decode(valueAttr)
+                                    } catch (_: Throwable) { null }
                                 }
+                                if (b != null) String(b, Charsets.UTF_8).trim() else ""
                             } else ""
 
                             if (decoded.isNotBlank()) {

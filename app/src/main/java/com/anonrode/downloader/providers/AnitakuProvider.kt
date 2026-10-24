@@ -447,13 +447,16 @@ object AnitakuProvider : SiteProvider {
                         if (valueAttr.isNotBlank()) {
                             // Check if value is base64-encoded iframe or URL
                             val decoded = if (valueAttr.length >= 16 && (valueAttr.startsWith("PGlm") || valueAttr.startsWith("aHR0") || !valueAttr.contains(" "))) {
-                                try {
-                                    String(android.util.Base64.decode(valueAttr, android.util.Base64.DEFAULT), Charsets.UTF_8).trim()
+                                val b = try {
+                                    android.util.Base64.decode(valueAttr, android.util.Base64.DEFAULT)
+                                        ?.takeIf { it.isNotEmpty() }
+                                        ?: java.util.Base64.getDecoder().decode(valueAttr)
                                 } catch (_: Throwable) {
                                     try {
-                                        String(java.util.Base64.getDecoder().decode(valueAttr), Charsets.UTF_8).trim()
-                                    } catch (_: Throwable) { "" }
+                                        java.util.Base64.getDecoder().decode(valueAttr)
+                                    } catch (_: Throwable) { null }
                                 }
+                                if (b != null) String(b, Charsets.UTF_8).trim() else ""
                             } else ""
 
                             if (decoded.isNotBlank()) {

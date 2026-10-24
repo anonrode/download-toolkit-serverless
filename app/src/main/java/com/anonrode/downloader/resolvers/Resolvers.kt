@@ -1060,6 +1060,8 @@ object VidbasicResolver : BaseResolver {
             try {
                 val cipherBytes = try {
                     android.util.Base64.decode(b64, android.util.Base64.DEFAULT)
+                        ?.takeIf { it.isNotEmpty() }
+                        ?: java.util.Base64.getDecoder().decode(b64)
                 } catch (_: Throwable) {
                     java.util.Base64.getDecoder().decode(b64)
                 }
@@ -1162,6 +1164,8 @@ object KisskhMegaplayResolver : BaseResolver {
             val padded = if (pad > 0) clean + "=".repeat(4 - pad) else clean
             val cipherBytes = try {
                 android.util.Base64.decode(padded, android.util.Base64.DEFAULT)
+                    ?.takeIf { it.isNotEmpty() }
+                    ?: java.util.Base64.getDecoder().decode(padded)
             } catch (_: Exception) {
                 java.util.Base64.getDecoder().decode(padded)
             }
@@ -3057,6 +3061,8 @@ object PlutoMoviesResolver : BaseResolver {
             val padded = clean + "=".repeat((4 - clean.length % 4) % 4)
             val cipherBytes = try {
                 android.util.Base64.decode(padded, android.util.Base64.DEFAULT)
+                    ?.takeIf { it.isNotEmpty() }
+                    ?: java.util.Base64.getDecoder().decode(padded)
             } catch (_: Throwable) {
                 java.util.Base64.getDecoder().decode(padded)
             }
