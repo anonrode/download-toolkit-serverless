@@ -3,7 +3,7 @@
 **Target Modules:** Core Network (`com.anonrode.downloader.data.net`), UI Challenge Host (`ui.components`), Engine (`engine`), OTA Pipeline (`data.rules`), Resolvers (`resolvers`), Providers (`providers`), and Security (`security`)
 **Specification Model:** Complete 100% Unabridged Source Code Audit Specification
 **Truncation Status:** ZERO TRUNCATION / ZERO OMISSIONS (All 32 files included line 1 to EOF)
-**Audit Payload Metrics:** 32 Production Files | 32,144 Total Lines | 1,657,220 Total Bytes
+**Audit Payload Metrics:** 32 Production Files | 32,145 Total Lines | 1,657,349 Total Bytes
 
 ---
 
@@ -12,22 +12,25 @@
 ### 1.1 Git Repository Identifiers & Status
 ```shell
 git rev-parse HEAD:
-705d2b7c4cd41a2ff4e4354a468ef60db3e55b79
+1f9de39f8ec2e82728306ee9b016ac1bc8dcccc9
 
 git status --short:
-M app/src/main/java/com/anonrode/downloader/engine/HlsVodDownloader.kt
+M app/src/main/java/com/anonrode/downloader/pipeline/PlaylistPicker.kt
+ M app/src/main/java/com/anonrode/downloader/pipeline/UrlClassifier.kt
 ?? CLOUDFLARE_SOLVER_COMPLETE_AUDIT_DUMP.md
 ?? COMPLETE_CODEBASE_AUDIT_DUMP_PART1_ENGINE_OTA_PIPELINE.md
 ?? COMPLETE_CODEBASE_AUDIT_DUMP_PART2_UI_VIEWMODEL_APP.md
 ?? investigation/
 
 git diff --stat:
-app/src/main/java/com/anonrode/downloader/engine/HlsVodDownloader.kt | 2 ++
- 1 file changed, 2 insertions(+)
+app/src/main/java/com/anonrode/downloader/pipeline/PlaylistPicker.kt | 2 ++
+ app/src/main/java/com/anonrode/downloader/pipeline/UrlClassifier.kt  | 1 +
+ 2 files changed, 3 insertions(+)
 ```
 
 ### 1.2 Recent Campaign Commit Ledger
 ```shell
+1f9de39 fix(engine): restore remuxTo function signature in HlsVodDownloader
 705d2b7 feat(network): implement Cloudflare Turnstile solver and resolve engine edge cases
 0cd9c3d docs: add register of unresolved issues and deferred repairs
 4cc5773 docs: update project roadmap with operational lessons and open issues inventory
@@ -39,7 +42,6 @@ dfa134a Fix HLS startup latency, downloader engine lifecycles, and cross-subsyst
 cdf91b4 fix(ci): sanitize branch refs in APK artifact names
 10174f9 fix(ui): render download glyphs as monochrome arrows
 1bb4c5d test(ci): map mock origin past SSRF floor and rasterize via View.draw
-d278855 test(ci): freeze the Compose clock only while capturing screenshots
 ```
 
 ### 1.3 Subsystem Modification & File:Line Evidence Matrix
@@ -17765,9 +17767,9 @@ internal class TaskDisplayWindow {
 ### 2.17 `app/src/main/java/com/anonrode/downloader/pipeline/UrlClassifier.kt`
 
 - **Path:** `app/src/main/java/com/anonrode/downloader/pipeline/UrlClassifier.kt`
-- **Line Count:** 503 lines
-- **File Size:** 24,755 bytes
-- **MD5 Checksum:** `286ef80b9d999df6da9dfcb771aaad91`
+- **Line Count:** 504 lines
+- **File Size:** 24,884 bytes
+- **MD5 Checksum:** `fc61f1358eaec11a8d638a04ee3b4255`
 
 ```kotlin
 package com.anonrode.downloader.pipeline
@@ -18140,6 +18142,7 @@ object UrlClassifier {
             val isBinaryMedia = (rawBytes.size >= 8 && String(rawBytes, 4, 4, Charsets.US_ASCII).lowercase() in setOf("ftyp", "moov", "mdat", "styp")) ||
                 (rawBytes.size >= 4 && rawBytes[0] == 0x1A.toByte() && rawBytes[1] == 0x45.toByte()) ||
                 (rawBytes.isNotEmpty() && rawBytes[0] == 0x47.toByte())
+            val ct = if (isDash) "application/dash+xml" else if (isBinaryMedia) "video/mp4" else "application/vnd.apple.mpegurl"
             val ev = when {
                 trimmed.isBlank() ->
                     TerminalEvidence(TerminalKind.UNKNOWN, 0, ct, null, "manifest body unreadable")

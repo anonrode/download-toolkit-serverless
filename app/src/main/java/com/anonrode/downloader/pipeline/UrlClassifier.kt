@@ -368,6 +368,7 @@ object UrlClassifier {
             val isBinaryMedia = (rawBytes.size >= 8 && String(rawBytes, 4, 4, Charsets.US_ASCII).lowercase() in setOf("ftyp", "moov", "mdat", "styp")) ||
                 (rawBytes.size >= 4 && rawBytes[0] == 0x1A.toByte() && rawBytes[1] == 0x45.toByte()) ||
                 (rawBytes.isNotEmpty() && rawBytes[0] == 0x47.toByte())
+            val ct = if (isDash) "application/dash+xml" else if (isBinaryMedia) "video/mp4" else "application/vnd.apple.mpegurl"
             val ev = when {
                 trimmed.isBlank() ->
                     TerminalEvidence(TerminalKind.UNKNOWN, 0, ct, null, "manifest body unreadable")

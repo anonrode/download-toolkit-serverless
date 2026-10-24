@@ -100,6 +100,8 @@ object PlaylistPicker {
         )
     }
 
+    fun isYoutubePlaylist(url: String): Boolean = detect(url) != null
+
     /**
      * Parse a `yt-dlp -J --flat-playlist` dump. Tolerates relative
      * "/watch?v=" urls, absent titles/durations/thumbnails, and single-video
