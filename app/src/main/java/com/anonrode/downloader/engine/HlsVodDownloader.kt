@@ -586,6 +586,7 @@ object HlsVodDownloader {
      * fails; the caller falls back to yt-dlp with the stage + sidecar intact
      * (progress preserved either way).
      */
+    internal fun remuxTo(staging: File, outPath: File): Boolean {
         var p: Process? = null
         return try {
             val context = appContextRef?.get() ?: return false
@@ -637,6 +638,7 @@ object HlsVodDownloader {
         } finally {
             try { p?.destroyForcibly() } catch (_: Exception) {}
         }
+    }
 
     /** Context hand-off set once by the engine (avoids threading a Context
      *  through every call signature; application-scoped, weakly held). */

@@ -3,7 +3,7 @@
 **Target Modules:** Core Network (`com.anonrode.downloader.data.net`), UI Challenge Host (`ui.components`), Engine (`engine`), OTA Pipeline (`data.rules`), Resolvers (`resolvers`), Providers (`providers`), and Security (`security`)
 **Specification Model:** Complete 100% Unabridged Source Code Audit Specification
 **Truncation Status:** ZERO TRUNCATION / ZERO OMISSIONS (All 32 files included line 1 to EOF)
-**Audit Payload Metrics:** 32 Production Files | 32,142 Total Lines | 1,657,146 Total Bytes
+**Audit Payload Metrics:** 32 Production Files | 32,144 Total Lines | 1,657,220 Total Bytes
 
 ---
 
@@ -12,66 +12,23 @@
 ### 1.1 Git Repository Identifiers & Status
 ```shell
 git rev-parse HEAD:
-0cd9c3dd117c9907c1650e121926f2ef42fb6e9f
+705d2b7c4cd41a2ff4e4354a468ef60db3e55b79
 
 git status --short:
-M PROJECT.md
- M app/src/main/java/com/anonrode/downloader/AnonApp.kt
- M app/src/main/java/com/anonrode/downloader/MainActivity.kt
- M app/src/main/java/com/anonrode/downloader/data/net/HttpClient.kt
- M app/src/main/java/com/anonrode/downloader/data/net/HttpStatusCodeException.kt
- M app/src/main/java/com/anonrode/downloader/data/rules/DynamicRulesManager.kt
- M app/src/main/java/com/anonrode/downloader/engine/HlsVodDownloader.kt
- M app/src/main/java/com/anonrode/downloader/engine/TurboDownloader.kt
- M app/src/main/java/com/anonrode/downloader/engine/YoutubeDlDownloader.kt
- M app/src/main/java/com/anonrode/downloader/pipeline/LinkResolver.kt
- M app/src/main/java/com/anonrode/downloader/pipeline/StrictLinkClassifier.kt
- M app/src/main/java/com/anonrode/downloader/pipeline/UrlClassifier.kt
- M app/src/main/java/com/anonrode/downloader/providers/AnitakuProvider.kt
- M app/src/main/java/com/anonrode/downloader/providers/RulesPipeline.kt
- M app/src/main/java/com/anonrode/downloader/resolvers/Resolvers.kt
- M app/src/main/java/com/anonrode/downloader/ui/screens/EpisodeDrawer.kt
- M app/src/main/java/com/anonrode/downloader/ui/screens/QuickShareActivity.kt
- M app/src/test/java/com/anonrode/downloader/pipeline/StrictLinkClassifierTest.kt
- M app/src/test/java/com/anonrode/downloader/providers/PlutoProviderTest.kt
- M docs/UNRESOLVED_ISSUES_REGISTER.md
- M scraper_rules.json.enc
-?? CLOUDFLARE_AND_ENGINE_AUDIT_DUMP.md
+M app/src/main/java/com/anonrode/downloader/engine/HlsVodDownloader.kt
 ?? CLOUDFLARE_SOLVER_COMPLETE_AUDIT_DUMP.md
 ?? COMPLETE_CODEBASE_AUDIT_DUMP_PART1_ENGINE_OTA_PIPELINE.md
 ?? COMPLETE_CODEBASE_AUDIT_DUMP_PART2_UI_VIEWMODEL_APP.md
-?? app/src/main/java/com/anonrode/downloader/data/net/CloudflareSolver.kt
-?? app/src/main/java/com/anonrode/downloader/ui/components/CloudflareChallengeHost.kt
-?? app/src/test/java/com/anonrode/downloader/data/net/CloudflareSolverTest.kt
 ?? investigation/
 
 git diff --stat:
-PROJECT.md                                         |  42 ++--
- .../main/java/com/anonrode/downloader/AnonApp.kt   |   5 +
- .../java/com/anonrode/downloader/MainActivity.kt   |   2 +
- .../com/anonrode/downloader/data/net/HttpClient.kt | 236 +++++++++++++++++++--
- .../downloader/data/net/HttpStatusCodeException.kt |   7 +-
- .../downloader/data/rules/DynamicRulesManager.kt   |  26 ++-
- .../anonrode/downloader/engine/HlsVodDownloader.kt |  20 +-
- .../anonrode/downloader/engine/TurboDownloader.kt  |   4 +-
- .../downloader/engine/YoutubeDlDownloader.kt       | 131 +++++++++++-
- .../anonrode/downloader/pipeline/LinkResolver.kt   |   9 +
- .../downloader/pipeline/StrictLinkClassifier.kt    |  14 ++
- .../anonrode/downloader/pipeline/UrlClassifier.kt  |   9 +-
- .../downloader/providers/AnitakuProvider.kt        |  70 +++++-
- .../anonrode/downloader/providers/RulesPipeline.kt |  21 +-
- .../com/anonrode/downloader/resolvers/Resolvers.kt |  68 +++++-
- .../downloader/ui/screens/EpisodeDrawer.kt         |  26 ++-
- .../downloader/ui/screens/QuickShareActivity.kt    |  21 ++
- .../pipeline/StrictLinkClassifierTest.kt           |  12 ++
- .../downloader/providers/PlutoProviderTest.kt      |  14 ++
- docs/UNRESOLVED_ISSUES_REGISTER.md                 |  36 ++--
- scraper_rules.json.enc                             |   2 +-
- 21 files changed, 669 insertions(+), 106 deletions(-)
+app/src/main/java/com/anonrode/downloader/engine/HlsVodDownloader.kt | 2 ++
+ 1 file changed, 2 insertions(+)
 ```
 
 ### 1.2 Recent Campaign Commit Ledger
 ```shell
+705d2b7 feat(network): implement Cloudflare Turnstile solver and resolve engine edge cases
 0cd9c3d docs: add register of unresolved issues and deferred repairs
 4cc5773 docs: update project roadmap with operational lessons and open issues inventory
 f42f9ec ota: revert site domains from nkiri episode allowlist (rev 9)
@@ -83,7 +40,6 @@ cdf91b4 fix(ci): sanitize branch refs in APK artifact names
 10174f9 fix(ui): render download glyphs as monochrome arrows
 1bb4c5d test(ci): map mock origin past SSRF floor and rasterize via View.draw
 d278855 test(ci): freeze the Compose clock only while capturing screenshots
-ac2ddcd fix(health,resolvers): order same-ms events and unblock JVM caption decode
 ```
 
 ### 1.3 Subsystem Modification & File:Line Evidence Matrix
@@ -12809,9 +12765,9 @@ class DownloadEngine(
 ### 2.12 `app/src/main/java/com/anonrode/downloader/engine/HlsVodDownloader.kt`
 
 - **Path:** `app/src/main/java/com/anonrode/downloader/engine/HlsVodDownloader.kt`
-- **Line Count:** 649 lines
-- **File Size:** 32,681 bytes
-- **MD5 Checksum:** `be8f8e23a17c0c1113a944373ee7c6ac`
+- **Line Count:** 651 lines
+- **File Size:** 32,755 bytes
+- **MD5 Checksum:** `601389b4a79741c3aee46b0acaac6026`
 
 ```kotlin
 package com.anonrode.downloader.engine
@@ -13402,6 +13358,7 @@ object HlsVodDownloader {
      * fails; the caller falls back to yt-dlp with the stage + sidecar intact
      * (progress preserved either way).
      */
+    internal fun remuxTo(staging: File, outPath: File): Boolean {
         var p: Process? = null
         return try {
             val context = appContextRef?.get() ?: return false
@@ -13453,6 +13410,7 @@ object HlsVodDownloader {
         } finally {
             try { p?.destroyForcibly() } catch (_: Exception) {}
         }
+    }
 
     /** Context hand-off set once by the engine (avoids threading a Context
      *  through every call signature; application-scoped, weakly held). */
