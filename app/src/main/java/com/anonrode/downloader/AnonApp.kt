@@ -344,6 +344,8 @@ class AnonApp : Application(), ImageLoaderFactory {
         lateinit var instance: AnonApp
             private set
 
+        fun instanceOrNull(): AnonApp? = if (::instance.isInitialized) instance else null
+
         val repository: DownloadRepository by lazy { DownloadRepository() }
 
         val downloadEngine: DownloadEngine

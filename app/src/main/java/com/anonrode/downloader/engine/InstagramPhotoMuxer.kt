@@ -1590,9 +1590,7 @@ object InstagramPhotoMuxer {
 
         val effectiveNoBackup = noBackupFilesDir
             ?: runCatching {
-                if (com.anonrode.downloader.AnonApp::instance.isInitialized) {
-                    com.anonrode.downloader.AnonApp.instance.noBackupFilesDir
-                } else null
+                com.anonrode.downloader.AnonApp.instanceOrNull()?.noBackupFilesDir
             }.getOrNull()
 
         // 1) youtubedl-android packages directory (packages/ffmpeg/usr/lib, etc.)
