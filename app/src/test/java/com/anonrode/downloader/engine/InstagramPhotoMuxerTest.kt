@@ -468,4 +468,12 @@ class InstagramPhotoMuxerTest {
             native.deleteRecursively()
         }
     }
+
+    @Test
+    fun isReelUrl_identifiesReelUrlsCorrectly() {
+        assertTrue(InstagramPhotoMuxer.isReelUrl("https://www.instagram.com/reel/DeFVVFRuDvW/"))
+        assertTrue(InstagramPhotoMuxer.isReelUrl("https://www.instagram.com/reels/De2GZRoIfEU/?param=1"))
+        assertFalse(InstagramPhotoMuxer.isReelUrl("https://www.instagram.com/p/DV50JOdjR-P/"))
+        assertFalse(InstagramPhotoMuxer.isReelUrl("https://www.instagram.com/p/DeALkBtIwSB/"))
+    }
 }

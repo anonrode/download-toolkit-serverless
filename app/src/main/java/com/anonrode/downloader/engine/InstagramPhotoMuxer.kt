@@ -835,6 +835,12 @@ object InstagramPhotoMuxer {
             ?: Regex("""<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
                 .find(embedHtml)?.groupValues?.get(1)?.replace("&amp;", "&")
 
+        val isVideo = embedHtml.contains("EmbeddedMediaVideo", ignoreCase = true) ||
+            embedHtml.contains("video_versions", ignoreCase = true) ||
+            embedHtml.contains("\"is_video\":true", ignoreCase = true) ||
+            embedHtml.contains("<video", ignoreCase = true) ||
+            embedHtml.contains("og:video", ignoreCase = true)
+
         val htmlParts = MediaParts(
             photoUrl = embedImg.orEmpty(),
             audioUrl = embedAudio.orEmpty(),
@@ -842,7 +848,7 @@ object InstagramPhotoMuxer {
             title = parsedTitle,
             artist = parsedArtist,
             caption = null,
-            hasVideo = false,
+            hasVideo = isVideo,
             audioClusterId = clusterId
         )
 
@@ -934,6 +940,11 @@ object InstagramPhotoMuxer {
         return downloaded?.takeIf { it.exists() && it.length() > 0 }
     }
 
+    fun isReelUrl(url: String): Boolean {
+        val low = url.lowercase()
+        return low.contains("/reel/") || low.contains("/reels/")
+    }
+
     /**
      * Orchestration entry point, called from YoutubeDlDownloader ONLY after
      * yt-dlp has failed on an Instagram post URL. Returns the produced mp4 in
@@ -945,9 +956,14 @@ object InstagramPhotoMuxer {
         sourceUrl: String,
         outDir: File,
         taskId: String,
+        allowStillFallback: Boolean = false,
         isCancelled: () -> Boolean = { false }
     ): File? {
         val shortcode = shortcodeFromUrl(sourceUrl) ?: return null
+        if (isReelUrl(sourceUrl)) {
+            DebugLog.backend("task=$taskId ig-mux: $sourceUrl is an Instagram Reel (video) — rejecting photo muxer fallback")
+            return null
+        }
         val cookieFile = File(context.filesDir, "cookies.txt").takeIf { it.exists() && it.length() > 0 }
             ?: File(context.getExternalFilesDir(null), "cookies.txt").takeIf { it.exists() && it.length() > 0 }
         if (cookieFile != null) {
@@ -1080,8 +1096,11 @@ object InstagramPhotoMuxer {
                 val imgExt = guessExt(parts.photoUrl, ".jpg")
                 val cover = fetchTo(work, "cover$imgExt", parts.photoUrl)
                 if (cover == null) {
-                    DebugLog.backend("task=$taskId ig-mux: cover fetch failed, falling back to still photos")
-                    return deliverStillPhotos(outDir, shortcode, parts)
+                    DebugLog.backend("task=$taskId ig-mux: cover fetch failed")
+                    if (allowStillFallback) {
+                        return deliverStillPhotos(outDir, shortcode, parts)
+                    }
+                    return null
                 }
                 if (isCancelled()) throw CancellationException("IG mux cancelled after cover fetch")
                 // Single-photo posts can also be WebP; normalize to baseline
@@ -1105,13 +1124,19 @@ object InstagramPhotoMuxer {
                     return produced
                 }
             }
-            DebugLog.backend("task=$taskId ig-mux: ffmpeg produced nothing, falling back to still photos")
-            return deliverStillPhotos(outDir, shortcode, parts)
+            DebugLog.backend("task=$taskId ig-mux: ffmpeg produced nothing")
+            if (allowStillFallback) {
+                return deliverStillPhotos(outDir, shortcode, parts)
+            }
+            return null
         } catch (ce: CancellationException) {
             throw ce
         } catch (t: Throwable) {
             DebugLog.backend("task=$taskId ig-mux error: ${(t.message ?: t.javaClass.simpleName).take(200)}")
-            return deliverStillPhotos(outDir, shortcode, parts)
+            if (allowStillFallback) {
+                return deliverStillPhotos(outDir, shortcode, parts)
+            }
+            return null
         } finally {
             runCatching { work.deleteRecursively() }
             // A cancelled/killed ffmpeg can leave a truncated, moov-less mp4

@@ -4274,10 +4274,10 @@ class DownloadEngine(
                             },
                             onTorrentFiles = onTorrentFileSelection,
                             magnetMaxAttempts = magnetMaxAttempts,
-                            // HLS never runs the retry ladder below 3: one
-                            // attempt turns a token/quota blip into a terminal
-                            // failure (device setting was 1 on 2026-10-19).
-                            ytdlpMaxAttempts = if (isHlsStream) maxOf(ytdlpMaxAttempts, 3) else ytdlpMaxAttempts,
+                            // HLS and extractor/social tasks never run the retry ladder below 3: one
+                            // attempt turns a token/quota blip or transient 55s crawl into a terminal
+                            // failure (device setting was 1 on 2026-10-19 and 2026-10-25).
+                            ytdlpMaxAttempts = if (isHlsStream || isExtractor || isSocial) maxOf(ytdlpMaxAttempts, 3) else ytdlpMaxAttempts,
                             hlsFragments = if (isHlsStream) {
                                 (if (grantedLanes > 0) grantedLanes else hlsFragmentConcurrency).coerceIn(1, 16)
                             } else hlsFragmentConcurrency,

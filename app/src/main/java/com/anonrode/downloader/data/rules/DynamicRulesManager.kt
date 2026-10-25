@@ -504,7 +504,6 @@ object DynamicRulesManager {
         listOf("--continue"),
         listOf("--no-check-certificates"),
         listOf("--no-warnings"),
-        listOf("--no-call-home"),
         listOf("--socket-timeout", "15"),
         listOf("--retries", "10"),
         listOf("--fragment-retries", "10"),

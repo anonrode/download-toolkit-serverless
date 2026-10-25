@@ -143,23 +143,39 @@ class ProgressWatchdog(
                 }
             }
 
-            val crawlStalled = (now - windowStartTime > stallTimeoutMs) && (moved < CRAWL_WINDOW_BYTES)
+            val isStartupPhase = (disk == 0L && parsed == 0L)
+            val isExtractor = initialTask.backend == "yt-dlp" ||
+                streamUrl.contains("facebook.com", ignoreCase = true) ||
+                streamUrl.contains("instagram.com", ignoreCase = true) ||
+                streamUrl.contains("youtube.com", ignoreCase = true) ||
+                streamUrl.contains("youtu.be", ignoreCase = true) ||
+                streamUrl.contains("tiktok.com", ignoreCase = true) ||
+                streamUrl.contains("x.com", ignoreCase = true) ||
+                streamUrl.contains("twitter.com", ignoreCase = true)
+
+            val effectiveStallTimeoutMs = if (isStartupPhase && isExtractor) {
+                maxOf(stallTimeoutMs, 120_000L)
+            } else {
+                stallTimeoutMs
+            }
+
+            val crawlStalled = (now - windowStartTime > effectiveStallTimeoutMs) && (moved < CRAWL_WINDOW_BYTES)
             val magnetTask = streamUrl.startsWith("magnet:", ignoreCase = true)
-            val attemptBoundary = if (magnetTask) 90_000L else maxOf(stallKills * stallTimeoutMs * 2, stallTimeoutMs)
-            val stalledLong = (now - lastActivity) > stallTimeoutMs
+            val attemptBoundary = if (magnetTask) 90_000L else maxOf(stallKills * effectiveStallTimeoutMs * 2, effectiveStallTimeoutMs)
+            val stalledLong = (now - lastActivity) > effectiveStallTimeoutMs
             // A crawl verdict additionally requires NO growth in the last
             // half-timeout: the old code killed active transfers whose 60s
             // window total stayed under the floor even though bytes were
             // arriving every poll (server evidence: idle=0s crawl=true
             // best=940KiB/s x63). Bytes moving = not a stall.
-            val recentlyActive = (now - lastActivity) <= (stallTimeoutMs / 2).coerceAtLeast(1_000L)
+            val recentlyActive = (now - lastActivity) <= (effectiveStallTimeoutMs / 2).coerceAtLeast(1_000L)
             val isStalledOrCrawling = stalledLong || (crawlStalled && !recentlyActive)
 
             if (!magnetTask &&
                 !throttleGrace &&
                 isStalledOrCrawling &&
                 (now - watchdogStart) > attemptBoundary &&
-                (stallKills == 0 || (now - lastKillTime) > stallTimeoutMs)
+                (stallKills == 0 || (now - lastKillTime) > effectiveStallTimeoutMs)
             ) {
                 // BUG FIX: Compute idleSeconds BEFORE resetting lastActivity = now!
                 val idleSeconds = (now - lastActivity) / 1000L
@@ -175,7 +191,7 @@ class ProgressWatchdog(
                 )
 
                 val exhausted = stallKills >= MAX_STALL_KILLS
-                val stallMsg = "Download stalled — no progress for ${stallTimeoutSec}s across $stallKills attempts"
+                val stallMsg = "Download stalled — no progress for ${effectiveStallTimeoutMs / 1000L}s across $stallKills attempts"
                 onStallKill(initialTask.id, stallKills, exhausted, stallMsg, t)
                 if (exhausted) break
             }

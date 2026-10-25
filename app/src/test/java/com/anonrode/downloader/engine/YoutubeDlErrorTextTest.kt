@@ -89,4 +89,21 @@ class YoutubeDlErrorTextTest {
         assertTrue(msg.contains("no diagnostic line"))
         assertTrue(msg.contains("no HTTP status reported"))
     }
+
+    @Test
+    fun `isSocialExtractorUrl classifies social URLs correctly`() {
+        assertTrue(YoutubeDlDownloader.isSocialExtractorUrl("https://www.instagram.com/reel/DeFVVFRuDvW/"))
+        assertTrue(YoutubeDlDownloader.isSocialExtractorUrl("https://instagr.am/p/12345/"))
+        assertTrue(YoutubeDlDownloader.isSocialExtractorUrl("https://www.facebook.com/share/r/19aMkNLP5v/"))
+        assertTrue(YoutubeDlDownloader.isSocialExtractorUrl("https://fb.watch/xyz/"))
+        assertTrue(YoutubeDlDownloader.isSocialExtractorUrl("https://twitter.com/user/status/123"))
+        assertTrue(YoutubeDlDownloader.isSocialExtractorUrl("https://x.com/AsianDawn4/status/2113744220393762900"))
+        assertTrue(YoutubeDlDownloader.isSocialExtractorUrl("https://www.tiktok.com/@user/video/123"))
+        assertTrue(YoutubeDlDownloader.isSocialExtractorUrl("https://www.youtube.com/watch?v=abc"))
+        assertTrue(YoutubeDlDownloader.isSocialExtractorUrl("https://youtu.be/abc"))
+
+        assertFalse(YoutubeDlDownloader.isSocialExtractorUrl("https://kissorgrab.com/dl/123"))
+        assertFalse(YoutubeDlDownloader.isSocialExtractorUrl("https://wildshare.net/123"))
+        assertFalse(YoutubeDlDownloader.isSocialExtractorUrl("https://silversurfer.wildshare.net/123"))
+    }
 }

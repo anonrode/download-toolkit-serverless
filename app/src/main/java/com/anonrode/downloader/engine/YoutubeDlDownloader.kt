@@ -732,11 +732,19 @@ object YoutubeDlDownloader {
                 parallelSockets.coerceIn(1, 16)
             }
 
+            val isSocialExtractor = isExtractorTask || isSocialExtractorUrl(sourceUrl)
+            // yt-dlp extractors for Instagram, Facebook, Twitter, TikTok, and YouTube provide
+            // their own internal User-Agent matching platform API tokens. Forcing desktop Chrome UA
+            // breaks Instagram's mobile GraphQL API ("Instagram sent an empty media response").
+            val effUa = if (isSocialExtractor && ua == com.anonrode.downloader.data.net.HttpClient.DEFAULT_UA) "" else ua.trim()
+            val effRef = if (isSocialExtractor && !explicitReferer) "" else effReferer.trim()
+            val effOrigin = if (isSocialExtractor) "" else originToPass.trim()
+
             if (profileArgs != null && profileArgs.isNotEmpty()) {
                 val vars = mapOf(
-                    "user_agent" to ua.trim(),
-                    "referer" to effReferer.trim(),
-                    "origin" to originToPass.trim(),
+                    "user_agent" to effUa,
+                    "referer" to effRef,
+                    "origin" to effOrigin,
                     "concurrent_fragments" to effectiveFrags.toString()
                 )
                 for (group in profileArgs) {
@@ -745,20 +753,21 @@ object YoutubeDlDownloader {
                         resolved.filter { arg ->
                             arg != "--skip-unavailable-fragments" &&
                             arg != "--no-part" &&
-                            arg != "--hls-use-mpegts"
+                            arg != "--hls-use-mpegts" &&
+                            arg != "--no-call-home"
                         }
                     } else {
-                        resolved.filter { arg -> arg != "--no-part" }
+                        resolved.filter { arg -> arg != "--no-part" && arg != "--no-call-home" }
                     }
                     if (filtered.isNotEmpty()) {
                         addCommands(filtered)
                     }
                 }
             } else {
-                if (effReferer.isNotBlank()) addOption("--referer", effReferer)
-                if (ua.isNotBlank()) addOption("--user-agent", ua)
-                if (originToPass.isNotBlank()) {
-                    val cleanOrig = originToPass.replace("\r", "").replace("\n", "").trim()
+                if (effRef.isNotBlank()) addOption("--referer", effRef)
+                if (effUa.isNotBlank()) addOption("--user-agent", effUa)
+                if (effOrigin.isNotBlank()) {
+                    val cleanOrig = effOrigin.replace("\r", "").replace("\n", "").trim()
                     if (cleanOrig.isNotBlank()) addOption("--add-header", "Origin: $cleanOrig")
                 }
             }
@@ -934,7 +943,7 @@ object YoutubeDlDownloader {
                 // normally deletes them, a half-finished pass may not) were
                 // never artifacts.
                 f.extension.lowercase() !in SUBTITLE_ARTIFACT_EXTS &&
-                (!audioOnly || f.extension.lowercase() !in setOf("jpg", "jpeg", "png", "webp", "gif")) &&
+                f.extension.lowercase() !in setOf("jpg", "jpeg", "png", "webp", "gif") &&
                 !formatShard.containsMatchIn(f.name) &&
                 !File(f.absolutePath + ".aria2").exists()
 
@@ -1044,8 +1053,12 @@ object YoutubeDlDownloader {
                 sourceUrl = sourceUrl,
                 outDir = outDir,
                 taskId = taskId,
+                allowStillFallback = false,
                 isCancelled = { muxJob?.isActive != true }
             )
+            if (produced != null && produced.extension.lowercase() in setOf("jpg", "jpeg", "png", "webp", "gif")) {
+                produced = null
+            }
         }
         if (produced == null && errors.isNotBlank()) {
             val isIgPhoto = InstagramPhotoMuxer.shortcodeFromUrl(sourceUrl) != null && (
@@ -1923,6 +1936,15 @@ object YoutubeDlDownloader {
             RegexOption.IGNORE_CASE
         )
         return genericPlatformRegex.matches(clean)
+    }
+
+    internal fun isSocialExtractorUrl(url: String): Boolean {
+        val low = url.lowercase()
+        return low.contains("instagram.com") || low.contains("instagr.am") ||
+            low.contains("facebook.com") || low.contains("fb.watch") ||
+            low.contains("twitter.com") || low.contains("x.com") ||
+            low.contains("tiktok.com") || low.contains("youtube.com") ||
+            low.contains("youtu.be")
     }
 
     internal fun findAria2Executable(context: Context): File? {
