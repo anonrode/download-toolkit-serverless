@@ -49,8 +49,7 @@ object CloudflareSolver {
 
         val contentType = res.header("Content-Type").orEmpty()
         val isHtmlLike = contentType.contains("text/html", ignoreCase = true) ||
-            contentType.contains("application/xhtml+xml", ignoreCase = true) ||
-            (contentType.isBlank() && res.code != 200)
+            contentType.contains("application/xhtml+xml", ignoreCase = true)
 
         if (isHtmlLike) {
             val bodySnippet = try {

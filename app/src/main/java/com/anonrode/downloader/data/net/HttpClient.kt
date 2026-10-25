@@ -1216,14 +1216,11 @@ object HttpClient {
                         com.anonrode.downloader.pipeline.HostHealth.clearIfAlive(url)
                         readCappedText(r, maxBytes, propagateFailure = onFailure != null)
                     } else {
-                        val cfChallenge = isCloudflareChallenge(r)
-                        if (cfChallenge) {
-                            throw HttpStatusCodeException(r.code, r.request.url.toString(), isChallenge = true)
-                        }
                         if (r.code == 429 || r.code == 503) {
                             throw OriginCooldownException(r.request.url.toString())
                         }
-                        throw HttpStatusCodeException(r.code, r.request.url.toString(), isChallenge = false)
+                        val cfChallenge = isCloudflareChallenge(r)
+                        throw HttpStatusCodeException(r.code, r.request.url.toString(), isChallenge = cfChallenge)
                     }
                 }
             }
