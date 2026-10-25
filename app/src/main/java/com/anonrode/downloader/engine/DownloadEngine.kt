@@ -3683,12 +3683,7 @@ class DownloadEngine(
                 // reveals the real segment host.
                 if (finalBackend != "yt-dlp" && !isMagnet) {
                     grantedLanes = com.anonrode.downloader.pipeline.HostPolicyRegistry.LaneBudget
-                        .reserve(
-                            task.id, effectiveSockets, hls = false,
-                            plannedTasks = plannedTransferCount(),
-                            hostCap = com.anonrode.downloader.pipeline.HostPolicyRegistry
-                                .effectiveSocketsForUrl(streamUrl, 16)
-                        )
+                        .reserve(task.id, effectiveSockets, hls = false, plannedTasks = plannedTransferCount())
                     if (grantedLanes == 0) {
                         // Admission race: hand the slot back to the queue
                         // instead of starting with a starved flow set.
@@ -3901,12 +3896,7 @@ class DownloadEngine(
                     )
                 } else if (finalBackend == "yt-dlp" && !isMagnet) {
                     grantedLanes = com.anonrode.downloader.pipeline.HostPolicyRegistry.LaneBudget
-                        .reserve(
-                            task.id, effectiveSockets, hls = false,
-                            plannedTasks = plannedTransferCount(),
-                            hostCap = com.anonrode.downloader.pipeline.HostPolicyRegistry
-                                .effectiveSocketsForUrl(streamUrl, 16)
-                        )
+                        .reserve(task.id, effectiveSockets, hls = false, plannedTasks = plannedTransferCount())
                     if (grantedLanes == 0) {
                         repository.update(task.id) {
                             it.copy(status = TaskStatus.QUEUED, speedBytesPerSec = 0.0)
