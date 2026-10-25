@@ -35,14 +35,39 @@ object CloudflareSolver {
     private const val VAULT_TTL_MS = 12 * 60 * 60 * 1000L // 12 hours
 
     private val BACKGROUND_TAGS = setOf("verify", "trending", "warmup", "hls-estimate", "background")
-    val CHALLENGE_STATUS_CODES = setOf(200, 403, 429, 451, 503)
+    val CHALLENGE_STATUS_CODES = setOf(403, 503)
 
     /**
-     * Accurate discrimination of Cloudflare Turnstile, LiteSpeed, DDOS-GUARD & Bot-Check challenges.
-     * Evaluates status codes (200, 403, 429, 451, 503), cf-mitigated header, and peeks up to
-     * 16KB (16384 bytes) for genuine anti-bot challenge signatures.
+     * Root domains the WebView solve exists for — the sites OTA rev 10
+     * re-enabled "with cloudflare solver" (nepu, anitaku, asianc) plus
+     * gogoanime. Four weeks of client logs (share-19..48) never showed a
+     * genuine challenge from ANY host, while the widened 11ec62e detection
+     * burned real resolve time "solving" pages that are not challenges:
+     * nepu /watch meta-refresh templates, naijavault dl pages carrying the
+     * literal challenge-platform script name, and already-cleared dood 200
+     * embeds. The solver is scoped by host: requests to anything outside
+     * this list never enter a solve.
+     */
+    val SOLVER_HOSTS = setOf("asianc.id", "anitaku.pe", "gogoanime.or.at", "nepu.gd")
+
+    fun isSolverScopedHost(host: String?): Boolean {
+        val h = host?.lowercase()?.trim()?.removePrefix("www.") ?: return false
+        return h.isNotBlank() && SOLVER_HOSTS.any { h == it || h.endsWith(".$it") }
+    }
+
+    /**
+     * Accurate discrimination of Cloudflare Turnstile, LiteSpeed, DDOS-GUARD & Bot-Check
+     * challenges on solver-scoped hosts. Evaluates status codes (403, 503), cf-mitigated
+     * header, and peeks up to 16KB (16384 bytes) for genuine anti-bot challenge signatures.
+     * 200/429/451 never qualify: a 200 is an ordinary page (meta-refresh is a common
+     * non-challenge template), 429 belongs to the rate-limit backoff ladder, and a 451
+     * legal block is unsolvable by definition.
      */
     fun isChallenge(res: Response): Boolean {
+        val reqHost = try {
+            res.request.url.host
+        } catch (_: Exception) { null }
+        if (!isSolverScopedHost(reqHost)) return false
         if (res.code !in CHALLENGE_STATUS_CODES) return false
         val cfMitigated = res.header("cf-mitigated")
         if (cfMitigated?.equals("challenge", ignoreCase = true) == true) return true
@@ -64,13 +89,9 @@ object CloudflareSolver {
                 bodySnippet.contains("__hvtok") ||
                 bodySnippet.contains("quick check") ||
                 bodySnippet.contains("dv1ok") ||
-                bodySnippet.contains("<meta http-equiv=\"refresh") ||
-                bodySnippet.contains("<meta http-equiv='refresh") ||
-                bodySnippet.contains("<meta http-equiv=refresh") ||
                 bodySnippet.contains("ddos-guard") ||
                 bodySnippet.contains("checking your browser") ||
-                bodySnippet.contains("verifying you are human") ||
-                (bodySnippet.contains("cloudflare") && bodySnippet.contains("ray id"))
+                bodySnippet.contains("verifying you are human")
             if (hasMarker) return true
         }
         return false
@@ -258,6 +279,7 @@ object CloudflareSolver {
             URI(targetUrl).host?.lowercase() ?: ""
         } catch (_: Exception) { "" }
         if (host.isBlank()) return false
+        if (!isSolverScopedHost(host)) return false
         val root = rootDomain(host)
 
         // Capture the stale token BEFORE waiting on any lock

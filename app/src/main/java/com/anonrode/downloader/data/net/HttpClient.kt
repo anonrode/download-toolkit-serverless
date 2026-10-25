@@ -910,6 +910,15 @@ object HttpClient {
                 val priorHeaders = res.headers
                 val challengeUrl = priorReq.url.toString()
 
+                // Snapshot a bounded slice of the body BEFORE closing: a failed
+                // solve must hand the caller the real response instead of a
+                // fabricated empty 200, which made resolvers report
+                // "produced no response — refusing" on otherwise valid pages.
+                val challengeBody = try {
+                    res.peekBody(65_536L).bytes()
+                } catch (_: Exception) {
+                    ByteArray(0)
+                }
                 res.close()
                 unregister(call)
 
@@ -938,7 +947,7 @@ object HttpClient {
                         .code(priorCode)
                         .message(priorMessage)
                         .headers(priorHeaders)
-                        .body(okhttp3.ResponseBody.create(null, ByteArray(0)))
+                        .body(okhttp3.ResponseBody.create(null, challengeBody))
                         .build()
                 }
             }
@@ -1332,6 +1341,13 @@ object HttpClient {
                     val postUrl = priorReq.url.toString()
                     val solveTarget = CloudflareSolver.resolveChallengeTargetUrl(postUrl, referer)
 
+                    // Same failed-solve contract as the GET path: keep a body
+                    // snapshot so a failed solve never fabricates an empty page.
+                    val challengeBody = try {
+                        response.peekBody(65_536L).bytes()
+                    } catch (_: Exception) {
+                        ByteArray(0)
+                    }
                     response.close()
                     inFlightCalls.remove(call)
                     if (tag != null) taggedCalls[tag]?.remove(call)
@@ -1359,7 +1375,7 @@ object HttpClient {
                             .code(priorCode)
                             .message(priorMessage)
                             .headers(priorHeaders)
-                            .body(okhttp3.ResponseBody.create(null, ByteArray(0)))
+                            .body(okhttp3.ResponseBody.create(null, challengeBody))
                             .build()
                     }
                 }

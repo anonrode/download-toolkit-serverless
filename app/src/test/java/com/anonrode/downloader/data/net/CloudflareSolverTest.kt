@@ -54,15 +54,20 @@ class CloudflareSolverTest {
 
     @Test
     fun isCloudflareChallenge_cfMitigatedHeaderTriggers() {
-        val res = mockResponse(
-            code = 403,
-            headers = mapOf(
-                "Server" to "cloudflare",
-                "cf-mitigated" to "challenge",
-                "cf-ray" to "8d94bc72a1-DFW"
+        val headers = mapOf(
+            "Server" to "cloudflare",
+            "cf-mitigated" to "challenge",
+            "cf-ray" to "8d94bc72a1-DFW"
+        )
+        // Scoped host: an explicit cf-mitigated challenge is solved.
+        assertTrue(
+            HttpClient.isCloudflareChallenge(
+                mockResponse(403, headers, url = "https://nepu.gd/watch/tv/5926")
             )
         )
-        assertTrue(HttpClient.isCloudflareChallenge(res))
+        // Outside the solver scope the WEBVIEW SOLVER IS NOT INVOKED AT ALL —
+        // a working site must never pay the solve tax, regardless of headers.
+        assertFalse(HttpClient.isCloudflareChallenge(mockResponse(403, headers)))
     }
 
     @Test
@@ -74,7 +79,8 @@ class CloudflareSolverTest {
                 "Server" to "cloudflare",
                 "Content-Type" to "text/html; charset=UTF-8"
             ),
-            body = html
+            body = html,
+            url = "https://asianc.id/search?keyword=romance"
         )
         assertTrue(HttpClient.isCloudflareChallenge(res))
     }
@@ -87,7 +93,8 @@ class CloudflareSolverTest {
             headers = mapOf(
                 "Content-Type" to "text/html; charset=UTF-8"
             ),
-            body = html
+            body = html,
+            url = "https://anitaku.pe/home"
         )
         assertTrue(HttpClient.isCloudflareChallenge(res))
     }
@@ -111,6 +118,43 @@ class CloudflareSolverTest {
     fun isCloudflareChallenge_status200Or404DoesNotTrigger() {
         assertFalse(HttpClient.isCloudflareChallenge(mockResponse(200)))
         assertFalse(HttpClient.isCloudflareChallenge(mockResponse(404)))
+    }
+
+    @Test
+    fun isChallenge_scopedToSolverHosts() {
+        // Genuine challenge markers on OUT-OF-SCOPE hosts never fire the solver.
+        // dood embeds both serve real 403 challenges AND carry meta-refresh in
+        // their normal 200 template; nepu watch pages carry meta-refresh on a
+        // plain 200. Dood was deliberately left out of the scope (it is a
+        // locker terminal, not one of the four provider hosts), so all of
+        // these must stay FALSE and cost zero solve time.
+        val htmlHeaders = mapOf("Content-Type" to "text/html; charset=UTF-8")
+        val metaRefresh = "<html><head><meta http-equiv=\"refresh\" content=\"2;url=/index.php\"></head></html>"
+        val justAMoment = "<html><head><title>Just a moment...</title></head><body>cf-challenge</body></html>"
+
+        // nepu belongs to the scope, but a 200 page is still never a challenge.
+        assertFalse(
+            HttpClient.isCloudflareChallenge(
+                mockResponse(200, htmlHeaders, metaRefresh, url = "https://nepu.gd/watch/tv/5926")
+            )
+        )
+        // real markers, wrong host: no solve.
+        assertFalse(
+            HttpClient.isCloudflareChallenge(
+                mockResponse(403, htmlHeaders, justAMoment, url = "https://dood.wf/e/i2kabsqjuwc2")
+            )
+        )
+        assertFalse(
+            HttpClient.isCloudflareChallenge(
+                mockResponse(403, htmlHeaders, justAMoment, url = "https://www.naijavault.com/dl-10d565d1/")
+            )
+        )
+        // subdomains of scoped root domains ARE in scope.
+        assertTrue(
+            HttpClient.isCloudflareChallenge(
+                mockResponse(403, htmlHeaders, justAMoment, url = "https://video.nepu.gd/watch/tv/5926")
+            )
+        )
     }
 
     @Test
@@ -244,25 +288,30 @@ class CloudflareSolverTest {
     }
 
     @Test
-    fun isCloudflareChallenge_expandedStatusCodes() {
+    fun isChallenge_statusCodes_403and503Only_restoresPrePushContract() {
         val challengeHtml = "<html><head><title>Just a moment...</title></head><body>Verifying</body></html>"
         val htmlHeaders = mapOf("Content-Type" to "text/html; charset=UTF-8")
+        val scoped = "https://asianc.id/mystic-nine-2026-episode-1.html"
 
-        // 403, 503, 429, 451, 200 all trigger when authentic challenge markers exist
-        assertTrue(HttpClient.isCloudflareChallenge(mockResponse(403, htmlHeaders, challengeHtml)))
-        assertTrue(HttpClient.isCloudflareChallenge(mockResponse(503, htmlHeaders, challengeHtml)))
-        assertTrue(HttpClient.isCloudflareChallenge(mockResponse(429, htmlHeaders, challengeHtml)))
-        assertTrue(HttpClient.isCloudflareChallenge(mockResponse(451, htmlHeaders, challengeHtml)))
-        assertTrue(HttpClient.isCloudflareChallenge(mockResponse(200, htmlHeaders, challengeHtml)))
+        // Only 403 and 503 can be a WebView challenge.
+        assertTrue(HttpClient.isCloudflareChallenge(mockResponse(403, htmlHeaders, challengeHtml, url = scoped)))
+        assertTrue(HttpClient.isCloudflareChallenge(mockResponse(503, htmlHeaders, challengeHtml, url = scoped)))
+
+        // The 11ec62e expansion taught the solver to attack working pages:
+        // 200s are normal content, 429 is rate-limit backoff, 451 is an
+        // unsolvable legal block. None of them may ever reach the solver.
+        assertFalse(HttpClient.isCloudflareChallenge(mockResponse(429, htmlHeaders, challengeHtml, url = scoped)))
+        assertFalse(HttpClient.isCloudflareChallenge(mockResponse(451, htmlHeaders, challengeHtml, url = scoped)))
+        assertFalse(HttpClient.isCloudflareChallenge(mockResponse(200, htmlHeaders, challengeHtml, url = scoped)))
 
         // Non-challenge status codes do NOT trigger even with challenge markers
-        assertFalse(HttpClient.isCloudflareChallenge(mockResponse(404, htmlHeaders, challengeHtml)))
-        assertFalse(HttpClient.isCloudflareChallenge(mockResponse(500, htmlHeaders, challengeHtml)))
-        assertFalse(HttpClient.isCloudflareChallenge(mockResponse(302, htmlHeaders, challengeHtml)))
+        assertFalse(HttpClient.isCloudflareChallenge(mockResponse(404, htmlHeaders, challengeHtml, url = scoped)))
+        assertFalse(HttpClient.isCloudflareChallenge(mockResponse(500, htmlHeaders, challengeHtml, url = scoped)))
+        assertFalse(HttpClient.isCloudflareChallenge(mockResponse(302, htmlHeaders, challengeHtml, url = scoped)))
 
         // 200 with normal HTML content does NOT trigger
         val normalHtml = "<html><head><title>Watch Movie</title></head><body>Welcome to the movie stream</body></html>"
-        assertFalse(HttpClient.isCloudflareChallenge(mockResponse(200, htmlHeaders, normalHtml)))
+        assertFalse(HttpClient.isCloudflareChallenge(mockResponse(200, htmlHeaders, normalHtml, url = scoped)))
 
         // 200 with normal JSON does NOT trigger
         val jsonHeaders = mapOf("Content-Type" to "application/json")
@@ -272,59 +321,69 @@ class CloudflareSolverTest {
     @Test
     fun isCloudflareChallenge_16kbPeekReachesDeepSignatures() {
         val htmlHeaders = mapOf("Content-Type" to "text/html; charset=UTF-8")
+        val scoped = "https://nepu.gd/watch/tv/5926"
 
         // Signature placed at offset ~10,000 bytes (beyond old 4KB limit, within 16KB)
         val padding10k = " ".repeat(10_000)
         val deepChallengeHtml = "<html><head><title>Checking</title></head><body>${padding10k}<div class='cf-challenge'></div></body></html>"
-        assertTrue(HttpClient.isCloudflareChallenge(mockResponse(403, htmlHeaders, deepChallengeHtml)))
+        assertTrue(HttpClient.isCloudflareChallenge(mockResponse(403, htmlHeaders, deepChallengeHtml, url = scoped)))
 
         // Signature placed at offset ~20,000 bytes (beyond 16KB limit)
         val padding20k = " ".repeat(20_000)
         val tooDeepChallengeHtml = "<html><head><title>Checking</title></head><body>${padding20k}<div class='cf-challenge'></div></body></html>"
-        assertFalse(HttpClient.isCloudflareChallenge(mockResponse(403, htmlHeaders, tooDeepChallengeHtml)))
+        assertFalse(HttpClient.isCloudflareChallenge(mockResponse(403, htmlHeaders, tooDeepChallengeHtml, url = scoped)))
     }
 
     @Test
     fun isCloudflareChallenge_liteSpeedSignatures() {
         val htmlHeaders = mapOf("Content-Type" to "text/html; charset=UTF-8")
+        val scoped = "https://nepu.gd/api/search?q=test"
 
-        // Quick check
+        // Quick check (nepu/LiteSpeed bot check) — 403/503 only.
         val quickCheckHtml = "<html><head><title>Quick check</title></head><body>Anti-DDoS</body></html>"
-        assertTrue(HttpClient.isCloudflareChallenge(mockResponse(200, htmlHeaders, quickCheckHtml)))
+        assertTrue(HttpClient.isCloudflareChallenge(mockResponse(403, htmlHeaders, quickCheckHtml, url = scoped)))
+        assertTrue(HttpClient.isCloudflareChallenge(mockResponse(503, htmlHeaders, quickCheckHtml, url = scoped)))
 
-        // dv1ok
+        // dv1ok cookie seeding script — 403/503 only.
         val dv1okHtml = "<html><body><script>document.cookie='dv1ok=active; path=/';</script></body></html>"
-        assertTrue(HttpClient.isCloudflareChallenge(mockResponse(200, htmlHeaders, dv1okHtml)))
+        assertTrue(HttpClient.isCloudflareChallenge(mockResponse(403, htmlHeaders, dv1okHtml, url = scoped)))
 
-        // meta http-equiv="refresh"
+        // meta http-equiv="refresh" is a common NON-challenge template (dood
+        // countdowns, nepu watch pages): removed from the marker set entirely.
         val metaRefreshDouble = "<html><head><meta http-equiv=\"refresh\" content=\"2;url=/index.php\"></head></html>"
-        assertTrue(HttpClient.isCloudflareChallenge(mockResponse(200, htmlHeaders, metaRefreshDouble)))
-
-        // meta http-equiv='refresh'
+        assertFalse(HttpClient.isCloudflareChallenge(mockResponse(403, htmlHeaders, metaRefreshDouble, url = scoped)))
         val metaRefreshSingle = "<html><head><meta http-equiv='refresh' content='2;url=/index.php'></head></html>"
-        assertTrue(HttpClient.isCloudflareChallenge(mockResponse(200, htmlHeaders, metaRefreshSingle)))
+        assertFalse(HttpClient.isCloudflareChallenge(mockResponse(403, htmlHeaders, metaRefreshSingle, url = scoped)))
+
+        // A quick-check page served with 200 is a working page, not a challenge.
+        assertFalse(HttpClient.isCloudflareChallenge(mockResponse(200, htmlHeaders, quickCheckHtml, url = scoped)))
     }
 
     @Test
     fun isCloudflareChallenge_ddosGuardSignatures() {
         val htmlHeaders = mapOf("Content-Type" to "text/html; charset=UTF-8")
+        val scoped = "https://asianc.id/mystic-nine-2026-episode-1.html"
 
         val ddosGuardHtml = "<html><body><div id='ddos-guard'>DDOS Protection</div></body></html>"
-        assertTrue(HttpClient.isCloudflareChallenge(mockResponse(403, htmlHeaders, ddosGuardHtml)))
+        assertTrue(HttpClient.isCloudflareChallenge(mockResponse(403, htmlHeaders, ddosGuardHtml, url = scoped)))
 
         val checkingBrowserHtml = "<html><body><h1>Checking your browser</h1><p>Please wait...</p></body></html>"
-        assertTrue(HttpClient.isCloudflareChallenge(mockResponse(503, htmlHeaders, checkingBrowserHtml)))
+        assertTrue(HttpClient.isCloudflareChallenge(mockResponse(503, htmlHeaders, checkingBrowserHtml, url = scoped)))
     }
 
     @Test
     fun isCloudflareChallenge_turnstileModernSignatures() {
         val htmlHeaders = mapOf("Content-Type" to "text/html; charset=UTF-8")
+        val scoped = "https://anitaku.pe/home"
 
         val turnstileHumanHtml = "<html><body><p>Verifying you are human. This may take a few seconds.</p></body></html>"
-        assertTrue(HttpClient.isCloudflareChallenge(mockResponse(403, htmlHeaders, turnstileHumanHtml)))
+        assertTrue(HttpClient.isCloudflareChallenge(mockResponse(403, htmlHeaders, turnstileHumanHtml, url = scoped)))
 
+        // "Performance & security by Cloudflare" + "Ray ID" text appears in
+        // error pages AND some footers of working pages: 11ec62e made the pair
+        // a challenge trigger and every such page paid a solve round. Removed.
         val cfRayHtml = "<html><body><p>Performance & security by Cloudflare</p><p>Cloudflare Ray ID: 8d94bc72a1</p></body></html>"
-        assertTrue(HttpClient.isCloudflareChallenge(mockResponse(403, htmlHeaders, cfRayHtml)))
+        assertFalse(HttpClient.isCloudflareChallenge(mockResponse(403, htmlHeaders, cfRayHtml, url = scoped)))
     }
 
     @Test
