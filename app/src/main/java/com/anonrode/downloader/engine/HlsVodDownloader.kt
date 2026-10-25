@@ -568,17 +568,8 @@ object HlsVodDownloader {
      * as InstagramPhotoMuxer: the extracted archive — whose versioned shared
      * libraries are complete — first, bare jniLibs fallback second).
      */
-    internal fun resolveFfmpegBinary(context: android.content.Context): File? {
-        try {
-            com.yausername.ffmpeg.FFmpeg.getInstance().init(context)
-        } catch (_: Throwable) {
-        }
-        val extracted = File(context.noBackupFilesDir, "youtubedl-android/packages/ffmpeg")
-        extracted.walkTopDown()
-            .firstOrNull { it.isFile && it.name in setOf("libffmpeg.so", "libffmpeg.bin.so", "ffmpeg") }
-            ?.let { return it }
-        return File(context.applicationInfo.nativeLibraryDir, "libffmpeg.so").takeIf { it.isFile }
-    }
+    internal fun resolveFfmpegBinary(context: android.content.Context): File? =
+        InstagramPhotoMuxer.resolveFfmpegBinary(context)
 
     /**
      * Concat-demux `-c copy` remux of the staged segment stream into

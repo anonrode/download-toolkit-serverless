@@ -444,4 +444,28 @@ class InstagramPhotoMuxerTest {
             native.deleteRecursively()
         }
     }
+
+    @Test
+    fun ffmpegLdPathIncludesNoBackupPackagesWhenBinaryIsInNativeDir() {
+        // Issue 1 regression: When libffmpeg.so is in nativeLibraryDir (e.g. /data/app/.../lib/arm64),
+        // buildFfmpegLdLibraryPath must include the extracted packages/ffmpeg/usr/lib directory
+        // from noBackupFilesDir so that the dynamic linker finds versioned libs (libavdevice.so.61).
+        val noBackup = Files.createTempDirectory("ffmpeg-nobackup").toFile()
+        val native = Files.createTempDirectory("ffmpeg-native").toFile()
+        try {
+            val ffmpegUsrLib = File(noBackup, "youtubedl-android/packages/ffmpeg/usr/lib").apply { mkdirs() }
+            val pythonUsrLib = File(noBackup, "youtubedl-android/packages/python/usr/lib").apply { mkdirs() }
+            val exe = File(native, "libffmpeg.so").apply { writeBytes(ByteArray(8)) }
+
+            val path = InstagramPhotoMuxer.buildFfmpegLdLibraryPath(exe, native.absolutePath, noBackup)
+            val parts = path.split(File.pathSeparator)
+
+            assertTrue(parts.contains(ffmpegUsrLib.absolutePath))
+            assertTrue(parts.contains(pythonUsrLib.absolutePath))
+            assertTrue(parts.contains(native.absolutePath))
+        } finally {
+            noBackup.deleteRecursively()
+            native.deleteRecursively()
+        }
+    }
 }

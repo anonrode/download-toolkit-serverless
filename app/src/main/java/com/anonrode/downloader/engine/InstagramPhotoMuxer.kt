@@ -1489,41 +1489,121 @@ object InstagramPhotoMuxer {
             }
         }
 
-    private fun resolveFfmpegBinary(context: android.content.Context): File? {
+    private fun extractFfmpegZipFallback(context: Context, targetDir: File) {
+        val zipSo = File(context.applicationInfo.nativeLibraryDir, "libffmpeg.zip.so")
+        if (!zipSo.exists() || zipSo.length() <= 0L) return
+        try {
+            targetDir.mkdirs()
+            java.util.zip.ZipFile(zipSo).use { zip ->
+                val entries = zip.entries()
+                while (entries.hasMoreElements()) {
+                    val entry = entries.nextElement()
+                    val dest = File(targetDir, entry.name)
+                    if (!dest.canonicalPath.startsWith(targetDir.canonicalPath + File.separator)) {
+                        continue
+                    }
+                    if (entry.isDirectory) {
+                        dest.mkdirs()
+                    } else {
+                        dest.parentFile?.mkdirs()
+                        zip.getInputStream(entry).use { input ->
+                            dest.outputStream().use { output -> input.copyTo(output) }
+                        }
+                    }
+                }
+            }
+            DebugLog.backend("ig-mux: extracted ffmpeg fallback completed to ${targetDir.absolutePath}")
+        } catch (t: Throwable) {
+            DebugLog.backend("ig-mux: extractFfmpegZipFallback failed: ${t.message ?: t.javaClass.simpleName}")
+        }
+    }
+
+    internal fun resolveFfmpegBinary(context: android.content.Context): File? {
         // Idempotent: extracts libffmpeg.zip.so on first use (and re-extracts
         // when the bundled version changes). Never let a failure here mask
         // the filesystem fallback.
         try {
             com.yausername.ffmpeg.FFmpeg.getInstance().init(context)
-        } catch (_: Throwable) {}
+        } catch (t: Throwable) {
+            DebugLog.backend("ig-mux: FFmpeg.init failed: ${t.message ?: t.javaClass.simpleName}")
+        }
         val extracted = File(context.noBackupFilesDir, "youtubedl-android/packages/ffmpeg")
+        if (!File(extracted, "usr/lib").isDirectory) {
+            extractFfmpegZipFallback(context, extracted)
+        }
         return pickFfmpegBinary(extracted, File(context.applicationInfo.nativeLibraryDir))
     }
 
     /**
-     * Directories the extracted FFmpeg needs at link time. The executable
-     * usually lives in `<package>/usr/bin` while the versioned `libav*.so.*`
-     * siblings live in `<package>/usr/lib`; the bare jniLib only ships the
-     * executable half. Include every plausible layout plus the app's native
-     * library dir (libc++_shared), and only existing directories.
+     * Directories the extracted FFmpeg needs at link time.
+     *
+     * The youtubedl-android:ffmpeg package places the main executable in
+     * `nativeLibraryDir/libffmpeg.so`, while the versioned shared libraries
+     * (`libavdevice.so.61`, `libavformat.so.61`, `libavcodec.so.61`, etc.)
+     * are unzipped by FFmpeg.init from `libffmpeg.zip.so` into
+     * `<noBackupFilesDir>/youtubedl-android/packages/ffmpeg/usr/lib`.
+     *
+     * If LD_LIBRARY_PATH does not include `packages/ffmpeg/usr/lib`, executing
+     * `libffmpeg.so` crashes with:
+     * `CANNOT LINK EXECUTABLE ".../libffmpeg.so": library "libavdevice.so.61" not found`
+     *
+     * Include the extracted packages usr/lib directories, layout relative to
+     * the binary, and the app's native library dir (libc++_shared.so).
      */
     internal fun buildFfmpegLdLibraryPath(context: Context, binary: File): String =
-        buildFfmpegLdLibraryPath(binary, context.applicationInfo.nativeLibraryDir)
+        buildFfmpegLdLibraryPath(binary, context.applicationInfo.nativeLibraryDir, context.noBackupFilesDir)
 
-    internal fun buildFfmpegLdLibraryPath(binary: File, nativeLibraryDir: String): String {
+    internal fun buildFfmpegLdLibraryPath(binary: File, nativeLibraryDir: String): String =
+        buildFfmpegLdLibraryPath(binary, nativeLibraryDir, null)
+
+    internal fun buildFfmpegLdLibraryPath(
+        binary: File,
+        nativeLibraryDir: String,
+        noBackupFilesDir: File?
+    ): String {
         val dirs = LinkedHashSet<String>()
+
+        val effectiveNoBackup = noBackupFilesDir
+            ?: runCatching {
+                if (com.anonrode.downloader.AnonApp::instance.isInitialized) {
+                    com.anonrode.downloader.AnonApp.instance.noBackupFilesDir
+                } else null
+            }.getOrNull()
+
+        // 1) youtubedl-android packages directory (packages/ffmpeg/usr/lib, etc.)
+        // This is where FFmpeg.init extracts the versioned shared libraries (libavdevice.so.61, etc.)
+        if (effectiveNoBackup != null) {
+            val packagesDir = File(effectiveNoBackup, "youtubedl-android/packages")
+            for (pkg in listOf("ffmpeg", "python", "aria2c")) {
+                val pkgDir = File(packagesDir, pkg)
+                dirs.add(File(pkgDir, "usr/lib").absolutePath)
+                dirs.add(File(pkgDir, "lib").absolutePath)
+                dirs.add(pkgDir.absolutePath)
+            }
+        }
+
+        // 2) Layout relative to the binary (covers custom packaging & test fixtures)
         binary.parentFile?.let { bin ->
             dirs.add(bin.absolutePath)
             dirs.add(File(bin, "lib").absolutePath)
+            dirs.add(File(bin, "usr/lib").absolutePath)
             bin.parentFile?.let { parent ->
                 dirs.add(File(parent, "lib").absolutePath)
                 dirs.add(File(parent, "usr/lib").absolutePath)
                 parent.parentFile?.let { grand ->
                     dirs.add(File(grand, "usr/lib").absolutePath)
+                    dirs.add(File(grand, "lib").absolutePath)
                 }
             }
         }
-        if (nativeLibraryDir.isNotBlank()) dirs.add(nativeLibraryDir)
+
+        // 3) App native library dir (libc++_shared.so, libffmpeg.so)
+        if (nativeLibraryDir.isNotBlank()) {
+            val native = File(nativeLibraryDir)
+            dirs.add(native.absolutePath)
+            dirs.add(File(native, "lib").absolutePath)
+        }
+
         return dirs.filter { File(it).isDirectory }.joinToString(File.pathSeparator)
     }
 

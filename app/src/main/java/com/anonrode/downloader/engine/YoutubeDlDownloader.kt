@@ -1969,9 +1969,7 @@ object YoutubeDlDownloader {
             }?.maxByOrNull { it.lastModified() }
             ?: return audioFile
 
-        val extractedDir = File(context.noBackupFilesDir, "youtubedl-android/packages/ffmpeg")
-        val nativeDir = File(context.applicationInfo.nativeLibraryDir)
-        val lib = InstagramPhotoMuxer.pickFfmpegBinary(extractedDir, nativeDir) ?: return audioFile
+        val lib = InstagramPhotoMuxer.resolveFfmpegBinary(context) ?: return audioFile
         try { lib.setExecutable(true) } catch (_: Exception) {}
         val ldLibraryPath = InstagramPhotoMuxer.buildFfmpegLdLibraryPath(context, lib)
 
