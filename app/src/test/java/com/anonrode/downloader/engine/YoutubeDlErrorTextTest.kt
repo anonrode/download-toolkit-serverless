@@ -5,6 +5,8 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.File
+import java.nio.file.Files
 
 /**
  * User-facing error text (AGENTS rule 14, 2026-10-20): the raw
@@ -105,5 +107,49 @@ class YoutubeDlErrorTextTest {
         assertFalse(YoutubeDlDownloader.isSocialExtractorUrl("https://kissorgrab.com/dl/123"))
         assertFalse(YoutubeDlDownloader.isSocialExtractorUrl("https://wildshare.net/123"))
         assertFalse(YoutubeDlDownloader.isSocialExtractorUrl("https://silversurfer.wildshare.net/123"))
+    }
+
+    @Test
+    fun `isFinalCandidate rejects image extensions even when size is sufficient`() {
+        val tempDir = Files.createTempDirectory("ytdl-final-test").toFile()
+        try {
+            val exts = listOf("jpg", "jpeg", "png", "webp", "gif")
+            for (ext in exts) {
+                val f = File(tempDir, "video.$ext").apply { writeBytes(ByteArray(50_000)) }
+                assertFalse("File with extension .$ext must be rejected as media artifact", YoutubeDlDownloader.isFinalCandidate(f))
+            }
+        } finally {
+            tempDir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `isFinalCandidate accepts valid media files and rejects partials and shards`() {
+        val tempDir = Files.createTempDirectory("ytdl-final-valid").toFile()
+        try {
+            val mp4 = File(tempDir, "reel.mp4").apply { writeBytes(ByteArray(50_000)) }
+            assertTrue(YoutubeDlDownloader.isFinalCandidate(mp4))
+
+            val mkv = File(tempDir, "episode.mkv").apply { writeBytes(ByteArray(50_000)) }
+            assertTrue(YoutubeDlDownloader.isFinalCandidate(mkv))
+
+            val small = File(tempDir, "tiny.mp4").apply { writeBytes(ByteArray(500)) }
+            assertFalse(YoutubeDlDownloader.isFinalCandidate(small))
+
+            val part = File(tempDir, "reel.mp4.part").apply { writeBytes(ByteArray(50_000)) }
+            assertFalse(YoutubeDlDownloader.isFinalCandidate(part))
+
+            val shard = File(tempDir, "reel.f137.mp4").apply { writeBytes(ByteArray(50_000)) }
+            assertFalse(YoutubeDlDownloader.isFinalCandidate(shard))
+
+            val vtt = File(tempDir, "reel.en.vtt").apply { writeBytes(ByteArray(50_000)) }
+            assertFalse(YoutubeDlDownloader.isFinalCandidate(vtt))
+
+            // Sibling aria2 file marks file as partial
+            File(tempDir, "reel.mp4.aria2").apply { writeBytes(ByteArray(100)) }
+            assertFalse(YoutubeDlDownloader.isFinalCandidate(mp4))
+        } finally {
+            tempDir.deleteRecursively()
+        }
     }
 }

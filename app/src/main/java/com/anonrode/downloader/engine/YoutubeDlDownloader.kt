@@ -261,7 +261,7 @@ object YoutubeDlDownloader {
      *  sidecars written by the embed-subs pass). Single source of truth is
      *  [SubtitleArtifacts]: player formats (srt/vtt/ass/ssa) plus the exotic
      *  timed-text formats yt-dlp can leave behind (ttml/json3/srv3). */
-    private val SUBTITLE_ARTIFACT_EXTS = SubtitleArtifacts.RENAMED_ARTIFACT_EXTS
+    internal val SUBTITLE_ARTIFACT_EXTS = SubtitleArtifacts.RENAMED_ARTIFACT_EXTS
 
     /** Terminal-stub floor for the FINAL accepted output (activity-log audit
      *  §3.4 class): a yt-dlp/aria2c "artifact" under this size is a decoy or
@@ -270,7 +270,7 @@ object YoutubeDlDownloader {
      *  probe consumers re-apply for HLS (LinkResolver.isHlsStubTerminal).
      *  Only the output gate uses this: HLS segment/fragment reads are
      *  untouched (sub-KB segment reads are normal). */
-    private const val MIN_PRODUCED_BYTES = 1024L
+    internal const val MIN_PRODUCED_BYTES = 1024L
 
     /**
      * Flat playlist metadata dump: `yt-dlp -J --flat-playlist` over the whole
@@ -937,15 +937,7 @@ object YoutubeDlDownloader {
             // successful completion. Without this, an attempt that exits 0
             // while a straggler range request died could hand the engine a
             // truncated file that the structure tier then blesses.
-            fun isFinal(f: File) = f.exists() && f.isFile && f.length() >= MIN_PRODUCED_BYTES &&
-                !f.name.endsWith(".aria2") && !f.name.endsWith(".part") && !f.name.endsWith(".ytdl") &&
-                // Subtitle sidecars (write-subs/embed-subs output; embed
-                // normally deletes them, a half-finished pass may not) were
-                // never artifacts.
-                f.extension.lowercase() !in SUBTITLE_ARTIFACT_EXTS &&
-                f.extension.lowercase() !in setOf("jpg", "jpeg", "png", "webp", "gif") &&
-                !formatShard.containsMatchIn(f.name) &&
-                !File(f.absolutePath + ".aria2").exists()
+            fun isFinal(f: File) = isFinalCandidate(f, MIN_PRODUCED_BYTES, formatShard)
 
             val candidates = outDir.listFiles { f -> isFinal(f) }?.toList() ?: emptyList()
 
@@ -1945,6 +1937,19 @@ object YoutubeDlDownloader {
             low.contains("twitter.com") || low.contains("x.com") ||
             low.contains("tiktok.com") || low.contains("youtube.com") ||
             low.contains("youtu.be")
+    }
+
+    internal fun isFinalCandidate(
+        file: File,
+        minBytes: Long = MIN_PRODUCED_BYTES,
+        formatShardRegex: Regex = Regex("""\.(?:f\d+|\d+)\.[^.]+$""")
+    ): Boolean {
+        return file.exists() && file.isFile && file.length() >= minBytes &&
+            !file.name.endsWith(".aria2") && !file.name.endsWith(".part") && !file.name.endsWith(".ytdl") &&
+            file.extension.lowercase() !in SUBTITLE_ARTIFACT_EXTS &&
+            file.extension.lowercase() !in setOf("jpg", "jpeg", "png", "webp", "gif") &&
+            !formatShardRegex.containsMatchIn(file.name) &&
+            !File(file.absolutePath + ".aria2").exists()
     }
 
     internal fun findAria2Executable(context: Context): File? {
