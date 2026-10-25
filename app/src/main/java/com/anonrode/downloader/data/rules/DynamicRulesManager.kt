@@ -168,7 +168,16 @@ data class ContentPolicy(
      * Semantics: no NEW work starts for a disabled site (search, feeds,
      * failover, drawer). Work already running is allowed to finish.
      */
-    val disabledSites: List<String> = emptyList()
+    val disabledSites: List<String> = emptyList(),
+    /**
+     * Per-site OTA-authoritative episodes switch (2026-10-25): provider ids
+     * whose episode lists come from the OTA pipeline ALONE when it returns
+     * rows. For flagged sites the compiled provider parse becomes a fallback
+     * (used only when the pipeline answer is empty), so episode-list defects
+     * on those sites are fixable by payload edits instead of app updates.
+     * Same lenient explicit-string semantics as [disabledSites].
+     */
+    val episodesAuthority: List<String> = emptyList()
 )
 
 /**
@@ -712,7 +721,8 @@ object DynamicRulesManager {
             nollywoodOnlySites = lowerTrimmedList(cp.optJSONArray("nollywoodOnlySites"), 64),
             nollywoodSites = lowerTrimmedList(cp.optJSONArray("nollywoodSites"), 64),
             nollywoodTerms = lowerTrimmedList(cp.optJSONArray("nollywoodTerms"), 128),
-            disabledSites = lenientSiteList(cp.opt("disabledSites"), 64)
+            disabledSites = lenientSiteList(cp.opt("disabledSites"), 64),
+            episodesAuthority = lenientSiteList(cp.opt("episodesAuthority"), 32)
         )
     }
 
@@ -1470,6 +1480,19 @@ object DynamicRulesManager {
         if (key.isBlank()) return true
         val disabled = try { activeContentPolicy.disabledSites } catch (_: Exception) { emptyList() }
         return disabled.none { it == key }
+    }
+
+    /**
+     * OTA-authoritative episodes flag (contentPolicy.episodesAuthority).
+     * Explicit string match, case/whitespace insensitive — the same
+     * fail-open semantics as [isSiteEnabled]: an absent/blank field leaves
+     * every site on the compiled-authoritative path.
+     */
+    fun isEpisodesAuthority(site: String): Boolean {
+        val key = site.trim().lowercase()
+        if (key.isBlank()) return false
+        val auth = try { activeContentPolicy.episodesAuthority } catch (_: Exception) { return false }
+        return auth.any { it == key }
     }
 
     /** Snapshot of the active disabled-site list (lowercased, payload order). */

@@ -1520,7 +1520,8 @@ def validate_schema(plain: bytes) -> list:
                 problems.append("contentPolicy.suppressNollywood: must be a bool")
             for arr_name, cap in (("nollywoodSites", 64),
                                   ("nollywoodOnlySites", 64),
-                                  ("nollywoodTerms", 128)):
+                                  ("nollywoodTerms", 128),
+                                  ("episodesAuthority", 32)):
                 arr = cp.get(arr_name)
                 if arr is not None and (not isinstance(arr, list) or len(arr) > cap
                                         or any(not isinstance(x, str) or not x.strip()
@@ -1543,7 +1544,8 @@ def validate_schema(plain: bytes) -> list:
             for key in cp:
                 if key not in ("socketCaps", "suppressNollywood",
                                "nollywoodSites", "nollywoodOnlySites",
-                               "nollywoodTerms", "disabledSites"):
+                               "nollywoodTerms", "disabledSites",
+                               "episodesAuthority"):
                     problems.append(f"contentPolicy.{key}: unknown field")
 
     # v3.3.0 platform surfaces (plan §4.1) — announcements / update / ads /

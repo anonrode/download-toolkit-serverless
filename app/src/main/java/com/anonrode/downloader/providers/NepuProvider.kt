@@ -283,19 +283,25 @@ object NepuProvider : SiteProvider {
         }
 
         if (isTv) {
+            // Detail-page cards (/tv/{id}, the html-search payload shape) must
+            // fetch the /watch/tv/{id} listing: SRV_MAP + the season switcher
+            // live there, while the /tv/ variant serves only per-season stubs
+            // (live-verified 2026-10-25: "Big Love" 5 seasons x 1 stub).
+            val listingUrl = Regex("""^(https?://nepu\.gd)/(?:tv|movie)/(\d+)$""")
+                .replace(showUrl) { m -> "${m.groupValues[1]}/watch/tv/${m.groupValues[2]}" }
             val episodes = mutableListOf<EpisodeItem>()
             var extractedTitle: String? = null
             var extractedSynopsis: String? = null
             try {
-                val html = fetchUnlockedHtml(showUrl)
+                val html = fetchUnlockedHtml(listingUrl)
                 val srvMap = extractSrvMap(html)
                 if (srvMap.isNotEmpty() && tmdbId.isNotBlank()) {
-                    val pageRef = EPISODE_PATTERN.matcher(showUrl)
+                    val pageRef = EPISODE_PATTERN.matcher(listingUrl)
                     val pageSeason = if (pageRef.find()) pageRef.group(1)?.toIntOrNull() else null
                     val pageEpisode = if (pageSeason != null) pageRef.group(2)?.toIntOrNull() else null
                     srvMapCache[srvMapKey(tmdbId, pageSeason, pageEpisode)] = srvMap
                 }
-                val doc = Jsoup.parse(html, showUrl)
+                val doc = Jsoup.parse(html, listingUrl)
 
                 extractedTitle = doc.selectFirst("h1")?.text()?.replace(Regex("""(?i)\s*(S\d+\s*E\d+|Season\s*\d+).*"""), "")?.trim()
                     ?: doc.selectFirst("meta[property=og:title]")?.attr("content")?.substringBefore(" - S")?.trim()
@@ -326,7 +332,7 @@ object NepuProvider : SiteProvider {
                             val season = m.group(1)?.toIntOrNull() ?: currentSeasonHint ?: continue
                             val episode = m.group(2)?.toIntOrNull() ?: continue
                             if (seen.add(Pair(season, episode))) {
-                                links.add(Triple(season, episode, HttpClient.safeResolveUri(showUrl, href)))
+                                links.add(Triple(season, episode, HttpClient.safeResolveUri(listingUrl, href)))
                             }
                         }
                     }

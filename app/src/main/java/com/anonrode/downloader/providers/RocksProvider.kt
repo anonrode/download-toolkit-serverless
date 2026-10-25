@@ -145,6 +145,32 @@ object RocksProvider : SiteProvider {
         val pipelineEpisodes = pipeline?.episodes.orEmpty()
         val compiled = loadCompiledEpisodes(showUrl)
 
+        // OTA-authoritative episodes (contentPolicy.episodesAuthority, set for
+        // 9jarocks in rev 19): a non-empty pipeline answer REPLACES the
+        // compiled parse. The post bodies carry fully tokened locker filenames
+        // (live-verified 2026-10-25: 50/60/51/64/98/44 rows match filename
+        // tokens exactly), so the pipeline answer is the post's real files;
+        // merging under the compiled heuristic could surface rows the post
+        // never contained (activity-log sibling-series leak report).
+        if (DynamicRulesManager.isEpisodesAuthority(name) && pipelineEpisodes.isNotEmpty()) {
+            val slugSeason = pagePinOf(showUrl, pipeline?.title.orEmpty()) ?: 1
+            val stamped = sortEpisodes(stampPipelineEpisodes(pipelineEpisodes, slugSeason))
+            val card = ShowCard(
+                title = compiled?.show?.title?.ifBlank { null }
+                    ?: pipeline?.title?.ifBlank { null }
+                    ?: "Movie",
+                url = showUrl,
+                posterUrl = if (compiled?.show?.posterUrl.isNullOrBlank()) pipeline?.posterUrl.orEmpty()
+                else compiled.show.posterUrl,
+                site = name
+            )
+            return ShowDetails(
+                show = card,
+                synopsis = compiled?.synopsis ?: pipeline?.synopsis ?: "",
+                episodes = stamped
+            )
+        }
+
         if (compiled == null || compiled.episodes.isEmpty()) {
             if (pipelineEpisodes.isNotEmpty()) {
                 val slugSeason = pagePinOf(showUrl, pipeline?.title.orEmpty()) ?: 1
