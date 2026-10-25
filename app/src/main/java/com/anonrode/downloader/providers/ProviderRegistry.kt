@@ -68,7 +68,7 @@ object ProviderRegistry {
      *  and category/Asian feed consumers, which fan out to site-specific
      *  fetchers rather than through [searchStreaming]. */
     fun filterEnabledCards(cards: List<ShowCard>): List<ShowCard> =
-        cards.filter { DynamicRulesManager.isSiteEnabled(it.site) }
+        cards.filter { it.title.isNotBlank() && it.url.isNotBlank() && DynamicRulesManager.isSiteEnabled(it.site) }
 
     fun getProvider(site: String): SiteProvider? {
         return allProviders.find { it.name.equals(site, ignoreCase = true) }

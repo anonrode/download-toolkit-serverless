@@ -50,6 +50,8 @@ HANDOVER.md
 HANDOVER_AUDIT.md
 MASTER_ISSUES_AND_COMPLAINTS_NOTEBOOK.md
 REVIEW_PROMPTS.md
+*AUDIT_DUMP*.md
+investigation/
 
 # signing material never enters the tree
 *.jks

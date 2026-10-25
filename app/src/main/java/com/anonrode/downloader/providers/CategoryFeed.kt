@@ -389,7 +389,7 @@ object CategoryFeed {
                     // gate as the explicit filter (OTA-switch-gated inside).
                     val isSafe = (!filterExplicit || !com.anonrode.downloader.util.ExplicitContentFilter.isExplicit(card)) &&
                         !com.anonrode.downloader.util.NollywoodFilter.isNollywood(card)
-                    if (isSafe) {
+                    if (isSafe && card.url.isNotBlank() && DynamicRulesManager.isSiteEnabled(card.site)) {
                         val key = normalizeTitleKey(card.title, card.year)
                         if (key.isNotBlank()) {
                             val existingIdx = seen[key]

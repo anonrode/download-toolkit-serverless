@@ -1,5 +1,7 @@
 package com.anonrode.downloader.data.net
 
+import com.anonrode.downloader.ui.components.isChallengePage
+import com.anonrode.downloader.ui.components.isValidContentPage
 import com.anonrode.downloader.ui.components.shouldBlockSubresource
 import okhttp3.Protocol
 import okhttp3.Request
@@ -209,5 +211,151 @@ class CloudflareSolverTest {
         assertFalse(CloudflareSolver.shouldAllowSubresource("https://plutomovies.com/assets/style.css", "plutomovies.com"))
         assertFalse(CloudflareSolver.shouldAllowSubresource("https://plutomovies.com/hero.jpg", "plutomovies.com"))
         assertFalse(CloudflareSolver.shouldAllowSubresource("https://google-analytics.com/ga.js", "plutomovies.com"))
+    }
+
+    @Test
+    fun extractToken_detectsCompanionCookies() {
+        val litespeedCookie = "dv1ok=dv_val_12345; Path=/;"
+        val dvResult = CloudflareSolver.extractToken(litespeedCookie)
+        assertEquals(Pair("dv1ok", "dv_val_12345"), dvResult)
+
+        val bmCookie = "__cf_bm=bm_tok_67890; Path=/;"
+        val bmResult = CloudflareSolver.extractToken(bmCookie)
+        assertEquals(Pair("__cf_bm", "bm_tok_67890"), bmResult)
+
+        val phpCookie = "PHPSESSID=sess_php_abcdef; Path=/;"
+        val phpResult = CloudflareSolver.extractToken(phpCookie)
+        assertEquals(Pair("PHPSESSID", "sess_php_abcdef"), phpResult)
+
+        val sessCookie = "session=sess_val_9999; Path=/;"
+        val sessResult = CloudflareSolver.extractToken(sessCookie)
+        assertEquals(Pair("session", "sess_val_9999"), sessResult)
+
+        val tokCookie = "token=auth_tok_5555; Path=/;"
+        val tokResult = CloudflareSolver.extractToken(tokCookie)
+        assertEquals(Pair("token", "auth_tok_5555"), tokResult)
+
+        // Word-boundary safety: session_id or csrf_token must NOT match session or token
+        val fakeSessionCookie = "session_id=abcdef; theme=dark"
+        assertNull(CloudflareSolver.extractToken(fakeSessionCookie))
+
+        val fakeTokenCookie = "csrf_token=xyz; theme=dark"
+        assertNull(CloudflareSolver.extractToken(fakeTokenCookie))
+    }
+
+    @Test
+    fun isCloudflareChallenge_expandedStatusCodes() {
+        val challengeHtml = "<html><head><title>Just a moment...</title></head><body>Verifying</body></html>"
+        val htmlHeaders = mapOf("Content-Type" to "text/html; charset=UTF-8")
+
+        // 403, 503, 429, 451, 200 all trigger when authentic challenge markers exist
+        assertTrue(HttpClient.isCloudflareChallenge(mockResponse(403, htmlHeaders, challengeHtml)))
+        assertTrue(HttpClient.isCloudflareChallenge(mockResponse(503, htmlHeaders, challengeHtml)))
+        assertTrue(HttpClient.isCloudflareChallenge(mockResponse(429, htmlHeaders, challengeHtml)))
+        assertTrue(HttpClient.isCloudflareChallenge(mockResponse(451, htmlHeaders, challengeHtml)))
+        assertTrue(HttpClient.isCloudflareChallenge(mockResponse(200, htmlHeaders, challengeHtml)))
+
+        // Non-challenge status codes do NOT trigger even with challenge markers
+        assertFalse(HttpClient.isCloudflareChallenge(mockResponse(404, htmlHeaders, challengeHtml)))
+        assertFalse(HttpClient.isCloudflareChallenge(mockResponse(500, htmlHeaders, challengeHtml)))
+        assertFalse(HttpClient.isCloudflareChallenge(mockResponse(302, htmlHeaders, challengeHtml)))
+
+        // 200 with normal HTML content does NOT trigger
+        val normalHtml = "<html><head><title>Watch Movie</title></head><body>Welcome to the movie stream</body></html>"
+        assertFalse(HttpClient.isCloudflareChallenge(mockResponse(200, htmlHeaders, normalHtml)))
+
+        // 200 with normal JSON does NOT trigger
+        val jsonHeaders = mapOf("Content-Type" to "application/json")
+        assertFalse(HttpClient.isCloudflareChallenge(mockResponse(200, jsonHeaders, """{"status":"ok"}""")))
+    }
+
+    @Test
+    fun isCloudflareChallenge_16kbPeekReachesDeepSignatures() {
+        val htmlHeaders = mapOf("Content-Type" to "text/html; charset=UTF-8")
+
+        // Signature placed at offset ~10,000 bytes (beyond old 4KB limit, within 16KB)
+        val padding10k = " ".repeat(10_000)
+        val deepChallengeHtml = "<html><head><title>Checking</title></head><body>${padding10k}<div class='cf-challenge'></div></body></html>"
+        assertTrue(HttpClient.isCloudflareChallenge(mockResponse(403, htmlHeaders, deepChallengeHtml)))
+
+        // Signature placed at offset ~20,000 bytes (beyond 16KB limit)
+        val padding20k = " ".repeat(20_000)
+        val tooDeepChallengeHtml = "<html><head><title>Checking</title></head><body>${padding20k}<div class='cf-challenge'></div></body></html>"
+        assertFalse(HttpClient.isCloudflareChallenge(mockResponse(403, htmlHeaders, tooDeepChallengeHtml)))
+    }
+
+    @Test
+    fun isCloudflareChallenge_liteSpeedSignatures() {
+        val htmlHeaders = mapOf("Content-Type" to "text/html; charset=UTF-8")
+
+        // Quick check
+        val quickCheckHtml = "<html><head><title>Quick check</title></head><body>Anti-DDoS</body></html>"
+        assertTrue(HttpClient.isCloudflareChallenge(mockResponse(200, htmlHeaders, quickCheckHtml)))
+
+        // dv1ok
+        val dv1okHtml = "<html><body><script>document.cookie='dv1ok=active; path=/';</script></body></html>"
+        assertTrue(HttpClient.isCloudflareChallenge(mockResponse(200, htmlHeaders, dv1okHtml)))
+
+        // meta http-equiv="refresh"
+        val metaRefreshDouble = "<html><head><meta http-equiv=\"refresh\" content=\"2;url=/index.php\"></head></html>"
+        assertTrue(HttpClient.isCloudflareChallenge(mockResponse(200, htmlHeaders, metaRefreshDouble)))
+
+        // meta http-equiv='refresh'
+        val metaRefreshSingle = "<html><head><meta http-equiv='refresh' content='2;url=/index.php'></head></html>"
+        assertTrue(HttpClient.isCloudflareChallenge(mockResponse(200, htmlHeaders, metaRefreshSingle)))
+    }
+
+    @Test
+    fun isCloudflareChallenge_ddosGuardSignatures() {
+        val htmlHeaders = mapOf("Content-Type" to "text/html; charset=UTF-8")
+
+        val ddosGuardHtml = "<html><body><div id='ddos-guard'>DDOS Protection</div></body></html>"
+        assertTrue(HttpClient.isCloudflareChallenge(mockResponse(403, htmlHeaders, ddosGuardHtml)))
+
+        val checkingBrowserHtml = "<html><body><h1>Checking your browser</h1><p>Please wait...</p></body></html>"
+        assertTrue(HttpClient.isCloudflareChallenge(mockResponse(503, htmlHeaders, checkingBrowserHtml)))
+    }
+
+    @Test
+    fun isCloudflareChallenge_turnstileModernSignatures() {
+        val htmlHeaders = mapOf("Content-Type" to "text/html; charset=UTF-8")
+
+        val turnstileHumanHtml = "<html><body><p>Verifying you are human. This may take a few seconds.</p></body></html>"
+        assertTrue(HttpClient.isCloudflareChallenge(mockResponse(403, htmlHeaders, turnstileHumanHtml)))
+
+        val cfRayHtml = "<html><body><p>Performance & security by Cloudflare</p><p>Cloudflare Ray ID: 8d94bc72a1</p></body></html>"
+        assertTrue(HttpClient.isCloudflareChallenge(mockResponse(403, htmlHeaders, cfRayHtml)))
+    }
+
+    @Test
+    fun universalCookieBanking_banksAllCookiesForRootDomain() {
+        val rawHeader = "dv1ok=litespeed_ok; session=active_sess; __cf_bm=cfbm_tok; PHPSESSID=php_123; token=sec_tok"
+        val host = "sub.vidhide.com"
+
+        CloudflareSolver.bankCookiesFromHeader(rawHeader, host)
+
+        // All companion cookies banked for apex root domain "vidhide.com"
+        assertEquals("litespeed_ok", HttpClient.cookieValue("dv1ok", "vidhide.com"))
+        assertEquals("active_sess", HttpClient.cookieValue("session", "vidhide.com"))
+        assertEquals("cfbm_tok", HttpClient.cookieValue("__cf_bm", "vidhide.com"))
+        assertEquals("php_123", HttpClient.cookieValue("PHPSESSID", "vidhide.com"))
+        assertEquals("sec_tok", HttpClient.cookieValue("token", "vidhide.com"))
+    }
+
+    @Test
+    fun dualCompletionDetection_challengeMarkers() {
+        assertTrue(isChallengePage("Just a moment...", "https://streamwish.to/"))
+        assertTrue(isChallengePage("Attention Required! | Cloudflare", "https://streamwish.to/"))
+        assertTrue(isChallengePage("DDOS-GUARD", "https://site.com/"))
+        assertTrue(isChallengePage("Quick check", "https://site.com/"))
+        assertTrue(isChallengePage("Verifying you are human", "https://site.com/"))
+        assertTrue(isChallengePage("Watch Movie", "https://streamwish.to/cdn-cgi/challenge-platform/h/b/flow"))
+
+        assertFalse(isChallengePage("Watch Big Movie", "https://streamwish.to/e/12345"))
+
+        assertTrue(isValidContentPage("Watch Big Movie", "https://streamwish.to/e/12345"))
+        assertFalse(isValidContentPage("Just a moment...", "https://streamwish.to/e/12345"))
+        assertFalse(isValidContentPage("", "https://streamwish.to/e/12345"))
+        assertFalse(isValidContentPage("about:blank", "about:blank"))
     }
 }

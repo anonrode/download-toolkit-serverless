@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.net.Uri
 import android.view.ViewGroup
 import android.webkit.CookieManager
+import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
@@ -77,6 +78,8 @@ fun CloudflareChallengeHost() {
 
     var showInteractive by remember(activeRequest) { mutableStateOf(false) }
     var webViewRef by remember(activeRequest) { mutableStateOf<WebView?>(null) }
+    var sawChallengeMarker by remember(activeRequest) { mutableStateOf(false) }
+    var elapsedMs by remember(activeRequest) { mutableLongStateOf(0L) }
 
     BackHandler(enabled = showInteractive) {
         CloudflareSolver.resolve(activeRequest, false)
@@ -112,7 +115,6 @@ fun CloudflareChallengeHost() {
 
     LaunchedEffect(activeRequest) {
         val cookieManager = CookieManager.getInstance()
-        var elapsedMs = 0L
         while (isActive && !activeRequest.deferred.isCompleted) {
             delay(250)
             elapsedMs += 250
@@ -126,10 +128,12 @@ fun CloudflareChallengeHost() {
                 null
             }
 
+            // Dual completion path 1: Token appearance
             val tokenPair = CloudflareSolver.extractToken(cookieStr)
             if (tokenPair != null) {
                 val (tokenName, tokenValue) = tokenPair
                 if (tokenValue != activeRequest.staleClearance) {
+                    CloudflareSolver.bankCookies(activeRequest.targetUrl, activeRequest.host)
                     CloudflareSolver.resolve(
                         request = activeRequest,
                         success = true,
@@ -138,6 +142,24 @@ fun CloudflareChallengeHost() {
                     )
                     break
                 }
+            }
+
+            // Dual completion path 2: Navigation away from challenge page
+            val wv = webViewRef
+            val currentTitle = try { wv?.title } catch (_: Throwable) { null }
+            val currentUrl = try { wv?.url } catch (_: Throwable) { null }
+
+            if (isChallengePage(currentTitle, currentUrl)) {
+                sawChallengeMarker = true
+            } else if (isValidContentPage(currentTitle, currentUrl) && (sawChallengeMarker || elapsedMs >= 1500L)) {
+                CloudflareSolver.bankCookies(activeRequest.targetUrl, activeRequest.host)
+                CloudflareSolver.resolve(
+                    request = activeRequest,
+                    success = true,
+                    clearanceToken = tokenPair?.second,
+                    tokenName = tokenPair?.first ?: "cf_clearance"
+                )
+                break
             }
         }
     }
@@ -250,6 +272,15 @@ fun CloudflareChallengeHost() {
                                     cookieManager.setAcceptCookie(true)
                                     cookieManager.setAcceptThirdPartyCookies(this, true)
 
+                                    webChromeClient = object : WebChromeClient() {
+                                        override fun onReceivedTitle(view: WebView?, title: String?) {
+                                            super.onReceivedTitle(view, title)
+                                            if (isChallengePage(title, view?.url)) {
+                                                sawChallengeMarker = true
+                                            }
+                                        }
+                                    }
+
                                     webViewClient = object : WebViewClient() {
                                         override fun shouldInterceptRequest(
                                             view: WebView?,
@@ -268,6 +299,37 @@ fun CloudflareChallengeHost() {
                                             }
                                             return super.shouldInterceptRequest(view, request)
                                         }
+
+                                        override fun onPageFinished(view: WebView?, url: String?) {
+                                            super.onPageFinished(view, url)
+                                            if (activeRequest.deferred.isCompleted) return
+                                            val title = try { view?.title } catch (_: Throwable) { null }
+                                            val cookieStr = try { cookieManager.getCookie(url ?: activeRequest.targetUrl) } catch (_: Throwable) { null }
+                                            val tokenPair = CloudflareSolver.extractToken(cookieStr)
+
+                                            if (tokenPair != null && tokenPair.second != activeRequest.staleClearance) {
+                                                CloudflareSolver.bankCookies(activeRequest.targetUrl, activeRequest.host)
+                                                CloudflareSolver.resolve(
+                                                    request = activeRequest,
+                                                    success = true,
+                                                    clearanceToken = tokenPair.second,
+                                                    tokenName = tokenPair.first
+                                                )
+                                                return
+                                            }
+
+                                            if (isChallengePage(title, url)) {
+                                                sawChallengeMarker = true
+                                            } else if (isValidContentPage(title, url) && (sawChallengeMarker || elapsedMs >= 1500L)) {
+                                                CloudflareSolver.bankCookies(activeRequest.targetUrl, activeRequest.host)
+                                                CloudflareSolver.resolve(
+                                                    request = activeRequest,
+                                                    success = true,
+                                                    clearanceToken = tokenPair?.second,
+                                                    tokenName = tokenPair?.first ?: "cf_clearance"
+                                                )
+                                            }
+                                        }
                                     }
                                     if (!activeRequest.referer.isNullOrBlank()) {
                                         loadUrl(activeRequest.targetUrl, mapOf("Referer" to activeRequest.referer))
@@ -284,6 +346,44 @@ fun CloudflareChallengeHost() {
             }
         }
     }
+}
+
+/**
+ * Accurately determines if a page title or URL corresponds to a bot challenge / verification interstitial.
+ */
+internal fun isChallengePage(title: String?, url: String?): Boolean {
+    val t = title?.lowercase().orEmpty()
+    val u = url?.lowercase().orEmpty()
+
+    val titleHasChallenge = t.contains("just a moment") ||
+        t.contains("attention required") ||
+        t.contains("checking your browser") ||
+        t.contains("ddos-guard") ||
+        t.contains("quick check") ||
+        t.contains("cloudflare") ||
+        t.contains("turnstile") ||
+        t.contains("security check") ||
+        t.contains("verifying you are human") ||
+        t.contains("human verification")
+
+    val urlHasChallenge = u.contains("/cdn-cgi/") ||
+        u.contains("/challenge-platform/") ||
+        u.contains("__cf_chl_") ||
+        u.contains("cf-mitigated") ||
+        u.contains("chk_jschl")
+
+    return titleHasChallenge || urlHasChallenge
+}
+
+/**
+ * Accurately determines if a page has successfully navigated away from a challenge interstitial
+ * onto legitimate web content.
+ */
+internal fun isValidContentPage(title: String?, url: String?): Boolean {
+    val t = title?.trim().orEmpty()
+    val u = url?.trim().orEmpty()
+    if (t.isBlank() || u.isBlank() || u == "about:blank" || u.startsWith("data:")) return false
+    return !isChallengePage(t, u)
 }
 
 /**

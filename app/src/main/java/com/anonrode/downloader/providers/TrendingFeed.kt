@@ -125,7 +125,7 @@ object TrendingFeed {
                     // gate as the explicit filter (OTA-switch-gated inside).
                     val isSafe = (!filterExplicit || !com.anonrode.downloader.util.ExplicitContentFilter.isExplicit(card)) &&
                         !com.anonrode.downloader.util.NollywoodFilter.isNollywood(card)
-                    if (out.size < limit && key.isNotBlank() && isSafe && seenTitles.add(key)) {
+                    if (out.size < limit && key.isNotBlank() && card.url.isNotBlank() && isSafe && DynamicRulesManager.isSiteEnabled(card.site) && seenTitles.add(key)) {
                         out.add(card)
                     }
                     advanced = true

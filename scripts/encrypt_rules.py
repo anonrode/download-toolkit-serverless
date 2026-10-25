@@ -573,7 +573,7 @@ def _validate_pipeline(where, pl, problems):
                             problems.append(f"{bw}.transforms: list <= 16")
                         else:
                             for t_name in tf:
-                                if t_name not in ALLOWED_TRANSFORMS:
+                                if t_name not in ALLOWED_TRANSFORMS and not (isinstance(t_name, str) and t_name.startswith("xor:")):
                                     problems.append(f"{bw}.transforms: unknown transform {t_name!r}")
                     for pow_key in ("pow", "pow_sha256"):
                         if pow_key in bv:

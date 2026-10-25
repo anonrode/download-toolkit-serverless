@@ -463,7 +463,8 @@ object DramaRainProvider : SiteProvider {
             gatewayTarget(episodeUrl) ?: episodeUrl
         } else episodeUrl
 
-        val direct = RulesPipeline.runResolveForSite(name, effective, quality)
+        val direct = RulesPipeline.runResolveForSite(name, episodeUrl, quality)
+            ?: RulesPipeline.runResolveForSite(name, effective, quality)
             ?: ResolverRegistry.resolve(effective, quality)
         val target = if (!direct.isNullOrBlank()) direct else {
             if (com.anonrode.downloader.pipeline.StrictLinkClassifier.isDirectMedia(effective)) effective else ""

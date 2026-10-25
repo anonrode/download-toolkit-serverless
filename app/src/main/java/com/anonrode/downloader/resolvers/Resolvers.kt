@@ -858,7 +858,7 @@ internal fun terminalScore(
 object VidbasicResolver : BaseResolver {
     private val KEY = "94588293375053432799222445521289".toByteArray(Charsets.UTF_8)
     private val IV = "5259228356829423".toByteArray(Charsets.UTF_8)
-    private val HOSTS = listOf("vidbasic.", "vidb.top", "embedload.cfd")
+    private val HOSTS = listOf("vidbasic.", "vidb.top", "embedload.cfd", "hglink.")
     @Volatile private var lastFailure: String? = null
 
     override fun lastResolveFailure(): String? = lastFailure
@@ -948,12 +948,13 @@ object VidbasicResolver : BaseResolver {
             // recursion is our own counter capped at 3 so A->B->A cycles end
             // instead of spinning through the registry depth limit
             // (resolvers.py:606-611).
-            val miMatcher = Pattern.compile("""<iframe[^>]+src=["']([^"']*(?:vidbasic|vidb\.top|3rdplayer|/embed/)[^"']*)["']""").matcher(html)
-            if (miMatcher.find() && depth < 3) {
-                var inner = miMatcher.group(1)?.replace("&amp;", "&") ?: ""
+            val miMatcher = Pattern.compile("""<iframe[^>]+src=["']([^"']*(?:vidbasic|vidb\.top|3rdplayer|/embed/|/e/|hglink)[^"']*)["']""").matcher(html)
+            while (miMatcher.find() && depth < 3) {
+                var inner = miMatcher.group(1)?.replace("&amp;", "&") ?: continue
                 inner = HttpClient.safeResolveUri(url, inner)
                 if (inner != url && inner.startsWith("http")) {
-                    val innerDirect = resolve(inner, quality, depth + 1)
+                    val innerDirect = ResolverRegistry.resolve(inner, quality, depth + 1)
+                        ?: resolve(inner, quality, depth + 1)
                     if (!innerDirect.isNullOrBlank()) return innerDirect
                 }
             }

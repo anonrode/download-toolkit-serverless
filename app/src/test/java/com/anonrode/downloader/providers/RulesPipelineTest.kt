@@ -1164,4 +1164,18 @@ class RulesPipelineTest {
         assertEquals("https://x.test/p/q", v5["all"])
         RulesPipeline.applyUrlBinds(listOf(PipelineVarBind("all", """.+""", 0)), mutableMapOf())
     }
+
+    @Test
+    fun applyTransforms_xorTransform() {
+        val key = "9589ebdf447855fb"
+        val original = "https://kissorgrab.com/dl/movie.mkv"
+        val keyBytes = key.toByteArray(Charsets.UTF_8)
+        val origBytes = original.toByteArray(Charsets.UTF_8)
+        val scrambled = ByteArray(origBytes.size) { i ->
+            (origBytes[i].toInt() xor keyBytes[i % keyBytes.size].toInt()).toByte()
+        }
+        val b64 = java.util.Base64.getEncoder().encodeToString(scrambled)
+        val decrypted = RulesPipeline.applyTransforms(b64, listOf("xor:$key"))
+        assertEquals(original, decrypted)
+    }
 }

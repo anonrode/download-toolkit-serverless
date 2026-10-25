@@ -177,33 +177,11 @@ object HttpClient {
     }
 
     /**
-     * Accurate discrimination of Cloudflare Turnstile & Bot-Check challenges.
-     *
-     * Only returns true if cf-mitigated header explicitly signals challenge,
-     * or if an HTML response contains genuine signature markers.
-     * Never returns true solely on Server: cloudflare or cf-ray headers.
+     * Accurate discrimination of Cloudflare Turnstile, LiteSpeed, DDOS-GUARD & Bot-Check challenges.
+     * Delegates to [CloudflareSolver.isChallenge] with expanded status codes (200, 403, 429, 451, 503)
+     * and a 16KB signature peek.
      */
-    fun isCloudflareChallenge(res: Response): Boolean {
-        if (res.code != 403 && res.code != 503) return false
-        val cfMitigated = res.header("cf-mitigated")
-        if (cfMitigated?.equals("challenge", ignoreCase = true) == true) return true
-
-        val contentType = res.header("Content-Type") ?: ""
-        if (contentType.contains("text/html", ignoreCase = true)) {
-            val bodySnippet = try {
-                res.peekBody(4096).string().lowercase()
-            } catch (_: Exception) { "" }
-
-            val hasMarker = bodySnippet.contains("just a moment") ||
-                bodySnippet.contains("cf-challenge") ||
-                bodySnippet.contains("challenge-platform") ||
-                bodySnippet.contains("turnstile") ||
-                bodySnippet.contains("__cf_chl_") ||
-                bodySnippet.contains("__hvtok")
-            if (hasMarker) return true
-        }
-        return false
-    }
+    fun isCloudflareChallenge(res: Response): Boolean = CloudflareSolver.isChallenge(res)
 
     /**
      * Why the most recent getText() returned null. Every resolver funnels through
@@ -844,7 +822,11 @@ object HttpClient {
             .header("Accept-Language", "en-US,en;q=0.9")
 
         val isXhrOrJson = headers["X-Requested-With"]?.equals("XMLHttpRequest", ignoreCase = true) == true ||
-            headers["Accept"].orEmpty().contains("json", ignoreCase = true)
+            headers["Accept"].orEmpty().contains("json", ignoreCase = true) ||
+            url.contains("/api/", ignoreCase = true) ||
+            url.contains("admin-ajax.php", ignoreCase = true) ||
+            url.contains("/wp-json/", ignoreCase = true) ||
+            url.substringBefore('?').endsWith(".json", ignoreCase = true)
         if (!isXhrOrJson) {
             reqBuilder.header("Sec-Fetch-Dest", "document")
             reqBuilder.header("Sec-Fetch-Mode", "navigate")
@@ -852,6 +834,9 @@ object HttpClient {
             reqBuilder.header("Sec-Fetch-User", "?1")
             reqBuilder.header("Upgrade-Insecure-Requests", "1")
         } else {
+            if (headers["Accept"] == null) {
+                reqBuilder.header("Accept", "*/*")
+            }
             reqBuilder.header("Sec-Fetch-Dest", "empty")
             reqBuilder.header("Sec-Fetch-Mode", "cors")
             reqBuilder.header("Sec-Fetch-Site", "same-origin")
@@ -876,6 +861,7 @@ object HttpClient {
         var call = client.newCall(reqBuilder.build())
         register(call)
         var attempt = 0
+        var challengeSolved = false
         val started = System.currentTimeMillis()
         return try {
             var res = try {
@@ -915,7 +901,8 @@ object HttpClient {
             if (android.os.Looper.myLooper() != android.os.Looper.getMainLooper() &&
                 CloudflareSolver.canAttemptSolve(tag) &&
                 isCloudflareChallenge(res) &&
-                attempt == 0) {
+                !challengeSolved) {
+                challengeSolved = true
                 val priorReq = res.request
                 val priorProtocol = res.protocol
                 val priorCode = res.code
@@ -1229,11 +1216,14 @@ object HttpClient {
                         com.anonrode.downloader.pipeline.HostHealth.clearIfAlive(url)
                         readCappedText(r, maxBytes, propagateFailure = onFailure != null)
                     } else {
+                        val cfChallenge = isCloudflareChallenge(r)
+                        if (cfChallenge) {
+                            throw HttpStatusCodeException(r.code, r.request.url.toString(), isChallenge = true)
+                        }
                         if (r.code == 429 || r.code == 503) {
                             throw OriginCooldownException(r.request.url.toString())
                         }
-                        val cfChallenge = isCloudflareChallenge(r)
-                        throw HttpStatusCodeException(r.code, r.request.url.toString(), isChallenge = cfChallenge)
+                        throw HttpStatusCodeException(r.code, r.request.url.toString(), isChallenge = false)
                     }
                 }
             }

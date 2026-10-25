@@ -56,6 +56,7 @@ object LinkResolver {
         "pixeldrain.com",
         "vidbasic.",
         "vidb.top",
+        "hglink.",
         "lightdl.cc",
         "5play.cc",
         "megaplay.",

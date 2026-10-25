@@ -17,6 +17,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import okhttp3.Response
 import org.json.JSONObject
 import java.net.URI
 import java.util.concurrent.ConcurrentHashMap
@@ -34,6 +35,49 @@ object CloudflareSolver {
     private const val VAULT_TTL_MS = 12 * 60 * 60 * 1000L // 12 hours
 
     private val BACKGROUND_TAGS = setOf("verify", "trending", "warmup", "hls-estimate", "background")
+    val CHALLENGE_STATUS_CODES = setOf(200, 403, 429, 451, 503)
+
+    /**
+     * Accurate discrimination of Cloudflare Turnstile, LiteSpeed, DDOS-GUARD & Bot-Check challenges.
+     * Evaluates status codes (200, 403, 429, 451, 503), cf-mitigated header, and peeks up to
+     * 16KB (16384 bytes) for genuine anti-bot challenge signatures.
+     */
+    fun isChallenge(res: Response): Boolean {
+        if (res.code !in CHALLENGE_STATUS_CODES) return false
+        val cfMitigated = res.header("cf-mitigated")
+        if (cfMitigated?.equals("challenge", ignoreCase = true) == true) return true
+
+        val contentType = res.header("Content-Type").orEmpty()
+        val isHtmlLike = contentType.contains("text/html", ignoreCase = true) ||
+            contentType.contains("application/xhtml+xml", ignoreCase = true) ||
+            (contentType.isBlank() && res.code != 200)
+
+        if (isHtmlLike) {
+            val bodySnippet = try {
+                res.peekBody(16384L).string().lowercase()
+            } catch (_: Exception) { "" }
+
+            val hasMarker = bodySnippet.contains("just a moment") ||
+                bodySnippet.contains("cf-challenge") ||
+                bodySnippet.contains("challenge-platform") ||
+                bodySnippet.contains("turnstile") ||
+                bodySnippet.contains("__cf_chl_") ||
+                bodySnippet.contains("__hvtok") ||
+                bodySnippet.contains("quick check") ||
+                bodySnippet.contains("dv1ok") ||
+                bodySnippet.contains("<meta http-equiv=\"refresh") ||
+                bodySnippet.contains("<meta http-equiv='refresh") ||
+                bodySnippet.contains("<meta http-equiv=refresh") ||
+                bodySnippet.contains("ddos-guard") ||
+                bodySnippet.contains("checking your browser") ||
+                bodySnippet.contains("verifying you are human") ||
+                (bodySnippet.contains("cloudflare") && bodySnippet.contains("ray id"))
+            if (hasMarker) return true
+        }
+        return false
+    }
+
+    fun isCloudflareChallenge(res: Response): Boolean = isChallenge(res)
 
     @Volatile
     var isAppInForeground: Boolean = false
@@ -220,6 +264,8 @@ object CloudflareSolver {
         // Capture the stale token BEFORE waiting on any lock
         val staleClearance = HttpClient.cookieValue("cf_clearance", root)
             ?: HttpClient.cookieValue("hvp", root)
+            ?: HttpClient.cookieValue("dv1ok", root)
+            ?: HttpClient.cookieValue("__cf_bm", root)
             ?: extractToken(try { CookieManager.getInstance().getCookie(targetUrl) } catch (_: Throwable) { null })?.second
 
         // 1. Per-host single-flight coalescing OUTSIDE solverMutex
@@ -256,6 +302,8 @@ object CloudflareSolver {
                 // Check if a fresh token was already minted while waiting for solverMutex
                 val currentToken = HttpClient.cookieValue("cf_clearance", root)
                     ?: HttpClient.cookieValue("hvp", root)
+                    ?: HttpClient.cookieValue("dv1ok", root)
+                    ?: HttpClient.cookieValue("__cf_bm", root)
                 if (!currentToken.isNullOrBlank() && currentToken != staleClearance) {
                     myDeferred.complete(true)
                     return@withLock true
@@ -264,12 +312,15 @@ object CloudflareSolver {
                 // Purge the rejected stale cookie from both HttpClient and CookieManager
                 HttpClient.purgeCookie("cf_clearance", root)
                 HttpClient.purgeCookie("hvp", root)
+                HttpClient.purgeCookie("dv1ok", root)
                 try {
                     val cm = CookieManager.getInstance()
                     cm.setCookie(targetUrl, "cf_clearance=; Max-Age=0; Path=/")
                     cm.setCookie("https://$root", "cf_clearance=; Domain=.$root; Max-Age=0; Path=/")
                     cm.setCookie(targetUrl, "hvp=; Max-Age=0; Path=/")
                     cm.setCookie("https://$root", "hvp=; Domain=.$root; Max-Age=0; Path=/")
+                    cm.setCookie(targetUrl, "dv1ok=; Max-Age=0; Path=/")
+                    cm.setCookie("https://$root", "dv1ok=; Domain=.$root; Max-Age=0; Path=/")
                     cm.flush()
                 } catch (_: Throwable) {}
 
@@ -308,31 +359,67 @@ object CloudflareSolver {
     }
 
     fun resolve(request: ChallengeRequest, success: Boolean, clearanceToken: String? = null, tokenName: String = "cf_clearance") {
-        if (success && !clearanceToken.isNullOrBlank()) {
+        if (success) {
             val ttlSec = VAULT_TTL_MS / 1000L
-            HttpClient.storeCookie(tokenName, clearanceToken, request.host, "/", ttlSec)
-            // Also sync companion cookies (__cf_bm, _cfuvid, hv*) set during the WebView challenge
-            try {
-                val cm = CookieManager.getInstance()
-                cm.flush()
-                val rawCookies = cm.getCookie(request.targetUrl).orEmpty()
-                for (part in rawCookies.split(";")) {
-                    val eq = part.indexOf('=')
-                    if (eq <= 0) continue
-                    val k = part.substring(0, eq).trim()
-                    val v = part.substring(eq + 1).trim()
-                    if (k.isNotBlank() && v.isNotBlank()) {
-                        HttpClient.storeCookie(k, v, request.host, "/", ttlSec)
-                    }
+            if (!clearanceToken.isNullOrBlank()) {
+                HttpClient.storeCookie(tokenName, clearanceToken, request.host, "/", ttlSec)
+                appContext?.let { ctx ->
+                    persistClearance(ctx, request.host, clearanceToken, HttpClient.DEFAULT_UA, tokenName)
                 }
+            }
+            // Universal cookie banking: sync ALL cookies set during the WebView challenge
+            try {
+                bankCookies(request.targetUrl, request.host)
             } catch (_: Throwable) {}
-            appContext?.let { ctx ->
-                persistClearance(ctx, request.host, clearanceToken, HttpClient.DEFAULT_UA, tokenName)
+
+            // If clearanceToken wasn't explicitly passed, check if any recognized token was minted into CookieManager
+            if (clearanceToken.isNullOrBlank()) {
+                try {
+                    val cm = CookieManager.getInstance()
+                    val rawCookies = cm.getCookie(request.targetUrl).orEmpty()
+                    val pair = extractToken(rawCookies)
+                    if (pair != null) {
+                        appContext?.let { ctx ->
+                            persistClearance(ctx, request.host, pair.second, HttpClient.DEFAULT_UA, pair.first)
+                        }
+                    }
+                } catch (_: Throwable) {}
             }
         }
         request.deferred.complete(success)
         if (_challengeState.value === request) {
             _challengeState.value = null
+        }
+    }
+
+    /**
+     * Universal cookie banking: extracts all cookies from Android CookieManager for targetUrl
+     * and persists them in HttpClient session jar for the root apex domain.
+     */
+    fun bankCookies(targetUrl: String, host: String) {
+        try {
+            val cm = CookieManager.getInstance()
+            cm.flush()
+            val rawCookies = cm.getCookie(targetUrl).orEmpty()
+            bankCookiesFromHeader(rawCookies, host)
+        } catch (_: Throwable) {}
+    }
+
+    /**
+     * Stores all raw cookies from a Set-Cookie / Cookie header line into HttpClient for the host root domain.
+     */
+    fun bankCookiesFromHeader(cookieHeader: String?, host: String) {
+        if (cookieHeader.isNullOrBlank()) return
+        val root = rootDomain(host)
+        val ttlSec = VAULT_TTL_MS / 1000L
+        for (part in cookieHeader.split(";")) {
+            val eq = part.indexOf('=')
+            if (eq <= 0) continue
+            val k = part.substring(0, eq).trim()
+            val v = part.substring(eq + 1).trim()
+            if (k.isNotBlank() && v.isNotBlank()) {
+                HttpClient.storeCookie(k, v, root, "/", ttlSec)
+            }
         }
     }
 
@@ -356,18 +443,40 @@ object CloudflareSolver {
         }
     }
 
+    val KNOWN_TOKENS = listOf(
+        "cf_clearance",
+        "hvp",
+        "dv1ok",
+        "__cf_bm",
+        "PHPSESSID",
+        "session",
+        "token"
+    )
+
     fun extractToken(cookieString: String?): Pair<String, String>? {
         if (cookieString.isNullOrBlank()) return null
-        val cfRegex = Regex("""cf_clearance=([a-zA-Z0-9_.~-]+)""")
-        val cfMatch = cfRegex.find(cookieString)
-        if (cfMatch != null) {
-            return Pair("cf_clearance", cfMatch.groupValues[1])
-        }
-        val hvpRegex = Regex("""hvp=([a-zA-Z0-9_.~-]+)""")
-        val hvpMatch = hvpRegex.find(cookieString)
-        if (hvpMatch != null) {
-            return Pair("hvp", hvpMatch.groupValues[1])
+        for (tokenName in KNOWN_TOKENS) {
+            val regex = Regex("""\b${Regex.escape(tokenName)}=([^;,\s]+)""")
+            val match = regex.find(cookieString)
+            if (match != null) {
+                return Pair(tokenName, match.groupValues[1])
+            }
         }
         return null
+    }
+
+    fun extractAllTokens(cookieString: String?): Map<String, String> {
+        if (cookieString.isNullOrBlank()) return emptyMap()
+        val result = mutableMapOf<String, String>()
+        for (part in cookieString.split(";")) {
+            val eq = part.indexOf('=')
+            if (eq <= 0) continue
+            val k = part.substring(0, eq).trim()
+            val v = part.substring(eq + 1).trim()
+            if (k.isNotBlank() && v.isNotBlank()) {
+                result[k] = v
+            }
+        }
+        return result
     }
 }

@@ -1179,11 +1179,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun onQueryChanged(newQuery: String) {
-        // The field always shows the normalized, capped text; the guard's
-        // decision is measured on the RAW input so a dictated 1,700-char
-        // paste cannot silently become a 120-char provider fan-out.
-        val normalized = SearchQueryGuard.normalize(newQuery)
-        _uiState.update { it.copy(query = normalized) }
+        // The text field retains active typing (including trailing spaces) so the
+        // user can type multi-word queries. We only cap length to MAX for display;
+        // whitespace normalization and trimming are applied upon search debounce/submit.
+        val capped = newQuery.take(SearchQueryGuard.MAX)
+        _uiState.update { it.copy(query = capped) }
         debounceJob?.cancel()
         when (val decision = SearchQueryGuard.decide(newQuery)) {
             is SearchQueryGuard.Decision.Refuse -> {

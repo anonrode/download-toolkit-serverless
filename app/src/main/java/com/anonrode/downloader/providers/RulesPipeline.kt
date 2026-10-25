@@ -816,6 +816,8 @@ object RulesPipeline {
         return try {
             val keyBytes = key.toByteArray(Charsets.UTF_8)
             if (keyBytes.isEmpty()) return input
+            val unscrambled = com.anonrode.downloader.resolvers.PlutoMoviesResolver.xorUnscramble(input, key)
+            if (unscrambled.isNotBlank()) return unscrambled
             val inputBytes = input.toByteArray(Charsets.UTF_8)
             val out = ByteArray(inputBytes.size) { i ->
                 (inputBytes[i].toInt() xor keyBytes[i % keyBytes.size].toInt()).toByte()
