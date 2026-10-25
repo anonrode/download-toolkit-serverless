@@ -97,10 +97,20 @@ object HostPolicyRegistry {
             var lanes: Int,
             val hls: Boolean,
             val cap: Int,
+            // Host ceiling from effectiveSocketsForUrl (OTA socketCaps + compiled
+            // caps). Growth paths clamp to it so a fair-share target can never
+            // walk a grant past its host cap again (share-52: kissorgrab 6->16 at 0KB/s).
+            var hostCap: Int = Int.MAX_VALUE,
             var speedBps: Double = 0.0,
             var prevSpeedBps: Double = 0.0,
             /** Consecutive non-improving samples (RC-7 plateau veto). */
-            var flatSamples: Int = 0
+            var flatSamples: Int = 0,
+            /** True once a non-zero speed sample arrived. Zero windows only
+             *  count as stall signals after this, so slow-start TTFB windows
+             *  never trip the veto. */
+            var hasProgress: Boolean = false,
+            /** Consecutive telemetry windows at 0 B after progress began. */
+            var zeroWindows: Int = 0
         )
 
         private val grants = LinkedHashMap<String, Grant>()
@@ -125,9 +135,15 @@ object HostPolicyRegistry {
          * cannot cover the minimum — the caller must queue, never start.
          */
         @Synchronized
-        fun reserve(taskId: String, requested: Int, hls: Boolean, plannedTasks: Int = 1): Int {
+        fun reserve(
+            taskId: String,
+            requested: Int,
+            hls: Boolean,
+            plannedTasks: Int = 1,
+            hostCap: Int = Int.MAX_VALUE
+        ): Int {
             val cap = if (hls) HLS_MAX_LANES else DIRECT_MAX_LANES
-            val want = requested.coerceIn(1, cap)
+            val want = requested.coerceIn(1, minOf(cap, hostCap))
             if (taskId.isBlank()) return want
             grants[taskId]?.let { return it.lanes }
             val used = grants.values.sumOf { it.lanes }
@@ -144,8 +160,8 @@ object HostPolicyRegistry {
             val divisor = maxOf(1, plannedTasks.coerceAtLeast(1) - grants.size)
             val share = maxOf(MIN_LANES_PER_TASK, free / divisor)
             val floor = minOf(MIN_LANES_PER_TASK, want)
-            val grant = minOf(want, share, free).coerceAtLeast(floor)
-            grants[taskId] = Grant(lanes = grant, hls = hls, cap = cap)
+            val grant = minOf(want, share, free, hostCap).coerceAtLeast(minOf(floor, hostCap))
+            grants[taskId] = Grant(lanes = grant, hls = hls, cap = cap, hostCap = hostCap)
             com.anonrode.downloader.util.DebugLog.engine(
                 "lane admission task=$taskId kind=${if (hls) "hls" else "direct"} grant=$grant " +
                     "active=${grants.size} used=${grants.values.sumOf { it.lanes }} free=${globalLanes - grants.values.sumOf { it.lanes }}"
@@ -161,10 +177,17 @@ object HostPolicyRegistry {
          * existing grant unchanged.
          */
         @Synchronized
-        fun resize(taskId: String, requested: Int, hls: Boolean, plannedTasks: Int = 1): Int {
+        fun resize(
+            taskId: String,
+            requested: Int,
+            hls: Boolean,
+            plannedTasks: Int = 1,
+            hostCap: Int = Int.MAX_VALUE
+        ): Int {
             val existing = grants[taskId] ?: return reserve(taskId, requested, hls, plannedTasks)
             val cap = if (hls) HLS_MAX_LANES else DIRECT_MAX_LANES
-            val want = requested.coerceIn(existing.lanes, cap)
+            if (hostCap != Int.MAX_VALUE) existing.hostCap = minOf(existing.hostCap, hostCap)
+            val want = requested.coerceIn(existing.lanes, minOf(cap, existing.hostCap))
             if (want <= existing.lanes) return existing.lanes
             val usedExcluding = grants.values.sumOf { it.lanes } - existing.lanes
             val free = (globalLanes - usedExcluding).coerceAtLeast(0)
@@ -192,7 +215,16 @@ object HostPolicyRegistry {
         @Synchronized
         fun reportSpeed(taskId: String, bps: Double) {
             val g = grants[taskId] ?: return
-            if (bps <= 0.0) return
+            if (bps <= 0.0) {
+                // A zero window is real stall telemetry once bytes have moved:
+                // rebalance vetoes growth after two consecutive ones. Dropping
+                // zero samples entirely is what let a dying host escalade
+                // 6->16 lanes at 0KB/s until the watchdog killed the task
+                // (share-52, kissorgrab 2026-10-25). Slow-start stays invisible:
+                // hasProgress only flips after the first non-zero sample.
+                if (g.hasProgress) g.zeroWindows++
+                return
+            }
             // RC-7 spike clamp (2026-10-21): the released build printed a
             // 2.4 GB/s lane sample (perTask=c6710cfb:6:2485125KB/s) from a
             // resume-priming telemetry tick. No single device pulls half a
@@ -200,6 +232,8 @@ object HostPolicyRegistry {
             // telemetry defect and must neither steer the controller nor
             // reach any display surface.
             val clamped = minOf(bps, MAX_PLAUSIBLE_BPS)
+            g.hasProgress = true
+            g.zeroWindows = 0
             g.speedBps = clamped
         }
 
@@ -219,9 +253,14 @@ object HostPolicyRegistry {
                 val target = fair[id] ?: g.lanes
                 var next = g.lanes
                 if (target > g.lanes) {
-                    // AIMD growth only if the last speed sample improved.
-                    if (g.prevSpeedBps <= 0.0 || g.speedBps >= g.prevSpeedBps * 1.10) {
-                        next = minOf(target, g.lanes + 2)
+                    // AIMD growth only if the last speed sample improved, the
+                    // link has not stalled (two consecutive zero windows after
+                    // progress veto growth — see reportSpeed), and never past
+                    // the host's socket ceiling.
+                    val stalled = g.zeroWindows >= 2
+                    if (!stalled &&
+                        (g.prevSpeedBps <= 0.0 || g.speedBps >= g.prevSpeedBps * 1.10)) {
+                        next = minOf(target, g.lanes + 2, g.hostCap)
                     }
                 } else if (target < g.lanes) {
                     // Surplus lanes go back to the pool, at most one step and
